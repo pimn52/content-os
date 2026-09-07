@@ -118,6 +118,12 @@ class AssetRepository(_Repository[Asset]):
 class ClipRepository(_Repository[Clip]):
     table, model = "clips", Clip
 
+    def list_by_asset(self, asset_id: UUID) -> list[Clip]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM clips WHERE asset_id = ? ORDER BY start_ms, end_ms, id", (str(asset_id),)
+        ).fetchall()
+        return [_model(row, Clip) for row in rows]
+
     def create(self, value: Clip) -> Clip:
         self._validate_asset(value)
         self.db.connection.execute("INSERT INTO clips(id, asset_id, start_ms, end_ms, asset_duration_ms, payload) VALUES (?, ?, ?, ?, ?, ?)", (str(value.id), str(value.asset_id), value.start_ms, value.end_ms, value.asset_duration_ms, _payload(value)))
@@ -128,6 +134,24 @@ class ClipRepository(_Repository[Clip]):
         cursor = self.db.connection.execute("UPDATE clips SET asset_id = ?, start_ms = ?, end_ms = ?, asset_duration_ms = ?, payload = ? WHERE id = ?", (str(value.asset_id), value.start_ms, value.end_ms, value.asset_duration_ms, _payload(value), str(value.id)))
         if cursor.rowcount != 1:
             raise KeyError(value.id)
+        return value
+
+    def upsert(self, value: Clip) -> Clip:
+        self._validate_asset(value)
+        self.db.connection.execute(
+            """INSERT INTO clips(id, asset_id, start_ms, end_ms, asset_duration_ms, payload)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   asset_id = excluded.asset_id,
+                   start_ms = excluded.start_ms,
+                   end_ms = excluded.end_ms,
+                   asset_duration_ms = excluded.asset_duration_ms,
+                   payload = excluded.payload""",
+            (
+                str(value.id), str(value.asset_id), value.start_ms, value.end_ms,
+                value.asset_duration_ms, _payload(value),
+            ),
+        )
         return value
 
     def _validate_asset(self, value: Clip) -> None:
