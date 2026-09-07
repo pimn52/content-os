@@ -88,18 +88,31 @@ class ProjectRepository(_Repository[Project]):
 class AssetRepository(_Repository[Asset]):
     table, model = "assets", Asset
 
+    def __init__(self, db: Database):
+        super().__init__(db)
+        self.db.connection.execute("PRAGMA busy_timeout = 5000")
+
     def create(self, value: Asset) -> Asset:
-        self.db.connection.execute("INSERT INTO assets(id, duration_ms, payload) VALUES (?, ?, ?)", (str(value.id), value.duration_ms, _payload(value)))
+        self.db.connection.execute("INSERT INTO assets(id, duration_ms, content_hash, payload) VALUES (?, ?, ?, ?)", (str(value.id), value.duration_ms, value.content_hash, _payload(value)))
         return value
 
     def update(self, value: Asset) -> Asset:
+        existing = self.db.connection.execute("SELECT content_hash FROM assets WHERE id = ?", (str(value.id),)).fetchone()
+        if existing is None:
+            raise KeyError(value.id)
+        if existing["content_hash"] != value.content_hash:
+            raise ValueError("asset content_hash is immutable")
         clips = self.db.connection.execute("SELECT asset_duration_ms, end_ms FROM clips WHERE asset_id = ?", (str(value.id),)).fetchall()
         if any(int(row["asset_duration_ms"]) != value.duration_ms or int(row["end_ms"]) > value.duration_ms for row in clips):
             raise ValueError("asset duration update would invalidate existing clips")
-        cursor = self.db.connection.execute("UPDATE assets SET duration_ms = ?, payload = ? WHERE id = ?", (value.duration_ms, _payload(value), str(value.id)))
+        cursor = self.db.connection.execute("UPDATE assets SET duration_ms = ?, content_hash = ?, payload = ? WHERE id = ?", (value.duration_ms, value.content_hash, _payload(value), str(value.id)))
         if cursor.rowcount != 1:
             raise KeyError(value.id)
         return value
+
+    def get_by_content_hash(self, content_hash: str) -> Asset | None:
+        row = self.db.connection.execute("SELECT * FROM assets WHERE content_hash = ?", (content_hash,)).fetchone()
+        return None if row is None else _model(row, self.model)
 
 
 class ClipRepository(_Repository[Clip]):

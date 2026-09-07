@@ -12,3 +12,7 @@ This is the bounded Task 002a inventory. Observed versions come from the Python 
 | httpx | FastAPI test client support (optional test dependency) | 0.28.1 | BSD-3-Clause in installed metadata |
 
 No provider SDK, database, frontend, renderer, secret, or paid API is introduced by this scaffold. Transitive packages installed by the local test environment are not project direct dependencies; include them in a full release inventory.
+
+## External media tooling
+
+Task 004 uses the external `ffprobe` command for local media metadata and does not add a Python dependency. A development or deployment installation must provide compatible FFmpeg/ffprobe binaries (FFmpeg licensing and build configuration must be reviewed separately before redistribution). The application invokes an explicit argv with no shell and does not bundle, download, or silently install these binaries.

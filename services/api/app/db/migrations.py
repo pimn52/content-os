@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -45,6 +45,26 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     )""",
     """CREATE INDEX IF NOT EXISTS jobs_claimable_idx
         ON jobs(status, lease_expires_at, created_at, id)""",
+    )),
+    (2, (
+        "ALTER TABLE assets ADD COLUMN content_hash TEXT",
+        """UPDATE assets SET content_hash = json_extract(payload, '$.content_hash')
+           WHERE content_hash IS NULL AND json_valid(payload)
+             AND json_type(payload, '$.content_hash') = 'text'""",
+        """CREATE TABLE _migration_asset_hash_validation (
+               content_hash TEXT NOT NULL CHECK (length(trim(content_hash)) > 0)
+           )""",
+        "INSERT INTO _migration_asset_hash_validation(content_hash) SELECT content_hash FROM assets",
+        "DROP TABLE _migration_asset_hash_validation",
+        "CREATE UNIQUE INDEX IF NOT EXISTS assets_content_hash_uq ON assets(content_hash)",
+        """CREATE TRIGGER IF NOT EXISTS assets_content_hash_required_insert
+           BEFORE INSERT ON assets
+           WHEN NEW.content_hash IS NULL OR length(trim(NEW.content_hash)) = 0
+           BEGIN SELECT RAISE(ABORT, 'assets.content_hash is required'); END""",
+        """CREATE TRIGGER IF NOT EXISTS assets_content_hash_required_update
+           BEFORE UPDATE OF content_hash ON assets
+           WHEN NEW.content_hash IS NULL OR length(trim(NEW.content_hash)) = 0
+           BEGIN SELECT RAISE(ABORT, 'assets.content_hash is required'); END""",
     )),
 )
 

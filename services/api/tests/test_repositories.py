@@ -57,11 +57,11 @@ def test_crud_round_trip_and_reopen(tmp_path: Path):
     db.close()
     reopened = Database(path)
     assert reopened.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1]
+    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2]
     assert IPProfileRepository(reopened).get(profile.id) == updated_profile
     assert JobRepository(reopened).list() == [updated_job]
     apply_migrations(reopened.connection)
-    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1]
+    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2]
     assert ClipRepository(reopened).delete(clip.id)
     assert JobRepository(reopened).delete(job.id)
     assert ProjectRepository(reopened).delete(project.id)
@@ -92,6 +92,25 @@ def test_asset_update_cannot_invalidate_existing_clips():
     with pytest.raises(ValueError):
         assets.update(asset.model_copy(update={"duration_ms": 400}))
     assert assets.get(asset.id) == asset
+    db.close()
+
+
+def test_asset_content_hash_is_immutable_after_create():
+    db = Database()
+    _, _, asset, _, _ = make_models()
+    assets = AssetRepository(db)
+    assets.create(asset)
+    with pytest.raises(ValueError, match="content_hash is immutable"):
+        assets.update(asset.model_copy(update={"content_hash": "different-content-hash"}))
+    assert assets.get(asset.id) == asset
+    db.close()
+
+
+def test_asset_update_missing_row_raises_key_error():
+    db = Database()
+    _, _, asset, _, _ = make_models()
+    with pytest.raises(KeyError):
+        AssetRepository(db).update(asset)
     db.close()
 
 
