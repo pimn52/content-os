@@ -11,6 +11,9 @@ Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向
 - `GET /health` 健康检查；
 - pytest 配置与健康端点测试；
 - Windows PowerShell 本地启动和检查脚本；
+- SQLite Repository、幂等 Job、租约/重试/崩溃恢复及单次 Worker 执行边界；
+- 本地媒体内容寻址导入、ffprobe 探测、连续 Clip 切分、分析音频和关键帧提取；
+- provider-neutral ASR 契约、OpenAI-compatible BYOK 适配器及时间戳转写到 Clip 的原子写回；
 - 依赖清单与许可证核查提示。
 
 Windows PowerShell 首次运行（支持带空格的路径）：
@@ -53,7 +56,7 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 
 ## 本批次暂未完成
 
-本批次完成数据契约与后端最小骨架。ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、素材导入、切片、ASR、Vision、Provider、移动端及完整生产链路待开发。后续按 `DEVELOPMENT_PLAN.md` 推进；本地绑定固定为 `127.0.0.1`，没有部署、公开网络绑定、密钥或付费 API。
+ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Vision、Embedding 索引、移动端及完整生产链路待开发。ASR 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。当前 Worker 是显式 `run_once`，不包含轮询守护进程或长任务自动心跳。
 
 ## 文档与契约
 
@@ -65,4 +68,4 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 & ".\.venv\Scripts\python.exe" contracts/export_schemas.py
 ```
 
-本包在 Linux / Python 3.12 环境验证；Windows PowerShell 启动脚本尚未实机验证。首次安装需要 Python 3.11+ 和可用的包下载网络。解压时将包内文件直接放到目标目录，避免再套一层 `Content OS` 子目录。
+本包已在 Windows / Python 3.12 环境验证。首次安装需要 Python 3.11+ 和可用的包下载网络；媒体分析还需要本机可执行的 FFmpeg / ffprobe。解压时将包内文件直接放到目标目录，避免再套一层 `Content OS` 子目录。

@@ -47,7 +47,11 @@ class ASRRateLimitError(ASRError):
 
 
 class ASRHTTPError(ASRError):
-    pass
+    """A non-special-cased HTTP response, with a safe numeric status."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"ASR provider returned HTTP {status_code}")
 
 
 class ASRProviderResponseError(ASRError):
@@ -255,7 +259,7 @@ def _raise_for_status(status_code: object) -> None:
         raise ASRAuthenticationError("ASR authentication was rejected")
     if status_code == 429:
         raise ASRRateLimitError("ASR provider rate limit was reached")
-    raise ASRHTTPError(f"ASR provider returned HTTP {status_code}")
+    raise ASRHTTPError(status_code)
 
 
 def _parse_verbose_json(body: bytes) -> TranscriptionResult:

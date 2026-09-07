@@ -106,6 +106,9 @@ def test_provider_http_errors_are_classified_without_key_leakage(tmp_path: Path,
         with pytest.raises(error_type) as raised:
             provider.transcribe(audio)
     assert key not in str(raised.value)
+    if status == 500:
+        assert isinstance(raised.value, ASRHTTPError)
+        assert raised.value.status_code == 500
 
 
 def test_provider_does_not_follow_redirect_with_byok_header(tmp_path: Path) -> None:

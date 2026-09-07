@@ -166,6 +166,7 @@ def test_wrong_worker_cannot_complete_or_fail_another_workers_job(tmp_path: Path
 
     assert store.complete(job.id, "other", now=NOW + timedelta(seconds=1)) is None
     assert store.fail(job.id, "other", "worker_error", "not owner", max_attempts=2, now=NOW + timedelta(seconds=1)) is None
+    assert store.fail_terminal(job.id, "other", "worker_error", "not owner", now=NOW + timedelta(seconds=1)) is None
     assert store.complete(job.id, "owner", now=NOW + timedelta(seconds=1)) is not None
     assert store.get(job.id).status is JobStatus.COMPLETED  # type: ignore[union-attr]
     db.close()

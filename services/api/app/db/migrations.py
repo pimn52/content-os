@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -65,6 +65,13 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
            BEFORE UPDATE OF content_hash ON assets
            WHEN NEW.content_hash IS NULL OR length(trim(NEW.content_hash)) = 0
            BEGIN SELECT RAISE(ABORT, 'assets.content_hash is required'); END""",
+    )),
+    (3, (
+        """CREATE TABLE IF NOT EXISTS asset_job_targets (
+               job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+               asset_id TEXT NOT NULL REFERENCES assets(id)
+           )""",
+        "CREATE INDEX IF NOT EXISTS asset_job_targets_asset_idx ON asset_job_targets(asset_id)",
     )),
 )
 

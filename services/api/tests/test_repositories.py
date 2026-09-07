@@ -57,11 +57,11 @@ def test_crud_round_trip_and_reopen(tmp_path: Path):
     db.close()
     reopened = Database(path)
     assert reopened.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2]
+    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
     assert IPProfileRepository(reopened).get(profile.id) == updated_profile
     assert JobRepository(reopened).list() == [updated_job]
     apply_migrations(reopened.connection)
-    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2]
+    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
     assert ClipRepository(reopened).delete(clip.id)
     assert JobRepository(reopened).delete(job.id)
     assert ProjectRepository(reopened).delete(project.id)

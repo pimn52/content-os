@@ -196,6 +196,47 @@ class JobStore:
             )
             return transitioned if cursor.rowcount == 1 else None
 
+    def fail_terminal(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        error_code: str,
+        error_message: str,
+        *,
+        now: datetime | None = None,
+    ) -> Job | None:
+        """Terminally fail an owned, unexpired running job.
+
+        This is intentionally separate from :meth:`fail`: callers that know
+        an error cannot succeed on retry must not consume the remaining retry
+        budget merely to reach the terminal state.
+        """
+        worker = _valid_worker(worker_id)
+        code, message = _valid_error(error_code, error_message)
+        timestamp = _validated_now(now)
+        timestamp_text = _utc_timestamp(timestamp)
+        with self._write_transaction():
+            current = self._owned_running_job(job_id, worker, timestamp_text)
+            if current is None:
+                return None
+            failed = current.model_copy(update={
+                "status": JobStatus.FAILED,
+                "updated_at": timestamp,
+                "error_code": code,
+                "error_message": message,
+            })
+            cursor = self.db.connection.execute(
+                """UPDATE jobs
+                   SET status = ?, updated_at = ?, error_code = ?, error_message = ?,
+                       lease_owner = NULL, lease_expires_at = NULL, payload = ?
+                   WHERE id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?""",
+                (
+                    JobStatus.FAILED.value, timestamp_text, code, message, _job_payload(failed), str(job_id),
+                    JobStatus.RUNNING.value, worker, timestamp_text,
+                ),
+            )
+            return failed if cursor.rowcount == 1 else None
+
     def recover_expired(self, *, max_attempts: int, now: datetime | None = None) -> list[Job]:
         """Recover expired running jobs and terminalize exhausted pending jobs.
 
