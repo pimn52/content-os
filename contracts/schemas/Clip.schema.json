@@ -1,0 +1,269 @@
+{
+  "$defs": {
+    "ProjectFormat": {
+      "enum": [
+        "vertical",
+        "horizontal",
+        "square"
+      ],
+      "title": "ProjectFormat",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "asset_id": {
+      "format": "uuid",
+      "title": "Asset Id",
+      "type": "string"
+    },
+    "start_ms": {
+      "description": "Milliseconds from the source start.",
+      "minimum": 0,
+      "title": "Start Ms",
+      "type": "integer"
+    },
+    "end_ms": {
+      "description": "Milliseconds from the source start.",
+      "minimum": 0,
+      "title": "End Ms",
+      "type": "integer"
+    },
+    "asset_duration_ms": {
+      "exclusiveMinimum": 0,
+      "title": "Asset Duration Ms",
+      "type": "integer"
+    },
+    "transcript": {
+      "anyOf": [
+        {
+          "maxLength": 100000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Transcript"
+    },
+    "speaker_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Speaker Ids",
+      "type": "array"
+    },
+    "visual_description": {
+      "anyOf": [
+        {
+          "maxLength": 5000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Visual Description"
+    },
+    "people": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "People",
+      "type": "array"
+    },
+    "objects": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Objects",
+      "type": "array"
+    },
+    "location": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Location"
+    },
+    "action": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Action"
+    },
+    "shot_type": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Shot Type"
+    },
+    "orientation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectFormat"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "motion_level": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Motion Level"
+    },
+    "quality_score": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Quality Score"
+    },
+    "speech_quality": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Speech Quality"
+    },
+    "face_visibility": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Face Visibility"
+    },
+    "mouth_visibility": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mouth Visibility"
+    },
+    "talking_candidate": {
+      "default": false,
+      "title": "Talking Candidate",
+      "type": "boolean"
+    },
+    "voice_candidate": {
+      "default": false,
+      "title": "Voice Candidate",
+      "type": "boolean"
+    },
+    "embedding_ref": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Embedding Ref"
+    },
+    "used_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Used Count",
+      "type": "integer"
+    },
+    "last_used_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Used At"
+    }
+  },
+  "required": [
+    "asset_id",
+    "start_ms",
+    "end_ms",
+    "asset_duration_ms"
+  ],
+  "title": "Clip",
+  "type": "object"
+}

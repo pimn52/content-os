@@ -1,0 +1,72 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "provider": {
+      "description": "Provider name only; never credentials.",
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    },
+    "account_external_id": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Account External Id",
+      "type": "string"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Display Name"
+    },
+    "read_only": {
+      "default": true,
+      "title": "Read Only",
+      "type": "boolean"
+    },
+    "connected_at": {
+      "format": "date-time",
+      "title": "Connected At",
+      "type": "string"
+    },
+    "last_synced_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Synced At"
+    }
+  },
+  "required": [
+    "provider",
+    "account_external_id",
+    "connected_at"
+  ],
+  "title": "AccountConnection",
+  "type": "object"
+}

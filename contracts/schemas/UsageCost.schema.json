@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "CostCategory": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking",
+        "voice",
+        "asr",
+        "llm",
+        "render"
+      ],
+      "title": "CostCategory",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "category": {
+      "$ref": "#/$defs/CostCategory"
+    },
+    "amount": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,8}|(?=[\\d.]{1,13}0*$)\\d{0,8}\\.\\d{0,4}0*$)",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Amount"
+    },
+    "currency": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z]{3}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Currency"
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider"
+    },
+    "note": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Note"
+    }
+  },
+  "required": [
+    "category"
+  ],
+  "title": "UsageCost",
+  "type": "object"
+}

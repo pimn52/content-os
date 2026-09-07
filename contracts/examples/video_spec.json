@@ -1,0 +1,42 @@
+{
+  "schema_version": "0.1",
+  "project_id": "11111111-1111-1111-1111-111111111111",
+  "format": "vertical",
+  "width": 1080,
+  "height": 1920,
+  "fps": {
+    "schema_version": "0.1",
+    "numerator": 30,
+    "denominator": 1
+  },
+  "scenes": [
+    {
+      "schema_version": "0.1",
+      "scene_id": "scene_01",
+      "start_frame": 0,
+      "duration_frames": 90,
+      "visual": {
+        "schema_version": "0.1",
+        "source_kind": "user_asset",
+        "authorization_reference": "user-owned-media",
+        "asset_id": "22222222-2222-2222-2222-222222222222",
+        "clip_id": "33333333-3333-3333-3333-333333333333",
+        "clip_start_ms": 13200,
+        "clip_end_ms": 16200,
+        "source_duration_ms": 60000
+      },
+      "narration_asset_id": null,
+      "caption": "A continuous user clip",
+      "transition": "cut"
+    }
+  ],
+  "voice_profile_id": null,
+  "estimated_cost": {
+    "schema_version": "0.1",
+    "category": "user_asset",
+    "amount": "0",
+    "currency": "USD",
+    "provider": null,
+    "note": null
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "$defs": {
+    "ProjectFormat": {
+      "enum": [
+        "vertical",
+        "horizontal",
+        "square"
+      ],
+      "title": "ProjectFormat",
+      "type": "string"
+    },
+    "RationalFps": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "numerator": {
+          "exclusiveMinimum": 0,
+          "maximum": 240000,
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "title": "Denominator",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "title": "RationalFps",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "ip_profile_id": {
+      "format": "uuid",
+      "title": "Ip Profile Id",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "topic": {
+      "maxLength": 5000,
+      "minLength": 1,
+      "title": "Topic",
+      "type": "string"
+    },
+    "format": {
+      "$ref": "#/$defs/ProjectFormat",
+      "default": "vertical"
+    },
+    "resolution_width": {
+      "default": 1080,
+      "exclusiveMinimum": 0,
+      "maximum": 16384,
+      "title": "Resolution Width",
+      "type": "integer"
+    },
+    "resolution_height": {
+      "default": 1920,
+      "exclusiveMinimum": 0,
+      "maximum": 16384,
+      "title": "Resolution Height",
+      "type": "integer"
+    },
+    "fps": {
+      "$ref": "#/$defs/RationalFps"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ip_profile_id",
+    "title",
+    "topic",
+    "fps",
+    "created_at"
+  ],
+  "title": "Project",
+  "type": "object"
+}

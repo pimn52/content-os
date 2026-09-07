@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "JobStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "JobStatus",
+      "type": "string"
+    },
+    "JobType": {
+      "enum": [
+        "import_asset",
+        "analyze_asset",
+        "transcribe_audio",
+        "index_clips",
+        "build_ip_profile",
+        "build_voice_profile",
+        "build_talking_profile",
+        "plan_content",
+        "match_assets",
+        "generate_voice",
+        "generate_talking",
+        "render",
+        "sync_account"
+      ],
+      "title": "JobType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Project Id"
+    },
+    "type": {
+      "$ref": "#/$defs/JobType"
+    },
+    "status": {
+      "$ref": "#/$defs/JobStatus",
+      "default": "pending"
+    },
+    "attempt": {
+      "default": 0,
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "idempotency_key": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "error_message": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Message"
+    }
+  },
+  "required": [
+    "type",
+    "idempotency_key",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Job",
+  "type": "object"
+}

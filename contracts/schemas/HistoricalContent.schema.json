@@ -1,0 +1,93 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "account_connection_id": {
+      "format": "uuid",
+      "title": "Account Connection Id",
+      "type": "string"
+    },
+    "external_id": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "External Id",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "published_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Published At"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "maxLength": 10000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "transcript": {
+      "anyOf": [
+        {
+          "maxLength": 100000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Transcript"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      },
+      "title": "Metrics",
+      "type": "object"
+    }
+  },
+  "required": [
+    "account_connection_id",
+    "external_id",
+    "title"
+  ],
+  "title": "HistoricalContent",
+  "type": "object"
+}

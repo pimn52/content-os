@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "RationalFps": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "numerator": {
+          "exclusiveMinimum": 0,
+          "maximum": 240000,
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "title": "Denominator",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "title": "RationalFps",
+      "type": "object"
+    },
+    "SourceKind": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking_profile"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "source_kind": {
+      "$ref": "#/$defs/SourceKind",
+      "default": "user_asset"
+    },
+    "source_file": {
+      "description": "Local logical path, never a secret URL.",
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Source File",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 128,
+      "minLength": 16,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "duration_ms": {
+      "exclusiveMinimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "width": {
+      "exclusiveMinimum": 0,
+      "maximum": 16384,
+      "title": "Width",
+      "type": "integer"
+    },
+    "height": {
+      "exclusiveMinimum": 0,
+      "maximum": 16384,
+      "title": "Height",
+      "type": "integer"
+    },
+    "fps": {
+      "$ref": "#/$defs/RationalFps"
+    },
+    "has_audio": {
+      "default": false,
+      "title": "Has Audio",
+      "type": "boolean"
+    },
+    "authorization_reference": {
+      "description": "Rights or authorization record reference; never credentials.",
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Authorization Reference",
+      "type": "string"
+    },
+    "imported_at": {
+      "format": "date-time",
+      "title": "Imported At",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "source_file",
+    "content_hash",
+    "duration_ms",
+    "width",
+    "height",
+    "fps",
+    "authorization_reference",
+    "imported_at"
+  ],
+  "title": "Asset",
+  "type": "object"
+}

@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "ConsentBasis": {
+      "enum": [
+        "self",
+        "explicit_authorization"
+      ],
+      "title": "ConsentBasis",
+      "type": "string"
+    },
+    "ConsentRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "subject_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Subject Name",
+          "type": "string"
+        },
+        "basis": {
+          "$ref": "#/$defs/ConsentBasis"
+        },
+        "confirmed": {
+          "title": "Confirmed",
+          "type": "boolean"
+        },
+        "confirmed_at": {
+          "format": "date-time",
+          "title": "Confirmed At",
+          "type": "string"
+        },
+        "authorization_reference": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authorization Reference"
+        }
+      },
+      "required": [
+        "subject_name",
+        "basis",
+        "confirmed",
+        "confirmed_at"
+      ],
+      "title": "ConsentRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "provider": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    },
+    "provider_profile_id": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Profile Id"
+    },
+    "reference_clip_ids": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Reference Clip Ids",
+      "type": "array"
+    },
+    "consent": {
+      "$ref": "#/$defs/ConsentRecord"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "provider",
+    "reference_clip_ids",
+    "consent",
+    "created_at"
+  ],
+  "title": "TalkingProfile",
+  "type": "object"
+}

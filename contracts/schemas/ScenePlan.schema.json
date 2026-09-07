@@ -1,0 +1,173 @@
+{
+  "$defs": {
+    "SourceKind": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking_profile"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "VisualIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "framing": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Framing"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "title": "VisualIntent",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "scene_id": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Scene Id",
+      "type": "string"
+    },
+    "order": {
+      "maximum": 10000,
+      "minimum": 0,
+      "title": "Order",
+      "type": "integer"
+    },
+    "purpose": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Purpose",
+      "type": "string"
+    },
+    "voice_text": {
+      "maxLength": 10000,
+      "minLength": 1,
+      "title": "Voice Text",
+      "type": "string"
+    },
+    "duration_target_ms": {
+      "exclusiveMinimum": 0,
+      "title": "Duration Target Ms",
+      "type": "integer"
+    },
+    "visual_intent": {
+      "$ref": "#/$defs/VisualIntent"
+    },
+    "preferred_sources": {
+      "items": {
+        "$ref": "#/$defs/SourceKind"
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "title": "Preferred Sources",
+      "type": "array"
+    },
+    "fallback_sources": {
+      "items": {
+        "$ref": "#/$defs/SourceKind"
+      },
+      "maxItems": 10,
+      "title": "Fallback Sources",
+      "type": "array"
+    },
+    "caption_emphasis": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "Caption Emphasis",
+      "type": "array"
+    }
+  },
+  "required": [
+    "project_id",
+    "scene_id",
+    "order",
+    "purpose",
+    "voice_text",
+    "duration_target_ms",
+    "visual_intent",
+    "preferred_sources"
+  ],
+  "title": "ScenePlan",
+  "type": "object"
+}

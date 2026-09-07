@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "creator_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Creator Name",
+      "type": "string"
+    },
+    "domains": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "Domains",
+      "type": "array"
+    },
+    "audience": {
+      "anyOf": [
+        {
+          "maxLength": 1000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Audience"
+    },
+    "topics": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Topics",
+      "type": "array"
+    },
+    "vocabulary": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 200,
+      "title": "Vocabulary",
+      "type": "array"
+    },
+    "avoided_expressions": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 200,
+      "title": "Avoided Expressions",
+      "type": "array"
+    },
+    "common_hooks": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Common Hooks",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "creator_name"
+  ],
+  "title": "IPProfile",
+  "type": "object"
+}
