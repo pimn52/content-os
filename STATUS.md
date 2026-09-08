@@ -30,6 +30,7 @@
 - Luna：SQLite Clip 向量持久化与余弦过滤检索；主 Agent 完成版本化迁移、索引管线、自然语言搜索 API 与 Vision→Embedding 作业串联。
 - Luna：Task 010 本地素材库页面、只读 Asset/Clip/媒体 API；主 Agent 修正语义搜索接线并完成浏览器交互验收。
 - Terra：Task 011 provider-neutral ScenePlanner、OpenAI-compatible 严格 JSON Schema 适配器；主 Agent 完成 Project→ScenePlan API。
+- Terra：Task 012 provider-neutral Asset Router、本地连续 Clip 多因子排序与补拍缺口；主 Agent 加固时长/来源约束并完成路由 API。
 
 未调用任何生成供应商，不产生本产品的媒体生成 API 费用；Agent 本身的运行消耗由当前平台计量。
 
@@ -43,7 +44,7 @@
 
 ## 继续开发阶段
 
-Task 011 ScenePlan 最小可运行切片已完成，当前继续进入 Task 012 素材路由。执行器不会在长耗时媒体/网络调用期间持有 SQLite 写事务，也不会把供应商密钥持久化。
+Task 012 Asset Router 最小可运行切片已完成，当前继续进入 Task 013 VideoSpec 组装。执行器不会在长耗时媒体/网络调用期间持有 SQLite 写事务，也不会把供应商密钥持久化。
 
 真实媒体验收阶段再使用用户授权的 3–5 个视频和一个脚本。没有这批真实素材前，不能声称个性化成片质量通过。
 
@@ -67,5 +68,6 @@ Task 011 ScenePlan 最小可运行切片已完成，当前继续进入 Task 012 
 - Embedding/检索阶段通过本地 fake transport 验证批量顺序、维度/有限值、错误分类、携密重定向禁用与 BYOK 脱敏；SQLite schema v4 保存向量与 `embedding_ref`，支持 asset/orientation/talking filters、稳定余弦 Top-K，并以“本人坐在电脑前操作软件”用例返回合理 Clip；完整测试 `197 passed`，未调用真实供应商。
 - Task 010 素材库通过 API 测试验证 Asset/Clip 列表、详情、404、媒体文件与区间校验；实际浏览器验证页面加载、空库状态、查询输入和 `/clips/search` 错误反馈，完整测试 `199 passed`。
 - Task 011 通过本地 fake server 验证 Project/脚本/主题请求、严格 ScenePlan JSON Schema、连续 order、唯一 scene_id、真实素材优先、错误分类、禁携密重定向与 BYOK 脱敏；Project→ScenePlan API 验证项目绑定、404、运行时配置和拒绝请求内密钥，完整测试 `209 passed`。
+- Task 012 以本地 SQLite fixture 验证“本人坐在电脑前操作软件”返回合理连续 Clip Top‑1/Top‑3、真实素材来源过滤、时长满足、语义/视觉质量/镜头适配/新鲜度/复用惩罚、稳定排序、零供应商成本和补拍缺口；路由 API 验证 Project 绑定，完整测试 `215 passed`。
 - 便携 FFmpeg 仅放在本机临时目录用于开发验收，下载包 SHA-256 已按发布方值核对，未提交仓库。
 - 尚未使用用户真实 IP 素材；当前仅证明媒体工程链路，不代表个性化素材理解通过。

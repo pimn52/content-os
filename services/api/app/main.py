@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import AssetRepository, ClipRepository, Database, JobRepository, ProjectRepository
-from app.domain.models import Asset, Clip, Job, JobStatus, JobType, ProjectFormat, ScenePlan
+from app.domain.models import Asset, CandidateAsset, Clip, Job, JobStatus, JobType, ProjectFormat, ScenePlan
 from app.asset_library import asset_library_page
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
@@ -42,6 +42,7 @@ from app.providers.scene_planner import (
     ScenePlannerTimeout,
 )
 from app.search import ClipEmbeddingIndexer, EmbeddingIndexError, IndexError
+from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
 
 
 class JobEnqueueRequest(BaseModel):
@@ -90,6 +91,19 @@ class ScenePlanResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: UUID
     scenes: tuple[ScenePlan, ...]
+
+
+class AssetRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenes: list[ScenePlan] = Field(min_length=1, max_length=100)
+    max_candidates: int = Field(default=3, ge=1, le=20)
+    capture_gap_threshold: float = Field(default=0.45, ge=0, le=1)
+
+
+class AssetRouteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scene_plan_id: UUID
+    candidates: tuple[CandidateAsset, ...]
 
 
 def create_app(
@@ -231,6 +245,35 @@ def create_app(
         except ScenePlannerInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return ScenePlanResponse(project_id=result.project_id, scenes=result.scenes)
+
+    @application.post("/projects/{project_id}/asset-routes", response_model=list[AssetRouteResponse])
+    async def route_scene_assets(project_id: UUID, payload: AssetRouteRequest, request: Request) -> list[AssetRouteResponse]:
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if any(scene.project_id != project_id for scene in payload.scenes):
+            raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
+        try:
+            provider = request.app.state.embedding_provider or _embedding_provider_from_env()
+            router = AssetRouter(
+                ClipEmbeddingIndexer(db, provider),
+                AssetRepository(db),
+                max_candidates=payload.max_candidates,
+                capture_gap_threshold=payload.capture_gap_threshold,
+            )
+            results = router.route_all(payload.scenes)
+        except (EmbeddingConfigurationError, EmbeddingAuthenticationError) as exc:
+            raise HTTPException(status_code=503, detail="embedding provider is not configured") from exc
+        except (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError) as exc:
+            raise HTTPException(status_code=503, detail="embedding provider is temporarily unavailable") from exc
+        except EmbeddingHTTPError as exc:
+            status = 503 if exc.status_code >= 500 or exc.status_code in {408, 409, 425, 429} else 502
+            raise HTTPException(status_code=status, detail="embedding provider request failed") from exc
+        except EmbeddingProviderResponseError as exc:
+            raise HTTPException(status_code=502, detail="embedding provider returned an invalid response") from exc
+        except (EmbeddingInputError, EmbeddingIndexError, IndexError, RoutingConfigurationError, RoutingInputError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return [AssetRouteResponse(scene_plan_id=result.scene_plan_id, candidates=result.candidates) for result in results]
 
     @application.get("/clips/{clip_id}", response_model=Clip, tags=["assets"])
     async def get_clip(clip_id: UUID) -> Clip:

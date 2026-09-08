@@ -19,6 +19,7 @@ Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向
 - provider-neutral Embedding 契约、本地 SQLite 向量索引、过滤余弦检索与自然语言 Clip 搜索 API；
 - 无前端构建依赖的本地素材库页面、只读 Asset/Clip API 与原视频区间预览；
 - provider-neutral ScenePlanner、严格结构化 ScenePlan 输出与本地 Project→ScenePlan API；
+- 可配置本地 Asset Router：连续 Clip Top‑K、真实素材优先、质量/适配/新鲜度/复用评分与补拍缺口；
 - 依赖清单与许可证核查提示。
 
 Windows PowerShell 首次运行（支持带空格的路径）：
@@ -72,6 +73,7 @@ ScenePlan 已能从 Project + 脚本/主题生成严格结构化结果；VideoSp
 - `GET /asset-library`
 - `GET /assets`、`GET /assets/{asset_id}/clips`、`GET /clips/{clip_id}`
 - `POST /projects/{project_id}/scene-plan`
+- `POST /projects/{project_id}/asset-routes`
 - `GET /jobs/{job_id}`
 
 本地 Worker CLI（前台进程，不启动独立 daemon 线程）：
