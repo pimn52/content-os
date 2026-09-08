@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import AssetRepository, ClipRepository, Database, JobRepository, ProjectRepository
-from app.domain.models import Asset, Clip, Job, JobStatus, JobType, ProjectFormat
+from app.domain.models import Asset, Clip, Job, JobStatus, JobType, ProjectFormat, ScenePlan
 from app.asset_library import asset_library_page
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
@@ -28,6 +28,18 @@ from app.providers.embedding import (
     EmbeddingRateLimitError,
     EmbeddingTimeout,
     OpenAICompatibleEmbeddingProvider,
+)
+from app.providers.scene_planner import (
+    OpenAICompatibleScenePlanner,
+    ScenePlanner,
+    ScenePlannerAuthenticationError,
+    ScenePlannerConfigurationError,
+    ScenePlannerConnectionError,
+    ScenePlannerHTTPError,
+    ScenePlannerInputError,
+    ScenePlannerProviderResponseError,
+    ScenePlannerRateLimitError,
+    ScenePlannerTimeout,
 )
 from app.search import ClipEmbeddingIndexer, EmbeddingIndexError, IndexError
 
@@ -68,7 +80,24 @@ class ClipSearchHitResponse(BaseModel):
     score: float = Field(ge=-1, le=1)
 
 
-def create_app(data_path: str | Path | None = None, *, embedding_provider: EmbeddingProvider | None = None) -> FastAPI:
+class ScenePlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    script: str | None = Field(default=None, min_length=1, max_length=100_000)
+    topic: str | None = Field(default=None, min_length=1, max_length=5_000)
+
+
+class ScenePlanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: UUID
+    scenes: tuple[ScenePlan, ...]
+
+
+def create_app(
+    data_path: str | Path | None = None,
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
+    scene_planner: ScenePlanner | None = None,
+) -> FastAPI:
     """Create an app whose SQLite connection belongs to its lifespan thread."""
     selected_path = data_path or os.environ.get("CONTENT_OS_DB_PATH") or Path("content-os-data") / "content-os.sqlite3"
 
@@ -85,6 +114,7 @@ def create_app(data_path: str | Path | None = None, *, embedding_provider: Embed
 
     application = FastAPI(title="Content OS API", version="0.1.0", description="Local-first API scaffold for Content OS.", lifespan=lifespan)
     application.state.embedding_provider = embedding_provider
+    application.state.scene_planner = scene_planner
 
     @application.get("/health", tags=["system"])
     def health() -> dict[str, str]:
@@ -181,6 +211,27 @@ def create_app(data_path: str | Path | None = None, *, embedding_provider: Embed
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return [ClipSearchHitResponse(clip=hit.clip, score=hit.score) for hit in hits]
 
+    @application.post("/projects/{project_id}/scene-plan", response_model=ScenePlanResponse)
+    async def create_scene_plan(project_id: UUID, payload: ScenePlanRequest, request: Request) -> ScenePlanResponse:
+        project = ProjectRepository(request.app.state.database).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            planner = request.app.state.scene_planner or _scene_planner_from_env()
+            result = planner.plan(project, script=payload.script, topic=payload.topic)
+        except (ScenePlannerConfigurationError, ScenePlannerAuthenticationError) as exc:
+            raise HTTPException(status_code=503, detail="scene planner is not configured") from exc
+        except (ScenePlannerRateLimitError, ScenePlannerTimeout, ScenePlannerConnectionError) as exc:
+            raise HTTPException(status_code=503, detail="scene planner is temporarily unavailable") from exc
+        except ScenePlannerHTTPError as exc:
+            status = 503 if exc.status_code >= 500 or exc.status_code in {408, 409, 425, 429} else 502
+            raise HTTPException(status_code=status, detail="scene planner request failed") from exc
+        except ScenePlannerProviderResponseError as exc:
+            raise HTTPException(status_code=502, detail="scene planner returned an invalid response") from exc
+        except ScenePlannerInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ScenePlanResponse(project_id=result.project_id, scenes=result.scenes)
+
     @application.get("/clips/{clip_id}", response_model=Clip, tags=["assets"])
     async def get_clip(clip_id: UUID) -> Clip:
         clip = ClipRepository(application.state.database).get(clip_id)
@@ -226,6 +277,17 @@ def _embedding_provider_from_env() -> OpenAICompatibleEmbeddingProvider:
         base_url=os.environ.get("CONTENT_OS_EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         model=os.environ.get("CONTENT_OS_EMBEDDING_MODEL", "text-embedding-3-small"),
         dimensions=dimensions,
+    )
+
+
+def _scene_planner_from_env() -> OpenAICompatibleScenePlanner:
+    api_key = os.environ.get("CONTENT_OS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ScenePlannerConfigurationError("scene planner API key must be supplied at runtime")
+    return OpenAICompatibleScenePlanner(
+        api_key,
+        base_url=os.environ.get("CONTENT_OS_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        model=os.environ.get("CONTENT_OS_LLM_MODEL", "gpt-4.1-mini"),
     )
 
 

@@ -43,6 +43,20 @@ from .embedding import (
     EmbeddingTimeout,
     OpenAICompatibleEmbeddingProvider,
 )
+from .scene_planner import (
+    OpenAICompatibleScenePlanner,
+    ScenePlanResult,
+    ScenePlanner,
+    ScenePlannerAuthenticationError,
+    ScenePlannerConfigurationError,
+    ScenePlannerConnectionError,
+    ScenePlannerError,
+    ScenePlannerHTTPError,
+    ScenePlannerInputError,
+    ScenePlannerProviderResponseError,
+    ScenePlannerRateLimitError,
+    ScenePlannerTimeout,
+)
 
 __all__ = [
     "ASRAuthenticationError",
@@ -82,4 +96,16 @@ __all__ = [
     "EmbeddingRateLimitError",
     "EmbeddingTimeout",
     "OpenAICompatibleEmbeddingProvider",
+    "OpenAICompatibleScenePlanner",
+    "ScenePlanResult",
+    "ScenePlanner",
+    "ScenePlannerAuthenticationError",
+    "ScenePlannerConfigurationError",
+    "ScenePlannerConnectionError",
+    "ScenePlannerError",
+    "ScenePlannerHTTPError",
+    "ScenePlannerInputError",
+    "ScenePlannerProviderResponseError",
+    "ScenePlannerRateLimitError",
+    "ScenePlannerTimeout",
 ]
