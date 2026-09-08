@@ -57,13 +57,22 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 
 ## 本批次暂未完成
 
-ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Vision、Embedding 索引、移动端及完整生产链路待开发。ASR 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。当前 Worker 是显式 `run_once` 并可启用独立连接自动心跳，尚不包含轮询守护进程。
+ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Vision、Embedding 索引、移动端及完整生产链路待开发。ASR 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。Worker CLI 支持前台轮询与 `--once`，并可启用独立连接自动心跳。
 
 默认 SQLite 文件为 `content-os-data/content-os.sqlite3`，可通过 `CONTENT_OS_DB_PATH` 覆盖。Job API：
 
 - `POST /assets/{asset_id}/jobs/analyze_asset`
 - `POST /assets/{asset_id}/jobs/transcribe_audio`
 - `GET /jobs/{job_id}`
+
+本地 Worker CLI（前台进程，不启动独立 daemon 线程）：
+
+```powershell
+& ".\.venv\Scripts\content-os-worker.exe" --once --job-type analyze_asset
+& ".\.venv\Scripts\content-os-worker.exe" --job-type analyze_asset --job-type transcribe_audio
+```
+
+转录任务启动前需要运行时环境变量 `OPENAI_API_KEY`（可选覆盖 `OPENAI_BASE_URL` / `OPENAI_MODEL`）；密钥不会写入数据库或日志。`--db`、`--data-root`、`--worker-id`、租约/心跳/轮询间隔和 `--max-attempts` 可覆盖默认值。
 
 ## 文档与契约
 
@@ -75,4 +84,4 @@ ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲�
 & ".\.venv\Scripts\python.exe" contracts/export_schemas.py
 ```
 
-本包已在 Windows / Python 3.12 环境验证。首次安装需要 Python 3.11+ 和可用的包下载网络；媒体分析还需要本机可执行的 FFmpeg / ffprobe。解压时将包内文件直接放到目标目录，避免再套一层 `Content OS` 子目录。
+Worker CLI 是前台轮询进程，可用 `--once` 执行一个兼容任务，也可持续轮询直到收到 SIGINT/SIGTERM；它不启动独立 daemon 线程。首次安装需要 Python 3.11+ 和可用的包下载网络；媒体分析还需要本机可执行的 FFmpeg / ffprobe。解压时将包内文件直接放到目标目录，避免再套一层 `Content OS` 子目录。

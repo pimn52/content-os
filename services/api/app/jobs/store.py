@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Iterator
+from typing import Collection, Iterator
 from uuid import UUID
 
 from app.db.database import Database
 from app.db.repositories import JobRepository, _job_payload, _model, _utc_timestamp
-from app.domain.models import Job, JobStatus
+from app.domain.models import Job, JobStatus, JobType
 
 
 class JobStore:
@@ -39,6 +39,7 @@ class JobStore:
         lease_duration: timedelta,
         *,
         max_attempts: int,
+        allowed_types: Collection[JobType] | None = None,
         now: datetime | None = None,
     ) -> Job | None:
         """Atomically claim one pending or expired-running job.
@@ -49,17 +50,27 @@ class JobStore:
         """
         worker = _valid_worker(worker_id)
         maximum = _valid_max_attempts(max_attempts)
+        allowed = _valid_allowed_types(allowed_types)
+        if allowed is not None and not allowed:
+            return None
         timestamp, expiry = _lease_times(now, lease_duration)
         timestamp_text, expiry_text = _utc_timestamp(timestamp), _utc_timestamp(expiry)
         with self._write_transaction():
             while True:
+                type_clause = "" if allowed is None else f" AND json_extract(payload, '$.type') IN ({','.join('?' for _ in allowed)})"
                 row = self.db.connection.execute(
-                    """SELECT * FROM jobs
-                       WHERE status = ?
-                          OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                    f"""SELECT * FROM jobs
+                       WHERE (status = ?
+                          OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)){type_clause}
                        ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, created_at, id
                        LIMIT 1""",
-                    (JobStatus.PENDING.value, JobStatus.RUNNING.value, timestamp_text, JobStatus.PENDING.value),
+                    (
+                        JobStatus.PENDING.value,
+                        JobStatus.RUNNING.value,
+                        timestamp_text,
+                        *(item.value for item in allowed or ()),
+                        JobStatus.PENDING.value,
+                    ),
                 ).fetchone()
                 if row is None:
                     return None
@@ -97,10 +108,11 @@ class JobStore:
         lease_duration: timedelta,
         *,
         max_attempts: int,
+        allowed_types: Collection[JobType] | None = None,
         now: datetime | None = None,
     ) -> Job | None:
         """Compatibility-friendly name for a runner's next-job operation."""
-        return self.claim(worker_id, lease_duration, max_attempts=max_attempts, now=now)
+        return self.claim(worker_id, lease_duration, max_attempts=max_attempts, allowed_types=allowed_types, now=now)
 
     def heartbeat(
         self,
@@ -345,6 +357,18 @@ def _valid_max_attempts(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > 100:
         raise ValueError("max_attempts must be an integer from 1 to 100")
     return value
+
+
+def _valid_allowed_types(value: Collection[JobType] | None) -> tuple[JobType, ...] | None:
+    if value is None:
+        return None
+    try:
+        values = tuple(value)
+    except TypeError as exc:
+        raise ValueError("allowed_types must be a collection of JobType values") from exc
+    if any(not isinstance(item, JobType) for item in values):
+        raise ValueError("allowed_types must contain only JobType values")
+    return tuple(dict.fromkeys(values))
 
 
 def _valid_error(code: str, message: str) -> tuple[str, str]:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from threading import Event, Thread
-from typing import Callable, Mapping, Protocol
+from typing import Callable, Collection, Mapping, Protocol
 from uuid import UUID
 
 from app.db.database import Database
@@ -157,7 +157,16 @@ class JobRunner:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat_store_factory = heartbeat_store_factory or self._default_heartbeat_store_factory(store)
 
-    def run_once(self) -> Job | None:
+    @property
+    def handler_types(self) -> frozenset[JobType]:
+        """The job types this runner can execute without ``NoHandler``."""
+        return frozenset(self._handlers)
+
+    def recover_expired(self) -> list[Job]:
+        """Make expired leases visible before a polling worker starts."""
+        return self._store.recover_expired(max_attempts=self._max_attempts)
+
+    def run_once(self, *, allowed_types: Collection[JobType] | None = None) -> Job | None:
         """Execute one claimed job, or return ``None`` when no work is eligible.
 
         An ownership failure after the handler returns raises :class:`LeaseLost`
@@ -169,6 +178,7 @@ class JobRunner:
             self._worker_id,
             self._lease_duration,
             max_attempts=self._max_attempts,
+            allowed_types=allowed_types,
         )
         if job is None:
             return None

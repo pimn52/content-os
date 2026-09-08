@@ -15,6 +15,7 @@ from .targets import (
     AssetJobTargetStore,
     UnsupportedAssetJobType,
 )
+from .worker import JobWorker
 
 __all__ = [
     "AssetAnalysisJobHandler",
@@ -26,6 +27,7 @@ __all__ = [
     "JobExecutionError",
     "JobRunner",
     "JobStore",
+    "JobWorker",
     "LeaseLost",
     "NoHandler",
     "UnsupportedAssetJobType",

@@ -4,7 +4,7 @@
 
 ## 本批次范围
 
-已完成 Task 001 核心契约、Task 002a 后端运行骨架、Task 003 SQLite 持久化与最小任务基础、Task 004A 本地媒体导入/去重/探测、Task 005/006 连续镜头切分、音频/关键帧提取与持久化媒体分析切片、Task 007 可替换 ASR Provider 与 Clip 转写持久化，以及媒体分析/ASR 的持久化 Job 单次执行边界、自动心跳和最小 Job API。前端与渲染骨架尚未完成，因此不将整个 Gate 1 标记通过。
+已完成 Task 001 核心契约、Task 002a 后端运行骨架、Task 003 SQLite 持久化与最小任务基础、Task 004A 本地媒体导入/去重/探测、Task 005/006 连续镜头切分、音频/关键帧提取与持久化媒体分析切片、Task 007 可替换 ASR Provider 与 Clip 转写持久化，以及媒体分析/ASR 的持久化 Job 执行边界、自动心跳、最小 Job API 和可控轮询 Worker CLI。前端与渲染骨架尚未完成，因此不将整个 Gate 1 标记通过。
 
 - Terra：核心数据模型、JSON Schema、示例、校验测试。
 - Luna：FastAPI、健康检查、Python 项目配置、Windows 启动文档。
@@ -22,6 +22,8 @@
 - Terra：同步 JobRunner、终态/重试/租约丢失语义，以及媒体分析/ASR handler 集成。
 - Terra：长任务独立 SQLite 连接自动心跳、续租失败检测与线程清理。
 - Luna：持久化默认路径、Asset Job 入队/状态 API、lifespan 连接管理与并发请求验证。
+- Terra：可中断轮询 Worker、启动租约恢复、按已注册类型安全领取与优雅停机。
+- Luna：Worker CLI 运行时组装、信号处理、BYOK 配置校验与 console script。
 
 未调用任何生成供应商，不产生本产品的媒体生成 API 费用；Agent 本身的运行消耗由当前平台计量。
 
@@ -30,12 +32,12 @@
 - 已能导入、探测、切分视频、提取音频/关键帧，并通过可替换 ASR 边界取得时间戳转写及原子写回 Clip；尚未实现任务 Worker、Vision、Embedding 搜索、自动写稿、自动剪辑、克隆声音、口播生成或发布。
 - Project / Asset / Clip / Job 的基础外键，以及 Clip 与数据库 Asset 时长一致性已由 Repository 校验；源文件是否存在、数据库时长是否与真实媒体一致，留待导入/ffprobe 与 assembler 验证。
 - 授权记录是数据凭据，无法仅凭字符串核验权利；撤销授权与生成前检查在对应业务流程实现。
-- 任务状态、幂等、领取、租约、自动心跳、有限重试、崩溃恢复、媒体/ASR handler 与最小任务 API 已接通；尚无轮询守护进程、预算预留/对账或任务 UI。
+- 任务状态、幂等、领取、租约、自动心跳、有限重试、崩溃恢复、媒体/ASR handler、最小任务 API 与前台轮询 Worker CLI 已接通；尚无系统后台服务、预算预留/对账或任务 UI。
 - Python 依赖范围不是锁文件；Windows 安装与完整依赖审计仍待后续。FFmpeg/ffprobe 当前作为外部工具，不随仓库分发，发布前需按具体构建核验 GPL/LGPL 与编解码库许可。
 
 ## 下一步
 
-下一步实现可控轮询 Worker 进程/CLI 与优雅停机，再进入 Vision Provider 与素材索引。执行器不得在长耗时媒体/网络调用期间持有 SQLite 写事务，也不得把供应商密钥持久化。
+下一步进入 Vision Provider 与 Clip 视觉元数据持久化，再接素材索引。执行器不得在长耗时媒体/网络调用期间持有 SQLite 写事务，也不得把供应商密钥持久化。
 
 真实媒体验收阶段再使用用户授权的 3–5 个视频和一个脚本。没有这批真实素材前，不能声称个性化成片质量通过。
 
@@ -54,5 +56,6 @@
 - Task 007 通过本地 fake HTTP server 验证 multipart、segment 时间戳、错误分类、BYOK 不泄露及禁用携密重定向；Clip 映射验证跨镜头重叠、清理过期转写、重复执行稳定与事务回滚；完整测试 `105 passed`。
 - Job 执行边界验证 Asset target 同事务入队、并发幂等、handler 事务外执行、重试/终态/中断恢复、错误脱敏，以及 ASR segment 经 Worker 写回 Clip；集成后完整测试 `126 passed`。
 - 自动心跳与 Job API 集成后完整测试 `135 passed`；8 路 API 并发入队及 heartbeat/runner 聚焦套件连续复跑 10 轮通过。
+- 可控轮询 Worker/CLI 已验证空闲中断、多任务、启动恢复、部分类型隔离、handler 内停机等待、参数安全与连接关闭；console script 实际安装/帮助命令通过，完整测试 `156 passed`。
 - 便携 FFmpeg 仅放在本机临时目录用于开发验收，下载包 SHA-256 已按发布方值核对，未提交仓库。
 - 尚未使用用户真实 IP 素材；当前仅证明媒体工程链路，不代表个性化素材理解通过。

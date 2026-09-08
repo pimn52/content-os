@@ -19,6 +19,9 @@ test = [
   "pytest>=8,<10",
 ]
 
+[project.scripts]
+content-os-worker = "app.worker_cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["services/api/tests"]
 pythonpath = ["services/api"]
