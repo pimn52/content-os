@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, get_ident
+from time import monotonic
 
 import pytest
 
@@ -177,3 +180,218 @@ def test_runner_does_not_catch_process_interrupt_and_expired_lease_recovers(tmp_
         assert [(item.id, item.status) for item in recovered] == [(job.id, JobStatus.PENDING)]
     finally:
         reopened.close()
+
+
+def test_runner_heartbeat_uses_thread_local_store_and_prevents_reclaim(tmp_path: Path) -> None:
+    path = tmp_path / "heartbeat.sqlite"
+    db = Database(path)
+    store = JobStore(db)
+    store.enqueue(make_job("long-running"))
+    enough_heartbeats = Event()
+    heartbeat_stores: list[JobStore] = []
+    heartbeat_threads: list[int] = []
+
+    class CountingHeartbeatStore(JobStore):
+        calls = 0
+
+        def heartbeat(self, *args: object, **kwargs: object) -> Job | None:
+            type(self).calls += 1
+            renewed = super().heartbeat(*args, **kwargs)  # type: ignore[arg-type]
+            if type(self).calls >= 12:
+                enough_heartbeats.set()
+            return renewed
+
+    def factory() -> JobStore:
+        heartbeat_threads.append(get_ident())
+        heartbeat = CountingHeartbeatStore(Database(path))
+        heartbeat_stores.append(heartbeat)
+        return heartbeat
+
+    def handler(_: Job) -> None:
+        assert not db.connection.in_transaction
+        assert enough_heartbeats.wait(timeout=3)
+        contender_db = Database(path)
+        try:
+            assert JobStore(contender_db).claim(
+                "other-worker", timedelta(milliseconds=500), max_attempts=2
+            ) is None
+        finally:
+            contender_db.close()
+
+    runner = JobRunner(
+        store,
+        {JobType.ANALYZE_ASSET: handler},
+        worker_id="runner-worker",
+        lease_duration=timedelta(milliseconds=500),
+        max_attempts=2,
+        heartbeat_interval=timedelta(milliseconds=50),
+        heartbeat_store_factory=factory,
+    )
+    result = runner.run_once()
+
+    assert result is not None and result.status is JobStatus.COMPLETED
+    # Twelve 50ms intervals exceed the original 500ms lease; a successful
+    # contender check therefore proves renewal, not merely the initial lease.
+    assert CountingHeartbeatStore.calls >= 12
+    assert heartbeat_threads and heartbeat_threads[0] != get_ident()
+    assert len(heartbeat_stores) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        heartbeat_stores[0].db.connection.execute("SELECT 1")
+    db.close()
+
+
+def test_runner_file_database_default_heartbeat_factory_renews_lease(tmp_path: Path) -> None:
+    path = tmp_path / "default-heartbeat.sqlite"
+    db = Database(path)
+    store = JobStore(db)
+    job = store.enqueue(make_job("default-heartbeat"))
+    renewed = Event()
+
+    def handler(claimed: Job) -> None:
+        deadline = monotonic() + 2
+        while monotonic() < deadline:
+            current = store.get(claimed.id)
+            if current is not None and current.updated_at > claimed.updated_at:
+                renewed.set()
+                return
+            # This is a bounded observation wait, not a timing assumption:
+            # completion only occurs after the persisted timestamp advances.
+            Event().wait(0.01)
+        raise AssertionError("default heartbeat did not renew the lease")
+
+    result = JobRunner(
+        store,
+        {JobType.ANALYZE_ASSET: handler},
+        worker_id="runner-worker",
+        lease_duration=timedelta(seconds=1),
+        max_attempts=2,
+        heartbeat_interval=timedelta(milliseconds=20),
+    ).run_once()
+
+    assert renewed.is_set()
+    assert result is not None and result.status is JobStatus.COMPLETED
+    assert store.get(job.id).status is JobStatus.COMPLETED  # type: ignore[union-attr]
+    db.close()
+
+
+def test_runner_heartbeat_loss_never_marks_job_completed(tmp_path: Path) -> None:
+    path = tmp_path / "heartbeat-lost.sqlite"
+    db = Database(path)
+    store = JobStore(db)
+    job = store.enqueue(make_job("heartbeat-lost"))
+    heartbeat_called = Event()
+    heartbeat_stores: list[JobStore] = []
+
+    class LostHeartbeatStore(JobStore):
+        def heartbeat(self, *args: object, **kwargs: object) -> Job | None:
+            heartbeat_called.set()
+            return None
+
+    def factory() -> JobStore:
+        heartbeat = LostHeartbeatStore(Database(path))
+        heartbeat_stores.append(heartbeat)
+        return heartbeat
+
+    def handler(_: Job) -> None:
+        assert heartbeat_called.wait(timeout=2)
+
+    runner = JobRunner(
+        store,
+        {JobType.ANALYZE_ASSET: handler},
+        worker_id="runner-worker",
+        lease_duration=timedelta(seconds=1),
+        max_attempts=2,
+        heartbeat_interval=timedelta(milliseconds=10),
+        heartbeat_store_factory=factory,
+    )
+    with pytest.raises(LeaseLost, match="lease was lost"):
+        runner.run_once()
+
+    assert store.get(job.id).status is JobStatus.RUNNING  # type: ignore[union-attr]
+    with pytest.raises(sqlite3.ProgrammingError):
+        heartbeat_stores[0].db.connection.execute("SELECT 1")
+    db.close()
+
+
+def test_runner_heartbeat_thread_failure_never_marks_job_completed(tmp_path: Path) -> None:
+    path = tmp_path / "heartbeat-error.sqlite"
+    db = Database(path)
+    store = JobStore(db)
+    job = store.enqueue(make_job("heartbeat-error"))
+    heartbeat_called = Event()
+
+    class BrokenHeartbeatStore(JobStore):
+        def heartbeat(self, *args: object, **kwargs: object) -> Job | None:
+            heartbeat_called.set()
+            raise RuntimeError("private heartbeat detail")
+
+    def factory() -> JobStore:
+        return BrokenHeartbeatStore(Database(path))
+
+    def handler(_: Job) -> None:
+        assert heartbeat_called.wait(timeout=2)
+
+    runner = JobRunner(
+        store,
+        {JobType.ANALYZE_ASSET: handler},
+        worker_id="runner-worker",
+        lease_duration=timedelta(seconds=1),
+        max_attempts=2,
+        heartbeat_interval=timedelta(milliseconds=10),
+        heartbeat_store_factory=factory,
+    )
+    with pytest.raises(LeaseLost, match="heartbeat failed") as raised:
+        runner.run_once()
+
+    assert "private" not in str(raised.value)
+    assert store.get(job.id).status is JobStatus.RUNNING  # type: ignore[union-attr]
+    db.close()
+
+
+def test_runner_heartbeat_preserves_handler_process_interrupt_for_crash_recovery(tmp_path: Path) -> None:
+    path = tmp_path / "heartbeat-interrupt.sqlite"
+    db = Database(path)
+    store = JobStore(db)
+    job = store.enqueue(make_job("heartbeat-interrupt"))
+    heartbeat_started = Event()
+
+    def factory() -> JobStore:
+        heartbeat_started.set()
+        return JobStore(Database(path))
+
+    def interrupted(_: Job) -> None:
+        assert heartbeat_started.wait(timeout=2)
+        raise KeyboardInterrupt()
+
+    runner = JobRunner(
+        store,
+        {JobType.ANALYZE_ASSET: interrupted},
+        worker_id="runner-worker",
+        lease_duration=timedelta(seconds=1),
+        max_attempts=2,
+        heartbeat_interval=timedelta(milliseconds=10),
+        heartbeat_store_factory=factory,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_once()
+
+    assert store.get(job.id).status is JobStatus.RUNNING  # type: ignore[union-attr]
+    db.close()
+
+
+def test_runner_heartbeat_requires_interval_shorter_than_lease_and_explicit_memory_factory() -> None:
+    memory_db = Database()
+    try:
+        store = JobStore(memory_db)
+        with pytest.raises(ValueError, match="shorter"):
+            JobRunner(
+                store, {}, worker_id="worker", lease_duration=timedelta(seconds=1), max_attempts=1,
+                heartbeat_interval=timedelta(seconds=1),
+            )
+        with pytest.raises(ValueError, match=":memory:"):
+            JobRunner(
+                store, {}, worker_id="worker", lease_duration=timedelta(seconds=1), max_attempts=1,
+                heartbeat_interval=timedelta(milliseconds=100),
+            )
+    finally:
+        memory_db.close()

@@ -11,7 +11,8 @@ Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向
 - `GET /health` 健康检查；
 - pytest 配置与健康端点测试；
 - Windows PowerShell 本地启动和检查脚本；
-- SQLite Repository、幂等 Job、租约/重试/崩溃恢复及单次 Worker 执行边界；
+- SQLite Repository、幂等 Job、租约/自动心跳/重试/崩溃恢复及单次 Worker 执行边界；
+- 本地 Job API：Asset 分析/转写幂等入队与状态查询；
 - 本地媒体内容寻址导入、ffprobe 探测、连续 Clip 切分、分析音频和关键帧提取；
 - provider-neutral ASR 契约、OpenAI-compatible BYOK 适配器及时间戳转写到 Clip 的原子写回；
 - 依赖清单与许可证核查提示。
@@ -56,7 +57,13 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 
 ## 本批次暂未完成
 
-ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Vision、Embedding 索引、移动端及完整生产链路待开发。ASR 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。当前 Worker 是显式 `run_once`，不包含轮询守护进程或长任务自动心跳。
+ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Vision、Embedding 索引、移动端及完整生产链路待开发。ASR 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。当前 Worker 是显式 `run_once` 并可启用独立连接自动心跳，尚不包含轮询守护进程。
+
+默认 SQLite 文件为 `content-os-data/content-os.sqlite3`，可通过 `CONTENT_OS_DB_PATH` 覆盖。Job API：
+
+- `POST /assets/{asset_id}/jobs/analyze_asset`
+- `POST /assets/{asset_id}/jobs/transcribe_audio`
+- `GET /jobs/{job_id}`
 
 ## 文档与契约
 
