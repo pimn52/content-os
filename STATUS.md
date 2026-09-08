@@ -4,7 +4,7 @@
 
 ## 本批次范围
 
-已完成 Task 001 核心契约、Task 002a 后端运行骨架、Task 003 SQLite 持久化与最小任务基础、Task 004A 本地媒体导入/去重/探测、Task 005/006 连续镜头切分、音频/关键帧提取与持久化媒体分析切片、Task 007 可替换 ASR Provider 与 Clip 转写持久化，以及 provider-neutral Vision/Embedding、本地 Clip 向量索引与过滤检索、三类 Asset Job 的执行边界、自动心跳、最小 Job/Search API、素材库 UI 和可控轮询 Worker CLI。渲染骨架尚未完成，因此不将整个 Gate 1 标记通过。
+已完成 Task 001–015 的最小工程链路，包括核心契约、SQLite/任务基础、媒体导入与理解、检索、素材库 UI、ScenePlan、Asset Router、VideoSpec、基础 Remotion Renderer 与可重复端到端成片夹具。合成媒体工程门禁已通过，但尚未进行创作者真实素材质量验收，因此不将真实素材 Gate 标记通过。
 
 - Terra：核心数据模型、JSON Schema、示例、校验测试。
 - Luna：FastAPI、健康检查、Python 项目配置、Windows 启动文档。
@@ -32,12 +32,14 @@
 - Terra：Task 011 provider-neutral ScenePlanner、OpenAI-compatible 严格 JSON Schema 适配器；主 Agent 完成 Project→ScenePlan API。
 - Terra：Task 012 provider-neutral Asset Router、本地连续 Clip 多因子排序与补拍缺口；主 Agent 加固时长/来源约束并完成路由 API。
 - Terra：Task 013 纯本地 VideoSpec Assembler、精确有理帧换算与契约边界；主 Agent 完成组装 API。
+- Terra：Task 014 基础 Remotion Renderer、授权本地 Clip 校验、Windows npm shim 与源音轨时间线。
+- Terra：Task 015 双素材真实编码夹具，验证 FFmpeg 导入、SQLite、VideoSpec、Remotion MP4 与 ffprobe 输出。
 
 未调用任何生成供应商，不产生本产品的媒体生成 API 费用；Agent 本身的运行消耗由当前平台计量。
 
 ## 当前限制
 
-- 已能导入、探测、切分视频、提取音频/关键帧，通过可替换 ASR/Vision 边界写回 Clip，并将 transcript + Vision + Clip metadata 生成 Embedding 后在 SQLite 本地 Top-K 检索；尚未实现自动写稿、自动剪辑、克隆声音、口播生成或发布。
+- 已能导入、探测、切分视频、提取音频/关键帧，通过可替换 ASR/Vision 边界写回 Clip，并将 transcript + Vision + Clip metadata 生成 Embedding 后在 SQLite 本地 Top-K 检索，再由 ScenePlan/Router/VideoSpec/Remotion 输出基础 MP4；尚未实现自动写稿、克隆声音、口播生成或发布。
 - Project / Asset / Clip / Job 的基础外键，以及 Clip 与数据库 Asset 时长一致性已由 Repository 校验；源文件是否存在、数据库时长是否与真实媒体一致，留待导入/ffprobe 与 assembler 验证。
 - 授权记录是数据凭据，无法仅凭字符串核验权利；撤销授权与生成前检查在对应业务流程实现。
 - 任务状态、幂等、领取、租约、自动心跳、有限重试、崩溃恢复、媒体/ASR handler、最小任务 API 与前台轮询 Worker CLI 已接通；尚无系统后台服务、预算预留/对账或任务 UI。
@@ -45,7 +47,7 @@
 
 ## 继续开发阶段
 
-Task 013 VideoSpec 组装已完成，当前继续进入 Task 014 基础 Remotion Renderer。执行器不会在长耗时媒体/网络调用期间持有 SQLite 写事务，也不会把供应商密钥持久化。
+Task 014/015 已完成。按冻结基线暂停功能扩展，进入首个真实素材 Gate。执行器不会在长耗时媒体/网络调用期间持有 SQLite 写事务，也不会把供应商密钥持久化。
 
 真实媒体验收阶段再使用用户授权的 3–5 个视频和一个脚本。没有这批真实素材前，不能声称个性化成片质量通过。
 
@@ -71,5 +73,7 @@ Task 013 VideoSpec 组装已完成，当前继续进入 Task 014 基础 Remotion
 - Task 011 通过本地 fake server 验证 Project/脚本/主题请求、严格 ScenePlan JSON Schema、连续 order、唯一 scene_id、真实素材优先、错误分类、禁携密重定向与 BYOK 脱敏；Project→ScenePlan API 验证项目绑定、404、运行时配置和拒绝请求内密钥，完整测试 `209 passed`。
 - Task 012 以本地 SQLite fixture 验证“本人坐在电脑前操作软件”返回合理连续 Clip Top‑1/Top‑3、真实素材来源过滤、时长满足、语义/视觉质量/镜头适配/新鲜度/复用惩罚、稳定排序、零供应商成本和补拍缺口；路由 API 验证 Project 绑定，完整测试 `215 passed`。
 - Task 013 验证 29.97/30fps 精确毫秒→帧换算、连续 start_frame、Project/Asset/Clip 身份、授权引用、短素材和 Capture gap 阻断、显式候选覆盖、确定性与 VideoSpec JSON 往返；本地组装 API 已接通，完整测试 `222 passed`。
+- Task 014 验证授权/身份/本地路径、源帧裁切、字幕、源音轨、9:16/cut 限制、失败清理和 Windows `npm.cmd` 解析；Remotion 4.0.522 完整打包并启动 Chrome Headless Shell。
+- Task 015 以两段真实编码的 360×640、30fps、AAC 合成素材贯穿导入、SQLite、双场景 VideoSpec 与实际 Remotion 渲染；ffprobe 验证输出为 24 帧、约 0.8 秒且含音轨，原始与内容寻址文件哈希未改变；完整测试 `227 passed`。
 - 便携 FFmpeg 仅放在本机临时目录用于开发验收，下载包 SHA-256 已按发布方值核对，未提交仓库。
 - 尚未使用用户真实 IP 素材；当前仅证明媒体工程链路，不代表个性化素材理解通过。

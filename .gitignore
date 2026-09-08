@@ -12,5 +12,7 @@ content-os-data/
 *.sqlite3
 .pyright/
 .mypy_cache/
+node_modules/
+apps/renderer/public/content-os-renders/
 .DS_Store
 Thumbs.db
