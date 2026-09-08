@@ -15,6 +15,20 @@ from .asr import (
     TranscriptionResult,
     TranscriptionSegment,
 )
+from .vision import (
+    ClipVisualAnalysis,
+    OpenAICompatibleVisionProvider,
+    VisionAuthenticationError,
+    VisionConfigurationError,
+    VisionConnectionError,
+    VisionError,
+    VisionHTTPError,
+    VisionInputError,
+    VisionProvider,
+    VisionProviderResponseError,
+    VisionRateLimitError,
+    VisionTimeout,
+)
 
 __all__ = [
     "ASRAuthenticationError",
@@ -30,4 +44,16 @@ __all__ = [
     "OpenAICompatibleASRProvider",
     "TranscriptionResult",
     "TranscriptionSegment",
+    "ClipVisualAnalysis",
+    "OpenAICompatibleVisionProvider",
+    "VisionAuthenticationError",
+    "VisionConfigurationError",
+    "VisionConnectionError",
+    "VisionError",
+    "VisionHTTPError",
+    "VisionInputError",
+    "VisionProvider",
+    "VisionProviderResponseError",
+    "VisionRateLimitError",
+    "VisionTimeout",
 ]

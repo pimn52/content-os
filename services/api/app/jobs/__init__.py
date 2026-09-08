@@ -5,7 +5,7 @@ these state transitions without making SQLite or lease details part of the
 domain contract.
 """
 
-from .handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler
+from .handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver
 from .runner import JobExecutionError, JobRunner, LeaseLost, NoHandler
 from .store import JobStore
 from .targets import (
@@ -24,6 +24,8 @@ __all__ = [
     "AssetJobTargetError",
     "AssetJobTargetStore",
     "AssetTranscriptionJobHandler",
+    "AssetVisionJobHandler",
+    "ExtractedKeyframeResolver",
     "JobExecutionError",
     "JobRunner",
     "JobStore",

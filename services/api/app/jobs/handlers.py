@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Protocol, Sequence
 from uuid import UUID
 
-from app.domain.models import Asset, Job, JobStatus, JobType
+from app.db import ClipRepository
+from app.domain.models import Asset, Clip, Job, JobStatus, JobType
 from app.media.extraction import (
     AudioExtraction,
     AudioUnavailableError,
@@ -13,6 +14,7 @@ from app.media.extraction import (
     ExtractionProcessError,
     ExtractionTimeout,
     ExtractionValidationError,
+    KeyframeExtraction,
 )
 from app.media.pipeline import (
     AssetIdentityMismatch,
@@ -28,6 +30,15 @@ from app.media.segmentation import (
     SegmentationError,
 )
 from app.media.transcripts import ClipTranscriptPersistence, NoClipsForAsset
+from app.media.vision import VisualMetadataError
+from app.media.vision_pipeline import (
+    MediaVisionPipeline,
+    VisionAssetIdentityMismatch,
+    VisionAssetNotPersisted,
+    VisionClipSetMismatch,
+    VisionKeyframeMismatch,
+    VisionPipelineError,
+)
 from app.providers.asr import (
     ASRAuthenticationError,
     ASRConfigurationError,
@@ -38,6 +49,16 @@ from app.providers.asr import (
     ASRProviderResponseError,
     ASRRateLimitError,
     ASRTimeout,
+)
+from app.providers.vision import (
+    VisionAuthenticationError,
+    VisionConfigurationError,
+    VisionConnectionError,
+    VisionHTTPError,
+    VisionInputError,
+    VisionProviderResponseError,
+    VisionRateLimitError,
+    VisionTimeout,
 )
 
 from .runner import JobExecutionError
@@ -58,6 +79,24 @@ class AudioExtractor(Protocol):
 
 class TranscriptPersistence(Protocol):
     def apply(self, asset_id: UUID, segments: Sequence[object]) -> object: ...
+
+
+class KeyframeResolver(Protocol):
+    def resolve(self, asset: Asset, clips: Sequence[Clip]) -> Sequence[str]: ...
+
+
+class KeyframeExtractor(Protocol):
+    def extract_keyframe(self, asset: Asset, clip: Clip) -> KeyframeExtraction: ...
+
+
+class ExtractedKeyframeResolver:
+    """Resolve deterministic local keyframes through the media extractor."""
+
+    def __init__(self, extractor: KeyframeExtractor) -> None:
+        self._extractor = extractor
+
+    def resolve(self, asset: Asset, clips: Sequence[Clip]) -> tuple[str, ...]:
+        return tuple(str(self._extractor.extract_keyframe(asset, clip).path) for clip in clips)
 
 
 class AssetAnalysisJobHandler:
@@ -149,6 +188,62 @@ class AssetTranscriptionJobHandler:
             raise JobExecutionError("clips_missing", "asset has no clips available for transcription", retryable=False) from None
         except (TypeError, ValueError):
             raise JobExecutionError("transcript_invalid", "transcription result cannot be persisted", retryable=False) from None
+
+
+class AssetVisionJobHandler:
+    """Resolve existing Clips/keyframes, then atomically persist vision metadata."""
+
+    def __init__(
+        self,
+        target_store: AssetTargetLookup,
+        assets: AssetLookup,
+        clips: ClipRepository,
+        keyframes: KeyframeResolver,
+        pipeline: MediaVisionPipeline,
+    ) -> None:
+        self._target_store = target_store
+        self._assets = assets
+        self._clips = clips
+        self._keyframes = keyframes
+        self._pipeline = pipeline
+
+    def __call__(self, job: Job) -> None:
+        asset = _resolve_asset_job(job, JobType.INDEX_CLIPS, self._target_store, self._assets)
+        clips = self._clips.list_by_asset(asset.id)
+        if not clips:
+            raise JobExecutionError("clips_missing", "asset has no clips available for visual analysis", retryable=False)
+        try:
+            paths = self._keyframes.resolve(asset, clips)
+        except ExtractionTimeout:
+            raise JobExecutionError("keyframe_extraction_timeout", "keyframe extraction timed out", retryable=True) from None
+        except ExtractionProcessError:
+            raise JobExecutionError("keyframe_extraction_failed", "keyframe extraction could not complete", retryable=True) from None
+        except (ExtractionBinaryMissing, ExtractionOutputError, ExtractionValidationError):
+            raise JobExecutionError("keyframes_invalid", "keyframes cannot be extracted for visual analysis", retryable=False) from None
+        except (FileNotFoundError, TypeError, ValueError):
+            raise JobExecutionError("keyframes_missing", "keyframes are unavailable for visual analysis", retryable=False) from None
+        try:
+            self._pipeline.process(asset, clips, paths)
+        except (VisionRateLimitError, VisionTimeout, VisionConnectionError):
+            raise JobExecutionError("vision_temporarily_unavailable", "vision provider is temporarily unavailable", retryable=True) from None
+        except VisionHTTPError as error:
+            retryable = error.status_code >= 500 or error.status_code in {408, 409, 425}
+            code = "vision_temporarily_unavailable" if retryable else "vision_request_rejected"
+            message = "vision provider is temporarily unavailable" if retryable else "vision provider rejected the request"
+            raise JobExecutionError(code, message, retryable=retryable) from None
+        except (
+            VisionAuthenticationError,
+            VisionConfigurationError,
+            VisionInputError,
+            VisionProviderResponseError,
+            VisionAssetIdentityMismatch,
+            VisionAssetNotPersisted,
+            VisionClipSetMismatch,
+            VisionKeyframeMismatch,
+            VisionPipelineError,
+            VisualMetadataError,
+        ):
+            raise JobExecutionError("vision_invalid", "visual analysis input is not processable", retryable=False) from None
 
 
 def _resolve_asset_job(

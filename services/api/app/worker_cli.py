@@ -12,9 +12,9 @@ from pathlib import Path
 from threading import Event
 from typing import Sequence
 
-from app.db import AssetRepository, Database
+from app.db import AssetRepository, ClipRepository, Database
 from app.domain.models import JobType
-from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler
+from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore
@@ -23,7 +23,9 @@ from app.media.extraction import FFmpegExtractionService
 from app.media.pipeline import MediaAnalysisPipeline
 from app.media.segmentation import FFmpegSceneDetector
 from app.media.transcripts import ClipTranscriptPersistence
+from app.media.vision_pipeline import MediaVisionPipeline
 from app.providers.asr import ASRConfigurationError, OpenAICompatibleASRProvider
+from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigurationError
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO)], help="Restrict handlers; repeat to select both")
+    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS)], help="Restrict handlers; repeat to select multiple")
     parser.add_argument("--ffmpeg", default=os.environ.get("CONTENT_OS_FFMPEG", "ffmpeg"))
     return parser
 
@@ -94,6 +96,23 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             model=os.environ.get("OPENAI_MODEL", os.environ.get("CONTENT_OS_ASR_MODEL", "whisper-1")),
         )
         handlers[JobType.TRANSCRIBE_AUDIO] = AssetTranscriptionJobHandler(targets, assets, extractor, provider, ClipTranscriptPersistence(db))
+    if JobType.INDEX_CLIPS in config.job_types:
+        api_key = os.environ.get("CONTENT_OS_VISION_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise VisionConfigurationError("vision API key must be supplied at runtime")
+        provider = OpenAICompatibleVisionProvider(
+            api_key,
+            base_url=os.environ.get("CONTENT_OS_VISION_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model=os.environ.get("CONTENT_OS_VISION_MODEL", "gpt-4.1-mini"),
+            detail=os.environ.get("CONTENT_OS_VISION_DETAIL", "low"),
+        )
+        handlers[JobType.INDEX_CLIPS] = AssetVisionJobHandler(
+            targets,
+            assets,
+            ClipRepository(db),
+            ExtractedKeyframeResolver(extractor),
+            MediaVisionPipeline(db, provider),
+        )
     return JobRunner(store, handlers, worker_id=config.worker_id, lease_duration=timedelta(seconds=config.lease_seconds), heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts)
 
 

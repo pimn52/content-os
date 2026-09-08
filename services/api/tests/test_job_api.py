@@ -41,6 +41,9 @@ def test_job_api_enqueue_idempotency_status_and_errors(tmp_path: Path):
         assert missing_job.status_code == 404
         status = client.get(f"/jobs/{body['id']}")
         assert status.status_code == 200 and status.json()["id"] == body["id"]
+        vision = client.post(f"/assets/{asset.id}/jobs/index_clips", json={"idempotency_key": "vision-key"})
+        assert vision.status_code == 201
+        assert vision.json()["type"] == "index_clips"
     assert app.state.database_closed is True
 
 

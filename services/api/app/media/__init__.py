@@ -18,10 +18,13 @@ from .transcripts import (
     TranscriptSegment,
     map_transcript_to_clips,
 )
+from .vision import ClipVisualMetadataPersistence, VisualMetadata, map_visual_metadata
+from .vision_pipeline import MediaVisionPipeline, VisionAnalysisResult, VisionPipelineError
 
 __all__ = [
     "AudioExtraction",
     "ClipTranscriptPersistence",
+    "ClipVisualMetadataPersistence",
     "ExtractionError",
     "FFmpegExtractionService",
     "FFmpegSceneDetector",
@@ -34,6 +37,7 @@ __all__ = [
     "MediaImportError",
     "MediaImporter",
     "MediaPipelineError",
+    "MediaVisionPipeline",
     "NoClipsForAsset",
     "ProbeError",
     "ProbeMetadata",
@@ -41,5 +45,9 @@ __all__ = [
     "SegmentationError",
     "TranscriptMapper",
     "TranscriptSegment",
+    "VisionAnalysisResult",
+    "VisionPipelineError",
+    "VisualMetadata",
     "map_transcript_to_clips",
+    "map_visual_metadata",
 ]

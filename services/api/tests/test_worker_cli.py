@@ -9,6 +9,7 @@ from app.jobs.handlers import AssetAnalysisJobHandler
 from app.jobs.targets import AssetJobTargetStore
 from app.jobs.store import JobStore
 from app.providers.asr import ASRConfigurationError
+from app.providers.vision import VisionConfigurationError
 from app.worker_cli import build_runner, parse_config, run
 
 
@@ -28,6 +29,22 @@ def test_transcribe_requires_runtime_key_but_analyze_does_not(tmp_path: Path, mo
         build_runner(parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "analyze_asset"]), db)
         with pytest.raises(ASRConfigurationError, match="supplied at runtime"):
             build_runner(parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "transcribe_audio"]), db)
+    finally:
+        db.close()
+
+
+def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CONTENT_OS_VISION_API_KEY", raising=False)
+    db = Database(tmp_path / "vision-worker.sqlite")
+    try:
+        config = parse_config(["--once", "--db", str(tmp_path / "vision-worker.sqlite"), "--job-type", "index_clips"])
+        assert config.job_types == (JobType.INDEX_CLIPS,)
+        with pytest.raises(VisionConfigurationError, match="supplied at runtime"):
+            build_runner(config, db)
+        monkeypatch.setenv("CONTENT_OS_VISION_API_KEY", "runtime-only-test-key")
+        runner = build_runner(config, db)
+        assert runner.handler_types == {JobType.INDEX_CLIPS}
     finally:
         db.close()
 

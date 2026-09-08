@@ -15,6 +15,7 @@ Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向
 - 本地 Job API：Asset 分析/转写幂等入队与状态查询；
 - 本地媒体内容寻址导入、ffprobe 探测、连续 Clip 切分、分析音频和关键帧提取；
 - provider-neutral ASR 契约、OpenAI-compatible BYOK 适配器及时间戳转写到 Clip 的原子写回；
+- provider-neutral Vision 契约、OpenAI-compatible Responses BYOK 适配器，以及关键帧视觉元数据到 Clip 的原子写回；
 - 依赖清单与许可证核查提示。
 
 Windows PowerShell 首次运行（支持带空格的路径）：
@@ -57,12 +58,13 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 
 ## 本批次暂未完成
 
-ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Vision、Embedding 索引、移动端及完整生产链路待开发。ASR 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。Worker CLI 支持前台轮询与 `--once`，并可启用独立连接自动心跳。
+ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲染。前端、Embedding 索引、移动端及完整生产链路待开发。ASR/Vision 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。Worker CLI 支持前台轮询与 `--once`，并可启用独立连接自动心跳。
 
 默认 SQLite 文件为 `content-os-data/content-os.sqlite3`，可通过 `CONTENT_OS_DB_PATH` 覆盖。Job API：
 
 - `POST /assets/{asset_id}/jobs/analyze_asset`
 - `POST /assets/{asset_id}/jobs/transcribe_audio`
+- `POST /assets/{asset_id}/jobs/index_clips`
 - `GET /jobs/{job_id}`
 
 本地 Worker CLI（前台进程，不启动独立 daemon 线程）：
@@ -70,9 +72,10 @@ ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲�
 ```powershell
 & ".\.venv\Scripts\content-os-worker.exe" --once --job-type analyze_asset
 & ".\.venv\Scripts\content-os-worker.exe" --job-type analyze_asset --job-type transcribe_audio
+& ".\.venv\Scripts\content-os-worker.exe" --job-type index_clips
 ```
 
-转录任务启动前需要运行时环境变量 `OPENAI_API_KEY`（可选覆盖 `OPENAI_BASE_URL` / `OPENAI_MODEL`）；密钥不会写入数据库或日志。`--db`、`--data-root`、`--worker-id`、租约/心跳/轮询间隔和 `--max-attempts` 可覆盖默认值。
+转录任务启动前需要运行时环境变量 `OPENAI_API_KEY` 或 `CONTENT_OS_ASR_API_KEY`。视觉任务需要 `CONTENT_OS_VISION_API_KEY` 或 `OPENAI_API_KEY`，并可用 `CONTENT_OS_VISION_BASE_URL`、`CONTENT_OS_VISION_MODEL`、`CONTENT_OS_VISION_DETAIL` 覆盖供应商配置。密钥不会写入数据库或日志。`--db`、`--data-root`、`--worker-id`、租约/心跳/轮询间隔和 `--max-attempts` 可覆盖默认值。
 
 ## 文档与契约
 

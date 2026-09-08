@@ -10,7 +10,7 @@ from app.db.repositories import JobRepository, _model
 from app.domain.models import Job, JobType
 
 
-ALLOWED_ASSET_JOB_TYPES = frozenset({JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO})
+ALLOWED_ASSET_JOB_TYPES = frozenset({JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS})
 
 
 class AssetJobTargetError(RuntimeError):
