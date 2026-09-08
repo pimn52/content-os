@@ -4,7 +4,7 @@
 
 ## 本批次范围
 
-已完成 Task 001 核心契约、Task 002a 后端运行骨架、Task 003 SQLite 持久化与最小任务基础、Task 004A 本地媒体导入/去重/探测、Task 005/006 连续镜头切分、音频/关键帧提取与持久化媒体分析切片、Task 007 可替换 ASR Provider 与 Clip 转写持久化，以及 provider-neutral Vision/Embedding、本地 Clip 向量索引与过滤检索、三类 Asset Job 的执行边界、自动心跳、最小 Job/Search API 和可控轮询 Worker CLI。前端与渲染骨架尚未完成，因此不将整个 Gate 1 标记通过。
+已完成 Task 001 核心契约、Task 002a 后端运行骨架、Task 003 SQLite 持久化与最小任务基础、Task 004A 本地媒体导入/去重/探测、Task 005/006 连续镜头切分、音频/关键帧提取与持久化媒体分析切片、Task 007 可替换 ASR Provider 与 Clip 转写持久化，以及 provider-neutral Vision/Embedding、本地 Clip 向量索引与过滤检索、三类 Asset Job 的执行边界、自动心跳、最小 Job/Search API、素材库 UI 和可控轮询 Worker CLI。渲染骨架尚未完成，因此不将整个 Gate 1 标记通过。
 
 - Terra：核心数据模型、JSON Schema、示例、校验测试。
 - Luna：FastAPI、健康检查、Python 项目配置、Windows 启动文档。
@@ -28,6 +28,7 @@
 - Luna：视觉元数据映射、原子持久化与视觉管线隔离测试；主 Agent 完成 `INDEX_CLIPS` handler/Worker/API 接线。
 - Terra：provider-neutral Embedding 契约与 OpenAI-compatible 批量适配器。
 - Luna：SQLite Clip 向量持久化与余弦过滤检索；主 Agent 完成版本化迁移、索引管线、自然语言搜索 API 与 Vision→Embedding 作业串联。
+- Luna：Task 010 本地素材库页面、只读 Asset/Clip/媒体 API；主 Agent 修正语义搜索接线并完成浏览器交互验收。
 
 未调用任何生成供应商，不产生本产品的媒体生成 API 费用；Agent 本身的运行消耗由当前平台计量。
 
@@ -41,7 +42,7 @@
 
 ## 继续开发阶段
 
-当前继续进入 ScenePlan 与素材路由。执行器不会在长耗时媒体/网络调用期间持有 SQLite 写事务，也不会把供应商密钥持久化。
+Task 010 已完成，当前继续进入 ScenePlan 与素材路由。执行器不会在长耗时媒体/网络调用期间持有 SQLite 写事务，也不会把供应商密钥持久化。
 
 真实媒体验收阶段再使用用户授权的 3–5 个视频和一个脚本。没有这批真实素材前，不能声称个性化成片质量通过。
 
@@ -63,5 +64,6 @@
 - 可控轮询 Worker/CLI 已验证空闲中断、多任务、启动恢复、部分类型隔离、handler 内停机等待、参数安全与连接关闭；console script 实际安装/帮助命令通过，完整测试 `156 passed`。
 - Vision 阶段通过本地 fake transport 验证 Responses 请求、JPEG data URL、严格 JSON Schema、错误分类、携密重定向禁用与 BYOK 脱敏；视觉管线验证 Clip/keyframe 身份绑定、供应商失败零写入、原子替换、重复执行稳定，并完成 `INDEX_CLIPS` API/Worker 接线；完整测试 `183 passed`。
 - Embedding/检索阶段通过本地 fake transport 验证批量顺序、维度/有限值、错误分类、携密重定向禁用与 BYOK 脱敏；SQLite schema v4 保存向量与 `embedding_ref`，支持 asset/orientation/talking filters、稳定余弦 Top-K，并以“本人坐在电脑前操作软件”用例返回合理 Clip；完整测试 `197 passed`，未调用真实供应商。
+- Task 010 素材库通过 API 测试验证 Asset/Clip 列表、详情、404、媒体文件与区间校验；实际浏览器验证页面加载、空库状态、查询输入和 `/clips/search` 错误反馈，完整测试 `199 passed`。
 - 便携 FFmpeg 仅放在本机临时目录用于开发验收，下载包 SHA-256 已按发布方值核对，未提交仓库。
 - 尚未使用用户真实 IP 素材；当前仅证明媒体工程链路，不代表个性化素材理解通过。

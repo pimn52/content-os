@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.db import AssetRepository, Database, JobRepository, ProjectRepository
-from app.domain.models import Clip, Job, JobStatus, JobType, ProjectFormat
+from app.db import AssetRepository, ClipRepository, Database, JobRepository, ProjectRepository
+from app.domain.models import Asset, Clip, Job, JobStatus, JobType, ProjectFormat
+from app.asset_library import asset_library_page
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
     EmbeddingAuthenticationError,
@@ -88,6 +90,45 @@ def create_app(data_path: str | Path | None = None, *, embedding_provider: Embed
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "content-os-api"}
 
+    # Read-only local Asset Library. Clip preview reuses the original source;
+    # the page seeks the video element to the selected Clip interval.
+    @application.get("/asset-library", response_class=HTMLResponse, include_in_schema=False)
+    def asset_library() -> HTMLResponse:
+        return asset_library_page()
+
+    @application.get("/assets", response_model=list[Asset], tags=["assets"])
+    async def list_assets() -> list[Asset]:
+        return AssetRepository(application.state.database).list()
+
+    @application.get("/assets/{asset_id}", response_model=Asset, tags=["assets"])
+    async def get_asset(asset_id: UUID) -> Asset:
+        asset = AssetRepository(application.state.database).get(asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        return asset
+
+    @application.get("/assets/{asset_id}/clips", response_model=list[Clip], tags=["assets"])
+    async def list_asset_clips(asset_id: UUID) -> list[Clip]:
+        db: Database = application.state.database
+        if AssetRepository(db).get(asset_id) is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        return ClipRepository(db).list_by_asset(asset_id)
+
+    @application.get("/assets/{asset_id}/media", tags=["assets"])
+    async def asset_media(asset_id: UUID, start_ms: int | None = Query(default=None, ge=0), end_ms: int | None = Query(default=None, gt=0)) -> FileResponse:
+        db: Database = application.state.database
+        asset = AssetRepository(db).get(asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        if (start_ms is None) != (end_ms is None) or (start_ms is not None and end_ms is not None and end_ms <= start_ms):
+            raise HTTPException(status_code=422, detail="start_ms and end_ms must be a valid pair")
+        if end_ms is not None and end_ms > asset.duration_ms:
+            raise HTTPException(status_code=422, detail="media interval exceeds asset duration")
+        source = Path(asset.source_file).expanduser().resolve()
+        if not source.is_file():
+            raise HTTPException(status_code=404, detail="asset source file not found")
+        return FileResponse(source)
+
     @application.post("/assets/{asset_id}/jobs/{job_type}", response_model=JobResponse, status_code=201)
     async def enqueue_asset_job(asset_id: UUID, job_type: JobType, payload: JobEnqueueRequest, request: Request) -> dict[str, Any]:
         db: Database = request.app.state.database
@@ -139,6 +180,27 @@ def create_app(data_path: str | Path | None = None, *, embedding_provider: Embed
         except (EmbeddingInputError, EmbeddingIndexError, IndexError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return [ClipSearchHitResponse(clip=hit.clip, score=hit.score) for hit in hits]
+
+    @application.get("/clips/{clip_id}", response_model=Clip, tags=["assets"])
+    async def get_clip(clip_id: UUID) -> Clip:
+        clip = ClipRepository(application.state.database).get(clip_id)
+        if clip is None:
+            raise HTTPException(status_code=404, detail="clip not found")
+        return clip
+
+    @application.get("/clips/{clip_id}/media", tags=["assets"])
+    async def clip_media(clip_id: UUID) -> FileResponse:
+        db: Database = application.state.database
+        clip = ClipRepository(db).get(clip_id)
+        if clip is None:
+            raise HTTPException(status_code=404, detail="clip not found")
+        asset = AssetRepository(db).get(clip.asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        source = Path(asset.source_file).expanduser().resolve()
+        if not source.is_file():
+            raise HTTPException(status_code=404, detail="asset source file not found")
+        return FileResponse(source)
 
     return application
 

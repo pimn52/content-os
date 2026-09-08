@@ -17,6 +17,7 @@ Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向
 - provider-neutral ASR 契约、OpenAI-compatible BYOK 适配器及时间戳转写到 Clip 的原子写回；
 - provider-neutral Vision 契约、OpenAI-compatible Responses BYOK 适配器，以及关键帧视觉元数据到 Clip 的原子写回；
 - provider-neutral Embedding 契约、本地 SQLite 向量索引、过滤余弦检索与自然语言 Clip 搜索 API；
+- 无前端构建依赖的本地素材库页面、只读 Asset/Clip API 与原视频区间预览；
 - 依赖清单与许可证核查提示。
 
 Windows PowerShell 首次运行（支持带空格的路径）：
@@ -67,6 +68,8 @@ ScenePlan / VideoSpec 目前只有数据模型，尚未实现自动规划或渲�
 - `POST /assets/{asset_id}/jobs/transcribe_audio`
 - `POST /assets/{asset_id}/jobs/index_clips`
 - `POST /clips/search`
+- `GET /asset-library`
+- `GET /assets`、`GET /assets/{asset_id}/clips`、`GET /clips/{clip_id}`
 - `GET /jobs/{job_id}`
 
 本地 Worker CLI（前台进程，不启动独立 daemon 线程）：
