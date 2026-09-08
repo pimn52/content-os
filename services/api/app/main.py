@@ -14,7 +14,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import AssetRepository, ClipRepository, Database, JobRepository, ProjectRepository
-from app.domain.models import Asset, CandidateAsset, Clip, Job, JobStatus, JobType, ProjectFormat, ScenePlan
+from app.domain.models import Asset, CandidateAsset, Clip, Job, JobStatus, JobType, ProjectFormat, ScenePlan, VideoSpec
+from app.assembly import VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
@@ -104,6 +105,13 @@ class AssetRouteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scene_plan_id: UUID
     candidates: tuple[CandidateAsset, ...]
+
+
+class VideoSpecAssemblyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenes: list[ScenePlan] = Field(min_length=1, max_length=1_000)
+    selections: list[CandidateAsset] = Field(min_length=1, max_length=1_000)
+    explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
 
 
 def create_app(
@@ -274,6 +282,27 @@ def create_app(
         except (EmbeddingInputError, EmbeddingIndexError, IndexError, RoutingConfigurationError, RoutingInputError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return [AssetRouteResponse(scene_plan_id=result.scene_plan_id, candidates=result.candidates) for result in results]
+
+    @application.post("/projects/{project_id}/video-spec", response_model=VideoSpec)
+    async def assemble_video_spec(project_id: UUID, payload: VideoSpecAssemblyRequest, request: Request) -> VideoSpec:
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if any(scene.project_id != project_id for scene in payload.scenes):
+            raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
+        selected = {candidate.scene_plan_id: candidate for candidate in payload.selections}
+        if len(selected) != len(payload.selections):
+            raise HTTPException(status_code=422, detail="selections must contain one candidate per scene")
+        try:
+            return VideoSpecAssembler(AssetRepository(db), ClipRepository(db)).assemble(
+                project,
+                payload.scenes,
+                selected,
+                explicit_scene_ids=payload.explicit_scene_ids,
+            )
+        except VideoSpecAssemblyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @application.get("/clips/{clip_id}", response_model=Clip, tags=["assets"])
     async def get_clip(clip_id: UUID) -> Clip:

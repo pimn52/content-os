@@ -20,6 +20,7 @@ Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向
 - 无前端构建依赖的本地素材库页面、只读 Asset/Clip API 与原视频区间预览；
 - provider-neutral ScenePlanner、严格结构化 ScenePlan 输出与本地 Project→ScenePlan API；
 - 可配置本地 Asset Router：连续 Clip Top‑K、真实素材优先、质量/适配/新鲜度/复用评分与补拍缺口；
+- 严格 VideoSpec 组装：授权绑定、精确帧换算、连续时间线及 Capture gap 阻断；
 - 依赖清单与许可证核查提示。
 
 Windows PowerShell 首次运行（支持带空格的路径）：
@@ -62,7 +63,7 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 
 ## 本批次暂未完成
 
-ScenePlan 已能从 Project + 脚本/主题生成严格结构化结果；VideoSpec 目前仍只有数据模型，尚未实现素材路由、组装或渲染。移动端及完整生产链路待开发。ASR/Vision/Embedding/ScenePlanner 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。Worker CLI 支持前台轮询与 `--once`，并可启用独立连接自动心跳。
+ScenePlan 已能从 Project + 脚本/主题生成严格结构化结果，并可路由真实连续 Clip 后组装 VideoSpec；尚未实现 Remotion 渲染。移动端及完整生产链路待开发。ASR/Vision/Embedding/ScenePlanner 密钥只通过运行时构造 Provider 注入，不写入数据库或仓库；测试仅使用本地 fake server，没有调用付费 API。Worker CLI 支持前台轮询与 `--once`，并可启用独立连接自动心跳。
 
 默认 SQLite 文件为 `content-os-data/content-os.sqlite3`，可通过 `CONTENT_OS_DB_PATH` 覆盖。Job API：
 
@@ -74,6 +75,7 @@ ScenePlan 已能从 Project + 脚本/主题生成严格结构化结果；VideoSp
 - `GET /assets`、`GET /assets/{asset_id}/clips`、`GET /clips/{clip_id}`
 - `POST /projects/{project_id}/scene-plan`
 - `POST /projects/{project_id}/asset-routes`
+- `POST /projects/{project_id}/video-spec`
 - `GET /jobs/{job_id}`
 
 本地 Worker CLI（前台进程，不启动独立 daemon 线程）：
