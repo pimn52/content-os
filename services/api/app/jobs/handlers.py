@@ -50,6 +50,16 @@ from app.providers.asr import (
     ASRRateLimitError,
     ASRTimeout,
 )
+from app.providers.embedding import (
+    EmbeddingAuthenticationError,
+    EmbeddingConfigurationError,
+    EmbeddingConnectionError,
+    EmbeddingHTTPError,
+    EmbeddingInputError,
+    EmbeddingProviderResponseError,
+    EmbeddingRateLimitError,
+    EmbeddingTimeout,
+)
 from app.providers.vision import (
     VisionAuthenticationError,
     VisionConfigurationError,
@@ -60,6 +70,7 @@ from app.providers.vision import (
     VisionRateLimitError,
     VisionTimeout,
 )
+from app.search import EmbeddingCountMismatch, EmbeddingIndexError, IndexError
 
 from .runner import JobExecutionError
 from .targets import AssetJobTarget, AssetJobTargetError
@@ -87,6 +98,10 @@ class KeyframeResolver(Protocol):
 
 class KeyframeExtractor(Protocol):
     def extract_keyframe(self, asset: Asset, clip: Clip) -> KeyframeExtraction: ...
+
+
+class ClipIndexer(Protocol):
+    def index_clips(self, clips: Sequence[Clip]) -> object: ...
 
 
 class ExtractedKeyframeResolver:
@@ -200,12 +215,14 @@ class AssetVisionJobHandler:
         clips: ClipRepository,
         keyframes: KeyframeResolver,
         pipeline: MediaVisionPipeline,
+        indexer: ClipIndexer | None = None,
     ) -> None:
         self._target_store = target_store
         self._assets = assets
         self._clips = clips
         self._keyframes = keyframes
         self._pipeline = pipeline
+        self._indexer = indexer
 
     def __call__(self, job: Job) -> None:
         asset = _resolve_asset_job(job, JobType.INDEX_CLIPS, self._target_store, self._assets)
@@ -223,7 +240,7 @@ class AssetVisionJobHandler:
         except (FileNotFoundError, TypeError, ValueError):
             raise JobExecutionError("keyframes_missing", "keyframes are unavailable for visual analysis", retryable=False) from None
         try:
-            self._pipeline.process(asset, clips, paths)
+            result = self._pipeline.process(asset, clips, paths)
         except (VisionRateLimitError, VisionTimeout, VisionConnectionError):
             raise JobExecutionError("vision_temporarily_unavailable", "vision provider is temporarily unavailable", retryable=True) from None
         except VisionHTTPError as error:
@@ -244,6 +261,27 @@ class AssetVisionJobHandler:
             VisualMetadataError,
         ):
             raise JobExecutionError("vision_invalid", "visual analysis input is not processable", retryable=False) from None
+        if self._indexer is None:
+            return
+        try:
+            self._indexer.index_clips(result.clips)
+        except (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError):
+            raise JobExecutionError("embedding_temporarily_unavailable", "embedding provider is temporarily unavailable", retryable=True) from None
+        except EmbeddingHTTPError as error:
+            retryable = error.status_code >= 500 or error.status_code in {408, 409, 425}
+            code = "embedding_temporarily_unavailable" if retryable else "embedding_request_rejected"
+            message = "embedding provider is temporarily unavailable" if retryable else "embedding provider rejected the request"
+            raise JobExecutionError(code, message, retryable=retryable) from None
+        except (
+            EmbeddingAuthenticationError,
+            EmbeddingConfigurationError,
+            EmbeddingInputError,
+            EmbeddingProviderResponseError,
+            EmbeddingCountMismatch,
+            EmbeddingIndexError,
+            IndexError,
+        ):
+            raise JobExecutionError("embedding_invalid", "Clip embeddings cannot be produced or persisted", retryable=False) from None
 
 
 def _resolve_asset_job(

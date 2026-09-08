@@ -25,7 +25,9 @@ from app.media.segmentation import FFmpegSceneDetector
 from app.media.transcripts import ClipTranscriptPersistence
 from app.media.vision_pipeline import MediaVisionPipeline
 from app.providers.asr import ASRConfigurationError, OpenAICompatibleASRProvider
+from app.providers.embedding import EmbeddingConfigurationError, OpenAICompatibleEmbeddingProvider
 from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigurationError
+from app.search import ClipEmbeddingIndexer
 
 
 @dataclass(frozen=True)
@@ -106,12 +108,27 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             model=os.environ.get("CONTENT_OS_VISION_MODEL", "gpt-4.1-mini"),
             detail=os.environ.get("CONTENT_OS_VISION_DETAIL", "low"),
         )
+        embedding_key = os.environ.get("CONTENT_OS_EMBEDDING_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not embedding_key:
+            raise EmbeddingConfigurationError("embedding API key must be supplied at runtime")
+        raw_dimensions = os.environ.get("CONTENT_OS_EMBEDDING_DIMENSIONS")
+        try:
+            dimensions = None if raw_dimensions is None else int(raw_dimensions)
+        except ValueError as exc:
+            raise EmbeddingConfigurationError("embedding dimensions must be an integer") from exc
+        embedding_provider = OpenAICompatibleEmbeddingProvider(
+            embedding_key,
+            base_url=os.environ.get("CONTENT_OS_EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model=os.environ.get("CONTENT_OS_EMBEDDING_MODEL", "text-embedding-3-small"),
+            dimensions=dimensions,
+        )
         handlers[JobType.INDEX_CLIPS] = AssetVisionJobHandler(
             targets,
             assets,
             ClipRepository(db),
             ExtractedKeyframeResolver(extractor),
             MediaVisionPipeline(db, provider),
+            ClipEmbeddingIndexer(db, embedding_provider),
         )
     return JobRunner(store, handlers, worker_id=config.worker_id, lease_duration=timedelta(seconds=config.lease_seconds), heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts)
 

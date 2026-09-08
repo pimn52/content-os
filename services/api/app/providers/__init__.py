@@ -29,6 +29,20 @@ from .vision import (
     VisionRateLimitError,
     VisionTimeout,
 )
+from .embedding import (
+    EmbeddingAuthenticationError,
+    EmbeddingBatch,
+    EmbeddingConfigurationError,
+    EmbeddingConnectionError,
+    EmbeddingError,
+    EmbeddingHTTPError,
+    EmbeddingInputError,
+    EmbeddingProvider,
+    EmbeddingProviderResponseError,
+    EmbeddingRateLimitError,
+    EmbeddingTimeout,
+    OpenAICompatibleEmbeddingProvider,
+)
 
 __all__ = [
     "ASRAuthenticationError",
@@ -56,4 +70,16 @@ __all__ = [
     "VisionProviderResponseError",
     "VisionRateLimitError",
     "VisionTimeout",
+    "EmbeddingAuthenticationError",
+    "EmbeddingBatch",
+    "EmbeddingConfigurationError",
+    "EmbeddingConnectionError",
+    "EmbeddingError",
+    "EmbeddingHTTPError",
+    "EmbeddingInputError",
+    "EmbeddingProvider",
+    "EmbeddingProviderResponseError",
+    "EmbeddingRateLimitError",
+    "EmbeddingTimeout",
+    "OpenAICompatibleEmbeddingProvider",
 ]

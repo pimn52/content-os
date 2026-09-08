@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from app.media.segmentation import FFmpegBinaryMissing, FFmpegTimeout
 from app.media.transcripts import ClipTranscriptPersistence
 from app.providers.asr import ASRHTTPError, ASRRateLimitError, TranscriptionResult, TranscriptionSegment
 from app.providers.vision import VisionHTTPError, VisionRateLimitError
+from app.providers.embedding import EmbeddingRateLimitError
 
 
 def _asset(db: Database, tmp_path: Path, *, has_audio: bool) -> Asset:
@@ -387,5 +389,74 @@ def test_vision_handler_without_clips_fails_before_keyframe_resolution(tmp_path:
         result = _runner(JobStore(db), {JobType.INDEX_CLIPS: handler}).run_once()
         assert result is not None and result.status is JobStatus.FAILED
         assert result.error_code == "clips_missing"
+    finally:
+        db.close()
+
+
+def test_vision_handler_passes_updated_clips_to_embedding_indexer(tmp_path: Path) -> None:
+    db = Database(tmp_path / "vision-index.sqlite")
+    try:
+        asset = _asset(db, tmp_path, has_audio=False)
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=2_000, asset_duration_ms=2_000)
+        clips = ClipRepository(db)
+        clips.create(clip)
+        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS, "vision-index"), asset.id)
+        frame = tmp_path / "frame.jpg"
+        frame.write_bytes(b"frame")
+        updated = clip.model_copy(update={"visual_description": "person using computer"})
+        seen = []
+
+        class Resolver:
+            def resolve(self, candidate, supplied):
+                return [str(frame)]
+
+        class Pipeline:
+            def process(self, candidate, supplied, paths):
+                return SimpleNamespace(clips=(updated,))
+
+        class Indexer:
+            def index_clips(self, supplied):
+                seen.extend(supplied)
+
+        handler = AssetVisionJobHandler(
+            AssetJobTargetStore(db), AssetRepository(db), clips, Resolver(), Pipeline(), Indexer()  # type: ignore[arg-type]
+        )
+        result = _runner(JobStore(db), {JobType.INDEX_CLIPS: handler}).run_once()
+        assert result is not None and result.status is JobStatus.COMPLETED
+        assert seen == [updated]
+    finally:
+        db.close()
+
+
+def test_embedding_rate_limit_retries_without_leaking_provider_detail(tmp_path: Path) -> None:
+    db = Database(tmp_path / "embedding-retry.sqlite")
+    try:
+        asset = _asset(db, tmp_path, has_audio=False)
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=2_000, asset_duration_ms=2_000)
+        clips = ClipRepository(db)
+        clips.create(clip)
+        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS, "embedding-retry"), asset.id)
+        frame = tmp_path / "frame.jpg"
+        frame.write_bytes(b"frame")
+
+        class Resolver:
+            def resolve(self, candidate, supplied):
+                return [str(frame)]
+
+        class Pipeline:
+            def process(self, candidate, supplied, paths):
+                return SimpleNamespace(clips=(clip,))
+
+        class Indexer:
+            def index_clips(self, supplied):
+                raise EmbeddingRateLimitError("private embedding key")
+
+        handler = AssetVisionJobHandler(
+            AssetJobTargetStore(db), AssetRepository(db), clips, Resolver(), Pipeline(), Indexer()  # type: ignore[arg-type]
+        )
+        result = _runner(JobStore(db), {JobType.INDEX_CLIPS: handler}).run_once()
+        assert result is not None and result.status is JobStatus.PENDING
+        assert result.error_code == "embedding_temporarily_unavailable"
+        assert "private" not in (result.error_message or "")
     finally:
         db.close()

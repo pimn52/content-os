@@ -36,6 +36,7 @@ def test_transcribe_requires_runtime_key_but_analyze_does_not(tmp_path: Path, mo
 def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CONTENT_OS_VISION_API_KEY", raising=False)
+    monkeypatch.delenv("CONTENT_OS_EMBEDDING_API_KEY", raising=False)
     db = Database(tmp_path / "vision-worker.sqlite")
     try:
         config = parse_config(["--once", "--db", str(tmp_path / "vision-worker.sqlite"), "--job-type", "index_clips"])
@@ -43,6 +44,7 @@ def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Pat
         with pytest.raises(VisionConfigurationError, match="supplied at runtime"):
             build_runner(config, db)
         monkeypatch.setenv("CONTENT_OS_VISION_API_KEY", "runtime-only-test-key")
+        monkeypatch.setenv("CONTENT_OS_EMBEDDING_API_KEY", "runtime-only-embedding-key")
         runner = build_runner(config, db)
         assert runner.handler_types == {JobType.INDEX_CLIPS}
     finally:

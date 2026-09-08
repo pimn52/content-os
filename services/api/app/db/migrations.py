@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -72,6 +72,23 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
                asset_id TEXT NOT NULL REFERENCES assets(id)
            )""",
         "CREATE INDEX IF NOT EXISTS asset_job_targets_asset_idx ON asset_job_targets(asset_id)",
+    )),
+    (4, (
+        """CREATE TABLE IF NOT EXISTS clip_search_metadata (
+               singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+               embedding_dim INTEGER NOT NULL CHECK (embedding_dim > 0)
+           )""",
+        """CREATE TABLE IF NOT EXISTS clip_search_index (
+               clip_id TEXT PRIMARY KEY NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+               asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+               orientation TEXT,
+               talking_candidate INTEGER NOT NULL CHECK (talking_candidate IN (0, 1)),
+               searchable_text TEXT NOT NULL,
+               embedding TEXT NOT NULL,
+               embedding_dim INTEGER NOT NULL CHECK (embedding_dim > 0)
+           )""",
+        "CREATE INDEX IF NOT EXISTS clip_search_asset_idx ON clip_search_index(asset_id)",
+        "CREATE INDEX IF NOT EXISTS clip_search_filter_idx ON clip_search_index(orientation, talking_candidate)",
     )),
 )
 
