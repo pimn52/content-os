@@ -38,11 +38,12 @@ class LocalFixtureScenePlanner:
                 scene_id=f"fixture-{order}",
                 order=order,
                 purpose="hook" if order == 0 else "explain",
-                voice_text="Show the creator editing locally.",
+                voice_text=f"Fixture sequence {order + 1}.",
                 duration_target_ms=400,
                 visual_intent=VisualIntent(subject="creator", action="editing locally", framing="close"),
                 preferred_sources=[SourceKind.USER_ASSET],
                 fallback_sources=[SourceKind.CAPTURE],
+                caption_emphasis=[f"fixture-sequence-{order + 1}"],
             )
             for order in range(2)
         )
@@ -50,10 +51,23 @@ class LocalFixtureScenePlanner:
 
 
 class DeterministicFixtureEmbedding:
-    """Test-only vector source; it does not call or impersonate a provider."""
+    """Test-only vector source; it does not call or impersonate a provider.
+
+    The ScenePlan's ``fixture-sequence-*`` labels are test routing controls,
+    not observations about the source clips.  Indexed Clip vectors are ordered
+    by the local fixture's explicit source order, so no transcript or vision
+    metadata is fabricated to influence selection.
+    """
 
     def embed(self, texts: tuple[str, ...]) -> EmbeddingBatch:
-        return EmbeddingBatch(tuple((1.0, 0.0) for _ in texts))
+        if len(texts) > 1:
+            return EmbeddingBatch(tuple((1.0, 0.0) if index == 0 else (0.0, 1.0) for index, _ in enumerate(texts)))
+        query = texts[0].lower()
+        if "fixture-sequence-1" in query:
+            return EmbeddingBatch(((1.0, 0.0),))
+        if "fixture-sequence-2" in query:
+            return EmbeddingBatch(((0.0, 1.0),))
+        raise AssertionError(f"unexpected local fixture query: {texts[0]}")
 
 
 def _binaries() -> tuple[str, str]:
