@@ -38,14 +38,15 @@ def build_ledger() -> dict[str, object]:
             {
                 "run_id": "local-codex-fixture-smoke",
                 "kind": "test_fixture",
-                "model": "gpt-5.6-luna",
+                "model": "deterministic-local-fixture",
+                "codex_model_label": "gpt-5.6-luna",
                 "reasoning_effort": "low",
                 "token_budget_total": 10_000_000,
                 "input_tokens": None,
                 "output_tokens": None,
                 "actual_cost_usd": None,
                 "usage_status": "unmetered",
-                "notes": "Local deterministic planner/embedding fixture only; no external model or provider call.",
+                "notes": "The Codex model label is a planned test tier only; execution used a deterministic planner/embedding fixture with no external model or provider call.",
             },
             {
                 "run_id": "historical-luna-dispatch",
