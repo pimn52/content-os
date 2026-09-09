@@ -6,12 +6,12 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectRepository
 from app.domain.models import Asset, CandidateAsset, Clip, IPProfile, Job, JobStatus, JobType, Project, ProjectFormat, RationalFps, ScenePlan, VideoSpec
@@ -45,6 +45,7 @@ from app.providers.scene_planner import (
 )
 from app.search import ClipEmbeddingIndexer, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
+from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError
 
 
 class JobEnqueueRequest(BaseModel):
@@ -115,6 +116,37 @@ class VideoSpecAssemblyRequest(BaseModel):
     explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
 
 
+class RenderRequest(BaseModel):
+    """One already-assembled spec, or the inputs needed to assemble one locally."""
+
+    model_config = ConfigDict(extra="forbid")
+    video_spec: VideoSpec | None = None
+    scenes: list[ScenePlan] | None = Field(default=None, min_length=1, max_length=1_000)
+    selections: list[CandidateAsset] | None = Field(default=None, min_length=1, max_length=1_000)
+    explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
+
+    @model_validator(mode="after")
+    def one_render_input_shape(self) -> "RenderRequest":
+        has_spec = self.video_spec is not None
+        has_assembly = self.scenes is not None or self.selections is not None
+        if has_spec == has_assembly:
+            raise ValueError("supply exactly one of video_spec or scenes with selections")
+        if has_assembly and (self.scenes is None or self.selections is None):
+            raise ValueError("scenes and selections must be supplied together")
+        if has_spec and self.explicit_scene_ids:
+            raise ValueError("explicit_scene_ids is only valid with scenes and selections")
+        return self
+
+
+class RenderResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: UUID
+    render_id: UUID
+    video_spec: VideoSpec
+    download_url: str
+    preview_url: str
+
+
 class ProjectCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=1, max_length=500)
@@ -127,6 +159,8 @@ def create_app(
     *,
     embedding_provider: EmbeddingProvider | None = None,
     scene_planner: ScenePlanner | None = None,
+    renderer_factory: Callable[[Database], RemotionRenderer] | None = None,
+    render_output_root: str | Path | None = None,
 ) -> FastAPI:
     """Create an app whose SQLite connection belongs to its lifespan thread."""
     selected_path = data_path or os.environ.get("CONTENT_OS_DB_PATH") or Path("content-os-data") / "content-os.sqlite3"
@@ -145,6 +179,11 @@ def create_app(
     application = FastAPI(title="Content OS API", version="0.1.0", description="Local-first API scaffold for Content OS.", lifespan=lifespan)
     application.state.embedding_provider = embedding_provider
     application.state.scene_planner = scene_planner
+    application.state.renderer_factory = renderer_factory
+    # This is intentionally an application-owned directory, never a request
+    # field.  A test may inject an isolated root, while normal local runs are
+    # always kept under content-os-data/test-runs.
+    application.state.render_output_root = Path(render_output_root or Path("content-os-data") / "test-runs").resolve()
 
     @application.get("/health", tags=["system"])
     def health() -> dict[str, str]:
@@ -333,6 +372,59 @@ def create_app(
         except VideoSpecAssemblyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @application.post("/projects/{project_id}/render", response_model=RenderResponse, tags=["render"])
+    async def render_project(project_id: UUID, payload: RenderRequest, request: Request) -> RenderResponse:
+        """Render authorized local continuous Clips to an application-owned MP4."""
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if payload.video_spec is not None:
+            spec = payload.video_spec
+            if spec.project_id != project_id:
+                raise HTTPException(status_code=422, detail="VideoSpec must belong to the requested project")
+        else:
+            assert payload.scenes is not None and payload.selections is not None
+            if any(scene.project_id != project_id for scene in payload.scenes):
+                raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
+            selected = {candidate.scene_plan_id: candidate for candidate in payload.selections}
+            if len(selected) != len(payload.selections):
+                raise HTTPException(status_code=422, detail="selections must contain one candidate per scene")
+            try:
+                spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db)).assemble(
+                    project, payload.scenes, selected, explicit_scene_ids=payload.explicit_scene_ids,
+                )
+            except VideoSpecAssemblyError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        render_id = uuid4()
+        output = _render_output_path(request.app.state.render_output_root, project_id, render_id)
+        try:
+            renderer = request.app.state.renderer_factory(db) if request.app.state.renderer_factory else _local_renderer(db)
+            renderer.render(spec, output)
+        except (RenderInputError, LocalResourceError, UnauthorizedVisualError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RenderTimeout as exc:
+            raise HTTPException(status_code=504, detail="local renderer timed out") from exc
+        except RenderProcessError as exc:
+            raise HTTPException(status_code=502, detail="local renderer failed") from exc
+        return RenderResponse(
+            project_id=project_id,
+            render_id=render_id,
+            video_spec=spec,
+            download_url=f"/projects/{project_id}/renders/{render_id}",
+            preview_url=f"/projects/{project_id}/renders/{render_id}",
+        )
+
+    @application.get("/projects/{project_id}/renders/{render_id}", tags=["render"])
+    async def get_rendered_video(project_id: UUID, render_id: UUID, request: Request) -> FileResponse:
+        if ProjectRepository(request.app.state.database).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        output = _render_output_path(request.app.state.render_output_root, project_id, render_id)
+        if not output.is_file():
+            raise HTTPException(status_code=404, detail="rendered video not found")
+        return FileResponse(output, media_type="video/mp4", filename=output.name)
+
     @application.get("/clips/{clip_id}", response_model=Clip, tags=["assets"])
     async def get_clip(clip_id: UUID) -> Clip:
         clip = ClipRepository(application.state.database).get(clip_id)
@@ -362,6 +454,22 @@ def _job_response(db: Database, job: Job) -> dict[str, Any]:
     values = job.model_dump(mode="json")
     values.pop("schema_version", None)
     return {**values, "target_asset_id": None if target is None else target.asset_id}
+
+
+def _local_renderer(db: Database) -> RemotionRenderer:
+    renderer_dir = Path(__file__).resolve().parents[3] / "apps" / "renderer"
+    return RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=renderer_dir)
+
+
+def _render_output_path(root: Path, project_id: UUID, render_id: UUID) -> Path:
+    """Build a path solely from server-generated UUIDs beneath the fixed root."""
+    safe_root = root.resolve()
+    path = (safe_root / str(project_id) / f"{render_id}.mp4").resolve()
+    try:
+        path.relative_to(safe_root)
+    except ValueError as exc:  # defensive: UUID path pieces cannot traverse.
+        raise RuntimeError("render output escaped its configured root") from exc
+    return path
 
 
 def _embedding_provider_from_env() -> OpenAICompatibleEmbeddingProvider:
