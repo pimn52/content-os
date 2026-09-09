@@ -71,10 +71,12 @@ class DeterministicFixtureEmbedding:
 
 
 def _binaries() -> tuple[str, str]:
-    ffmpeg = os.environ.get("CONTENT_OS_FFMPEG") or shutil.which("ffmpeg")
-    ffprobe = os.environ.get("CONTENT_OS_FFPROBE") or shutil.which("ffprobe")
+    # The persistent-runner contract intentionally does not discover tools from
+    # PATH: a report must say exactly which local binaries were injected.
+    ffmpeg = os.environ.get("CONTENT_OS_FFMPEG")
+    ffprobe = os.environ.get("CONTENT_OS_FFPROBE")
     if not ffmpeg or not ffprobe:
-        pytest.skip("real FFmpeg/ffprobe binaries are unavailable")
+        pytest.skip("set CONTENT_OS_FFMPEG and CONTENT_OS_FFPROBE to run this real-media fixture")
     return ffmpeg, ffprobe
 
 
@@ -87,12 +89,47 @@ def _make_source(ffmpeg: str, output: Path, color: str, frequency: int) -> None:
     )
 
 
+def _artifact_dir() -> Path | None:
+    """Return the runner's staging directory, if this is a persisted run."""
+    configured = os.environ.get("CONTENT_OS_LOCAL_FIXTURE_ARTIFACT_DIR")
+    if not configured:
+        return None
+    directory = Path(configured).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def test_local_codex_fixture_runs_plan_route_spec_and_remotion_render(tmp_path: Path) -> None:
     ffmpeg, ffprobe = _binaries()
+    artifact_dir = _artifact_dir()
     database_path = tmp_path / "fixture.sqlite"
     sources = [tmp_path / "fixture red.mp4", tmp_path / "fixture blue 中文.mp4"]
     _make_source(ffmpeg, sources[0], "red", 440)
     _make_source(ffmpeg, sources[1], "blue", 660)
+    if artifact_dir:
+        script_copy = artifact_dir / "script" / Path(__file__).name
+        script_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(__file__), script_copy)
+        for source in sources:
+            destination = artifact_dir / "fixture-input" / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        _write_json(artifact_dir / "fixture-input.json", {
+            "schema_version": 1,
+            "kind": "deterministic_local_fixture",
+            "script": "Show a local editing workflow.",
+            "topic": "Local fixture workflow",
+            "sources": [
+                {"filename": source.name, "color": color, "sine_frequency_hz": frequency, "rights_ref": f"fixture-rights-{index}"}
+                for index, (source, color, frequency) in enumerate(zip(sources, ("red", "blue"), (440, 660), strict=True))
+            ],
+            "binaries": {"ffmpeg": ffmpeg, "ffprobe": ffprobe},
+        })
 
     db = Database(database_path)
     try:
@@ -121,20 +158,27 @@ def test_local_codex_fixture_runs_plan_route_spec_and_remotion_render(tmp_path: 
         assert plan_response.status_code == 200
         scenes = plan_response.json()["scenes"]
         assert [scene["order"] for scene in scenes] == [0, 1]
+        if artifact_dir:
+            _write_json(artifact_dir / "scene-plan.json", plan_response.json())
 
         route_response = client.post(f"/projects/{project.id}/asset-routes", json={"scenes": scenes, "max_candidates": 1})
         assert route_response.status_code == 200
         selections = [result["candidates"][0] for result in route_response.json()]
         assert {selection["clip_id"] for selection in selections} == {str(clip.id) for clip in clips}
         assert all(selection["source_kind"] == "user_asset" and not selection["requires_capture"] for selection in selections)
+        if artifact_dir:
+            _write_json(artifact_dir / "route-candidates.json", route_response.json())
 
         spec_response = client.post(f"/projects/{project.id}/video-spec", json={"scenes": scenes, "selections": selections})
         assert spec_response.status_code == 200
         spec = spec_response.json()
         assert [scene["start_frame"] for scene in spec["scenes"]] == [0, 12]
         assert [scene["duration_frames"] for scene in spec["scenes"]] == [12, 12]
+        if artifact_dir:
+            _write_json(artifact_dir / "video-spec.json", spec)
 
-    output = tmp_path / "local codex fixture.mp4"
+    output = artifact_dir / "rendered" / "local-codex-fixture.mp4" if artifact_dir else tmp_path / "local codex fixture.mp4"
+    output.parent.mkdir(parents=True, exist_ok=True)
     renderer_db = Database(database_path)
     try:
         rendered = RemotionRenderer(AssetRepository(renderer_db), ClipRepository(renderer_db), renderer_dir=Path(__file__).parents[3] / "apps" / "renderer", timeout_seconds=120).render(
@@ -147,3 +191,5 @@ def test_local_codex_fixture_runs_plan_route_spec_and_remotion_render(tmp_path: 
     streams = json.loads(probe.stdout)["streams"]
     assert next(stream for stream in streams if stream["codec_type"] == "video")["nb_read_frames"] == "24"
     assert any(stream["codec_type"] == "audio" for stream in streams)
+    if artifact_dir:
+        _write_json(artifact_dir / "ffprobe.json", json.loads(probe.stdout))

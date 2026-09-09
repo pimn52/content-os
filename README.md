@@ -123,3 +123,11 @@ Set-Location -LiteralPath "C:\Users\ASUS\Documents\AI coding\Content OS"
 ```
 
 Worker CLI 是前台轮询进程，可用 `--once` 执行一个兼容任务，也可持续轮询直到收到 SIGINT/SIGTERM；它不启动独立 daemon 线程。首次安装需要 Python 3.11+ 和可用的包下载网络；媒体分析还需要本机可执行的 FFmpeg / ffprobe。解压时将包内文件直接放到目标目录，避免再套一层 `Content OS` 子目录。
+
+可重复的本地闭环报告（真实本机 FFmpeg/ffprobe、无外部 Provider）可用以下命令生成。两个二进制路径必须显式注入；成功报告会原子地写入被 Git 忽略的 `content-os-data/test-runs/<run-id>/`，其中包含夹具输入、ScenePlan、路由候选、VideoSpec、MP4、ffprobe JSON 和明确为 unmetered 的 usage ledger。
+
+```powershell
+$env:CONTENT_OS_FFMPEG = "C:\\path\\to\\ffmpeg.exe"
+$env:CONTENT_OS_FFPROBE = "C:\\path\\to\\ffprobe.exe"
+python scripts/run_local_fixture_report.py --run-id local-check
+```

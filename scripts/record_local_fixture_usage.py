@@ -19,7 +19,7 @@ FORMULA = (
 )
 
 
-def build_ledger() -> dict[str, object]:
+def build_ledger(run_id: str = "local-codex-fixture-smoke") -> dict[str, object]:
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -36,7 +36,7 @@ def build_ledger() -> dict[str, object]:
         },
         "runs": [
             {
-                "run_id": "local-codex-fixture-smoke",
+                "run_id": run_id,
                 "kind": "test_fixture",
                 "model": "deterministic-local-fixture",
                 "codex_model_label": "gpt-5.6-luna",
@@ -91,9 +91,10 @@ def build_ledger() -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record unmetered local Codex fixture metadata.")
     parser.add_argument("--ledger", type=Path, default=Path("content-os-data") / "usage" / "model-cost-ledger.json")
+    parser.add_argument("--run-id", default="local-codex-fixture-smoke")
     args = parser.parse_args()
     args.ledger.parent.mkdir(parents=True, exist_ok=True)
-    args.ledger.write_text(json.dumps(build_ledger(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    args.ledger.write_text(json.dumps(build_ledger(args.run_id), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
