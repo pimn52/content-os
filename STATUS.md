@@ -78,3 +78,5 @@ Task 014/015 已完成。按冻结基线暂停功能扩展，进入首个真实�
 - 便携 FFmpeg 仅放在本机临时目录用于开发验收，下载包 SHA-256 已按发布方值核对，未提交仓库。
 - 尚未使用用户真实 IP 素材；当前仅证明媒体工程链路，不代表个性化素材理解通过。
 - M1 Gate 工具仅用于第一真实素材验收：Provider 未配置时明确返回不可用状态，不伪造 ScenePlan 或匹配结果；Voice/Talking 仍按 Gate 5/6 后续推进。
+- Gate 7.2/7.3 本地渲染任务已纳入 Job Runner：`POST /projects/{project_id}/render-jobs` 以幂等键入队，Worker 支持 server-owned MP4 输出、超时/进程失败有限重试、输入/授权/资源错误终态失败；`GET /jobs/{id}` 返回状态及预览/下载链接，重启后的过期租约继续由既有 recovery 流程接管。
+- 本轮完整测试：`232 passed, 6 skipped`；未新增依赖。异步渲染测试使用本地确定性 fake renderer，真实 Remotion/FFmpeg 路径仍由 Task 015 与本地 fixture 报告覆盖。

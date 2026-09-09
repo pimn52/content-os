@@ -81,6 +81,8 @@ Task 001–015 的最小工程链路已完成；当前提供第一真实素材 G
 - `POST /projects/{project_id}/scene-plan`
 - `POST /projects/{project_id}/asset-routes`
 - `POST /projects/{project_id}/video-spec`
+- `POST /projects/{project_id}/render`（同步本地渲染）
+- `POST /projects/{project_id}/render-jobs`（幂等入队，Worker 异步渲染）
 - `GET /jobs/{job_id}`
 
 本地 Worker CLI（前台进程，不启动独立 daemon 线程）：
@@ -89,7 +91,10 @@ Task 001–015 的最小工程链路已完成；当前提供第一真实素材 G
 & ".\.venv\Scripts\content-os-worker.exe" --once --job-type analyze_asset
 & ".\.venv\Scripts\content-os-worker.exe" --job-type analyze_asset --job-type transcribe_audio
 & ".\.venv\Scripts\content-os-worker.exe" --job-type index_clips
+& ".\.venv\Scripts\content-os-worker.exe" --once --job-type render
 ```
+
+异步渲染请求需要在 JSON 中提供 `idempotency_key`，并附带与同步渲染相同的 `video_spec` 或 `scenes` + `selections`。接口立即返回 `pending` Job；执行 `--job-type render` 的本地 Worker 后，通过 `GET /jobs/{job_id}` 轮询状态，完成后使用返回的 `download_url`/`preview_url`。输出始终由服务端写入本地数据根的 `renders/<project_id>/<render_id>.mp4`，请求不会传入输出路径或密钥。
 
 转录任务启动前需要运行时环境变量 `OPENAI_API_KEY` 或 `CONTENT_OS_ASR_API_KEY`。`index_clips` 会先执行 Vision 再写入 Embedding 索引，需要 `CONTENT_OS_VISION_API_KEY`、`CONTENT_OS_EMBEDDING_API_KEY`，二者均可回退到 `OPENAI_API_KEY`；各自可用 `CONTENT_OS_VISION_*`、`CONTENT_OS_EMBEDDING_*` 覆盖 base URL、模型和维度等配置。搜索 API 使用相同的 Embedding 运行时配置。密钥不会写入数据库或日志。`--db`、`--data-root`、`--worker-id`、租约/心跳/轮询间隔和 `--max-attempts` 可覆盖默认值。
 
