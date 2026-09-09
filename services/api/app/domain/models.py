@@ -384,6 +384,20 @@ class VideoSpec(ContractModel):
         return self
 
 
+class RenderVideoJobPayload(ContractModel):
+    """All persistent input for one server-owned local render."""
+
+    project_id: UUID
+    render_id: UUID
+    video_spec: VideoSpec
+
+    @model_validator(mode="after")
+    def belongs_to_project(self) -> "RenderVideoJobPayload":
+        if self.video_spec.project_id != self.project_id:
+            raise ValueError("render VideoSpec must belong to payload project_id")
+        return self
+
+
 class Job(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID | None = None
@@ -395,3 +409,17 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
+    payload: RenderVideoJobPayload | None = None
+
+    @model_validator(mode="after")
+    def validates_typed_payload(self) -> "Job":
+        if self.type is JobType.RENDER:
+            # Legacy generic Job construction remains valid so target stores
+            # can reject RENDER as an unsupported asset job. The render API
+            # always persists this typed payload, and the handler rejects a
+            # missing payload before side effects.
+            if self.payload is not None and self.project_id != self.payload.project_id:
+                raise ValueError("render job project_id must match its payload")
+        elif self.payload is not None:
+            raise ValueError("only render jobs may contain a payload")
+        return self

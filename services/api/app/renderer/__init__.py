@@ -9,6 +9,7 @@ from .remotion import (
     RendererError,
     UnauthorizedVisualError,
 )
+from .outputs import render_output_path
 
 __all__ = [
     "LocalResourceError",
@@ -18,4 +19,5 @@ __all__ = [
     "RenderTimeout",
     "RendererError",
     "UnauthorizedVisualError",
+    "render_output_path",
 ]

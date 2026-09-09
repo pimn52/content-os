@@ -12,9 +12,9 @@ from pathlib import Path
 from threading import Event
 from typing import Sequence
 
-from app.db import AssetRepository, ClipRepository, Database
+from app.db import AssetRepository, ClipRepository, Database, ProjectRepository
 from app.domain.models import JobType
-from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver
+from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore
@@ -28,6 +28,7 @@ from app.providers.asr import ASRConfigurationError, OpenAICompatibleASRProvider
 from app.providers.embedding import EmbeddingConfigurationError, OpenAICompatibleEmbeddingProvider
 from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigurationError
 from app.search import ClipEmbeddingIndexer
+from app.renderer import RemotionRenderer
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS)], help="Restrict handlers; repeat to select multiple")
+    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
     parser.add_argument("--ffmpeg", default=os.environ.get("CONTENT_OS_FFMPEG", "ffmpeg"))
     return parser
 
@@ -129,6 +130,13 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             ExtractedKeyframeResolver(extractor),
             MediaVisionPipeline(db, provider),
             ClipEmbeddingIndexer(db, embedding_provider),
+        )
+    if JobType.RENDER in config.job_types:
+        renderer_dir = Path(__file__).resolve().parents[3] / "apps" / "renderer"
+        handlers[JobType.RENDER] = RenderVideoJobHandler(
+            ProjectRepository(db),
+            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=renderer_dir),
+            config.data_root / "renders",
         )
     return JobRunner(store, handlers, worker_id=config.worker_id, lease_duration=timedelta(seconds=config.lease_seconds), heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts)
 

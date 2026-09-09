@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectRepository
-from app.domain.models import Asset, CandidateAsset, Clip, IPProfile, Job, JobStatus, JobType, Project, ProjectFormat, RationalFps, ScenePlan, VideoSpec
+from app.domain.models import Asset, CandidateAsset, Clip, IPProfile, Job, JobStatus, JobType, Project, ProjectFormat, RationalFps, RenderVideoJobPayload, ScenePlan, VideoSpec
 from app.assembly import VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -45,7 +45,7 @@ from app.providers.scene_planner import (
 )
 from app.search import ClipEmbeddingIndexer, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
-from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError
+from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 
 
 class JobEnqueueRequest(BaseModel):
@@ -67,6 +67,9 @@ class JobResponse(BaseModel):
     updated_at: datetime
     error_code: str | None
     error_message: str | None
+    render_id: UUID | None = None
+    download_url: str | None = None
+    preview_url: str | None = None
 
 
 class ClipSearchRequest(BaseModel):
@@ -147,6 +150,12 @@ class RenderResponse(BaseModel):
     preview_url: str
 
 
+class RenderJobEnqueueRequest(RenderRequest):
+    """Strict render input plus a caller-selected idempotency key."""
+
+    idempotency_key: str = Field(min_length=1, max_length=500)
+
+
 class ProjectCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=1, max_length=500)
@@ -181,9 +190,9 @@ def create_app(
     application.state.scene_planner = scene_planner
     application.state.renderer_factory = renderer_factory
     # This is intentionally an application-owned directory, never a request
-    # field.  A test may inject an isolated root, while normal local runs are
-    # always kept under content-os-data/test-runs.
-    application.state.render_output_root = Path(render_output_root or Path("content-os-data") / "test-runs").resolve()
+    # field. Both API and worker derive the same default beneath the local
+    # data root, so a completed asynchronous job can be downloaded here.
+    application.state.render_output_root = Path(render_output_root or Path(selected_path).parent / "renders").resolve()
 
     @application.get("/health", tags=["system"])
     def health() -> dict[str, str]:
@@ -275,6 +284,31 @@ def create_app(
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         return _job_response(db, job)
+
+    @application.post("/projects/{project_id}/render-jobs", response_model=JobResponse, status_code=201, tags=["render"])
+    async def enqueue_render_project(project_id: UUID, payload: RenderJobEnqueueRequest, request: Request) -> dict[str, Any]:
+        """Persist a render request; a local worker performs the expensive work."""
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        spec = _resolve_render_spec(db, project, project_id, payload)
+        now = datetime.now(timezone.utc)
+        render_payload = RenderVideoJobPayload(project_id=project_id, render_id=uuid4(), video_spec=spec)
+        job = Job(
+            id=uuid4(), project_id=project_id, type=JobType.RENDER,
+            idempotency_key=payload.idempotency_key, created_at=now, updated_at=now,
+            payload=render_payload,
+        )
+        persisted = JobRepository(db).create(job)
+        if (
+            persisted.type is not JobType.RENDER
+            or persisted.project_id != project_id
+            or persisted.payload is None
+            or persisted.payload.video_spec != spec
+        ):
+            raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+        return _job_response(db, persisted)
 
     @application.post("/clips/search", response_model=list[ClipSearchHitResponse])
     async def search_clips(payload: ClipSearchRequest, request: Request) -> list[ClipSearchHitResponse]:
@@ -379,26 +413,10 @@ def create_app(
         project = ProjectRepository(db).get(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        if payload.video_spec is not None:
-            spec = payload.video_spec
-            if spec.project_id != project_id:
-                raise HTTPException(status_code=422, detail="VideoSpec must belong to the requested project")
-        else:
-            assert payload.scenes is not None and payload.selections is not None
-            if any(scene.project_id != project_id for scene in payload.scenes):
-                raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
-            selected = {candidate.scene_plan_id: candidate for candidate in payload.selections}
-            if len(selected) != len(payload.selections):
-                raise HTTPException(status_code=422, detail="selections must contain one candidate per scene")
-            try:
-                spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db)).assemble(
-                    project, payload.scenes, selected, explicit_scene_ids=payload.explicit_scene_ids,
-                )
-            except VideoSpecAssemblyError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        spec = _resolve_render_spec(db, project, project_id, payload)
 
         render_id = uuid4()
-        output = _render_output_path(request.app.state.render_output_root, project_id, render_id)
+        output = render_output_path(request.app.state.render_output_root, project_id, render_id)
         try:
             renderer = request.app.state.renderer_factory(db) if request.app.state.renderer_factory else _local_renderer(db)
             renderer.render(spec, output)
@@ -420,7 +438,7 @@ def create_app(
     async def get_rendered_video(project_id: UUID, render_id: UUID, request: Request) -> FileResponse:
         if ProjectRepository(request.app.state.database).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
-        output = _render_output_path(request.app.state.render_output_root, project_id, render_id)
+        output = render_output_path(request.app.state.render_output_root, project_id, render_id)
         if not output.is_file():
             raise HTTPException(status_code=404, detail="rendered video not found")
         return FileResponse(output, media_type="video/mp4", filename=output.name)
@@ -453,6 +471,14 @@ def _job_response(db: Database, job: Job) -> dict[str, Any]:
     target = AssetJobTargetStore(db).target_for(job.id)
     values = job.model_dump(mode="json")
     values.pop("schema_version", None)
+    values.pop("payload", None)
+    render = job.payload
+    if render is not None:
+        values.update({
+            "render_id": render.render_id,
+            "download_url": f"/projects/{render.project_id}/renders/{render.render_id}",
+            "preview_url": f"/projects/{render.project_id}/renders/{render.render_id}",
+        })
     return {**values, "target_asset_id": None if target is None else target.asset_id}
 
 
@@ -461,15 +487,23 @@ def _local_renderer(db: Database) -> RemotionRenderer:
     return RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=renderer_dir)
 
 
-def _render_output_path(root: Path, project_id: UUID, render_id: UUID) -> Path:
-    """Build a path solely from server-generated UUIDs beneath the fixed root."""
-    safe_root = root.resolve()
-    path = (safe_root / str(project_id) / f"{render_id}.mp4").resolve()
+def _resolve_render_spec(db: Database, project: Project, project_id: UUID, payload: RenderRequest) -> VideoSpec:
+    if payload.video_spec is not None:
+        if payload.video_spec.project_id != project_id:
+            raise HTTPException(status_code=422, detail="VideoSpec must belong to the requested project")
+        return payload.video_spec
+    assert payload.scenes is not None and payload.selections is not None
+    if any(scene.project_id != project_id for scene in payload.scenes):
+        raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
+    selected = {candidate.scene_plan_id: candidate for candidate in payload.selections}
+    if len(selected) != len(payload.selections):
+        raise HTTPException(status_code=422, detail="selections must contain one candidate per scene")
     try:
-        path.relative_to(safe_root)
-    except ValueError as exc:  # defensive: UUID path pieces cannot traverse.
-        raise RuntimeError("render output escaped its configured root") from exc
-    return path
+        return VideoSpecAssembler(AssetRepository(db), ClipRepository(db)).assemble(
+            project, payload.scenes, selected, explicit_scene_ids=payload.explicit_scene_ids,
+        )
+    except VideoSpecAssemblyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _embedding_provider_from_env() -> OpenAICompatibleEmbeddingProvider:

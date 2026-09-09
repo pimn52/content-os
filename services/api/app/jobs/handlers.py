@@ -1,11 +1,13 @@
 """Small, provider-neutral handlers for asset-targeted local jobs."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, Sequence
 from uuid import UUID
 
 from app.db import ClipRepository
 from app.domain.models import Asset, Clip, Job, JobStatus, JobType
+from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.media.extraction import (
     AudioExtraction,
     AudioUnavailableError,
@@ -102,6 +104,40 @@ class KeyframeExtractor(Protocol):
 
 class ClipIndexer(Protocol):
     def index_clips(self, clips: Sequence[Clip]) -> object: ...
+
+
+class ProjectLookup(Protocol):
+    def get(self, project_id: UUID) -> object | None: ...
+
+
+class RenderVideoJobHandler:
+    """Render one persisted VideoSpec to its fixed local output path."""
+
+    def __init__(self, projects: ProjectLookup, renderer: RemotionRenderer, output_root: str | Path) -> None:
+        self._projects = projects
+        self._renderer = renderer
+        self._output_root = Path(output_root).resolve()
+
+    def __call__(self, job: Job) -> None:
+        if job.status is not JobStatus.RUNNING:
+            raise JobExecutionError("job_not_claimed", "job must be claimed before execution", retryable=False)
+        if job.type is not JobType.RENDER or job.payload is None:
+            raise JobExecutionError("render_payload_invalid", "render job input is invalid", retryable=False)
+        payload = job.payload
+        if job.project_id != payload.project_id or self._projects.get(payload.project_id) is None:
+            raise JobExecutionError("render_project_missing", "render project is unavailable", retryable=False)
+        output = render_output_path(self._output_root, payload.project_id, payload.render_id)
+        try:
+            self._renderer.render(payload.video_spec, output)
+        except RenderTimeout:
+            output.unlink(missing_ok=True)
+            raise JobExecutionError("render_timeout", "local renderer timed out", retryable=True) from None
+        except RenderProcessError:
+            output.unlink(missing_ok=True)
+            raise JobExecutionError("render_processing_failed", "local renderer failed", retryable=True) from None
+        except (RenderInputError, LocalResourceError, UnauthorizedVisualError):
+            output.unlink(missing_ok=True)
+            raise JobExecutionError("render_invalid", "render input is not processable", retryable=False) from None
 
 
 class ExtractedKeyframeResolver:
