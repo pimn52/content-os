@@ -4,7 +4,7 @@
 
 ## 本批次范围
 
-已完成 Task 001–015 的最小工程链路，包括核心契约、SQLite/任务基础、媒体导入与理解、检索、素材库 UI、ScenePlan、Asset Router、VideoSpec、基础 Remotion Renderer 与可重复端到端成片夹具。合成媒体工程门禁已通过，但尚未进行创作者真实素材质量验收，因此不将真实素材 Gate 标记通过。
+已完成 Task 001–015 的最小工程链路，包括核心契约、SQLite/任务基础、媒体导入与理解、检索、素材库 UI、ScenePlan、Asset Router、VideoSpec、基础 Remotion Renderer 与可重复端到端成片夹具。新增 `/m1-gate` 本地验收页及 `GET/POST /projects` 测试项目接口，可记录 ScenePlan、Top-1/Top-3 候选、人工替换、VideoSpec 与 Gate JSON 指标（Scene 数、Top-1 接受率、Top-3 覆盖率、本人素材使用率、替换次数、人工耗时、未知成本数）。合成媒体工程门禁已通过，但尚未进行创作者真实素材质量验收，因此不将真实素材 Gate 标记通过。
 
 - Terra：核心数据模型、JSON Schema、示例、校验测试。
 - Luna：FastAPI、健康检查、Python 项目配置、Windows 启动文档。
@@ -77,3 +77,4 @@ Task 014/015 已完成。按冻结基线暂停功能扩展，进入首个真实�
 - Task 015 以两段真实编码的 360×640、30fps、AAC 合成素材贯穿导入、SQLite、双场景 VideoSpec 与实际 Remotion 渲染；ffprobe 验证输出为 24 帧、约 0.8 秒且含音轨，原始与内容寻址文件哈希未改变；完整测试 `227 passed`。
 - 便携 FFmpeg 仅放在本机临时目录用于开发验收，下载包 SHA-256 已按发布方值核对，未提交仓库。
 - 尚未使用用户真实 IP 素材；当前仅证明媒体工程链路，不代表个性化素材理解通过。
+- M1 Gate 工具仅用于第一真实素材验收：Provider 未配置时明确返回不可用状态，不伪造 ScenePlan 或匹配结果；Voice/Talking 仍按 Gate 5/6 后续推进。

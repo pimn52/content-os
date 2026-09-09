@@ -13,10 +13,11 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.db import AssetRepository, ClipRepository, Database, JobRepository, ProjectRepository
-from app.domain.models import Asset, CandidateAsset, Clip, Job, JobStatus, JobType, ProjectFormat, ScenePlan, VideoSpec
+from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectRepository
+from app.domain.models import Asset, CandidateAsset, Clip, IPProfile, Job, JobStatus, JobType, Project, ProjectFormat, RationalFps, ScenePlan, VideoSpec
 from app.assembly import VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
+from app.m1_gate import m1_gate_page
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
     EmbeddingAuthenticationError,
@@ -114,6 +115,13 @@ class VideoSpecAssemblyRequest(BaseModel):
     explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
 
 
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=500)
+    topic: str = Field(min_length=1, max_length=5_000)
+    creator_name: str = Field(default="本地创作者", min_length=1, max_length=200)
+
+
 def create_app(
     data_path: str | Path | None = None,
     *,
@@ -147,6 +155,27 @@ def create_app(
     @application.get("/asset-library", response_class=HTMLResponse, include_in_schema=False)
     def asset_library() -> HTMLResponse:
         return asset_library_page()
+
+    @application.get("/m1-gate", response_class=HTMLResponse, include_in_schema=False)
+    def m1_gate() -> HTMLResponse:
+        return m1_gate_page()
+
+    @application.get("/projects", response_model=list[Project], tags=["projects"])
+    async def list_projects() -> list[Project]:
+        return ProjectRepository(application.state.database).list()
+
+    @application.post("/projects", response_model=Project, status_code=201, tags=["projects"])
+    async def create_project(payload: ProjectCreateRequest, request: Request) -> Project:
+        db: Database = request.app.state.database
+        profile = IPProfile(creator_name=payload.creator_name)
+        project = Project(
+            ip_profile_id=profile.id, title=payload.title, topic=payload.topic,
+            fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc),
+        )
+        with db.transaction():
+            IPProfileRepository(db).create(profile)
+            ProjectRepository(db).create(project)
+        return project
 
     @application.get("/assets", response_model=list[Asset], tags=["assets"])
     async def list_assets() -> list[Asset]:
