@@ -672,13 +672,33 @@ class VideoSpec(ContractModel):
 class ProjectDraft(ContractModel):
     project_id: UUID
     version: int = Field(default=0, ge=0, strict=True)
+    script_revision: int = Field(default=0, ge=0, strict=True)
     script: str | None = Field(default=None, max_length=100_000)
     topic: str | None = Field(default=None, max_length=5_000)
     scenes: list[ScenePlan] = Field(default_factory=list, max_length=1_000)
     routes: list[DraftRoute] = Field(default_factory=list, max_length=1_000)
     confirmed: list[CandidateAsset] = Field(default_factory=list, max_length=1_000)
     video_spec: VideoSpec | None = None
+    ip_profile_version: int | None = Field(default=None, gt=0)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=1_000)
+    input_fingerprint: str | None = Field(default=None, min_length=16, max_length=128)
+    invalidation_reasons: list[Literal["script_changed", "topic_changed", "scene_copy_changed", "ip_profile_changed"]] = Field(default_factory=list, max_length=4)
     updated_at: AwareDatetime
+
+
+class ProjectDraftRevision(ContractModel):
+    """Immutable, inspectable record of one persisted script/draft version."""
+
+    project_id: UUID
+    version: int = Field(gt=0, strict=True)
+    script_revision: int = Field(ge=0, strict=True)
+    script: str | None = Field(default=None, max_length=100_000)
+    topic: str | None = Field(default=None, max_length=5_000)
+    ip_profile_version: int | None = Field(default=None, gt=0)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=1_000)
+    input_fingerprint: str | None = Field(default=None, min_length=16, max_length=128)
+    invalidation_reasons: list[Literal["script_changed", "topic_changed", "scene_copy_changed", "ip_profile_changed"]] = Field(default_factory=list, max_length=4)
+    created_at: AwareDatetime
 
 
 class AssetUsageEvent(ContractModel):

@@ -19,7 +19,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingProfile, UsageCost, VideoSpec, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingProfile, UsageCost, VideoSpec, VoiceProfile
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -59,6 +59,7 @@ from app.provider_execution import (
     ProviderExecutionService,
     runtime_provider_identity,
 )
+from app.project_drafts import save_project_draft as persist_project_draft
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
@@ -110,12 +111,16 @@ class ScenePlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     script: str | None = Field(default=None, min_length=1, max_length=100_000)
     topic: str | None = Field(default=None, min_length=1, max_length=5_000)
+    persist: bool = False
 
 
 class ScenePlanResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: UUID
     scenes: tuple[ScenePlan, ...]
+    script: str = Field(min_length=1, max_length=100_000)
+    generated_script: bool
+    draft: ProjectDraft | None = None
 
 
 class AssetRouteRequest(BaseModel):
@@ -792,8 +797,31 @@ def create_app(
                 IPProfileRepository(db).create(profile)
             return profile
         updated = IPProfile(id=profile.id, **payload.model_dump())
+        if updated == profile:
+            return profile
         with db.transaction():
             IPProfileRepository(db).update(updated)
+            # A project may retain its editable text, but no derived ScenePlan,
+            # route, candidate selection, or render may survive an IP revision.
+            # This server-side path also catches stale browser tabs.
+            for project in ProjectRepository(db).list():
+                if project.ip_profile_id != updated.id:
+                    continue
+                draft = ProjectDraftRepository(db).get(project.id)
+                if draft is None:
+                    continue
+                _, evidence_refs = _scene_planning_context(db, project)
+                persist_project_draft(
+                    db,
+                    project,
+                    script=draft.script,
+                    topic=draft.topic,
+                    scenes=draft.scenes,
+                    routes=draft.routes,
+                    confirmed=draft.confirmed,
+                    video_spec=draft.video_spec,
+                    evidence_refs=evidence_refs,
+                )
         return updated
 
     @application.get("/ip-profile/revisions", response_model=list[IPProfileRevisionResponse], tags=["profile"])
@@ -812,6 +840,13 @@ def create_app(
         draft = ProjectDraftRepository(db).get(project_id)
         return draft or ProjectDraft(project_id=project_id, updated_at=datetime.now(timezone.utc))
 
+    @application.get("/projects/{project_id}/draft/revisions", response_model=list[ProjectDraftRevision], tags=["projects"])
+    async def list_project_draft_revisions(project_id: UUID, request: Request) -> list[ProjectDraftRevision]:
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return ProjectDraftRepository(db).revisions(project_id)
+
     @application.put("/projects/{project_id}/draft", response_model=ProjectDraft, tags=["projects"])
     async def save_project_draft(project_id: UUID, payload: DraftUpdateRequest, request: Request) -> ProjectDraft:
         db: Database = request.app.state.database
@@ -828,20 +863,21 @@ def create_app(
             raise HTTPException(status_code=422, detail="draft confirmed selections must be unique per scene")
         if payload.video_spec is not None and payload.video_spec.project_id != project_id:
             raise HTTPException(status_code=422, detail="draft VideoSpec must belong to the requested project")
-        previous = ProjectDraftRepository(db).get(project_id)
-        draft = ProjectDraft(
-            project_id=project_id,
-            version=1 if previous is None else previous.version + 1,
-            script=payload.script,
-            topic=payload.topic,
-            scenes=payload.scenes,
-            routes=payload.routes,
-            confirmed=payload.confirmed,
-            video_spec=payload.video_spec,
-            updated_at=datetime.now(timezone.utc),
-        )
+        project = ProjectRepository(db).get(project_id)
+        assert project is not None  # checked above; narrows the local contract.
+        _, evidence_refs = _scene_planning_context(db, project)
         with db.transaction():
-            ProjectDraftRepository(db).save(draft)
+            draft = persist_project_draft(
+                db,
+                project,
+                script=payload.script,
+                topic=payload.topic,
+                scenes=payload.scenes,
+                routes=payload.routes,
+                confirmed=payload.confirmed,
+                video_spec=payload.video_spec,
+                evidence_refs=evidence_refs,
+            )
         return draft
 
     @application.get("/projects/{project_id}/cost-estimate", response_model=CostEstimate, tags=["runtime"])
@@ -1919,13 +1955,20 @@ def create_app(
                 **({"context": planning_context} if include_context else {}),
             )
             scenes = tuple(scene.model_copy(update={"evidence_refs": list(evidence_refs)}) for scene in result.scenes)
-            return ScenePlanResponse(project_id=result.project_id, scenes=scenes)
+            generated_script = payload.script is None
+            script = payload.script or "\n\n".join(scene.voice_text for scene in scenes)
+            return ScenePlanResponse(
+                project_id=result.project_id,
+                scenes=scenes,
+                script=script,
+                generated_script=generated_script,
+            )
 
         try:
             planner = request.app.state.scene_planner or _scene_planner_from_env()
             identity = runtime_provider_identity(planner)
             if identity is not None:
-                return ProviderExecutionService(db, request.app.state.cost_estimator).execute(
+                response = ProviderExecutionService(db, request.app.state.cost_estimator).execute(
                     project_id=project_id,
                     idempotency_key=_runtime_idempotency_key(request, "scene-planning"),
                     operation="scene_planning",
@@ -1942,9 +1985,26 @@ def create_app(
                     decode_result=ScenePlanResponse.model_validate,
                     error_code=_scene_planner_error_code,
                 )
-            # Deterministic/local test adapters retain the narrow original
-            # protocol and do not claim an externally metered identity.
-            return plan_response(planner, include_context=False)
+            else:
+                # Deterministic/local test adapters retain the narrow original
+                # protocol and do not claim an externally metered identity.
+                response = plan_response(planner, include_context=False)
+            if payload.persist:
+                with db.transaction():
+                    draft = persist_project_draft(
+                        db,
+                        project,
+                        script=response.script,
+                        topic=payload.topic or project.topic,
+                        scenes=response.scenes,
+                        routes=(),
+                        confirmed=(),
+                        video_spec=None,
+                        evidence_refs=evidence_refs,
+                        accept_scene_plan_with_new_script=True,
+                    )
+                response = response.model_copy(update={"draft": draft})
+            return response
         except BudgetLimitError as exc:
             raise HTTPException(status_code=409, detail=exc.code) from exc
         except (ProviderExecutionIdempotencyConflict, ProviderExecutionInProgress, ProviderExecutionRecordedFailure, ProviderExecutionReplayUnavailable) as exc:

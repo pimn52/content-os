@@ -765,6 +765,12 @@
       "title": "Version",
       "type": "integer"
     },
+    "script_revision": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Script Revision",
+      "type": "integer"
+    },
     "script": {
       "anyOf": [
         {
@@ -825,6 +831,55 @@
         }
       ],
       "default": null
+    },
+    "ip_profile_version": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ip Profile Version"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "input_fingerprint": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 16,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Input Fingerprint"
+    },
+    "invalidation_reasons": {
+      "items": {
+        "enum": [
+          "script_changed",
+          "topic_changed",
+          "scene_copy_changed",
+          "ip_profile_changed"
+        ],
+        "type": "string"
+      },
+      "maxItems": 4,
+      "title": "Invalidation Reasons",
+      "type": "array"
     },
     "updated_at": {
       "format": "date-time",

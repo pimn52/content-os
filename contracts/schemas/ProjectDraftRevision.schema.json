@@ -1,0 +1,115 @@
+{
+  "additionalProperties": false,
+  "description": "Immutable, inspectable record of one persisted script/draft version.",
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "version": {
+      "exclusiveMinimum": 0,
+      "title": "Version",
+      "type": "integer"
+    },
+    "script_revision": {
+      "minimum": 0,
+      "title": "Script Revision",
+      "type": "integer"
+    },
+    "script": {
+      "anyOf": [
+        {
+          "maxLength": 100000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Script"
+    },
+    "topic": {
+      "anyOf": [
+        {
+          "maxLength": 5000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Topic"
+    },
+    "ip_profile_version": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ip Profile Version"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "input_fingerprint": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 16,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Input Fingerprint"
+    },
+    "invalidation_reasons": {
+      "items": {
+        "enum": [
+          "script_changed",
+          "topic_changed",
+          "scene_copy_changed",
+          "ip_profile_changed"
+        ],
+        "type": "string"
+      },
+      "maxItems": 4,
+      "title": "Invalidation Reasons",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "project_id",
+    "version",
+    "script_revision",
+    "created_at"
+  ],
+  "title": "ProjectDraftRevision",
+  "type": "object"
+}

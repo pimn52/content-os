@@ -256,7 +256,7 @@ def test_migration_from_v1_backfills_asset_hash_and_unique_index(tmp_path: Path)
     connection.commit()
     apply_migrations(connection)
     assert connection.execute("SELECT content_hash FROM assets WHERE id = 'asset-1'").fetchone()[0] == "b" * 64
-    assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute("INSERT INTO assets(id, duration_ms, content_hash, payload) VALUES ('asset-2', 1, ?, ?)", ("b" * 64, payload))
     with pytest.raises(sqlite3.IntegrityError, match="content_hash is required"):

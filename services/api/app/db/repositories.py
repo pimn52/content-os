@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProviderCallRecord, PublicationRecord, ShootTask, TalkingProfile, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, PublicationRecord, ShootTask, TalkingProfile, VoiceProfile
 
 from .database import Database
 
@@ -115,6 +115,8 @@ class ProjectDraftRepository(_Repository[ProjectDraft]):
         return None if row is None else _model(row, self.model)
 
     def save(self, value: ProjectDraft) -> ProjectDraft:
+        if value.version <= 0:
+            raise ValueError("persisted project drafts require a positive version")
         self.db.connection.execute(
             """INSERT INTO project_drafts(project_id, version, updated_at, payload)
                VALUES (?, ?, ?, ?)
@@ -122,7 +124,37 @@ class ProjectDraftRepository(_Repository[ProjectDraft]):
                  version=excluded.version, updated_at=excluded.updated_at, payload=excluded.payload""",
             (str(value.project_id), value.version, _utc_timestamp(value.updated_at), _payload(value)),
         )
+        revision = ProjectDraftRevision(
+            project_id=value.project_id,
+            version=value.version,
+            script_revision=value.script_revision,
+            script=value.script,
+            topic=value.topic,
+            ip_profile_version=value.ip_profile_version,
+            evidence_refs=value.evidence_refs,
+            input_fingerprint=value.input_fingerprint,
+            invalidation_reasons=value.invalidation_reasons,
+            created_at=value.updated_at,
+        )
+        self.db.connection.execute(
+            """INSERT INTO project_draft_revisions(project_id, version, script_revision, created_at, payload)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                str(value.project_id),
+                value.version,
+                value.script_revision,
+                _utc_timestamp(value.updated_at),
+                _payload(revision),
+            ),
+        )
         return value
+
+    def revisions(self, project_id: UUID) -> list[ProjectDraftRevision]:
+        rows = self.db.connection.execute(
+            "SELECT payload FROM project_draft_revisions WHERE project_id = ? ORDER BY version",
+            (str(project_id),),
+        ).fetchall()
+        return [ProjectDraftRevision.model_validate(json.loads(row["payload"])) for row in rows]
 
 
 class ShootTaskRepository(_Repository[ShootTask]):
