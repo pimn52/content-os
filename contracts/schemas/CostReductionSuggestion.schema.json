@@ -1,0 +1,243 @@
+{
+  "$defs": {
+    "CandidateAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scene_plan_id": {
+          "format": "uuid",
+          "title": "Scene Plan Id",
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/SourceKind"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "clip_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clip Id"
+        },
+        "match_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Match Score",
+          "type": "number"
+        },
+        "why": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Why",
+          "type": "array"
+        },
+        "reuse_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Reuse Count",
+          "type": "integer"
+        },
+        "recommended": {
+          "default": false,
+          "title": "Recommended",
+          "type": "boolean"
+        },
+        "requires_capture": {
+          "default": false,
+          "title": "Requires Capture",
+          "type": "boolean"
+        },
+        "estimated_cost": {
+          "$ref": "#/$defs/UsageCost"
+        }
+      },
+      "required": [
+        "scene_plan_id",
+        "source_kind",
+        "match_score",
+        "why",
+        "estimated_cost"
+      ],
+      "title": "CandidateAsset",
+      "type": "object"
+    },
+    "CostCategory": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking",
+        "voice",
+        "asr",
+        "llm",
+        "render"
+      ],
+      "title": "CostCategory",
+      "type": "string"
+    },
+    "SourceKind": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking_profile"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "UsageCost": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/CostCategory"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,8}|(?=[\\d.]{1,13}0*$)\\d{0,8}\\.\\d{0,4}0*$)",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Amount"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currency"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "category"
+      ],
+      "title": "UsageCost",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "An explainable, non-destructive lower-cost alternative for one scene.",
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scene_plan_id": {
+      "format": "uuid",
+      "title": "Scene Plan Id",
+      "type": "string"
+    },
+    "current": {
+      "$ref": "#/$defs/CandidateAsset"
+    },
+    "suggested": {
+      "$ref": "#/$defs/CandidateAsset"
+    },
+    "changed": {
+      "title": "Changed",
+      "type": "boolean"
+    },
+    "reason": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "scene_plan_id",
+    "current",
+    "suggested",
+    "changed",
+    "reason"
+  ],
+  "title": "CostReductionSuggestion",
+  "type": "object"
+}

@@ -1,0 +1,99 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "scene_plan_id": {
+      "format": "uuid",
+      "title": "Scene Plan Id",
+      "type": "string"
+    },
+    "scene_id": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Scene Id",
+      "type": "string"
+    },
+    "what_to_shoot": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "What To Shoot",
+      "type": "string"
+    },
+    "framing": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Framing",
+      "type": "string"
+    },
+    "duration_ms": {
+      "exclusiveMinimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "requires_speaking": {
+      "title": "Requires Speaking",
+      "type": "boolean"
+    },
+    "status": {
+      "default": "confirmed",
+      "enum": [
+        "confirmed",
+        "fulfilled",
+        "dismissed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "asset_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Asset Id"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "project_id",
+    "scene_plan_id",
+    "scene_id",
+    "what_to_shoot",
+    "framing",
+    "duration_ms",
+    "requires_speaking",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "ShootTask",
+  "type": "object"
+}

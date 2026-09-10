@@ -1,6 +1,6 @@
 # Content OS — 开发计划与最低成本 Agent 分工
 
-> 2026-09-07 开发前修订见 [BASELINE_FREEZE.md](BASELINE_FREEZE.md)，冲突时以该修订为准。
+> 本文保留为历史任务拆分与成本分工参考；当前统一执行规格、任务顺序和验收以 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) 为准，历史审查证据见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。
 
 
 > 对应 PRD：V0.1 Draft  
@@ -902,7 +902,7 @@ Before finishing:
 14. **Task 014 — Basic Remotion Renderer** — Terra
 15. **Task 015 — E2E Fixture Video** — Terra
 
-完成 Task 015 后暂停扩展，先做真实素材效果验收。
+Task 015 是已完成的历史工程里程碑，不再作为停止条件；R1 从 S0 入口修复继续推进，并按统一规格进入 S1–S5。
 
 ---
 

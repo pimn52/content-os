@@ -149,6 +149,42 @@
       "title": "UsageCost",
       "type": "object"
     },
+    "VideoCaption": {
+      "additionalProperties": false,
+      "description": "A caption interval relative to the containing video scene.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "start_ms": {
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "text"
+      ],
+      "title": "VideoCaption",
+      "type": "object"
+    },
     "VideoScene": {
       "additionalProperties": false,
       "properties": {
@@ -190,6 +226,34 @@
           "default": null,
           "title": "Narration Asset Id"
         },
+        "narration_start_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narration Start Ms"
+        },
+        "narration_end_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narration End Ms"
+        },
         "caption": {
           "anyOf": [
             {
@@ -202,6 +266,14 @@
           ],
           "default": null,
           "title": "Caption"
+        },
+        "captions": {
+          "items": {
+            "$ref": "#/$defs/VideoCaption"
+          },
+          "maxItems": 1000,
+          "title": "Captions",
+          "type": "array"
         },
         "transition": {
           "default": "cut",

@@ -52,6 +52,10 @@ def _response(scenes: list[dict[str, object]]) -> dict[str, object]:
     return {"output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps({"scenes": scenes})}]}]}
 
 
+def _chat_response(scenes: list[dict[str, object]]) -> dict[str, object]:
+    return {"choices": [{"message": {"content": json.dumps({"scenes": scenes})}}]}
+
+
 @contextmanager
 def _fake_server(
     status: int,
@@ -92,7 +96,8 @@ def test_scene_planner_posts_strict_schema_and_binds_project() -> None:
     response = _response([_scene("scene_01", 0), _scene("scene_02", 1)])
     with _fake_server(200, response) as (base_url, requests):
         result = OpenAICompatibleScenePlanner("  runtime-secret  ", base_url=base_url).plan(
-            project, script="Open with the misconception.", topic="When to avoid Vibe Coding"
+            project, script="Open with the misconception.", topic="When to avoid Vibe Coding",
+            context={"ip_profile_version": 2, "evidence_refs": ["ip_profile:example:v2"], "ip_profile": {"audience": "builders"}},
         )
 
     assert isinstance(result, ScenePlanResult)
@@ -114,6 +119,32 @@ def test_scene_planner_posts_strict_schema_and_binds_project() -> None:
     assert "Prefer user_asset and historical_asset first" in prompt
     assert "Open with the misconception." in prompt
     assert "When to avoid Vibe Coding" in prompt
+    assert request["input"][0]["content"][0]["text"].find('"ip_profile_version": 2') >= 0
+
+
+def test_scene_planner_supports_explicit_chat_completions_protocol() -> None:
+    project = _project()
+    with _fake_server(200, _chat_response([_scene("chat_scene", 0)])) as (base_url, requests):
+        result = OpenAICompatibleScenePlanner(
+            "runtime-secret", base_url=base_url, model="kimi-k3", protocol="chat_completions"
+        ).plan(project, topic="H.265 码率与平台转码")
+
+    assert result.project_id == project.id
+    assert [scene.scene_id for scene in result.scenes] == ["chat_scene"]
+    path, headers, body = requests[0]
+    request = json.loads(body)
+    assert path == "/v1/chat/completions"
+    assert headers["Authorization"] == "Bearer runtime-secret"
+    assert request["model"] == "kimi-k3"
+    assert list(request) == ["model", "messages"]
+    assert request["messages"][0]["role"] == "user"
+    assert "H.265 码率与平台转码" in request["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("protocol", ["", "chat", "responses/v1", 1, [], None])
+def test_scene_planner_rejects_unknown_protocol(protocol: object) -> None:
+    with pytest.raises(ScenePlannerConfigurationError, match="protocol"):
+        OpenAICompatibleScenePlanner("key", protocol=protocol)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

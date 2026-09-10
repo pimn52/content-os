@@ -5,6 +5,7 @@ from .index import (
     ClipIndexRepository,
     ClipSearchHit,
     ClipSearchService,
+    ClipTextSearchService,
     IndexError,
     compose_clip_text,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "ClipEmbeddingIndexer",
     "ClipSearchHit",
     "ClipSearchService",
+    "ClipTextSearchService",
     "IndexError",
     "ClipsNotFoundForIndex",
     "EmbeddingCountMismatch",

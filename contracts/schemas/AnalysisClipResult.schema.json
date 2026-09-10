@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "AnalysisKeyframe": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "timestamp_ms": {
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "title": "Timestamp Ms",
+          "type": "integer"
+        },
+        "reference": {
+          "description": "Stable local analysis reference; not a secret URL.",
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 5000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "timestamp_ms",
+        "reference"
+      ],
+      "title": "AnalysisKeyframe",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "asset_id": {
+      "format": "uuid",
+      "title": "Asset Id",
+      "type": "string"
+    },
+    "clip_id": {
+      "format": "uuid",
+      "title": "Clip Id",
+      "type": "string"
+    },
+    "start_ms": {
+      "description": "Milliseconds from the source start.",
+      "minimum": 0,
+      "title": "Start Ms",
+      "type": "integer"
+    },
+    "end_ms": {
+      "exclusiveMinimum": 0,
+      "title": "End Ms",
+      "type": "integer"
+    },
+    "transcript": {
+      "anyOf": [
+        {
+          "maxLength": 100000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Transcript"
+    },
+    "available_subtitles": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Available Subtitles",
+      "type": "array"
+    },
+    "visual_description": {
+      "anyOf": [
+        {
+          "maxLength": 5000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Visual Description"
+    },
+    "people": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "People",
+      "type": "array"
+    },
+    "objects": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Objects",
+      "type": "array"
+    },
+    "action": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Action"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confidence"
+    },
+    "keyframes": {
+      "items": {
+        "$ref": "#/$defs/AnalysisKeyframe"
+      },
+      "maxItems": 100,
+      "title": "Keyframes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "asset_id",
+    "start_ms",
+    "end_ms"
+  ],
+  "title": "AnalysisClipResult",
+  "type": "object"
+}

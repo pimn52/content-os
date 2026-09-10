@@ -18,6 +18,7 @@ from app.providers.asr import (
     ASRProviderResponseError,
     ASRRateLimitError,
     ASRTimeout,
+    FasterWhisperASRProvider,
     HTTPResponse,
     OpenAICompatibleASRProvider,
     TranscriptionSegment,
@@ -228,3 +229,48 @@ def test_immutable_provider_neutral_segment_contract() -> None:
         segment.start_ms = 1  # type: ignore[misc]
     with pytest.raises(ValueError):
         TranscriptionSegment(1, 1, "text")
+
+
+def test_local_faster_whisper_adapter_maps_timestamped_segments_without_network(tmp_path: Path) -> None:
+    audio = tmp_path / "local.wav"
+    audio.write_bytes(b"audio")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Segment:
+        def __init__(self, start: float, end: float, text: str) -> None:
+            self.start = start
+            self.end = end
+            self.text = text
+
+    class Info:
+        language = "zh"
+
+    class Model:
+        def transcribe(self, path: str, **kwargs: object):
+            calls.append((path, kwargs))
+            return iter([Segment(0.001, 0.851, "  第一段 "), Segment(0.900, 1.600, "第二段")]), Info()
+
+    def factory(model: str, **kwargs: object) -> Model:
+        assert model == "tiny"
+        assert kwargs == {"device": "cpu", "compute_type": "int8"}
+        return Model()
+
+    result = FasterWhisperASRProvider("tiny", model_factory=factory).transcribe(
+        audio, language="zh", prompt="保留专有名词"
+    )
+
+    assert result.text == "第一段 第二段"
+    assert result.language == "zh"
+    assert [(item.start_ms, item.end_ms, item.text) for item in result.segments] == [
+        (1, 851, "第一段"),
+        (900, 1600, "第二段"),
+    ]
+    assert calls == [(str(audio), {"language": "zh", "initial_prompt": "保留专有名词", "vad_filter": True})]
+
+
+def test_local_faster_whisper_adapter_hides_model_loader_diagnostics(tmp_path: Path) -> None:
+    audio = tmp_path / "local.wav"
+    audio.write_bytes(b"audio")
+    provider = FasterWhisperASRProvider("tiny", model_factory=lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError()))
+    with pytest.raises(ASRConfigurationError, match="could not be loaded"):
+        provider.transcribe(audio)

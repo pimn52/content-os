@@ -1,0 +1,298 @@
+{
+  "$defs": {
+    "CostCategory": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking",
+        "voice",
+        "asr",
+        "llm",
+        "render"
+      ],
+      "title": "CostCategory",
+      "type": "string"
+    },
+    "UsageCost": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/CostCategory"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,8}|(?=[\\d.]{1,13}0*$)\\d{0,8}\\.\\d{0,4}0*$)",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Amount"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currency"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "category"
+      ],
+      "title": "UsageCost",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The auditable boundary around a model/provider operation.\n\nA reservation is persisted before an external call.  Completion may carry\nobserved usage and actual cost, while unknown values remain unknown rather\nthan being converted to zero.",
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "scene_planning",
+        "asr",
+        "vision",
+        "embedding",
+        "tts",
+        "talking",
+        "render"
+      ],
+      "title": "Operation",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "assisted_test",
+        "runtime"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "provider": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    },
+    "model": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "input_source": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Input Source",
+      "type": "string"
+    },
+    "status": {
+      "default": "reserved",
+      "enum": [
+        "reserved",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "estimated_cost": {
+      "$ref": "#/$defs/UsageCost"
+    },
+    "actual_cost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UsageCost"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "input_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Input Tokens"
+    },
+    "output_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Tokens"
+    },
+    "cache_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cache Tokens"
+    },
+    "usage_observable": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Usage Observable"
+    },
+    "price_date": {
+      "anyOf": [
+        {
+          "format": "date",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Price Date"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "maxLength": 100,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    }
+  },
+  "required": [
+    "project_id",
+    "idempotency_key",
+    "operation",
+    "mode",
+    "provider",
+    "model",
+    "input_source",
+    "estimated_cost",
+    "created_at"
+  ],
+  "title": "ProviderCallRecord",
+  "type": "object"
+}

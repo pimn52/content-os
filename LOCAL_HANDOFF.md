@@ -1,5 +1,7 @@
 # 本地开发接续
 
+> 当前接续入口是 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，状态事实见 [STATUS.md](STATUS.md)，审查起点见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。本文件的早期 Task 001 提示仅保留作历史参考。
+
 ## 1. 放入目录
 
 将开发包内所有文件直接解压到：
@@ -21,13 +23,13 @@ py -m venv .venv
 & ".\.venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir services/api --host 127.0.0.1 --port 8000
 ```
 
-浏览器打开 `http://127.0.0.1:8000/health`，预期 status 为 ok。终端保持运行，Ctrl+C 停止服务。目前没有产品网页。
+浏览器打开 `http://127.0.0.1:8000/app/`，预期进入 R1 正式 React/Vite 工作区；`/health` 仍用于诊断。`/m1-gate` 保留为旧版开发验收入口，不是当前用户主流程。终端保持运行，Ctrl+C 停止服务。
 
 ## 3. 交给本地开发 Agent
 
 在有文件访问权限的本地开发环境中打开上述项目目录，然后发送以下任务：
 
-> 继续开发 Content OS。先读 AGENTS.md、STRATEGY_BASELINE.md、BASELINE_FREEZE.md、STATUS.md、PRD.md、DEVELOPMENT_PLAN.md，以及现有模型与测试。产品方向已经确定，不要重写脚手架或重新做战略讨论。先运行现有测试与健康检查，确认本地 Windows 环境。下一任务为 SQLite Persistence：为 IPProfile、Project、Asset、Clip、Job 建立轻量 repository，使用参数化 SQL、外键、迁移版本及事务；校验 Clip 所属 Asset 与真实 duration 一致，保留任务幂等键唯一约束。简单 CRUD 分派 Luna，任务 claim/recovery/concurrency 分派 Terra；若环境无这些模型，说明可用模型，不冒称已调度。不要同时改核心契约。验收至少包括重启后数据保留、重复导入/任务去重、跨素材时间越界拒绝、事务回滚。暂不调用付费 Provider、不自动发布、不修改网络设置。完成后更新 STATUS.md，并报告测试及下一步。
+> 继续开发 Content OS。先读 CONTENT_OS_EXECUTION_SPEC.md、AUDIT_REPORT.md、STATUS.md、DECISIONS.md 和本仓库现有模型/测试。按 STATUS.md 的当前 ready 任务继续，不重做已完成的媒体/任务基础，不重新讨论战略。普通工程选择直接执行；外部付费接口保持后置；真实模型辅助测试与 fixture、runtime 分开记录。每个任务完成后运行针对性测试，更新 STATUS.md 和必要的 DECISIONS.md，然后直接领取下一个 ready 任务。只有 U1/U2/U3、首次付费/预算、权限、不可逆数据变更或发布授权才集中等待用户。
 
 任务执行依赖本地 Agent 的实际工具和模型可用性，本包本身不会自动创建子 Agent。
 

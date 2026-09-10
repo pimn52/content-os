@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -216,6 +216,128 @@ class OpenAICompatibleASRProvider:
 
 
 OpenAICompatibleTranscriptionAdapter = OpenAICompatibleASRProvider
+
+
+class FasterWhisperASRProvider:
+    """Optional local CPU ASR provider backed by faster-whisper.
+
+    The dependency is imported lazily so the default API installation remains
+    provider-neutral. Model loading (and any model download performed by the
+    library) only happens after an explicit transcription job starts.
+    """
+
+    def __init__(
+        self,
+        model: str = "small",
+        *,
+        device: str = "cpu",
+        compute_type: str = "int8",
+        download_root: str | Path | None = None,
+        model_factory: Callable[..., object] | None = None,
+    ) -> None:
+        if not isinstance(model, str) or not model.strip():
+            raise ASRConfigurationError("local ASR model must not be empty")
+        if not isinstance(device, str) or not device.strip():
+            raise ASRConfigurationError("local ASR device must not be empty")
+        if not isinstance(compute_type, str) or not compute_type.strip():
+            raise ASRConfigurationError("local ASR compute type must not be empty")
+        if download_root is not None and not isinstance(download_root, (str, Path)):
+            raise ASRConfigurationError("local ASR model directory is invalid")
+        self.model = model.strip()
+        self.device = device.strip()
+        self.compute_type = compute_type.strip()
+        self.download_root = Path(download_root) if download_root is not None else None
+        self._model_factory = model_factory
+        self._model: object | None = None
+
+    def transcribe(
+        self,
+        audio_path: str | Path,
+        *,
+        language: str | None = None,
+        prompt: str | None = None,
+    ) -> TranscriptionResult:
+        path = _validate_audio_path(audio_path)
+        language_value = _validate_optional_text(language, "language")
+        prompt_value = _validate_optional_text(prompt, "prompt")
+        model = self._loaded_model()
+        try:
+            raw_segments, info = model.transcribe(
+                str(path),
+                language=language_value,
+                initial_prompt=prompt_value,
+                vad_filter=True,
+            )
+            segments: list[TranscriptionSegment] = []
+            for raw in raw_segments:
+                text = getattr(raw, "text", None)
+                start = getattr(raw, "start", None)
+                end = getattr(raw, "end", None)
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                start_ms = _start_ms(start)
+                end_ms = _end_ms(end)
+                if end_ms <= start_ms:
+                    continue
+                segments.append(TranscriptionSegment(start_ms, end_ms, text.strip()))
+        except ASRError:
+            raise
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ASRProviderResponseError("local ASR returned invalid segment timestamps") from exc
+        except Exception:
+            raise ASRConnectionError("local ASR inference failed") from None
+
+        detected_language = getattr(info, "language", None)
+        if not isinstance(detected_language, str) or not detected_language.strip():
+            detected_language = None
+        return TranscriptionResult(
+            " ".join(segment.text for segment in segments),
+            tuple(segments),
+            detected_language.strip() if detected_language else None,
+        )
+
+    def _loaded_model(self) -> object:
+        if self._model is not None:
+            return self._model
+        factory = self._model_factory
+        if factory is None:
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as exc:
+                raise ASRConfigurationError(
+                    "local ASR requires the optional faster-whisper dependency"
+                ) from exc
+            factory = WhisperModel
+        kwargs: dict[str, object] = {
+            "device": self.device,
+            "compute_type": self.compute_type,
+        }
+        if self.download_root is not None:
+            kwargs["download_root"] = str(self.download_root)
+        try:
+            self._model = factory(self.model, **kwargs)
+        except ASRError:
+            raise
+        except Exception:
+            raise ASRConfigurationError("local ASR model could not be loaded") from None
+        return self._model
+
+
+def _validate_audio_path(audio_path: str | Path) -> Path:
+    path = Path(audio_path)
+    if not path.is_file():
+        raise ASRInputError(f"audio input does not exist: {path}")
+    if not path.suffix:
+        raise ASRInputError("audio input filename must include an extension")
+    if path.suffix[1:].lower() not in _SUPPORTED_AUDIO_EXTENSIONS:
+        raise ASRInputError("audio input extension is not supported by the ASR provider")
+    return path
+
+
+def _validate_optional_text(value: str | None, name: str) -> str | None:
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise ASRInputError(f"{name} must be a non-empty string when provided")
+    return value.strip() if value is not None else None
 
 
 def _multipart_body(path: Path, model: str, language: str | None, prompt: str | None) -> tuple[bytes, str]:

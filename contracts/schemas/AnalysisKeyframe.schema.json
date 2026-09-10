@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "timestamp_ms": {
+      "description": "Milliseconds from the source start.",
+      "minimum": 0,
+      "title": "Timestamp Ms",
+      "type": "integer"
+    },
+    "reference": {
+      "description": "Stable local analysis reference; not a secret URL.",
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Reference",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "maxLength": 5000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    }
+  },
+  "required": [
+    "timestamp_ms",
+    "reference"
+  ],
+  "title": "AnalysisKeyframe",
+  "type": "object"
+}

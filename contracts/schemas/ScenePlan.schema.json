@@ -156,6 +156,15 @@
       "maxItems": 30,
       "title": "Caption Emphasis",
       "type": "array"
+    },
+    "evidence_refs": {
+      "description": "Traceable IP/material evidence identifiers.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Evidence Refs",
+      "type": "array"
     }
   },
   "required": [

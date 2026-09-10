@@ -1,14 +1,14 @@
 # AGENTS.md — Content OS
 
-> 2026-09-07 开发前修订见 [BASELINE_FREEZE.md](BASELINE_FREEZE.md)，冲突时以该修订为准。
+> R1 统一执行规格见 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，本轮工程范围、阶段顺序和验收以它为准；审查证据见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。旧基线文件保留为历史背景。
 
 
 ## Read first
 
 Before changing code, read:
 
-1. `STRATEGY_BASELINE.md`、`BASELINE_FREEZE.md`、`STATUS.md`、`LOCAL_HANDOFF.md`，然后 `PRD.md`
-2. `DEVELOPMENT_PLAN.md`
+1. `CONTENT_OS_EXECUTION_SPEC.md`、`AUDIT_REPORT.md`、`STATUS.md`、`DECISIONS.md`
+2. `STRATEGY_BASELINE.md`、`BASELINE_FREEZE.md`、`LOCAL_HANDOFF.md`、`PRD.md`、`DEVELOPMENT_PLAN.md`
 3. The schemas/interfaces for the module you are changing.
 
 ## Product invariant

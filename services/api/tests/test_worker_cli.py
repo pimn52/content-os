@@ -10,25 +10,46 @@ from app.jobs.targets import AssetJobTargetStore
 from app.jobs.store import JobStore
 from app.providers.asr import ASRConfigurationError
 from app.providers.vision import VisionConfigurationError
+from app.runtime import resolve_local_executable
 from app.worker_cli import build_runner, parse_config, run
 
 
 def test_worker_defaults_and_type_selection(monkeypatch):
     monkeypatch.delenv("CONTENT_OS_DB_PATH", raising=False)
+    monkeypatch.delenv("CONTENT_OS_FFMPEG", raising=False)
     config = parse_config(["--once", "--job-type", "analyze_asset"])
     assert config.once is True
     assert config.job_types == (JobType.ANALYZE_ASSET,)
     assert config.db_path == Path("content-os-data/content-os.sqlite3")
+    assert config.ffmpeg == resolve_local_executable("ffmpeg")
 
 
 def test_transcribe_requires_runtime_key_but_analyze_does_not(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CONTENT_OS_ASR_API_KEY", raising=False)
+    monkeypatch.delenv("CONTENT_OS_ASR_PROVIDER", raising=False)
     db = Database(tmp_path / "worker.sqlite")
     try:
         build_runner(parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "analyze_asset"]), db)
         with pytest.raises(ASRConfigurationError, match="supplied at runtime"):
             build_runner(parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "transcribe_audio"]), db)
+    finally:
+        db.close()
+
+
+def test_transcribe_can_select_local_faster_whisper_without_api_key(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CONTENT_OS_ASR_API_KEY", raising=False)
+    monkeypatch.setenv("CONTENT_OS_ASR_PROVIDER", "local")
+    db = Database(tmp_path / "local-asr-worker.sqlite")
+    try:
+        runner = build_runner(
+            parse_config(["--once", "--db", str(tmp_path / "local-asr-worker.sqlite"), "--job-type", "transcribe_audio"]),
+            db,
+        )
+        assert runner.handler_types == {JobType.TRANSCRIBE_AUDIO}
+        handler = runner._handlers[JobType.TRANSCRIBE_AUDIO]
+        assert handler._provider.__class__.__name__ == "FasterWhisperASRProvider"
     finally:
         db.close()
 

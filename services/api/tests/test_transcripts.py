@@ -26,6 +26,8 @@ def test_overlap_mapping_preserves_clip_and_segment_order():
     mapped = map_transcript_to_clips(clips, segments)
     assert [clip.id for clip in mapped] == [clip.id for clip in clips]
     assert [clip.transcript for clip in mapped] == ["first words crosses boundary", "crosses boundary last words"]
+    assert [(segment.start_ms, segment.end_ms) for segment in mapped[0].transcript_segments] == [(100, 400), (900, 1_100)]
+    assert [(segment.start_ms, segment.end_ms) for segment in mapped[1].transcript_segments] == [(900, 1_100), (1_200, 1_500)]
 
 
 def test_empty_and_duplicate_segments_are_stable_and_stale_text_is_cleared():
@@ -72,10 +74,12 @@ def test_transcripts_persist_repeatably_and_in_stable_order(tmp_path):
             repository.create(clip)
         segments = [TranscriptSegment(100, 1_100, "cross"), TranscriptSegment(1_200, 1_500, "second")]
         service = ClipTranscriptPersistence(db)
-        first = service.apply(asset.id, segments)
-        second = service.apply(asset.id, segments)
+        first = service.apply(asset.id, segments, source_reference="subtitle:creator-2026.srt")
+        second = service.apply(asset.id, segments, source_reference="subtitle:creator-2026.srt")
         assert [clip.id for clip in first] == [clip.id for clip in second]
         assert [clip.transcript for clip in second] == ["cross", "cross second"]
+        assert [(segment.start_ms, segment.end_ms) for segment in second[0].transcript_segments] == [(100, 1_100)]
+        assert second[0].transcript_source == "subtitle:creator-2026.srt"
         assert repository.list_by_asset(asset.id) == second
     finally:
         db.close()

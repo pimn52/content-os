@@ -4,9 +4,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
 from app.domain.models import (
-    Asset, CandidateAsset, Clip, CostCategory, IPProfile, Project, RationalFps,
+    Asset, AudioAsset, CandidateAsset, Clip, CostCategory, IPProfile, Project, RationalFps,
     ScenePlan, SourceKind, UsageCost, VisualIntent,
 )
 from app.main import create_app
@@ -60,6 +60,14 @@ def test_video_spec_api_assembles_contiguous_local_timeline(tmp_path: Path) -> N
         assert body["scenes"][0]["visual"]["clip_id"] == str(clip.id)
         assert body["scenes"][0]["caption"] == "Opening caption"
 
+        explicit = client.post(f"/projects/{project.id}/video-spec", json={
+            "scenes": [scene.model_dump(mode="json")],
+            "selections": [candidate.model_dump(mode="json")],
+            "explicit_scene_ids": [str(scene.id)],
+        })
+        assert explicit.status_code == 200
+        assert explicit.json()["scenes"][0]["visual"]["clip_id"] == str(clip.id)
+
 
 def test_video_spec_api_rejects_duplicate_or_capture_selection(tmp_path: Path) -> None:
     path = tmp_path / "spec-invalid.sqlite"
@@ -79,3 +87,38 @@ def test_video_spec_api_rejects_duplicate_or_capture_selection(tmp_path: Path) -
         })
         assert response.status_code == 422
         assert "requires capture" in response.json()["detail"]
+
+
+def test_video_spec_api_attaches_persisted_narration_asset(tmp_path: Path) -> None:
+    path = tmp_path / "spec-audio.sqlite"
+    project, scene, candidate, _ = _seed(path, tmp_path)
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"voice")
+    db = Database(path)
+    audio = AudioAsset(
+        source_kind="user_asset", source_file=str(audio_path), content_hash="f" * 64,
+        duration_ms=4_000, sample_rate=48_000, channels=1, authorization_reference="creator-voice", imported_at=datetime.now(timezone.utc),
+    )
+    AudioAssetRepository(db).create(audio)
+    db.close()
+    with TestClient(create_app(path)) as client:
+        response = client.post(f"/projects/{project.id}/video-spec", json={
+            "scenes": [scene.model_dump(mode="json")],
+            "selections": [candidate.model_dump(mode="json")],
+            "narration_asset_ids": {str(scene.id): str(audio.id)},
+        })
+    assert response.status_code == 200
+    assert response.json()["scenes"][0]["narration_asset_id"] == str(audio.id)
+
+
+def test_video_spec_api_rejects_new_script_without_narration_when_requested(tmp_path: Path) -> None:
+    path = tmp_path / "spec-narration-required.sqlite"
+    project, scene, candidate, _ = _seed(path, tmp_path)
+    with TestClient(create_app(path)) as client:
+        response = client.post(f"/projects/{project.id}/video-spec", json={
+            "scenes": [scene.model_dump(mode="json")],
+            "selections": [candidate.model_dump(mode="json")],
+            "narration_required": True,
+        })
+    assert response.status_code == 422
+    assert "no narration audio" in response.json()["detail"]

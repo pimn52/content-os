@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "TranscriptSegment": {
+      "additionalProperties": false,
+      "description": "A persisted, source-relative spoken interval returned by ASR.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "start_ms": {
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "text"
+      ],
+      "title": "TranscriptSegment",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "source_kind": {
+      "default": "user_asset",
+      "enum": [
+        "user_asset",
+        "historical_asset"
+      ],
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "source_file": {
+      "description": "Local logical path, never a secret URL.",
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Source File",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 128,
+      "minLength": 16,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "duration_ms": {
+      "exclusiveMinimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "sample_rate": {
+      "exclusiveMinimum": 0,
+      "maximum": 192000,
+      "title": "Sample Rate",
+      "type": "integer"
+    },
+    "channels": {
+      "exclusiveMinimum": 0,
+      "maximum": 8,
+      "title": "Channels",
+      "type": "integer"
+    },
+    "language": {
+      "anyOf": [
+        {
+          "maxLength": 20,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Language"
+    },
+    "authorization_reference": {
+      "description": "Rights or authorization record reference; never credentials.",
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Authorization Reference",
+      "type": "string"
+    },
+    "imported_at": {
+      "format": "date-time",
+      "title": "Imported At",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    },
+    "transcript_segments": {
+      "items": {
+        "$ref": "#/$defs/TranscriptSegment"
+      },
+      "maxItems": 10000,
+      "title": "Transcript Segments",
+      "type": "array"
+    },
+    "transcript_source": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Traceable source reference for the current transcript.",
+      "title": "Transcript Source"
+    }
+  },
+  "required": [
+    "source_file",
+    "content_hash",
+    "duration_ms",
+    "sample_rate",
+    "channels",
+    "authorization_reference",
+    "imported_at"
+  ],
+  "title": "AudioAsset",
+  "type": "object"
+}

@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "source_kind": {
+      "default": "screenshot",
+      "enum": [
+        "screenshot",
+        "chart"
+      ],
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "source_file": {
+      "description": "Local logical path, never a secret URL.",
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Source File",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 128,
+      "minLength": 16,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "width": {
+      "exclusiveMinimum": 0,
+      "maximum": 16384,
+      "title": "Width",
+      "type": "integer"
+    },
+    "height": {
+      "exclusiveMinimum": 0,
+      "maximum": 16384,
+      "title": "Height",
+      "type": "integer"
+    },
+    "authorization_reference": {
+      "description": "Rights or authorization record reference; never credentials.",
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Authorization Reference",
+      "type": "string"
+    },
+    "imported_at": {
+      "format": "date-time",
+      "title": "Imported At",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "source_file",
+    "content_hash",
+    "width",
+    "height",
+    "authorization_reference",
+    "imported_at"
+  ],
+  "title": "ImageAsset",
+  "type": "object"
+}

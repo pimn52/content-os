@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, Sequence
+from decimal import Decimal
+from typing import Literal, Protocol, Sequence
 from uuid import UUID
 
+from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger
 from app.db import ClipRepository
-from app.domain.models import Asset, Clip, Job, JobStatus, JobType
+from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, UsageCost
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.media.extraction import (
     AudioExtraction,
@@ -196,12 +198,18 @@ class AssetTranscriptionJobHandler:
         extractor: AudioExtractor,
         provider: ASRProvider,
         transcript_persistence: TranscriptPersistence | ClipTranscriptPersistence,
+        ledger: ProviderCallLedger | None = None,
+        provider_name: str = "openai-compatible",
+        provider_model: str = "runtime-asr",
     ) -> None:
         self._target_store = target_store
         self._assets = assets
         self._extractor = extractor
         self._provider = provider
         self._transcript_persistence = transcript_persistence
+        self._ledger = ledger
+        self._provider_name = provider_name
+        self._provider_model = provider_model
 
     def __call__(self, job: Job) -> None:
         asset = _resolve_asset_job(job, JobType.TRANSCRIBE_AUDIO, self._target_store, self._assets)
@@ -221,20 +229,38 @@ class AssetTranscriptionJobHandler:
         ):
             raise JobExecutionError("audio_extraction_invalid", "audio cannot be extracted for transcription", retryable=False) from None
 
+        call = _reserve_job_provider_call(
+            self._ledger,
+            job,
+            operation="asr",
+            category=CostCategory.ASR,
+            provider=self._provider_name,
+            model=self._provider_model,
+            input_source=f"asset:{asset.id}:audio",
+            known_local_cost=self._provider_name == "faster-whisper",
+        )
         try:
             result = self._provider.transcribe(audio.path)
         except (ASRRateLimitError, ASRTimeout, ASRConnectionError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="asr_temporarily_unavailable")
             raise JobExecutionError("asr_temporarily_unavailable", "transcription provider is temporarily unavailable", retryable=True) from None
         except ASRHTTPError as error:
             retryable = error.status_code >= 500 or error.status_code in {408, 409, 425}
             code = "asr_temporarily_unavailable" if retryable else "asr_request_rejected"
             message = "transcription provider is temporarily unavailable" if retryable else "transcription provider rejected the request"
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code=code)
             raise JobExecutionError(code, message, retryable=retryable) from None
         except (ASRAuthenticationError, ASRConfigurationError, ASRInputError, ASRProviderResponseError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="asr_invalid_request")
             raise JobExecutionError("asr_invalid_request", "transcription request cannot be processed", retryable=False) from None
+        _finish_job_provider_call(self._ledger, job, call, status="completed")
 
         try:
-            self._transcript_persistence.apply(asset.id, result.segments)
+            self._transcript_persistence.apply(
+                asset.id,
+                result.segments,
+                source_reference=f"{self._provider_name}:{self._provider_model}",
+            )
         except NoClipsForAsset:
             raise JobExecutionError("clips_missing", "asset has no clips available for transcription", retryable=False) from None
         except (TypeError, ValueError):
@@ -252,6 +278,10 @@ class AssetVisionJobHandler:
         keyframes: KeyframeResolver,
         pipeline: MediaVisionPipeline,
         indexer: ClipIndexer | None = None,
+        ledger: ProviderCallLedger | None = None,
+        provider_name: str = "openai-compatible",
+        vision_model: str = "runtime-vision",
+        embedding_model: str = "runtime-embedding",
     ) -> None:
         self._target_store = target_store
         self._assets = assets
@@ -259,6 +289,10 @@ class AssetVisionJobHandler:
         self._keyframes = keyframes
         self._pipeline = pipeline
         self._indexer = indexer
+        self._ledger = ledger
+        self._provider_name = provider_name
+        self._vision_model = vision_model
+        self._embedding_model = embedding_model
 
     def __call__(self, job: Job) -> None:
         asset = _resolve_asset_job(job, JobType.INDEX_CLIPS, self._target_store, self._assets)
@@ -276,7 +310,18 @@ class AssetVisionJobHandler:
         except (FileNotFoundError, TypeError, ValueError):
             raise JobExecutionError("keyframes_missing", "keyframes are unavailable for visual analysis", retryable=False) from None
         try:
-            result = self._pipeline.process(asset, clips, paths)
+            if self._ledger is None:
+                result = self._pipeline.process(asset, clips, paths)
+            else:
+                vision_provider = _MeteredVisionProvider(
+                    self._pipeline.provider,
+                    self._ledger,
+                    job,
+                    asset.id,
+                    self._provider_name,
+                    self._vision_model,
+                )
+                result = self._pipeline.process(asset, clips, paths, provider=vision_provider)
         except (VisionRateLimitError, VisionTimeout, VisionConnectionError):
             raise JobExecutionError("vision_temporarily_unavailable", "vision provider is temporarily unavailable", retryable=True) from None
         except VisionHTTPError as error:
@@ -299,14 +344,25 @@ class AssetVisionJobHandler:
             raise JobExecutionError("vision_invalid", "visual analysis input is not processable", retryable=False) from None
         if self._indexer is None:
             return
+        embedding_call = _reserve_job_provider_call(
+            self._ledger,
+            job,
+            operation="embedding",
+            category=CostCategory.LLM,
+            provider=self._provider_name,
+            model=self._embedding_model,
+            input_source=f"asset:{asset.id}:clips:{len(result.clips)}",
+        )
         try:
             self._indexer.index_clips(result.clips)
         except (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError):
+            _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code="embedding_temporarily_unavailable")
             raise JobExecutionError("embedding_temporarily_unavailable", "embedding provider is temporarily unavailable", retryable=True) from None
         except EmbeddingHTTPError as error:
             retryable = error.status_code >= 500 or error.status_code in {408, 409, 425}
             code = "embedding_temporarily_unavailable" if retryable else "embedding_request_rejected"
             message = "embedding provider is temporarily unavailable" if retryable else "embedding provider rejected the request"
+            _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code=code)
             raise JobExecutionError(code, message, retryable=retryable) from None
         except (
             EmbeddingAuthenticationError,
@@ -317,7 +373,117 @@ class AssetVisionJobHandler:
             EmbeddingIndexError,
             IndexError,
         ):
+            _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code="embedding_invalid")
             raise JobExecutionError("embedding_invalid", "Clip embeddings cannot be produced or persisted", retryable=False) from None
+
+
+def _reserve_job_provider_call(
+    ledger: ProviderCallLedger | None,
+    job: Job,
+    *,
+    operation: Literal["asr", "vision", "embedding"],
+    category: CostCategory,
+    provider: str,
+    model: str,
+    input_source: str,
+    call_key: str = "call",
+    known_local_cost: bool = False,
+) -> ProviderCallRecord | None:
+    if ledger is None:
+        return None
+    if job.project_id is None:
+        raise JobExecutionError(
+            "provider_project_required",
+            "provider-backed asset jobs require a project for budget accounting",
+            retryable=False,
+        )
+    try:
+        estimated_cost = (
+            UsageCost(
+                category=category,
+                amount=Decimal("0"),
+                currency="USD",
+                provider=provider,
+                note="local provider execution; no external provider charge",
+            )
+            if known_local_cost
+            else UsageCost(
+                category=category,
+                provider=provider,
+                note="runtime provider price is not observable; set an explicit budget policy or estimate",
+            )
+        )
+        return ledger.reserve(
+            project_id=job.project_id,
+            idempotency_key=f"job:{job.id}:{operation}:{job.attempt}:{call_key}",
+            operation=operation,
+            mode="runtime",
+            provider=provider,
+            model=model,
+            input_source=input_source,
+            estimated_cost=estimated_cost,
+            allow_existing_unknown_cost=known_local_cost,
+        )
+    except BudgetLimitError:
+        raise JobExecutionError("provider_budget_blocked", "provider call blocked by the budget policy", retryable=False) from None
+    except ProviderCallError:
+        raise JobExecutionError("provider_call_accounting_failed", "provider call could not be reserved", retryable=True) from None
+
+
+def _finish_job_provider_call(
+    ledger: ProviderCallLedger | None,
+    job: Job,
+    call: ProviderCallRecord | None,
+    *,
+    status: Literal["completed", "failed"],
+    error_code: str | None = None,
+) -> None:
+    if ledger is None or call is None or job.project_id is None:
+        return
+    try:
+        ledger.finish(
+            project_id=job.project_id,
+            call_id=call.id,
+            status=status,
+            usage_observable=False,
+            error_code=error_code,
+        )
+    except ProviderCallError:
+        raise JobExecutionError("provider_call_accounting_failed", "provider call result could not be reconciled", retryable=True) from None
+
+
+class _MeteredVisionProvider:
+    """Count each keyframe request while preserving the provider contract."""
+
+    def __init__(self, provider: object, ledger: ProviderCallLedger, job: Job, asset_id: UUID, provider_name: str, model: str) -> None:
+        self._provider = provider
+        self._ledger = ledger
+        self._job = job
+        self._asset_id = asset_id
+        self._provider_name = provider_name
+        self._model = model
+        self._index = 0
+
+    def analyze(self, keyframe_path: str | Path) -> object:
+        index = self._index
+        self._index += 1
+        call = _reserve_job_provider_call(
+            self._ledger,
+            self._job,
+            operation="vision",
+            category=CostCategory.LLM,
+            provider=self._provider_name,
+            model=self._model,
+            input_source=f"asset:{self._asset_id}:keyframe:{index}",
+            call_key=f"keyframe-{index}",
+        )
+        try:
+            result = self._provider.analyze(keyframe_path)  # type: ignore[attr-defined]
+        except Exception:
+            _finish_job_provider_call(self._ledger, self._job, call, status="failed", error_code="vision_provider_failed")
+            raise
+        _finish_job_provider_call(self._ledger, self._job, call, status="completed")
+        return result
 
 
 def _resolve_asset_job(

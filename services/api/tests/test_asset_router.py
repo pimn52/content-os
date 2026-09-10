@@ -6,8 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.db import AssetRepository, ClipRepository, Database
-from app.domain.models import Asset, Clip, ProjectFormat, RationalFps, ScenePlan, SourceKind, VisualIntent
+from app.db import AssetRepository, ClipRepository, Database, ImageAssetRepository
+from app.domain.models import Asset, Clip, ImageAsset, ProjectFormat, RationalFps, ScenePlan, SourceKind, VisualIntent
 from app.providers.embedding import EmbeddingBatch
 from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError, RoutingWeights
 from app.search import ClipEmbeddingIndexer
@@ -120,6 +120,16 @@ def test_router_filters_disallowed_assets_and_penalizes_reuse(tmp_path: Path) ->
         db.close()
 
 
+def test_router_does_not_publish_assets_marked_reference_or_unknown(tmp_path: Path) -> None:
+    db, router, clips, primary_asset = _router(tmp_path)
+    try:
+        AssetRepository(db).update(primary_asset.model_copy(update={"metadata": {"r1_usage": "reference"}}))
+        ids = [candidate.clip_id for candidate in router.route(_scene()).candidates if candidate.clip_id is not None]
+        assert clips[0].id not in ids
+    finally:
+        db.close()
+
+
 def test_router_surfaces_capture_gap_without_generating_media(tmp_path: Path) -> None:
     db, _, _, _ = _router(tmp_path)
     try:
@@ -141,7 +151,34 @@ def test_router_surfaces_capture_gap_without_generating_media(tmp_path: Path) ->
         typography_only = _scene().model_copy(update={
             "preferred_sources": [SourceKind.TYPOGRAPHY], "fallback_sources": [SourceKind.CAPTURE],
         })
-        assert router.route(typography_only).candidates[0].source_kind == SourceKind.CAPTURE
+        typography_result = router.route(typography_only).candidates
+        assert typography_result[0].source_kind == SourceKind.TYPOGRAPHY
+        assert typography_result[0].recommended is True and typography_result[0].requires_capture is False
+        assert typography_result[-1].source_kind == SourceKind.CAPTURE
+    finally:
+        db.close()
+
+
+def test_router_surfaces_imported_static_visual_before_capture_gap(tmp_path: Path) -> None:
+    db, _, _, _ = _router(tmp_path)
+    try:
+        image = ImageAsset(
+            source_kind=SourceKind.SCREENSHOT,
+            source_file="C:/media/screen.png",
+            content_hash="e" * 64,
+            width=800,
+            height=600,
+            authorization_reference="creator-screen",
+            imported_at=NOW,
+        )
+        image_repo = ImageAssetRepository(db)
+        image_repo.create(image)
+        scene = _scene().model_copy(update={"preferred_sources": [SourceKind.SCREENSHOT], "fallback_sources": [SourceKind.CAPTURE]})
+        router = AssetRouter(ClipEmbeddingIndexer(db, _EmbeddingProvider()), AssetRepository(db), images=image_repo, capture_gap_threshold=0.99, now=lambda: NOW)
+        candidates = router.route(scene).candidates
+        assert candidates[0].source_kind is SourceKind.SCREENSHOT
+        assert candidates[0].recommended is True and candidates[0].asset_id == image.id
+        assert candidates[-1].source_kind is SourceKind.CAPTURE
     finally:
         db.close()
 

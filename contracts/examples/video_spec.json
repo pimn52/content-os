@@ -26,7 +26,10 @@
         "source_duration_ms": 60000
       },
       "narration_asset_id": null,
+      "narration_start_ms": null,
+      "narration_end_ms": null,
       "caption": "A continuous user clip",
+      "captions": [],
       "transition": "cut"
     }
   ],

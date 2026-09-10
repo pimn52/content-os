@@ -1,4 +1,4 @@
-"""Explicit repositories for the five persisted domain models."""
+"""Explicit repositories for persisted domain models."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from app.domain.models import Asset, Clip, IPProfile, Job, Project
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProviderCallRecord, PublicationRecord, ShootTask, TalkingProfile, VoiceProfile
 
 from .database import Database
 
@@ -62,13 +62,33 @@ class IPProfileRepository(_Repository[IPProfile]):
 
     def create(self, value: IPProfile) -> IPProfile:
         self.db.connection.execute("INSERT INTO ip_profiles(id, payload) VALUES (?, ?)", (str(value.id), _payload(value)))
+        self.db.connection.execute(
+            "INSERT INTO ip_profile_revisions(profile_id, version, created_at, payload) VALUES (?, 1, ?, ?)",
+            (str(value.id), _utc_timestamp(datetime.now(timezone.utc)), _payload(value)),
+        )
         return value
 
     def update(self, value: IPProfile) -> IPProfile:
         cursor = self.db.connection.execute("UPDATE ip_profiles SET payload = ? WHERE id = ?", (_payload(value), str(value.id)))
         if cursor.rowcount != 1:
             raise KeyError(value.id)
+        current = self.db.connection.execute(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM ip_profile_revisions WHERE profile_id = ?",
+            (str(value.id),),
+        ).fetchone()
+        next_version = int(current["version"]) + 1
+        self.db.connection.execute(
+            "INSERT INTO ip_profile_revisions(profile_id, version, created_at, payload) VALUES (?, ?, ?, ?)",
+            (str(value.id), next_version, _utc_timestamp(datetime.now(timezone.utc)), _payload(value)),
+        )
         return value
+
+    def revisions(self, profile_id: UUID) -> list[tuple[int, datetime, IPProfile]]:
+        rows = self.db.connection.execute(
+            "SELECT version, created_at, payload FROM ip_profile_revisions WHERE profile_id = ? ORDER BY version",
+            (str(profile_id),),
+        ).fetchall()
+        return [(int(row["version"]), datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")), IPProfile.model_validate(json.loads(row["payload"]))) for row in rows]
 
 
 class ProjectRepository(_Repository[Project]):
@@ -83,6 +103,388 @@ class ProjectRepository(_Repository[Project]):
         if cursor.rowcount != 1:
             raise KeyError(value.id)
         return value
+
+
+class ProjectDraftRepository(_Repository[ProjectDraft]):
+    table, model = "project_drafts", ProjectDraft
+
+    def get(self, project_id: UUID) -> ProjectDraft | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM project_drafts WHERE project_id = ?", (str(project_id),)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def save(self, value: ProjectDraft) -> ProjectDraft:
+        self.db.connection.execute(
+            """INSERT INTO project_drafts(project_id, version, updated_at, payload)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(project_id) DO UPDATE SET
+                 version=excluded.version, updated_at=excluded.updated_at, payload=excluded.payload""",
+            (str(value.project_id), value.version, _utc_timestamp(value.updated_at), _payload(value)),
+        )
+        return value
+
+
+class ShootTaskRepository(_Repository[ShootTask]):
+    table, model = "shoot_tasks", ShootTask
+
+    def get_by_scene(self, project_id: UUID, scene_plan_id: UUID) -> ShootTask | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM shoot_tasks WHERE project_id = ? AND scene_plan_id = ?",
+            (str(project_id), str(scene_plan_id)),
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: ShootTask) -> ShootTask:
+        self.db.connection.execute(
+            "INSERT INTO shoot_tasks(id, project_id, scene_plan_id, status, asset_id, created_at, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(value.id), str(value.project_id), str(value.scene_plan_id), value.status,
+                None if value.asset_id is None else str(value.asset_id),
+                _utc_timestamp(value.created_at), _utc_timestamp(value.updated_at), _payload(value),
+            ),
+        )
+        return value
+
+    def update(self, value: ShootTask) -> ShootTask:
+        cursor = self.db.connection.execute(
+            "UPDATE shoot_tasks SET status = ?, asset_id = ?, updated_at = ?, payload = ? WHERE id = ?",
+            (
+                value.status, None if value.asset_id is None else str(value.asset_id),
+                _utc_timestamp(value.updated_at), _payload(value), str(value.id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
+
+    def list_for_project(self, project_id: UUID) -> list[ShootTask]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM shoot_tasks WHERE project_id = ? ORDER BY created_at, id", (str(project_id),)
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
+class AnalysisResultRepository(_Repository[AnalysisResultBundle]):
+    table, model = "analysis_result_bundles", AnalysisResultBundle
+
+    def get_by_input_hash(self, input_hash: str) -> AnalysisResultBundle | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM analysis_result_bundles WHERE input_hash = ?", (input_hash,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: AnalysisResultBundle) -> AnalysisResultBundle:
+        self.db.connection.execute(
+            "INSERT INTO analysis_result_bundles(id, input_hash, mode, analyzed_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (str(value.id), value.input_hash, value.mode, _utc_timestamp(value.analyzed_at), _payload(value)),
+        )
+        return value
+
+
+class ImageAssetRepository(_Repository[ImageAsset]):
+    table, model = "image_assets", ImageAsset
+
+    def create(self, value: ImageAsset) -> ImageAsset:
+        self.db.connection.execute(
+            "INSERT INTO image_assets(id, content_hash, payload) VALUES (?, ?, ?)",
+            (str(value.id), value.content_hash, _payload(value)),
+        )
+        return value
+
+    def get_by_content_hash(self, content_hash: str) -> ImageAsset | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM image_assets WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+
+class AudioAssetRepository(_Repository[AudioAsset]):
+    table, model = "audio_assets", AudioAsset
+
+    def create(self, value: AudioAsset) -> AudioAsset:
+        self.db.connection.execute(
+            "INSERT INTO audio_assets(id, content_hash, payload) VALUES (?, ?, ?)",
+            (str(value.id), value.content_hash, _payload(value)),
+        )
+        return value
+
+    def update(self, value: AudioAsset) -> AudioAsset:
+        existing = self.db.connection.execute("SELECT content_hash FROM audio_assets WHERE id = ?", (str(value.id),)).fetchone()
+        if existing is None:
+            raise KeyError(value.id)
+        if existing["content_hash"] != value.content_hash:
+            raise ValueError("audio asset content_hash is immutable")
+        cursor = self.db.connection.execute(
+            "UPDATE audio_assets SET content_hash = ?, payload = ? WHERE id = ?",
+            (value.content_hash, _payload(value), str(value.id)),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
+
+    def get_by_content_hash(self, content_hash: str) -> AudioAsset | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM audio_assets WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+
+class AssetUsageRepository(_Repository[AssetUsageEvent]):
+    table, model = "asset_usage_events", AssetUsageEvent
+
+    def get_by_event_key(self, event_key: str) -> AssetUsageEvent | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM asset_usage_events WHERE event_key = ?", (event_key,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: AssetUsageEvent) -> AssetUsageEvent:
+        self.db.connection.execute(
+            "INSERT INTO asset_usage_events(id, project_id, event_key, payload) VALUES (?, ?, ?, ?)",
+            (str(value.id), str(value.project_id), value.event_key, _payload(value)),
+        )
+        return value
+
+    def list_for_project(self, project_id: UUID) -> list[AssetUsageEvent]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM asset_usage_events WHERE project_id = ? ORDER BY rowid", (str(project_id),)
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
+class PublicationRepository(_Repository[PublicationRecord]):
+    table, model = "publication_records", PublicationRecord
+
+    def get_by_key(self, project_id: UUID, output_version: str, platform: str) -> PublicationRecord | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM publication_records WHERE project_id = ? AND output_version = ? AND platform = ?",
+            (str(project_id), output_version, platform),
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: PublicationRecord) -> PublicationRecord:
+        self.db.connection.execute(
+            "INSERT INTO publication_records(id, project_id, output_version, platform, payload) VALUES (?, ?, ?, ?, ?)",
+            (str(value.id), str(value.project_id), value.output_version, value.platform, _payload(value)),
+        )
+        return value
+
+    def list_for_project(self, project_id: UUID) -> list[PublicationRecord]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM publication_records WHERE project_id = ? ORDER BY rowid", (str(project_id),)
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
+class FeedbackRepository(_Repository[ContentFeedback]):
+    table, model = "content_feedback", ContentFeedback
+
+    def get_by_key(self, project_id: UUID, output_version: str) -> ContentFeedback | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM content_feedback WHERE project_id = ? AND output_version = ?",
+            (str(project_id), output_version),
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: ContentFeedback) -> ContentFeedback:
+        self.db.connection.execute(
+            "INSERT INTO content_feedback(id, project_id, output_version, payload) VALUES (?, ?, ?, ?)",
+            (str(value.id), str(value.project_id), value.output_version, _payload(value)),
+        )
+        return value
+
+    def list_for_project(self, project_id: UUID) -> list[ContentFeedback]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM content_feedback WHERE project_id = ? ORDER BY rowid", (str(project_id),)
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
+class ContentOpportunityRepository(_Repository[ContentOpportunity]):
+    table, model = "content_opportunities", ContentOpportunity
+
+    def get_by_dedupe_key(self, dedupe_key: str) -> ContentOpportunity | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM content_opportunities WHERE dedupe_key = ?", (dedupe_key,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: ContentOpportunity) -> ContentOpportunity:
+        self.db.connection.execute(
+            "INSERT INTO content_opportunities(id, dedupe_key, status, created_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (str(value.id), value.dedupe_key, value.status, _utc_timestamp(value.created_at), _payload(value)),
+        )
+        return value
+
+    def update(self, value: ContentOpportunity) -> ContentOpportunity:
+        cursor = self.db.connection.execute(
+            "UPDATE content_opportunities SET status = ?, payload = ? WHERE id = ?",
+            (value.status, _payload(value), str(value.id)),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
+
+    def list_for_planning(self, limit: int = 20) -> list[ContentOpportunity]:
+        rows = self.db.connection.execute(
+            """SELECT * FROM content_opportunities
+               WHERE status != 'dismissed'
+               ORDER BY created_at DESC, id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+    def list_all(self, status: str | None = None) -> list[ContentOpportunity]:
+        if status is None:
+            rows = self.db.connection.execute(
+                "SELECT * FROM content_opportunities ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = self.db.connection.execute(
+                "SELECT * FROM content_opportunities WHERE status = ? ORDER BY created_at DESC, id DESC",
+                (status,),
+            ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
+class AccountConnectionRepository(_Repository[AccountConnection]):
+    table, model = "account_connections", AccountConnection
+
+    def get_by_key(self, provider: str, account_external_id: str) -> AccountConnection | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM account_connections WHERE provider = ? AND account_external_id = ?",
+            (provider, account_external_id),
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: AccountConnection) -> AccountConnection:
+        self.db.connection.execute(
+            "INSERT INTO account_connections(id, provider, account_external_id, payload) VALUES (?, ?, ?, ?)",
+            (str(value.id), value.provider, value.account_external_id, _payload(value)),
+        )
+        return value
+
+
+class HistoricalContentRepository(_Repository[HistoricalContent]):
+    table, model = "historical_content", HistoricalContent
+
+    def get_by_key(self, account_connection_id: UUID, external_id: str) -> HistoricalContent | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM historical_content WHERE account_connection_id = ? AND external_id = ?",
+            (str(account_connection_id), external_id),
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: HistoricalContent) -> HistoricalContent:
+        self.db.connection.execute(
+            "INSERT INTO historical_content(id, account_connection_id, external_id, payload) VALUES (?, ?, ?, ?)",
+            (str(value.id), str(value.account_connection_id), value.external_id, _payload(value)),
+        )
+        return value
+
+    def list_for_account(self, account_connection_id: UUID) -> list[HistoricalContent]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM historical_content WHERE account_connection_id = ? ORDER BY rowid",
+            (str(account_connection_id),),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
+class VoiceProfileRepository(_Repository[VoiceProfile]):
+    table, model = "voice_profiles", VoiceProfile
+
+    def get_by_provider_profile(self, provider: str, provider_profile_id: str) -> VoiceProfile | None:
+        rows = self.db.connection.execute(
+            "SELECT * FROM voice_profiles WHERE json_extract(payload, '$.provider') = ? AND json_extract(payload, '$.provider_profile_id') = ?",
+            (provider, provider_profile_id),
+        ).fetchall()
+        return None if not rows else _model(rows[0], self.model)
+
+    def create(self, value: VoiceProfile) -> VoiceProfile:
+        self.db.connection.execute(
+            "INSERT INTO voice_profiles(id, payload) VALUES (?, ?)", (str(value.id), _payload(value))
+        )
+        return value
+
+
+class TalkingProfileRepository(_Repository[TalkingProfile]):
+    table, model = "talking_profiles", TalkingProfile
+
+    def create(self, value: TalkingProfile) -> TalkingProfile:
+        self.db.connection.execute(
+            "INSERT INTO talking_profiles(id, payload) VALUES (?, ?)", (str(value.id), _payload(value))
+        )
+        return value
+
+class BudgetPolicyRepository(_Repository[BudgetPolicy]):
+    table, model = "budget_policies", BudgetPolicy
+
+    def get_by_project(self, project_id: UUID | None) -> BudgetPolicy | None:
+        scope_key = "global" if project_id is None else str(project_id)
+        row = self.db.connection.execute(
+            "SELECT * FROM budget_policies WHERE scope_key = ?", (scope_key,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def save(self, value: BudgetPolicy) -> BudgetPolicy:
+        scope_key = "global" if value.project_id is None else str(value.project_id)
+        self.db.connection.execute(
+            """INSERT INTO budget_policies(id, scope_key, payload) VALUES (?, ?, ?)
+               ON CONFLICT(scope_key) DO UPDATE SET id=excluded.id, payload=excluded.payload""",
+            (str(value.id), scope_key, _payload(value)),
+        )
+        return value
+
+
+class ProviderCallRepository(_Repository[ProviderCallRecord]):
+    table, model = "provider_call_records", ProviderCallRecord
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> ProviderCallRecord | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM provider_call_records WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: ProviderCallRecord) -> ProviderCallRecord:
+        self.db.connection.execute(
+            """INSERT INTO provider_call_records(
+                   id, project_id, idempotency_key, status, created_at, completed_at, payload
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(value.id), str(value.project_id), value.idempotency_key, value.status,
+                _utc_timestamp(value.created_at),
+                None if value.completed_at is None else _utc_timestamp(value.completed_at),
+                _payload(value),
+            ),
+        )
+        return value
+
+    def update(self, value: ProviderCallRecord) -> ProviderCallRecord:
+        cursor = self.db.connection.execute(
+            """UPDATE provider_call_records
+               SET status = ?, completed_at = ?, payload = ?
+               WHERE id = ?""",
+            (
+                value.status,
+                None if value.completed_at is None else _utc_timestamp(value.completed_at),
+                _payload(value),
+                str(value.id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
+
+    def list_for_project(self, project_id: UUID) -> list[ProviderCallRecord]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM provider_call_records WHERE project_id = ? ORDER BY created_at, id",
+            (str(project_id),),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+    def list_all(self) -> list[ProviderCallRecord]:
+        return self.list()
 
 
 class AssetRepository(_Repository[Asset]):
@@ -194,6 +596,15 @@ class JobRepository(_Repository[Job]):
         if row is None:  # A conflicting primary key is not an idempotency hit.
             raise sqlite3.IntegrityError("job insert did not persist")
         return _model(row, Job)
+
+    def list_for_asset(self, asset_id: UUID) -> list[Job]:
+        rows = self.db.connection.execute(
+            """SELECT j.* FROM jobs AS j
+               INNER JOIN asset_job_targets AS target ON target.job_id = j.id
+               WHERE target.asset_id = ? ORDER BY j.created_at, j.id""",
+            (str(asset_id),),
+        ).fetchall()
+        return [_model(row, Job) for row in rows]
 
     def update(self, value: Job) -> Job:
         cursor = self.db.connection.execute(

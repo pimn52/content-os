@@ -13,6 +13,7 @@ from threading import Event
 from typing import Sequence
 
 from app.db import AssetRepository, ClipRepository, Database, ProjectRepository
+from app.budget import ProviderCallLedger
 from app.domain.models import JobType
 from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler
 from app.jobs.runner import JobRunner
@@ -24,11 +25,12 @@ from app.media.pipeline import MediaAnalysisPipeline
 from app.media.segmentation import FFmpegSceneDetector
 from app.media.transcripts import ClipTranscriptPersistence
 from app.media.vision_pipeline import MediaVisionPipeline
-from app.providers.asr import ASRConfigurationError, OpenAICompatibleASRProvider
+from app.providers.asr import ASRConfigurationError, FasterWhisperASRProvider, OpenAICompatibleASRProvider
 from app.providers.embedding import EmbeddingConfigurationError, OpenAICompatibleEmbeddingProvider
 from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigurationError
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
+from app.runtime import resolve_local_executable
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
-    parser.add_argument("--ffmpeg", default=os.environ.get("CONTENT_OS_FFMPEG", "ffmpeg"))
+    parser.add_argument("--ffmpeg", default=resolve_local_executable("ffmpeg"))
     return parser
 
 
@@ -90,15 +92,37 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
         pipeline = MediaAnalysisPipeline(db, detector, extractor)
         handlers[JobType.ANALYZE_ASSET] = AssetAnalysisJobHandler(targets, assets, pipeline)
     if JobType.TRANSCRIBE_AUDIO in config.job_types:
-        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CONTENT_OS_ASR_API_KEY")
-        if not api_key:
-            raise ASRConfigurationError("ASR API key must be supplied at runtime")
-        provider = OpenAICompatibleASRProvider(
-            api_key,
-            base_url=os.environ.get("OPENAI_BASE_URL", os.environ.get("CONTENT_OS_ASR_BASE_URL", "https://api.openai.com/v1")),
-            model=os.environ.get("OPENAI_MODEL", os.environ.get("CONTENT_OS_ASR_MODEL", "whisper-1")),
+        provider_kind = os.environ.get("CONTENT_OS_ASR_PROVIDER", "openai-compatible").strip().lower()
+        if provider_kind == "local":
+            provider = FasterWhisperASRProvider(
+                model=os.environ.get("CONTENT_OS_ASR_LOCAL_MODEL", "small"),
+                device=os.environ.get("CONTENT_OS_ASR_DEVICE", "cpu"),
+                compute_type=os.environ.get("CONTENT_OS_ASR_COMPUTE_TYPE", "int8"),
+                download_root=os.environ.get("CONTENT_OS_ASR_MODEL_ROOT") or None,
+            )
+            provider_name = "faster-whisper"
+        elif provider_kind in {"", "openai-compatible"}:
+            api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CONTENT_OS_ASR_API_KEY")
+            if not api_key:
+                raise ASRConfigurationError("ASR API key must be supplied at runtime")
+            provider = OpenAICompatibleASRProvider(
+                api_key,
+                base_url=os.environ.get("OPENAI_BASE_URL", os.environ.get("CONTENT_OS_ASR_BASE_URL", "https://api.openai.com/v1")),
+                model=os.environ.get("OPENAI_MODEL", os.environ.get("CONTENT_OS_ASR_MODEL", "whisper-1")),
+            )
+            provider_name = "openai-compatible"
+        else:
+            raise ASRConfigurationError("CONTENT_OS_ASR_PROVIDER must be local or openai-compatible")
+        handlers[JobType.TRANSCRIBE_AUDIO] = AssetTranscriptionJobHandler(
+            targets,
+            assets,
+            extractor,
+            provider,
+            ClipTranscriptPersistence(db),
+            ProviderCallLedger(db),
+            provider_name=provider_name,
+            provider_model=provider.model,
         )
-        handlers[JobType.TRANSCRIBE_AUDIO] = AssetTranscriptionJobHandler(targets, assets, extractor, provider, ClipTranscriptPersistence(db))
     if JobType.INDEX_CLIPS in config.job_types:
         api_key = os.environ.get("CONTENT_OS_VISION_API_KEY") or os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -130,6 +154,9 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             ExtractedKeyframeResolver(extractor),
             MediaVisionPipeline(db, provider),
             ClipEmbeddingIndexer(db, embedding_provider),
+            ProviderCallLedger(db),
+            vision_model=provider.model,
+            embedding_model=embedding_provider.model,
         )
     if JobType.RENDER in config.job_types:
         renderer_dir = Path(__file__).resolve().parents[3] / "apps" / "renderer"

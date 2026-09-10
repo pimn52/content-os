@@ -50,6 +50,22 @@
       "title": "Topics",
       "type": "array"
     },
+    "knowledge": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 200,
+      "title": "Knowledge",
+      "type": "array"
+    },
+    "opinions": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 200,
+      "title": "Opinions",
+      "type": "array"
+    },
     "vocabulary": {
       "items": {
         "type": "string"
@@ -58,12 +74,28 @@
       "title": "Vocabulary",
       "type": "array"
     },
+    "style_notes": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Style Notes",
+      "type": "array"
+    },
     "avoided_expressions": {
       "items": {
         "type": "string"
       },
       "maxItems": 200,
       "title": "Avoided Expressions",
+      "type": "array"
+    },
+    "boundaries": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Boundaries",
       "type": "array"
     },
     "common_hooks": {

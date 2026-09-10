@@ -9,8 +9,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.db import AssetRepository, ClipRepository, Database
-from app.domain.models import Asset, Clip, ProjectFormat, RationalFps, SourceKind, VideoScene, VideoSpec, VideoVisual
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository
+from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, ProjectFormat, RationalFps, SourceKind, VideoScene, VideoSpec, VideoVisual
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, UnauthorizedVisualError
 
 
@@ -28,7 +28,10 @@ class _Runner:
         props = json.loads(props_path.read_text(encoding="utf-8"))
         self.calls.append((argv, cwd, timeout_seconds, props))
         for scene in props["sceneSources"].values():
-            self.staged_bytes[scene["src"]] = (cwd / "public" / scene["src"]).read_bytes()
+            if scene["kind"] in {"video", "image"}:
+                self.staged_bytes[scene["src"]] = (cwd / "public" / scene["src"]).read_bytes()
+            if "narrationSrc" in scene:
+                self.staged_bytes[scene["narrationSrc"]] = (cwd / "public" / scene["narrationSrc"]).read_bytes()
         if self.returncode == 0:
             output = Path(argv[7])
             output.write_bytes(b"minimal-mp4")
@@ -91,6 +94,24 @@ def test_remotion_adapter_stages_local_clip_trims_and_preserves_source(tmp_path:
         db.close()
 
 
+def test_remotion_adapter_accepts_authorized_subinterval_inside_clip(tmp_path: Path) -> None:
+    db, asset, clip, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        renderer_root = _renderer_project(tmp_path / "renderer")
+        sub_visual = spec.scenes[0].visual.model_copy(update={"clip_start_ms": 1_200, "clip_end_ms": 2_000})
+        sub_scene = spec.scenes[0].model_copy(update={"duration_frames": 18, "visual": sub_visual})
+        sub_spec = spec.model_copy(update={"scenes": [sub_scene]})
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=renderer_root, runner=runner).render(
+            sub_spec, tmp_path / "output" / "subinterval.mp4"
+        )
+        source_props = runner.calls[0][3]["sceneSources"]["scene_01"]
+        assert source_props["trimBefore"] == 36
+        assert source_props["trimAfter"] == 59
+    finally:
+        db.close()
+
+
 def test_remotion_adapter_rejects_remote_unauthorized_and_unsupported_visuals(tmp_path: Path) -> None:
     db, asset, clip, spec = _setup(tmp_path)
     runner = _Runner()
@@ -132,6 +153,85 @@ def test_remotion_adapter_cleans_generated_staging_after_process_failure(tmp_pat
         db.close()
 
 
+def test_remotion_adapter_renders_typography_without_staging_media(tmp_path: Path) -> None:
+    db, _, _, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        root = _renderer_project(tmp_path / "renderer")
+        typography_visual = VideoVisual(source_kind=SourceKind.TYPOGRAPHY, authorization_reference="local-typography")
+        typography_spec = spec.model_copy(update={
+            "scenes": [spec.scenes[0].model_copy(update={"visual": typography_visual, "caption": "Use the fallback"})],
+        })
+        output = tmp_path / "output" / "typography.mp4"
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=root, runner=runner).render(typography_spec, output)
+        source_props = runner.calls[0][3]["sceneSources"]["scene_01"]
+        assert source_props == {"kind": "typography", "text": "Use the fallback"}
+        assert runner.staged_bytes == {}
+    finally:
+        db.close()
+
+
+def test_remotion_adapter_stages_imported_image_visual(tmp_path: Path) -> None:
+    db, _, _, spec = _setup(tmp_path)
+    image_source = tmp_path / "screen.png"
+    image_source.write_bytes(b"png-bytes")
+    image = ImageAsset(
+        source_kind=SourceKind.SCREENSHOT,
+        source_file=str(image_source),
+        content_hash="c" * 64,
+        width=800,
+        height=600,
+        authorization_reference="creator-screen",
+        imported_at=NOW,
+    )
+    ImageAssetRepository(db).create(image)
+    runner = _Runner()
+    try:
+        root = _renderer_project(tmp_path / "renderer")
+        image_visual = VideoVisual(source_kind=SourceKind.SCREENSHOT, authorization_reference="creator-screen", asset_id=image.id)
+        image_spec = spec.model_copy(update={
+            "scenes": [spec.scenes[0].model_copy(update={"visual": image_visual, "caption": "Screenshot fallback"})],
+        })
+        output = tmp_path / "output" / "image.mp4"
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), images=ImageAssetRepository(db), renderer_dir=root, runner=runner).render(image_spec, output)
+        source_props = runner.calls[0][3]["sceneSources"]["scene_01"]
+        assert source_props["kind"] == "image"
+        assert runner.staged_bytes[source_props["src"]] == image_source.read_bytes()
+    finally:
+        db.close()
+
+
+def test_remotion_adapter_mixes_authorized_narration_audio(tmp_path: Path) -> None:
+    db, _, _, spec = _setup(tmp_path)
+    audio_source = tmp_path / "voice.wav"
+    audio_source.write_bytes(b"voice-bytes")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET,
+        source_file=str(audio_source),
+        content_hash="d" * 64,
+        duration_ms=2_000,
+        sample_rate=48_000,
+        channels=1,
+        authorization_reference="creator-voice",
+        imported_at=NOW,
+    )
+    AudioAssetRepository(db).create(audio)
+    runner = _Runner()
+    try:
+        root = _renderer_project(tmp_path / "renderer")
+        narrated_scene = spec.scenes[0].model_copy(update={"narration_asset_id": audio.id, "caption": "Narrated scene"})
+        narrated_spec = spec.model_copy(update={"scenes": [narrated_scene]})
+        output = tmp_path / "output" / "narrated.mp4"
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db), renderer_dir=root, runner=runner).render(narrated_spec, output)
+        props = runner.calls[0][3]
+        source_props = props["sceneSources"]["scene_01"]
+        assert props["audioMode"] == "narration"
+        assert source_props["narrationStartFrame"] == 0
+        assert runner.staged_bytes[source_props["narrationSrc"]] == audio_source.read_bytes()
+    finally:
+        db.close()
+
+
 def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_source_audio() -> None:
     root = Path(__file__).parents[3] / "apps" / "renderer"
     manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
@@ -140,5 +240,8 @@ def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_sourc
     assert "@remotion/renderer" not in manifest["dependencies"]
     assert all(not value.startswith(("^", "~")) for value in manifest["dependencies"].values())
     timeline = (root / "src" / "video.tsx").read_text(encoding="utf-8")
-    assert "trimBefore" in timeline and "trimAfter" in timeline
-    assert "scene.caption" in timeline and "audioMode === 'source'" in timeline
+    assert "trimBefore" in timeline and "trimAfter" in timeline and "typography" in timeline and "narrationSrc" in timeline
+    assert "scene.caption" in timeline and "scene.captions" in timeline and "audioMode === 'narration'" in timeline
+    assert "objectFit: 'contain'" in timeline
+    assert "objectFit: 'cover'" not in timeline
+    assert "scene.caption && audioMode === 'narration'" in timeline

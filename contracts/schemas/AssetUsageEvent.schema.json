@@ -1,0 +1,81 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "output_version": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Output Version",
+      "type": "string"
+    },
+    "event_key": {
+      "maxLength": 500,
+      "minLength": 16,
+      "title": "Event Key",
+      "type": "string"
+    },
+    "media_id": {
+      "format": "uuid",
+      "title": "Media Id",
+      "type": "string"
+    },
+    "media_kind": {
+      "enum": [
+        "video",
+        "image",
+        "audio"
+      ],
+      "title": "Media Kind",
+      "type": "string"
+    },
+    "clip_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Clip Id"
+    },
+    "usage_kind": {
+      "const": "production",
+      "default": "production",
+      "title": "Usage Kind",
+      "type": "string"
+    },
+    "used_at": {
+      "format": "date-time",
+      "title": "Used At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "project_id",
+    "output_version",
+    "event_key",
+    "media_id",
+    "media_kind",
+    "used_at"
+  ],
+  "title": "AssetUsageEvent",
+  "type": "object"
+}

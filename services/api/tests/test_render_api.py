@@ -93,6 +93,10 @@ def test_render_api_assembles_and_serves_a_local_mp4_under_owned_root(tmp_path: 
         assert file_response.status_code == 200
         assert file_response.headers["content-type"].startswith("video/mp4")
         assert file_response.content[4:8] == b"ftyp"
+        head_response = client.head(body["download_url"])
+        assert head_response.status_code == 200
+        assert head_response.headers["content-type"] == "video/mp4"
+        assert int(head_response.headers["content-length"]) == len(file_response.content)
         render_id = body["render_id"]
         assert (output_root / str(project.id) / f"{render_id}.mp4").is_file()
         assert runner.calls == 1
@@ -127,4 +131,5 @@ def test_render_api_rejects_foreign_project_unauthorized_spec_and_unknown_files(
         # UUID route parameters and server-owned output names leave no path
         # segment that a caller can turn into traversal.
         assert client.get(f"/projects/{project.id}/renders/00000000-0000-0000-0000-000000000001").status_code == 404
+        assert client.head(f"/projects/{project.id}/renders/00000000-0000-0000-0000-000000000001").status_code == 404
         assert client.get(f"/projects/{project.id}/renders/%2E%2E%2Fsecret.mp4").status_code == 404

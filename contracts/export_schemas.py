@@ -16,13 +16,14 @@ API_ROOT = ROOT / "services" / "api"
 sys.path.insert(0, str(API_ROOT))
 
 from app.domain.models import (  # noqa: E402
-    AccountConnection, Asset, CandidateAsset, Clip, HistoricalContent, IPProfile, Job,
-    Project, ProjectFormat, RationalFps, ScenePlan, SourceKind, TalkingProfile,
-    CostCategory, UsageCost, VideoScene, VideoSpec, VideoVisual, VoiceProfile,
+    AccountConnection, AnalysisClipResult, AnalysisKeyframe, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ContentFeedback, ContentOpportunity, CostEstimate, CostLineItem, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, ProviderCallRecord, PublicationRecord,
+    Project, ProjectDraft, ProjectFormat, RationalFps, ScenePlan, ShootTask, SourceKind, TalkingProfile, TranscriptSegment,
+    CostCategory, UsageCost, VideoCaption, VideoScene, VideoSpec, VideoVisual, VoiceProfile,
 )
 
-SCHEMAS = (IPProfile, AccountConnection, HistoricalContent, Asset, Clip, VoiceProfile,
-           TalkingProfile, Project, ScenePlan, CandidateAsset, VideoSpec, Job, UsageCost)
+SCHEMAS = (IPProfile, AccountConnection, HistoricalContent, ContentOpportunity, Asset, ImageAsset, AudioAsset, Clip, TranscriptSegment, AnalysisKeyframe, AnalysisClipResult, AnalysisResultBundle, AssetUsageEvent, PublicationRecord, ContentFeedback, BudgetPolicy, ProviderCallRecord, VoiceProfile,
+           TalkingProfile, Project, ScenePlan, CandidateAsset, ShootTask, DraftRoute, ProjectDraft,
+           VideoCaption, VideoSpec, Job, UsageCost, CostLineItem, CostEstimate, CostReductionSuggestion)
 
 
 def main() -> None:

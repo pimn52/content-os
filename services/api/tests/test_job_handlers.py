@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.db import AssetRepository, ClipRepository, Database
-from app.domain.models import Asset, Clip, Job, JobStatus, JobType, RationalFps
+from app.budget import ProviderCallLedger
+from app.db import AssetRepository, BudgetPolicyRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository, ProviderCallRepository
+from app.domain.models import Asset, BudgetPolicy, Clip, CostCategory, IPProfile, Job, JobStatus, JobType, Project, RationalFps, UsageCost
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler
 from app.jobs.targets import AssetJobTargetStore
@@ -156,6 +157,64 @@ def test_transcription_handler_rate_limit_retries_outside_transaction(tmp_path: 
         db.close()
 
 
+def test_transcription_provider_failure_is_reconciled_and_retry_gets_new_call_record(tmp_path: Path) -> None:
+    db = Database(tmp_path / "metered-retry.sqlite")
+    try:
+        asset = _asset(db, tmp_path, has_audio=True)
+        profile = IPProfile(creator_name="Creator")
+        IPProfileRepository(db).create(profile)
+        project = Project(
+            ip_profile_id=profile.id,
+            title="Metered transcription",
+            topic="Budget boundary",
+            fps=RationalFps(numerator=25, denominator=1),
+            created_at=datetime.now(timezone.utc),
+        )
+        ProjectRepository(db).create(project)
+        policy = BudgetPolicy(project_id=project.id, allow_unknown_cost=True, updated_at=datetime.now(timezone.utc))
+        with db.transaction():
+            BudgetPolicyRepository(db).save(policy)
+        job = AssetJobTargetStore(db).enqueue(
+            _job(JobType.TRANSCRIBE_AUDIO, "metered-retry").model_copy(update={"project_id": project.id}),
+            asset.id,
+        )
+        audio = tmp_path / "analysis.wav"
+        audio.write_bytes(b"audio")
+
+        class Extractor:
+            def extract_audio(self, _: Asset) -> AudioExtraction:
+                return AudioExtraction(audio)
+
+        class Provider:
+            def transcribe(self, _: Path, **__: object) -> TranscriptionResult:
+                raise ASRRateLimitError("safe rate limited")
+
+        class Persistence:
+            def apply(self, asset_id: UUID, segments: object) -> object:
+                raise AssertionError("failed ASR result must not persist")
+
+        handler = AssetTranscriptionJobHandler(
+            AssetJobTargetStore(db),
+            AssetRepository(db),
+            Extractor(),
+            Provider(),
+            Persistence(),
+            ProviderCallLedger(db),
+        )
+        runner = _runner(JobStore(db), {JobType.TRANSCRIBE_AUDIO: handler})
+        first = runner.run_once()
+        second = runner.run_once()
+        assert first is not None and first.status is JobStatus.PENDING
+        assert second is not None and second.status is JobStatus.FAILED
+        records = ProviderCallRepository(db).list_for_project(project.id)
+        assert len(records) == 2
+        assert [record.status for record in records] == ["failed", "failed"]
+        assert [record.idempotency_key for record in records][0] != [record.idempotency_key for record in records][1]
+        assert JobStore(db).get(job.id).attempt == 2  # type: ignore[union-attr]
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_status", "expected_error"),
     [
@@ -290,7 +349,76 @@ def test_transcription_handler_writes_asr_segments_to_clips(tmp_path: Path) -> N
         result = _runner(JobStore(db), {JobType.TRANSCRIBE_AUDIO: handler}).run_once()
 
         assert result is not None and result.status is JobStatus.COMPLETED
-        assert [clip.transcript for clip in repository.list_by_asset(asset.id)] == ["first cross", "first cross second"]
+        persisted = repository.list_by_asset(asset.id)
+        assert [clip.transcript for clip in persisted] == ["first cross", "first cross second"]
+        assert {clip.transcript_source for clip in persisted} == {"openai-compatible:runtime-asr"}
+    finally:
+        db.close()
+
+
+def test_local_asr_handler_uses_known_zero_cost_and_records_provenance(tmp_path: Path) -> None:
+    db = Database(tmp_path / "local-asr.sqlite")
+    try:
+        asset = _asset(db, tmp_path, has_audio=True)
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=2_000, asset_duration_ms=2_000)
+        ClipRepository(db).create(clip)
+        profile = IPProfile(creator_name="Local ASR creator")
+        IPProfileRepository(db).create(profile)
+        project = Project(
+            ip_profile_id=profile.id,
+            title="Local ASR project",
+            topic="real transcript",
+            fps=RationalFps(numerator=25, denominator=1),
+            created_at=datetime.now(timezone.utc),
+        )
+        ProjectRepository(db).create(project)
+        budget = BudgetPolicy(project_id=project.id, allow_unknown_cost=True, updated_at=datetime.now(timezone.utc))
+        BudgetPolicyRepository(db).save(budget)
+        ProviderCallLedger(db).reserve(
+            project_id=project.id,
+            idempotency_key="pre-existing-unknown-call",
+            operation="scene_planning",
+            mode="runtime",
+            provider="openai-compatible",
+            model="planner",
+            input_source="project:old",
+            estimated_cost=UsageCost(category=CostCategory.LLM),
+        )
+        BudgetPolicyRepository(db).save(budget.model_copy(update={"allow_unknown_cost": False, "updated_at": datetime.now(timezone.utc)}))
+        job = _job(JobType.TRANSCRIBE_AUDIO, "local-asr")
+        job = job.model_copy(update={"project_id": project.id})
+        AssetJobTargetStore(db).enqueue(job, asset.id)
+        audio = tmp_path / "analysis.wav"
+        audio.write_bytes(b"audio")
+
+        class Extractor:
+            def extract_audio(self, _: Asset) -> AudioExtraction:
+                return AudioExtraction(audio)
+
+        class Provider:
+            model = "small"
+
+            def transcribe(self, _: Path, **__: object) -> TranscriptionResult:
+                return TranscriptionResult("real local text", (TranscriptionSegment(100, 1_900, "real local text"),), "en")
+
+        handler = AssetTranscriptionJobHandler(
+            AssetJobTargetStore(db),
+            AssetRepository(db),
+            Extractor(),
+            Provider(),
+            ClipTranscriptPersistence(db),
+            ProviderCallLedger(db),
+            provider_name="faster-whisper",
+            provider_model="small",
+        )
+        result = _runner(JobStore(db), {JobType.TRANSCRIBE_AUDIO: handler}).run_once()
+
+        assert result is not None and result.status is JobStatus.COMPLETED
+        call = next(record for record in ProviderCallRepository(db).list_for_project(project.id) if record.provider == "faster-whisper")
+        assert call.provider == "faster-whisper"
+        assert call.estimated_cost.amount == 0
+        assert call.estimated_cost.currency == "USD"
+        assert ClipRepository(db).get(clip.id).transcript_source == "faster-whisper:small"  # type: ignore[union-attr]
     finally:
         db.close()
 

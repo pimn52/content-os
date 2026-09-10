@@ -10,7 +10,8 @@ import json
 import math
 import sqlite3
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+import re
+from typing import Iterable, Literal, Sequence
 from uuid import UUID
 
 from app.db import ClipRepository, Database
@@ -75,6 +76,7 @@ class ClipIndex:
 class ClipSearchHit:
     clip: Clip
     score: float
+    score_basis: Literal["embedding_similarity", "lexical_overlap"] = "embedding_similarity"
 
 
 class ClipIndexRepository:
@@ -234,3 +236,87 @@ class ClipSearchService:
             if clip is not None:
                 hits.append(ClipSearchHit(clip, score))
         return hits
+
+
+class ClipTextSearchService:
+    """Small-sample local text retrieval without pretending to be embedding search.
+
+    This is an explicit fallback for environments where no embedding provider
+    is configured. It ranks persisted Clip descriptions/transcripts by token
+    overlap and marks every hit so callers can show the weaker evidence basis.
+    It never writes vectors or changes the embedding index.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+        asset_id: UUID | None = None,
+        orientation: ProjectFormat | str | None = None,
+        talking_candidate: bool | None = None,
+    ) -> list[ClipSearchHit]:
+        _validate_top_k(top_k)
+        if not isinstance(query, str) or not query.strip() or len(query) > 10_000:
+            raise IndexError("search query must be non-empty and at most 10000 characters")
+        query_terms = _lexical_terms(query)
+        if not query_terms:
+            raise IndexError("search query must contain searchable text")
+        clips = ClipRepository(self.db).list()
+        scored: list[tuple[float, str, Clip]] = []
+        for clip in clips:
+            if asset_id is not None and clip.asset_id != asset_id:
+                continue
+            if orientation is not None:
+                value = orientation.value if isinstance(orientation, ProjectFormat) else str(orientation)
+                if value not in {item.value for item in ProjectFormat}:
+                    raise IndexError("invalid orientation filter")
+                if clip.orientation is None or clip.orientation.value != value:
+                    continue
+            if talking_candidate is not None:
+                if not isinstance(talking_candidate, bool):
+                    raise IndexError("talking_candidate filter must be boolean")
+                if clip.talking_candidate != talking_candidate:
+                    continue
+            clip_terms = _lexical_terms(_clip_content_text(clip))
+            overlap = query_terms.intersection(clip_terms)
+            if not overlap:
+                continue
+            score = len(overlap) / len(query_terms)
+            scored.append((max(0.0, min(1.0, score)), str(clip.id), clip))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [ClipSearchHit(clip, score, "lexical_overlap") for score, _, clip in scored[:top_k]]
+
+
+def _validate_top_k(top_k: object) -> None:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 1_000:
+        raise IndexError("top_k must be an integer from 1 to 1000")
+
+
+def _clip_content_text(clip: Clip) -> str:
+    """Return Clip fields without searchable field labels."""
+    values: list[str] = []
+    for value in (
+        clip.transcript, clip.visual_description, *clip.people, *clip.objects,
+        clip.location, clip.action, clip.shot_type, clip.orientation.value if clip.orientation else None,
+    ):
+        if isinstance(value, str) and value.strip():
+            values.append(value)
+    return " ".join(values)
+
+
+def _lexical_terms(value: str) -> set[str]:
+    """Tokenize Latin words and overlapping CJK bigrams/trigrams."""
+    terms: set[str] = set()
+    for match in re.finditer(r"[a-z0-9]+|[\u4e00-\u9fff]+", value.lower()):
+        token = match.group(0)
+        if token.isascii():
+            terms.add(token)
+            continue
+        terms.update(character for character in token if character not in "的了是在和与及我你他她其这那一个为从到对中有无也更")
+        terms.update(token[index:index + 2] for index in range(len(token) - 1))
+        terms.update(token[index:index + 3] for index in range(len(token) - 2))
+    return {term for term in terms if term.strip()}

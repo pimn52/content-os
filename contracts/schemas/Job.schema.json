@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "CostCategory": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking",
+        "voice",
+        "asr",
+        "llm",
+        "render"
+      ],
+      "title": "CostCategory",
+      "type": "string"
+    },
     "JobStatus": {
       "enum": [
         "pending",
@@ -29,6 +49,480 @@
       ],
       "title": "JobType",
       "type": "string"
+    },
+    "ProjectFormat": {
+      "enum": [
+        "vertical",
+        "horizontal",
+        "square"
+      ],
+      "title": "ProjectFormat",
+      "type": "string"
+    },
+    "RationalFps": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "numerator": {
+          "exclusiveMinimum": 0,
+          "maximum": 240000,
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "title": "Denominator",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "title": "RationalFps",
+      "type": "object"
+    },
+    "RenderVideoJobPayload": {
+      "additionalProperties": false,
+      "description": "All persistent input for one server-owned local render.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "project_id": {
+          "format": "uuid",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "render_id": {
+          "format": "uuid",
+          "title": "Render Id",
+          "type": "string"
+        },
+        "video_spec": {
+          "$ref": "#/$defs/VideoSpec"
+        }
+      },
+      "required": [
+        "project_id",
+        "render_id",
+        "video_spec"
+      ],
+      "title": "RenderVideoJobPayload",
+      "type": "object"
+    },
+    "SourceKind": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking_profile"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "UsageCost": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/CostCategory"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,8}|(?=[\\d.]{1,13}0*$)\\d{0,8}\\.\\d{0,4}0*$)",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Amount"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currency"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "category"
+      ],
+      "title": "UsageCost",
+      "type": "object"
+    },
+    "VideoCaption": {
+      "additionalProperties": false,
+      "description": "A caption interval relative to the containing video scene.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "start_ms": {
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "text"
+      ],
+      "title": "VideoCaption",
+      "type": "object"
+    },
+    "VideoScene": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scene_id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "start_frame": {
+          "minimum": 0,
+          "title": "Start Frame",
+          "type": "integer"
+        },
+        "duration_frames": {
+          "exclusiveMinimum": 0,
+          "title": "Duration Frames",
+          "type": "integer"
+        },
+        "visual": {
+          "$ref": "#/$defs/VideoVisual"
+        },
+        "narration_asset_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narration Asset Id"
+        },
+        "narration_start_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narration Start Ms"
+        },
+        "narration_end_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Narration End Ms"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "maxLength": 10000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "captions": {
+          "items": {
+            "$ref": "#/$defs/VideoCaption"
+          },
+          "maxItems": 1000,
+          "title": "Captions",
+          "type": "array"
+        },
+        "transition": {
+          "default": "cut",
+          "maxLength": 100,
+          "title": "Transition",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scene_id",
+        "start_frame",
+        "duration_frames",
+        "visual"
+      ],
+      "title": "VideoScene",
+      "type": "object"
+    },
+    "VideoSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "project_id": {
+          "format": "uuid",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/ProjectFormat"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "maximum": 16384,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "maximum": 16384,
+          "title": "Height",
+          "type": "integer"
+        },
+        "fps": {
+          "$ref": "#/$defs/RationalFps"
+        },
+        "scenes": {
+          "items": {
+            "$ref": "#/$defs/VideoScene"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Scenes",
+          "type": "array"
+        },
+        "voice_profile_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voice Profile Id"
+        },
+        "estimated_cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "project_id",
+        "format",
+        "width",
+        "height",
+        "fps",
+        "scenes"
+      ],
+      "title": "VideoSpec",
+      "type": "object"
+    },
+    "VideoVisual": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/SourceKind"
+        },
+        "authorization_reference": {
+          "description": "Reference to the source rights record; never credentials.",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Authorization Reference",
+          "type": "string"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "clip_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clip Id"
+        },
+        "clip_start_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clip Start Ms"
+        },
+        "clip_end_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clip End Ms"
+        },
+        "source_duration_ms": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Duration Ms"
+        }
+      },
+      "required": [
+        "source_kind",
+        "authorization_reference"
+      ],
+      "title": "VideoVisual",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -112,6 +606,17 @@
       ],
       "default": null,
       "title": "Error Message"
+    },
+    "payload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RenderVideoJobPayload"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

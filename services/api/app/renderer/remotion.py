@@ -20,8 +20,8 @@ from typing import Mapping, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from app.db import AssetRepository, ClipRepository
-from app.domain.models import Asset, Clip, ProjectFormat, RationalFps, SourceKind, VideoScene, VideoSpec
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, ImageAssetRepository
+from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, ProjectFormat, RationalFps, SourceKind, VideoScene, VideoSpec
 
 
 class RendererError(RuntimeError):
@@ -71,17 +71,20 @@ class SubprocessRenderCommandRunner:
 
 @dataclass(frozen=True)
 class _PreparedVisual:
-    source: Path
+    source: Path | None
     trim_before: int
     trim_after: int
+    kind: str
+    narration_source: Path | None = None
+    narration_start_frame: int = 0
 
 
 class RemotionRenderer:
     """Render a validated VideoSpec to a local MP4 through ``npm exec remotion``.
 
-    Source audio remains enabled in the minimal timeline because there is no
-    narration asset implementation yet. The React composition encodes this as
-    ``audioMode: 'source'`` and does not mix any generated narration.
+    Source audio is kept for scenes without narration. When a persisted local
+    narration asset is attached to a scene, the React composition mutes that
+    scene's source audio and overlays the authorized narration interval.
     """
 
     def __init__(
@@ -89,6 +92,8 @@ class RemotionRenderer:
         assets: AssetRepository,
         clips: ClipRepository,
         *,
+        images: ImageAssetRepository | None = None,
+        audios: AudioAssetRepository | None = None,
         renderer_dir: str | Path,
         npm_command: str = "npm",
         timeout_seconds: float = 600.0,
@@ -106,6 +111,8 @@ class RemotionRenderer:
             raise RenderInputError("renderer timeout must be positive")
         self.assets = assets
         self.clips = clips
+        self.images = images
+        self.audios = audios
         self.renderer_dir = directory
         self.npm_command = _npm_executable(npm_command.strip())
         self.timeout_seconds = float(timeout_seconds)
@@ -119,7 +126,7 @@ class RemotionRenderer:
         output = _output_path(output_path)
         _renderer_project(self.renderer_dir)
         prepared = {scene.scene_id: self._validate_scene(scene, spec.fps) for scene in spec.scenes}
-        if output in {visual.source for visual in prepared.values()}:
+        if output in {visual.source for visual in prepared.values() if visual.source is not None}:
             raise RenderInputError("render output must not overwrite a source media file")
         output.parent.mkdir(parents=True, exist_ok=True)
         public_root = self.renderer_dir / "public" / "content-os-renders"
@@ -155,8 +162,20 @@ class RemotionRenderer:
         visual = scene.visual
         if scene.transition != "cut":
             raise RenderInputError("minimal renderer supports only cut transitions")
-        if scene.narration_asset_id is not None:
-            raise RenderInputError("narration assets are not supported by the minimal renderer")
+        narration_source, narration_start_frame = self._validate_narration(scene, composition_fps)
+        if visual.source_kind == SourceKind.TYPOGRAPHY:
+            if any(value is not None for value in (visual.asset_id, visual.clip_id, visual.clip_start_ms, visual.clip_end_ms, visual.source_duration_ms)):
+                raise RenderInputError("typography visual must not reference a media Clip")
+            return _PreparedVisual(source=None, trim_before=0, trim_after=0, kind="typography", narration_source=narration_source, narration_start_frame=narration_start_frame)
+        if visual.source_kind in {SourceKind.SCREENSHOT, SourceKind.CHART}:
+            if visual.asset_id is None or visual.clip_id is not None or any(value is not None for value in (visual.clip_start_ms, visual.clip_end_ms, visual.source_duration_ms)):
+                raise RenderInputError("static visual must reference an image asset without a Clip")
+            if self.images is None:
+                raise LocalResourceError("image asset repository is unavailable")
+            image = self.images.get(visual.asset_id)
+            if image is None or image.source_kind != visual.source_kind or image.authorization_reference != visual.authorization_reference:
+                raise UnauthorizedVisualError("VideoSpec static visual does not match the authorized stored image")
+            return _PreparedVisual(source=_local_existing_image(image), trim_before=0, trim_after=0, kind="image", narration_source=narration_source, narration_start_frame=narration_start_frame)
         if visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}:
             raise UnauthorizedVisualError("renderer accepts only authorized user or historical local media")
         if visual.asset_id is None or visual.clip_id is None or visual.clip_start_ms is None or visual.clip_end_ms is None:
@@ -169,8 +188,9 @@ class RemotionRenderer:
             clip.asset_id != asset.id
             or asset.source_kind != visual.source_kind
             or visual.authorization_reference != asset.authorization_reference
-            or clip.start_ms != visual.clip_start_ms
-            or clip.end_ms != visual.clip_end_ms
+            or visual.clip_start_ms < clip.start_ms
+            or visual.clip_end_ms > clip.end_ms
+            or visual.clip_end_ms <= visual.clip_start_ms
             or clip.asset_duration_ms != asset.duration_ms
             or visual.source_duration_ms != asset.duration_ms
             or clip.end_ms > asset.duration_ms
@@ -179,15 +199,32 @@ class RemotionRenderer:
         source = _local_existing_file(asset)
         # Remotion trimBefore/trimAfter are measured in composition frames,
         # not the source file's native frame rate.
-        trim_before = _ceil_frames(clip.start_ms, composition_fps)
-        trim_after = _floor_frames(clip.end_ms, composition_fps)
+        trim_before = _ceil_frames(visual.clip_start_ms, composition_fps)
+        trim_after = _floor_frames(visual.clip_end_ms, composition_fps)
         if trim_after <= trim_before:
             raise RenderInputError("Clip interval cannot be represented as positive source frames")
         # VideoSpec's own validator enforces source duration relative to the
         # project timeline. This checks the adapter's source-frame trim too.
         if scene.duration_frames > trim_after - trim_before:
             raise RenderInputError("Clip source frame range is shorter than the requested scene")
-        return _PreparedVisual(source=source, trim_before=trim_before, trim_after=trim_after)
+        return _PreparedVisual(source=source, trim_before=trim_before, trim_after=trim_after, kind="video", narration_source=narration_source, narration_start_frame=narration_start_frame)
+
+    def _validate_narration(self, scene: VideoScene, composition_fps: RationalFps) -> tuple[Path | None, int]:
+        if scene.narration_asset_id is None:
+            return None, 0
+        if self.audios is None:
+            raise LocalResourceError("audio asset repository is unavailable")
+        audio = self.audios.get(scene.narration_asset_id)
+        if audio is None:
+            raise LocalResourceError("referenced narration audio is unavailable")
+        start_ms = scene.narration_start_ms or 0
+        end_ms = scene.narration_end_ms or audio.duration_ms
+        if end_ms > audio.duration_ms:
+            raise RenderInputError("narration interval exceeds audio duration")
+        required_ms = (scene.duration_frames * 1_000 * composition_fps.denominator + composition_fps.numerator - 1) // composition_fps.numerator
+        if end_ms - start_ms < required_ms:
+            raise RenderInputError("narration interval is shorter than the scene")
+        return _local_existing_audio(audio), _ceil_frames(start_ms, composition_fps)
 
     def _stage_props(
         self,
@@ -197,9 +234,28 @@ class RemotionRenderer:
         run_id: str,
     ) -> dict[str, object]:
         staged_by_source: dict[Path, str] = {}
+        staged_by_audio: dict[Path, str] = {}
         scene_sources: dict[str, dict[str, object]] = {}
         for scene in spec.scenes:
             visual = prepared[scene.scene_id]
+            narration_relative = None
+            if visual.narration_source is not None:
+                narration_relative = staged_by_audio.get(visual.narration_source)
+                if narration_relative is None:
+                    filename = f"narration-{len(staged_by_audio):03d}-{visual.narration_source.name}"
+                    destination = staging / filename
+                    shutil.copy2(visual.narration_source, destination)
+                    narration_relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
+                    staged_by_audio[visual.narration_source] = narration_relative
+            if visual.source is None:
+                scene_sources[scene.scene_id] = {
+                    "kind": "typography",
+                    "text": scene.caption or scene.scene_id,
+                }
+                if narration_relative is not None:
+                    scene_sources[scene.scene_id]["narrationSrc"] = narration_relative
+                    scene_sources[scene.scene_id]["narrationStartFrame"] = visual.narration_start_frame
+                continue
             relative = staged_by_source.get(visual.source)
             if relative is None:
                 filename = f"{len(staged_by_source):03d}-{visual.source.name}"
@@ -208,14 +264,18 @@ class RemotionRenderer:
                 relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
                 staged_by_source[visual.source] = relative
             scene_sources[scene.scene_id] = {
+                "kind": visual.kind,
                 "src": relative,
                 "trimBefore": visual.trim_before,
                 "trimAfter": visual.trim_after,
             }
+            if narration_relative is not None:
+                scene_sources[scene.scene_id]["narrationSrc"] = narration_relative
+                scene_sources[scene.scene_id]["narrationStartFrame"] = visual.narration_start_frame
         return {
             "videoSpec": spec.model_dump(mode="json"),
             "sceneSources": scene_sources,
-            "audioMode": "source",
+            "audioMode": "narration" if any(value.narration_source is not None for value in prepared.values()) else "source",
         }
 
 
@@ -243,6 +303,26 @@ def _local_existing_file(asset: Asset) -> Path:
     path = Path(raw).expanduser().resolve()
     if not path.is_file():
         raise LocalResourceError("referenced local media file does not exist")
+    return path
+
+
+def _local_existing_image(asset: ImageAsset) -> Path:
+    raw = asset.source_file
+    if _is_remote_or_network_path(raw):
+        raise LocalResourceError("renderer rejects remote or network image sources")
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise LocalResourceError("referenced local image file does not exist")
+    return path
+
+
+def _local_existing_audio(asset: AudioAsset) -> Path:
+    raw = asset.source_file
+    if _is_remote_or_network_path(raw):
+        raise LocalResourceError("renderer rejects remote or network audio sources")
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise LocalResourceError("referenced local narration file does not exist")
     return path
 
 

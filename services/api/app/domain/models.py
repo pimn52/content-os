@@ -1,7 +1,7 @@
 """Provider-agnostic, versioned domain contracts for Content OS."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -134,10 +134,57 @@ class IPProfile(ContractModel):
     domains: list[str] = Field(default_factory=list, max_length=30)
     audience: str | None = Field(default=None, max_length=1_000)
     topics: list[str] = Field(default_factory=list, max_length=100)
+    knowledge: list[str] = Field(default_factory=list, max_length=200)
+    opinions: list[str] = Field(default_factory=list, max_length=200)
     vocabulary: list[str] = Field(default_factory=list, max_length=200)
+    style_notes: list[str] = Field(default_factory=list, max_length=100)
     avoided_expressions: list[str] = Field(default_factory=list, max_length=200)
+    boundaries: list[str] = Field(default_factory=list, max_length=100)
     common_hooks: list[str] = Field(default_factory=list, max_length=100)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class AnalysisKeyframe(ContractModel):
+    timestamp_ms: NonNegativeMs
+    reference: str = Field(min_length=1, max_length=2_000, description="Stable local analysis reference; not a secret URL.")
+    description: str | None = Field(default=None, max_length=5_000)
+
+
+class AnalysisClipResult(ContractModel):
+    asset_id: UUID
+    clip_id: UUID = Field(default_factory=uuid4)
+    start_ms: NonNegativeMs
+    end_ms: PositiveFrames
+    transcript: str | None = Field(default=None, max_length=100_000)
+    available_subtitles: list[str] = Field(default_factory=list, max_length=100)
+    visual_description: str | None = Field(default=None, max_length=5_000)
+    people: list[str] = Field(default_factory=list, max_length=30)
+    objects: list[str] = Field(default_factory=list, max_length=100)
+    action: str | None = Field(default=None, max_length=500)
+    confidence: Score | None = None
+    keyframes: list[AnalysisKeyframe] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> "AnalysisClipResult":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("analysis clip interval must be valid")
+        if any(frame.timestamp_ms < self.start_ms or frame.timestamp_ms > self.end_ms for frame in self.keyframes):
+            raise ValueError("analysis keyframes must fall within the clip interval")
+        return self
+
+
+class AnalysisResultBundle(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    input_hash: str = Field(min_length=16, max_length=128, pattern=r"^[A-Fa-f0-9]+$")
+    mode: Literal["assisted_test", "runtime"]
+    source: str = Field(min_length=1, max_length=200, description="Origin of the analysis result, never credentials.")
+    model: str = Field(min_length=1, max_length=200)
+    tool: str = Field(min_length=1, max_length=200)
+    analyzed_at: AwareDatetime
+    ip_profile_id: UUID | None = None
+    ip_profile_version: int | None = Field(default=None, gt=0)
+    profile_snapshot: dict[str, JsonValue] = Field(default_factory=dict)
+    results: list[AnalysisClipResult] = Field(min_length=1, max_length=10_000)
 
 
 class AccountConnection(ContractModel):
@@ -169,6 +216,23 @@ class HistoricalContent(ContractModel):
         return values
 
 
+class ContentOpportunity(ContractModel):
+    """A traceable topic opportunity supplied by a user or a read-only source."""
+
+    id: UUID = Field(default_factory=uuid4)
+    dedupe_key: str = Field(min_length=1, max_length=700)
+    source_type: Literal["manual", "historical_content", "account_signal"]
+    source_ref: str = Field(min_length=1, max_length=500)
+    title: str = Field(min_length=1, max_length=500)
+    observed_at: AwareDatetime
+    fit_reason: str = Field(min_length=1, max_length=5_000)
+    angle: str = Field(min_length=1, max_length=5_000)
+    uncertainty: str | None = Field(default=None, max_length=5_000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+    status: Literal["new", "used", "dismissed"] = "new"
+    created_at: AwareDatetime
+
+
 class Asset(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     source_kind: SourceKind = SourceKind.USER_ASSET
@@ -184,6 +248,48 @@ class Asset(ContractModel):
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class ImageAsset(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    source_kind: Literal[SourceKind.SCREENSHOT, SourceKind.CHART] = SourceKind.SCREENSHOT
+    source_file: str = Field(min_length=1, max_length=2_000, description="Local logical path, never a secret URL.")
+    content_hash: str = Field(min_length=16, max_length=128)
+    width: int = Field(gt=0, le=16_384)
+    height: int = Field(gt=0, le=16_384)
+    authorization_reference: str = Field(min_length=1, max_length=500, description="Rights or authorization record reference; never credentials.")
+    imported_at: AwareDatetime
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class TranscriptSegment(ContractModel):
+    """A persisted, source-relative spoken interval returned by ASR."""
+
+    start_ms: NonNegativeMs
+    end_ms: PositiveFrames
+    text: str = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> "TranscriptSegment":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("transcript segment end_ms must be greater than start_ms")
+        return self
+
+
+class AudioAsset(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    source_kind: Literal[SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET] = SourceKind.USER_ASSET
+    source_file: str = Field(min_length=1, max_length=2_000, description="Local logical path, never a secret URL.")
+    content_hash: str = Field(min_length=16, max_length=128)
+    duration_ms: PositiveFrames
+    sample_rate: int = Field(gt=0, le=192_000)
+    channels: int = Field(gt=0, le=8)
+    language: str | None = Field(default=None, max_length=20)
+    authorization_reference: str = Field(min_length=1, max_length=500, description="Rights or authorization record reference; never credentials.")
+    imported_at: AwareDatetime
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    transcript_segments: list[TranscriptSegment] = Field(default_factory=list, max_length=10_000)
+    transcript_source: str | None = Field(default=None, max_length=500, description="Traceable source reference for the current transcript.")
+
+
 class Clip(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     asset_id: UUID
@@ -191,6 +297,8 @@ class Clip(ContractModel):
     end_ms: NonNegativeMs
     asset_duration_ms: PositiveFrames
     transcript: str | None = Field(default=None, max_length=100_000)
+    transcript_segments: list[TranscriptSegment] = Field(default_factory=list, max_length=10_000)
+    transcript_source: str | None = Field(default=None, max_length=500, description="Traceable source reference for the current transcript.")
     speaker_ids: list[str] = Field(default_factory=list, max_length=20)
     visual_description: str | None = Field(default=None, max_length=5_000)
     people: list[str] = Field(default_factory=list, max_length=30)
@@ -271,6 +379,7 @@ class ScenePlan(ContractModel):
     preferred_sources: list[SourceKind] = Field(min_length=1, max_length=10)
     fallback_sources: list[SourceKind] = Field(default_factory=list, max_length=10)
     caption_emphasis: list[str] = Field(default_factory=list, max_length=30)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100, description="Traceable IP/material evidence identifiers.")
 
 
 class UsageCost(ContractModel):
@@ -293,6 +402,115 @@ class UsageCost(ContractModel):
             raise ValueError("currency requires a known amount")
         if self.amount is not None and self.currency is None:
             raise ValueError("currency is required for a known amount")
+        return self
+
+
+class CostLineItem(ContractModel):
+    """One explainable line in a project execution estimate."""
+
+    scope: Literal["scene", "provider", "render", "audio"]
+    scene_plan_id: UUID | None = None
+    label: str = Field(min_length=1, max_length=200)
+    cost: UsageCost
+
+    @model_validator(mode="after")
+    def scene_scope_has_scene(self) -> "CostLineItem":
+        if self.scope == "scene" and self.scene_plan_id is None:
+            raise ValueError("scene cost line items require a scene_plan_id")
+        if self.scope != "scene" and self.scene_plan_id is not None:
+            raise ValueError("only scene cost line items may reference a scene_plan_id")
+        return self
+
+
+class CostEstimate(ContractModel):
+    """Project-facing cost summary; unknown amounts remain explicitly unknown."""
+
+    currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+    known_amount: Decimal = Field(default=Decimal("0"), ge=Decimal("0"), max_digits=12, decimal_places=4)
+    unknown_cost_count: int = Field(default=0, ge=0, strict=True)
+    selected_scene_count: int = Field(default=0, ge=0, strict=True)
+    required_scene_count: int = Field(default=0, ge=0, strict=True)
+    line_items: tuple[CostLineItem, ...] = Field(default_factory=tuple, max_length=1_000)
+
+    @field_validator("known_amount")
+    @classmethod
+    def known_amount_is_finite(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("known_amount must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def totals_match_line_items(self) -> "CostEstimate":
+        known = Decimal("0")
+        unknown = 0
+        for item in self.line_items:
+            if item.cost.amount is None or item.cost.currency != self.currency:
+                unknown += 1
+            else:
+                known += item.cost.amount
+        if known != self.known_amount or unknown != self.unknown_cost_count:
+            raise ValueError("cost totals must match line_items")
+        if self.selected_scene_count > self.required_scene_count:
+            raise ValueError("selected_scene_count cannot exceed required_scene_count")
+        return self
+
+
+class BudgetPolicy(ContractModel):
+    """A local spending/call ceiling; it never stores provider credentials."""
+
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID | None = None
+    currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+    max_amount: Decimal | None = Field(default=None, ge=Decimal("0"), max_digits=12, decimal_places=4)
+    max_calls: int | None = Field(default=None, ge=0, strict=True)
+    allow_unknown_cost: bool = False
+    updated_at: AwareDatetime
+
+    @field_validator("max_amount")
+    @classmethod
+    def max_amount_is_finite(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and not value.is_finite():
+            raise ValueError("max_amount must be finite")
+        return value
+
+
+class ProviderCallRecord(ContractModel):
+    """The auditable boundary around a model/provider operation.
+
+    A reservation is persisted before an external call.  Completion may carry
+    observed usage and actual cost, while unknown values remain unknown rather
+    than being converted to zero.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    operation: Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render"]
+    mode: Literal["assisted_test", "runtime"]
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    input_source: str = Field(min_length=1, max_length=500)
+    status: Literal["reserved", "running", "completed", "failed", "cancelled"] = "reserved"
+    estimated_cost: UsageCost
+    actual_cost: UsageCost | None = None
+    input_tokens: int | None = Field(default=None, ge=0, strict=True)
+    output_tokens: int | None = Field(default=None, ge=0, strict=True)
+    cache_tokens: int | None = Field(default=None, ge=0, strict=True)
+    usage_observable: bool | None = None
+    price_date: date | None = None
+    error_code: str | None = Field(default=None, max_length=100)
+    created_at: AwareDatetime
+    completed_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def terminal_timestamps_are_consistent(self) -> "ProviderCallRecord":
+        terminal = {"completed", "failed", "cancelled"}
+        if self.completed_at is not None and self.status not in terminal:
+            raise ValueError("completed_at requires a terminal provider call status")
+        if self.status == "completed" and self.actual_cost is None:
+            # A provider may not expose a billable amount; the record remains
+            # auditable with actual_cost=null instead of silently claiming zero.
+            return self
         return self
 
 
@@ -321,6 +539,42 @@ class CandidateAsset(ContractModel):
         return self
 
 
+class CostReductionSuggestion(ContractModel):
+    """An explainable, non-destructive lower-cost alternative for one scene."""
+
+    scene_plan_id: UUID
+    current: CandidateAsset
+    suggested: CandidateAsset
+    changed: bool
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ShootTask(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    scene_plan_id: UUID
+    scene_id: str = Field(min_length=1, max_length=100)
+    what_to_shoot: str = Field(min_length=1, max_length=2_000)
+    framing: str = Field(min_length=1, max_length=200)
+    duration_ms: PositiveFrames
+    requires_speaking: bool
+    status: Literal["confirmed", "fulfilled", "dismissed"] = "confirmed"
+    asset_id: UUID | None = None
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def fulfilled_task_requires_asset(self) -> "ShootTask":
+        if self.status == "fulfilled" and self.asset_id is None:
+            raise ValueError("fulfilled shoot tasks require an asset_id")
+        return self
+
+
+class DraftRoute(ContractModel):
+    scene_plan_id: UUID
+    candidates: tuple[CandidateAsset, ...] = Field(min_length=1, max_length=20)
+
+
 class VideoVisual(ContractModel):
     source_kind: SourceKind
     authorization_reference: str = Field(min_length=1, max_length=500, description="Reference to the source rights record; never credentials.")
@@ -346,14 +600,41 @@ class VideoVisual(ContractModel):
         return self
 
 
+class VideoCaption(ContractModel):
+    """A caption interval relative to the containing video scene."""
+
+    start_ms: NonNegativeMs
+    end_ms: PositiveFrames
+    text: str = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> "VideoCaption":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("caption end_ms must be greater than start_ms")
+        return self
+
+
 class VideoScene(ContractModel):
     scene_id: str = Field(min_length=1, max_length=100)
     start_frame: int = Field(ge=0, strict=True)
     duration_frames: PositiveFrames
     visual: VideoVisual
     narration_asset_id: UUID | None = None
+    narration_start_ms: NonNegativeMs | None = None
+    narration_end_ms: NonNegativeMs | None = None
     caption: str | None = Field(default=None, max_length=10_000)
+    captions: list[VideoCaption] = Field(default_factory=list, max_length=1_000)
     transition: str = Field(default="cut", max_length=100)
+
+    @model_validator(mode="after")
+    def narration_interval_is_complete(self) -> "VideoScene":
+        if (self.narration_start_ms is None) != (self.narration_end_ms is None):
+            raise ValueError("narration start/end must be supplied together")
+        if self.narration_start_ms is not None and self.narration_end_ms <= self.narration_start_ms:
+            raise ValueError("narration interval must be valid")
+        if self.narration_asset_id is None and self.narration_start_ms is not None:
+            raise ValueError("narration interval requires narration_asset_id")
+        return self
 
 
 class VideoSpec(ContractModel):
@@ -382,6 +663,60 @@ class VideoSpec(ContractModel):
                 if source_ms * self.fps.numerator < required_frame_count * self.fps.denominator * 1_000:
                     raise ValueError("source clip is shorter than the scene duration")
         return self
+
+
+class ProjectDraft(ContractModel):
+    project_id: UUID
+    version: int = Field(default=0, ge=0, strict=True)
+    script: str | None = Field(default=None, max_length=100_000)
+    topic: str | None = Field(default=None, max_length=5_000)
+    scenes: list[ScenePlan] = Field(default_factory=list, max_length=1_000)
+    routes: list[DraftRoute] = Field(default_factory=list, max_length=1_000)
+    confirmed: list[CandidateAsset] = Field(default_factory=list, max_length=1_000)
+    video_spec: VideoSpec | None = None
+    updated_at: AwareDatetime
+
+
+class AssetUsageEvent(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    output_version: str = Field(min_length=1, max_length=200)
+    event_key: str = Field(min_length=16, max_length=500)
+    media_id: UUID
+    media_kind: Literal["video", "image", "audio"]
+    clip_id: UUID | None = None
+    usage_kind: Literal["production"] = "production"
+    used_at: AwareDatetime
+
+
+class PublicationRecord(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    output_version: str = Field(min_length=1, max_length=200)
+    platform: str = Field(min_length=1, max_length=100)
+    published_at: AwareDatetime
+    content_url: str | None = Field(default=None, max_length=2_000)
+    content_external_id: str | None = Field(default=None, max_length=500)
+    metrics: dict[str, JsonValue] = Field(default_factory=dict)
+    metric_source: str | None = Field(default=None, max_length=200)
+    observation_window_days: int | None = Field(default=None, ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def metrics_need_source(self) -> "PublicationRecord":
+        if self.metrics and not self.metric_source:
+            raise ValueError("metric_source is required when metrics are provided")
+        return self
+
+
+class ContentFeedback(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    output_version: str = Field(min_length=1, max_length=200)
+    accepted: bool
+    changed_fields: list[str] = Field(default_factory=list, max_length=100)
+    rejection_reason: str | None = Field(default=None, max_length=2_000)
+    notes: str | None = Field(default=None, max_length=10_000)
+    created_at: AwareDatetime
 
 
 class RenderVideoJobPayload(ContractModel):

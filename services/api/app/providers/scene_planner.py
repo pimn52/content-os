@@ -10,7 +10,7 @@ import math
 import socket
 from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import Mapping, Protocol
+from typing import Literal, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -79,7 +79,14 @@ class ScenePlanResult:
 
 
 class ScenePlanner(Protocol):
-    def plan(self, project: Project, *, script: str | None = None, topic: str | None = None) -> ScenePlanResult: ...
+    def plan(
+        self,
+        project: Project,
+        *,
+        script: str | None = None,
+        topic: str | None = None,
+        context: Mapping[str, object] | None = None,
+    ) -> ScenePlanResult: ...
 
 
 @dataclass(frozen=True)
@@ -161,7 +168,12 @@ _FIXED_PROMPT = (
 
 
 class OpenAICompatibleScenePlanner:
-    """Runtime-key ``POST /v1/responses`` structured ScenePlan provider."""
+    """Runtime-key OpenAI-compatible structured ScenePlan provider.
+
+    ``responses`` remains the default. ``chat_completions`` is an explicit
+    compatibility mode for providers such as Moonshot/Kimi that expose the
+    OpenAI Chat Completions shape instead of the Responses shape.
+    """
 
     def __init__(
         self,
@@ -169,6 +181,7 @@ class OpenAICompatibleScenePlanner:
         *,
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4.1-mini",
+        protocol: Literal["responses", "chat_completions"] | str = "responses",
         timeout_seconds: float = 60.0,
         transport: ScenePlannerHTTPTransport | None = None,
     ) -> None:
@@ -177,6 +190,7 @@ class OpenAICompatibleScenePlanner:
         normalized_base_url = _validate_base_url(base_url)
         if not isinstance(model, str) or not model.strip():
             raise ScenePlannerConfigurationError("scene planner model must not be empty")
+        selected_protocol = _validate_protocol(protocol)
         if isinstance(timeout_seconds, bool):
             raise ScenePlannerConfigurationError("scene planner timeout must be finite and positive")
         try:
@@ -186,12 +200,21 @@ class OpenAICompatibleScenePlanner:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ScenePlannerConfigurationError("scene planner timeout must be finite and positive")
         self._api_key = api_key.strip()
-        self._endpoint = f"{normalized_base_url.rstrip('/')}/responses"
+        endpoint_suffix = "responses" if selected_protocol == "responses" else "chat/completions"
+        self._endpoint = f"{normalized_base_url.rstrip('/')}/{endpoint_suffix}"
         self.model = model.strip()
+        self.protocol = selected_protocol
         self.timeout_seconds = timeout
         self.transport = transport or UrllibScenePlannerTransport()
 
-    def plan(self, project: Project, *, script: str | None = None, topic: str | None = None) -> ScenePlanResult:
+    def plan(
+        self,
+        project: Project,
+        *,
+        script: str | None = None,
+        topic: str | None = None,
+        context: Mapping[str, object] | None = None,
+    ) -> ScenePlanResult:
         if not isinstance(project, Project):
             raise ScenePlannerInputError("scene planning requires a Project contract")
         requested_script = _optional_request_text("script", script, 100_000)
@@ -208,14 +231,26 @@ class OpenAICompatibleScenePlanner:
             "requested_topic": requested_topic,
             "user_script": requested_script,
         }
-        body = {
-            "model": self.model,
-            "store": False,
-            "input": [{"role": "user", "content": [
-                {"type": "input_text", "text": _FIXED_PROMPT + "\n\nProject request:\n" + json.dumps(request_context, ensure_ascii=False)},
-            ]}],
-            "text": {"format": {"type": "json_schema", "name": "scene_plan", "strict": True, "schema": _PLAN_SCHEMA}},
-        }
+        if context is not None:
+            request_context["creator_context"] = context
+        prompt = _FIXED_PROMPT + "\n\nProject request:\n" + json.dumps(request_context, ensure_ascii=False)
+        if self.protocol == "responses":
+            body = {
+                "model": self.model,
+                "store": False,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": prompt},
+                ]}],
+                "text": {"format": {"type": "json_schema", "name": "scene_plan", "strict": True, "schema": _PLAN_SCHEMA}},
+            }
+        else:
+            # Chat-completions providers do not share the Responses
+            # ``text.format`` contract. Keep the same strict prompt and
+            # validate the returned JSON locally before it reaches the domain.
+            body = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+            }
         try:
             response = self.transport.post(
                 self._endpoint,
@@ -232,7 +267,7 @@ class OpenAICompatibleScenePlanner:
         except Exception:
             raise ScenePlannerConnectionError("scene planner transport request failed") from None
         _raise_for_status(response.status_code)
-        return _parse_response(response.body, project)
+        return _parse_response(response.body, project, protocol=self.protocol)
 
 
 OpenAICompatibleScenePlanProvider = OpenAICompatibleScenePlanner
@@ -244,6 +279,12 @@ def _optional_request_text(name: str, value: object, maximum: int) -> str | None
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ScenePlannerInputError(f"scene planner {name} must be a non-empty string within its maximum length")
     return value
+
+
+def _validate_protocol(value: object) -> Literal["responses", "chat_completions"]:
+    if not isinstance(value, str) or value not in {"responses", "chat_completions"}:
+        raise ScenePlannerConfigurationError("scene planner protocol must be responses or chat_completions")
+    return value  # type: ignore[return-value]
 
 
 def _raise_for_status(status_code: object) -> None:
@@ -258,24 +299,45 @@ def _raise_for_status(status_code: object) -> None:
     raise ScenePlannerHTTPError(status_code)
 
 
-def _parse_response(body: bytes, project: Project) -> ScenePlanResult:
+def _parse_response(
+    body: bytes,
+    project: Project,
+    *,
+    protocol: Literal["responses", "chat_completions"] = "responses",
+) -> ScenePlanResult:
     try:
         document = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ScenePlannerProviderResponseError("scene planner provider returned malformed JSON") from exc
-    if not isinstance(document, dict) or not isinstance(document.get("output"), list):
+    if not isinstance(document, dict):
         raise ScenePlannerProviderResponseError("scene planner provider response has no output message")
-    texts = [
-        content.get("text")
-        for output in document["output"]
-        if isinstance(output, dict) and output.get("type") == "message" and isinstance(output.get("content"), list)
-        for content in output["content"]
-        if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str)
-    ]
+    if protocol == "responses":
+        if not isinstance(document.get("output"), list):
+            raise ScenePlannerProviderResponseError("scene planner provider response has no output message")
+        texts = [
+            content.get("text")
+            for output in document["output"]
+            if isinstance(output, dict) and output.get("type") == "message" and isinstance(output.get("content"), list)
+            for content in output["content"]
+            if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str)
+        ]
+    else:
+        choices = document.get("choices")
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [block.get("text") for block in content if isinstance(block, dict) and isinstance(block.get("text"), str)]
+        else:
+            texts = []
     if len(texts) != 1:
         raise ScenePlannerProviderResponseError("scene planner provider response has no structured output text")
     try:
-        value = json.loads(texts[0])
+        cleaned = texts[0].strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        value = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ScenePlannerProviderResponseError("scene planner provider returned invalid structured output") from exc
     if not isinstance(value, dict) or set(value) != {"scenes"} or not isinstance(value["scenes"], list):

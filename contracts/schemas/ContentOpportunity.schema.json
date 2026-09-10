@@ -1,0 +1,109 @@
+{
+  "additionalProperties": false,
+  "description": "A traceable topic opportunity supplied by a user or a read-only source.",
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "dedupe_key": {
+      "maxLength": 700,
+      "minLength": 1,
+      "title": "Dedupe Key",
+      "type": "string"
+    },
+    "source_type": {
+      "enum": [
+        "manual",
+        "historical_content",
+        "account_signal"
+      ],
+      "title": "Source Type",
+      "type": "string"
+    },
+    "source_ref": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Source Ref",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "fit_reason": {
+      "maxLength": 5000,
+      "minLength": 1,
+      "title": "Fit Reason",
+      "type": "string"
+    },
+    "angle": {
+      "maxLength": 5000,
+      "minLength": 1,
+      "title": "Angle",
+      "type": "string"
+    },
+    "uncertainty": {
+      "anyOf": [
+        {
+          "maxLength": 5000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Uncertainty"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "status": {
+      "default": "new",
+      "enum": [
+        "new",
+        "used",
+        "dismissed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "dedupe_key",
+    "source_type",
+    "source_ref",
+    "title",
+    "observed_at",
+    "fit_reason",
+    "angle",
+    "created_at"
+  ],
+  "title": "ContentOpportunity",
+  "type": "object"
+}

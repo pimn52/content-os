@@ -14,5 +14,6 @@ content-os-data/
 .mypy_cache/
 node_modules/
 apps/renderer/public/content-os-renders/
+apps/web/dist/
 .DS_Store
 Thumbs.db

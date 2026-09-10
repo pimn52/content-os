@@ -1,0 +1,208 @@
+{
+  "$defs": {
+    "CostCategory": {
+      "enum": [
+        "user_asset",
+        "historical_asset",
+        "capture",
+        "stock",
+        "ai_image",
+        "ai_video",
+        "typography",
+        "screenshot",
+        "chart",
+        "talking",
+        "voice",
+        "asr",
+        "llm",
+        "render"
+      ],
+      "title": "CostCategory",
+      "type": "string"
+    },
+    "CostLineItem": {
+      "additionalProperties": false,
+      "description": "One explainable line in a project execution estimate.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "scene",
+            "provider",
+            "render",
+            "audio"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "scene_plan_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scene Plan Id"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "cost": {
+          "$ref": "#/$defs/UsageCost"
+        }
+      },
+      "required": [
+        "scope",
+        "label",
+        "cost"
+      ],
+      "title": "CostLineItem",
+      "type": "object"
+    },
+    "UsageCost": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/CostCategory"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,8}|(?=[\\d.]{1,13}0*$)\\d{0,8}\\.\\d{0,4}0*$)",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Amount"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currency"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "category"
+      ],
+      "title": "UsageCost",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Project-facing cost summary; unknown amounts remain explicitly unknown.",
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "currency": {
+      "default": "USD",
+      "pattern": "^[A-Z]{3}$",
+      "title": "Currency",
+      "type": "string"
+    },
+    "known_amount": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,8}|(?=[\\d.]{1,13}0*$)\\d{0,8}\\.\\d{0,4}0*$)",
+          "type": "string"
+        }
+      ],
+      "default": "0",
+      "title": "Known Amount"
+    },
+    "unknown_cost_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Unknown Cost Count",
+      "type": "integer"
+    },
+    "selected_scene_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Selected Scene Count",
+      "type": "integer"
+    },
+    "required_scene_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Required Scene Count",
+      "type": "integer"
+    },
+    "line_items": {
+      "items": {
+        "$ref": "#/$defs/CostLineItem"
+      },
+      "maxItems": 1000,
+      "title": "Line Items",
+      "type": "array"
+    }
+  },
+  "title": "CostEstimate",
+  "type": "object"
+}

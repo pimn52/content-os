@@ -46,6 +46,15 @@ class ProbeMetadata:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class AudioProbeMetadata:
+    duration_ms: int
+    sample_rate: int
+    channels: int
+    language: str | None
+    metadata: dict[str, Any]
+
+
 def _fps(value: Any) -> RationalFps:
     if not isinstance(value, str) or "/" not in value:
         raise ProbeInvalid("ffprobe returned an invalid frame rate")
@@ -170,3 +179,48 @@ class FFProbeAdapter:
             has_audio=any(isinstance(stream, dict) and stream.get("codec_type") == "audio" for stream in streams),
             metadata={"format": format_info if isinstance(format_info, dict) else {}, "streams": streams},
         )
+
+    def probe_audio(self, path: str | Path) -> AudioProbeMetadata:
+        document = self._probe_document(path)
+        streams = document.get("streams")
+        if not isinstance(streams, list):
+            raise ProbeMalformed("ffprobe JSON has no streams list")
+        audio = next((stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "audio"), None)
+        if audio is None:
+            raise ProbeNoVideo("media contains no audio stream")
+        try:
+            sample_rate = int(audio["sample_rate"])
+            channels = int(audio["channels"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProbeInvalid("ffprobe returned invalid audio properties") from exc
+        if not 1 <= sample_rate <= 192_000 or not 1 <= channels <= 8:
+            raise ProbeInvalid("audio properties are outside the supported range")
+        tags = audio.get("tags") if isinstance(audio.get("tags"), dict) else {}
+        language = tags.get("language") if isinstance(tags.get("language"), str) else None
+        format_info = document.get("format")
+        return AudioProbeMetadata(
+            duration_ms=_duration_from_probe(format_info, audio),
+            sample_rate=sample_rate,
+            channels=channels,
+            language=language,
+            metadata={"format": format_info if isinstance(format_info, dict) else {}, "streams": streams},
+        )
+
+    def _probe_document(self, path: str | Path) -> dict[str, Any]:
+        argv = [*self.command, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)]
+        try:
+            completed = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=self.timeout_seconds, check=False)
+        except FileNotFoundError as exc:
+            raise ProbeBinaryMissing(f"ffprobe binary not found: {self.command[0]}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ProbeTimeout(f"ffprobe timed out after {self.timeout_seconds:g}s") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.strip()[:500]
+            raise ProbeError(f"ffprobe failed ({completed.returncode}): {detail}")
+        try:
+            document = json.loads(completed.stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ProbeMalformed("ffprobe returned malformed JSON") from exc
+        if not isinstance(document, dict):
+            raise ProbeMalformed("ffprobe JSON root must be an object")
+        return document

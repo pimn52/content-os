@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Callable, Protocol, Sequence
 from uuid import UUID
 
-from app.db import AssetRepository
+from app.db import AssetRepository, ImageAssetRepository
 from app.domain.models import Asset, CandidateAsset, Clip, CostCategory, ProjectFormat, ScenePlan, SourceKind, UsageCost
 from app.search import ClipSearchHit
 
@@ -90,6 +90,7 @@ class AssetRouter:
         max_candidates: int = 3,
         capture_gap_threshold: float = 0.45,
         allowed_source_kinds: Sequence[SourceKind] = (SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET),
+        images: ImageAssetRepository | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(candidate_pool_size, int) or isinstance(candidate_pool_size, bool) or not 1 <= candidate_pool_size <= 1_000:
@@ -115,6 +116,7 @@ class AssetRouter:
         self.max_candidates = max_candidates
         self.capture_gap_threshold = float(capture_gap_threshold)
         self.allowed_source_kinds = frozenset(normalized_sources)
+        self.images = images
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def route(self, scene: ScenePlan) -> RoutingResult:
@@ -128,9 +130,15 @@ class AssetRouter:
         candidates = self._score_hits(scene, hits)
         selected = candidates[: self.max_candidates]
         needs_capture = not selected or selected[0][0] < self.capture_gap_threshold
+        requested_sources = set(scene.preferred_sources) | set(scene.fallback_sources)
         values = [candidate for _, candidate in selected]
         if needs_capture:
+            values.extend(_static_fallbacks(scene, requested_sources, self.images, recommended=not values))
+            if SourceKind.TYPOGRAPHY in requested_sources:
+                values.append(_typography_fallback(scene, recommended=not values))
             values.append(_capture_gap(scene, recommended=not values))
+        if not values and SourceKind.TYPOGRAPHY in requested_sources:
+            values.append(_typography_fallback(scene, recommended=True))
         if values and not needs_capture:
             values[0] = CandidateAsset.model_validate({**values[0].model_dump(mode="python"), "recommended": True})
         elif values and not any(value.recommended for value in values):
@@ -161,14 +169,16 @@ class AssetRouter:
                 continue
             seen.add(clip.id)
             asset = self.assets.get(clip.asset_id)
+            usage = None if asset is None else asset.metadata.get("r1_usage")
             if (
                 asset is None
                 or asset.source_kind not in self.allowed_source_kinds
                 or asset.source_kind not in requested_sources
+                or usage is not None and usage != "production"
                 or clip.end_ms - clip.start_ms < scene.duration_target_ms
             ):
                 continue
-            score, why = _score(scene, clip, asset, hit.score, self.weights, now)
+            score, why = _score(scene, clip, asset, hit.score, self.weights, now, score_basis=hit.score_basis)
             candidate = CandidateAsset(
                 scene_plan_id=scene.id,
                 source_kind=asset.source_kind,
@@ -194,10 +204,22 @@ def _scene_query(scene: ScenePlan) -> str:
     return query
 
 
-def _score(scene: ScenePlan, clip: Clip, asset: Asset, raw_semantic: object, weights: RoutingWeights, now: datetime) -> tuple[float, list[str]]:
+def _score(
+    scene: ScenePlan,
+    clip: Clip,
+    asset: Asset,
+    raw_semantic: object,
+    weights: RoutingWeights,
+    now: datetime,
+    *,
+    score_basis: str = "embedding_similarity",
+) -> tuple[float, list[str]]:
     if isinstance(raw_semantic, bool) or not isinstance(raw_semantic, (int, float)) or not math.isfinite(float(raw_semantic)):
         raise RoutingInputError("Clip search hit score must be finite")
-    # Cosine similarity at or below zero does not constitute a semantic match.
+    if score_basis not in {"embedding_similarity", "lexical_overlap"}:
+        raise RoutingInputError("Clip search hit has an unsupported score basis")
+    # Cosine similarity or lexical overlap at or below zero does not constitute
+    # a useful retrieval match.
     semantic = max(0.0, min(1.0, float(raw_semantic)))
     quality = 0.5 if clip.quality_score is None else float(clip.quality_score)
     suitability = _shot_suitability(scene, clip)
@@ -214,8 +236,9 @@ def _score(scene: ScenePlan, clip: Clip, asset: Asset, raw_semantic: object, wei
     )
     score = max(0.0, min(1.0, total))
     source_label = "user-provided media" if asset.source_kind == SourceKind.USER_ASSET else "historical creator media"
+    retrieval_label = "semantic match" if score_basis == "embedding_similarity" else "lexical text overlap"
     why = [
-        f"semantic match {semantic:.2f}", f"visual quality {quality:.2f}",
+        f"{retrieval_label} {semantic:.2f}", f"visual quality {quality:.2f}",
         f"shot suitability {suitability:.2f}", f"freshness {freshness:.2f}",
         f"reuse penalty {reuse:.2f}", source_label,
     ]
@@ -280,3 +303,58 @@ def _capture_gap(scene: ScenePlan, *, recommended: bool) -> CandidateAsset:
         requires_capture=True,
         estimated_cost=UsageCost(category=CostCategory.CAPTURE, note="No provider cost; requires creator capture."),
     )
+
+
+def _typography_fallback(scene: ScenePlan, *, recommended: bool = False) -> CandidateAsset:
+    intent = scene.visual_intent
+    detail = intent.description or intent.action or intent.subject or scene.purpose
+    return CandidateAsset(
+        scene_plan_id=scene.id,
+        source_kind=SourceKind.TYPOGRAPHY,
+        match_score=0.0,
+        why=[
+            "No eligible continuous Clip met the configured match threshold.",
+            f"Use editable typography to explain: {detail}.",
+            "Local fallback only; no external image or video is generated.",
+        ],
+        recommended=recommended,
+        requires_capture=False,
+        estimated_cost=UsageCost(
+            category=CostCategory.TYPOGRAPHY,
+            amount=Decimal("0"),
+            currency="USD",
+            note="Local editable typography; no provider cost.",
+        ),
+    )
+
+
+def _static_fallbacks(
+    scene: ScenePlan,
+    requested_sources: set[SourceKind],
+    images: ImageAssetRepository | None,
+    *,
+    recommended: bool,
+) -> list[CandidateAsset]:
+    if images is None:
+        return []
+    values: list[CandidateAsset] = []
+    for image in images.list():
+        if image.source_kind not in requested_sources:
+            continue
+        category = CostCategory.SCREENSHOT if image.source_kind == SourceKind.SCREENSHOT else CostCategory.CHART
+        values.append(CandidateAsset(
+            scene_plan_id=scene.id,
+            source_kind=image.source_kind,
+            asset_id=image.id,
+            match_score=0.0,
+            why=[
+                "No eligible continuous Clip met the configured match threshold.",
+                "Use a user-imported static visual as an explicit fallback.",
+                "Static visual is not a semantic match score; review before export.",
+            ],
+            recommended=recommended and not values,
+            estimated_cost=UsageCost(category=category, amount=Decimal("0"), currency="USD", note="Local static visual; no provider cost."),
+        ))
+        if len(values) >= 3:
+            break
+    return values

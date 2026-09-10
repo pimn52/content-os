@@ -65,6 +65,8 @@ class MediaVisionPipeline:
         asset_or_analysis: Asset | MediaAnalysisResult,
         clips: Sequence[Clip] | None = None,
         keyframe_paths: Sequence[str | Path] | None = None,
+        *,
+        provider: VisionProvider | None = None,
     ) -> VisionAnalysisResult:
         asset, input_clips, paths = self._inputs(asset_or_analysis, clips, keyframe_paths)
         stored_asset = self._stored_asset(asset)
@@ -74,8 +76,9 @@ class MediaVisionPipeline:
 
         # Provider calls can be slow or remote. No SQLite write transaction is
         # open until every result is available and identity-bound below.
+        active_provider = self.provider if provider is None else provider
         metadata = tuple(
-            _metadata_for(clip, path, self.provider.analyze(path))
+            _metadata_for(clip, path, active_provider.analyze(path))
             for clip, path in zip(stored_clips, normalized_paths)
         )
         updated = self.persistence.apply(stored_asset.id, metadata, normalized_paths)
@@ -86,8 +89,10 @@ class MediaVisionPipeline:
         asset_or_analysis: Asset | MediaAnalysisResult,
         clips: Sequence[Clip] | None = None,
         keyframe_paths: Sequence[str | Path] | None = None,
+        *,
+        provider: VisionProvider | None = None,
     ) -> VisionAnalysisResult:
-        return self.process(asset_or_analysis, clips, keyframe_paths)
+        return self.process(asset_or_analysis, clips, keyframe_paths, provider=provider)
 
     @staticmethod
     def _inputs(

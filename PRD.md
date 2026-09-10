@@ -1,6 +1,6 @@
 # Content OS — 产品需求文档（PRD）
 
-> 2026-09-07 开发前修订见 [BASELINE_FREEZE.md](BASELINE_FREEZE.md)，冲突时以该修订为准。
+> 本文保留为历史产品设计参考；当前 R1 工程范围、阶段门禁和验收以 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) 为准，审查起点证据见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。
 
 
 > 版本：V0.1 Draft  

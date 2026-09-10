@@ -6,6 +6,8 @@
   "end_ms": 16200,
   "asset_duration_ms": 60000,
   "transcript": "A continuous source interval.",
+  "transcript_segments": [],
+  "transcript_source": null,
   "speaker_ids": [],
   "visual_description": null,
   "people": [],

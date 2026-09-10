@@ -14,8 +14,8 @@ from uuid import uuid4
 import pytest
 
 from app.assembly import VideoSpecAssembler
-from app.db import AssetRepository, ClipRepository, Database
-from app.domain.models import CandidateAsset, Clip, CostCategory, Project, RationalFps, ScenePlan, SourceKind, UsageCost, VisualIntent
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database
+from app.domain.models import AudioAsset, CandidateAsset, Clip, CostCategory, Project, RationalFps, ScenePlan, SourceKind, UsageCost, VisualIntent
 from app.media import FFProbeAdapter, MediaImporter
 from app.renderer import RemotionRenderer
 
@@ -34,6 +34,16 @@ def _make_source(ffmpeg: str, output: Path, color: str, frequency: int) -> None:
             ffmpeg, "-y", "-f", "lavfi", "-i", f"color=c={color}:size=360x640:rate=30",
             "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=48000", "-t", "0.8",
             "-c:v", "mpeg4", "-q:v", "2", "-c:a", "aac", "-shortest", str(output),
+        ],
+        check=True, capture_output=True,
+    )
+
+
+def _make_narration(ffmpeg: str, output: Path, frequency: int = 880) -> None:
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=48000",
+            "-t", "0.8", "-c:a", "pcm_s16le", str(output),
         ],
         check=True, capture_output=True,
     )
@@ -120,5 +130,54 @@ def test_real_remotion_renders_persisted_two_clip_vertical_timeline(tmp_path: Pa
         for path, digest in source_hashes.items():
             assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
         assert all(hashlib.sha256(Path(asset.source_file).read_bytes()).hexdigest() == asset.content_hash for asset in assets)
+    finally:
+        db.close()
+
+
+def test_real_remotion_renders_authorized_local_narration_over_source_clip(tmp_path: Path) -> None:
+    ffmpeg, ffprobe = _binaries()
+    source = tmp_path / "source with source audio.mp4"
+    narration = tmp_path / "narration.wav"
+    _make_source(ffmpeg, source, "green", 440)
+    _make_narration(ffmpeg, narration)
+
+    db = Database(tmp_path / "narration.sqlite")
+    try:
+        importer = MediaImporter(db, tmp_path / "data root", FFProbeAdapter(ffprobe))
+        asset = importer.import_path(source, "fixture-rights")
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=min(asset.duration_ms, 800), asset_duration_ms=asset.duration_ms)
+        ClipRepository(db).create(clip)
+        audio_probe = FFProbeAdapter(ffprobe).probe_audio(narration)
+        audio = AudioAsset(
+            source_kind=SourceKind.USER_ASSET, source_file=str(narration), content_hash=hashlib.sha256(narration.read_bytes()).hexdigest(),
+            duration_ms=audio_probe.duration_ms, sample_rate=audio_probe.sample_rate, channels=audio_probe.channels,
+            language=audio_probe.language, authorization_reference="fixture-voice-rights", imported_at=datetime.now(timezone.utc),
+        )
+        AudioAssetRepository(db).create(audio)
+        project = Project(
+            ip_profile_id=uuid4(), title="Real narration fixture", topic="Local narration over B-roll",
+            resolution_width=360, resolution_height=640, fps=RationalFps(numerator=30, denominator=1),
+            created_at=datetime.now(timezone.utc),
+        )
+        scene = _scene(project, 0)
+        spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db)).assemble(
+            project, [scene], {scene.id: _candidate(scene, asset.id, clip.id)},
+            narration_asset_ids={scene.id: audio.id}, narration_required=True,
+        )
+        assert spec.scenes[0].narration_asset_id == audio.id
+        assert spec.scenes[0].narration_start_ms == 0
+        assert spec.scenes[0].narration_end_ms == audio.duration_ms
+        assert spec.scenes[0].visual.clip_end_ms == audio.duration_ms
+        output = tmp_path / "narrated vertical.mp4"
+        result = RemotionRenderer(
+            AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db),
+            renderer_dir=Path(__file__).parents[3] / "apps" / "renderer", timeout_seconds=120,
+        ).render(spec, output)
+
+        assert result.is_file() and result.stat().st_size > 0
+        metadata = _probe_output(ffprobe, output)
+        audio_streams = [stream for stream in metadata["streams"] if stream["codec_type"] == "audio"]
+        assert len(audio_streams) == 1
+        assert Decimal(str(metadata["format"]["duration"])) >= Decimal("0.35")
     finally:
         db.close()

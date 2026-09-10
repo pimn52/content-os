@@ -10,21 +10,26 @@ import pytest
 from app.assembly import (
     AssetIdentityMismatch,
     CaptureGapSelected,
+    CandidateNotFound,
     InsufficientSourceDuration,
     InvalidCandidateSelection,
+    NarrationBindingError,
     VideoSpecAssembler,
     milliseconds_to_frames,
 )
-from app.db import AssetRepository, ClipRepository, Database
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository
 from app.domain.models import (
     Asset,
+    AudioAsset,
     CandidateAsset,
     Clip,
     CostCategory,
+    ImageAsset,
     Project,
     RationalFps,
     ScenePlan,
     SourceKind,
+    TranscriptSegment,
     UsageCost,
     VideoSpec,
     VisualIntent,
@@ -147,6 +152,204 @@ def test_assembler_rejects_capture_nonrecommended_and_identity_mismatch(tmp_path
         mismatched = _candidate(scene, assets[1], clips[0])
         with pytest.raises(AssetIdentityMismatch, match="do not match"):
             assembler.assemble(project, [scene], {scene.id: mismatched})
+    finally:
+        db.close()
+
+
+def test_assembler_builds_local_typography_fallback_without_media(tmp_path: Path) -> None:
+    db, assembler, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        scene = scenes[0].model_copy(update={
+            "preferred_sources": [SourceKind.TYPOGRAPHY],
+            "fallback_sources": [SourceKind.CAPTURE],
+        })
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id,
+            source_kind=SourceKind.TYPOGRAPHY,
+            match_score=0,
+            why=["editable local fallback"],
+            recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TYPOGRAPHY, amount=Decimal("0"), currency="USD"),
+        )
+        spec = assembler.assemble(project, [scene], {scene.id: candidate})
+        visual = spec.scenes[0].visual
+        assert visual.source_kind is SourceKind.TYPOGRAPHY
+        assert visual.asset_id is None and visual.clip_id is None
+        assert visual.authorization_reference == "local-typography"
+    finally:
+        db.close()
+
+
+def test_assembler_builds_imported_static_image_visual(tmp_path: Path) -> None:
+    db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        image = ImageAsset(
+            source_kind=SourceKind.SCREENSHOT,
+            source_file=str(tmp_path / "screen.png"),
+            content_hash="b" * 64,
+            width=800,
+            height=600,
+            authorization_reference="creator-screen",
+            imported_at=NOW,
+        )
+        ImageAssetRepository(db).create(image)
+        scene = scenes[0].model_copy(update={"preferred_sources": [SourceKind.SCREENSHOT], "fallback_sources": [SourceKind.CAPTURE]})
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id,
+            source_kind=SourceKind.SCREENSHOT,
+            asset_id=image.id,
+            match_score=0,
+            why=["explicit static fallback"],
+            recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.SCREENSHOT, amount=Decimal("0"), currency="USD"),
+        )
+        spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), ImageAssetRepository(db)).assemble(project, [scene], {scene.id: candidate})
+        assert spec.scenes[0].visual.asset_id == image.id
+        assert spec.scenes[0].visual.source_kind is SourceKind.SCREENSHOT
+    finally:
+        db.close()
+
+
+def test_assembler_attaches_existing_authorized_narration_per_scene(tmp_path: Path) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    audio_source = tmp_path / "voice.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="e" * 64,
+        duration_ms=2_000, sample_rate=48_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        assembler = VideoSpecAssembler(
+            AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db),
+        )
+        scene = scenes[0]
+        spec = assembler.assemble(
+            project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])},
+            narration_asset_ids={scene.id: audio.id},
+        )
+        assert spec.scenes[0].narration_asset_id == audio.id
+        assert spec.scenes[0].narration_start_ms is None
+        with pytest.raises(CandidateNotFound, match="narration audio"):
+            assembler.assemble(
+                project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])},
+                narration_asset_ids={scene.id: uuid4()},
+            )
+    finally:
+        db.close()
+
+
+def test_new_script_narration_uses_measured_audio_duration_and_rejects_reuse(tmp_path: Path) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    audio_source = tmp_path / "scene-01.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="d" * 64,
+        duration_ms=800, sample_rate=48_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+        transcript_segments=[
+            TranscriptSegment(start_ms=0, end_ms=300, text="first narration"),
+            TranscriptSegment(start_ms=350, end_ms=800, text="second narration"),
+        ],
+        transcript_source="narration.srt",
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        assembler = VideoSpecAssembler(
+            AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db),
+        )
+        scene = scenes[0]
+        spec = assembler.assemble(
+            project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])},
+            narration_asset_ids={scene.id: audio.id}, narration_required=True,
+        )
+        rendered_scene = spec.scenes[0]
+        assert rendered_scene.duration_frames == 24
+        assert rendered_scene.narration_start_ms == 0
+        assert rendered_scene.narration_end_ms == 800
+        assert rendered_scene.visual.clip_start_ms == clips[0].start_ms
+        assert rendered_scene.visual.clip_end_ms == clips[0].start_ms + 800
+        assert [(caption.start_ms, caption.end_ms) for caption in rendered_scene.captions] == [(0, 300), (350, 800)]
+
+        second = scenes[1]
+        with pytest.raises(NarrationBindingError, match="separate authorized narration"):
+            assembler.assemble(
+                project, [scene, second], {
+                    scene.id: _candidate(scene, assets[0], clips[0]),
+                    second.id: _candidate(second, assets[1], clips[1]),
+                },
+                narration_asset_ids={scene.id: audio.id, second.id: audio.id}, narration_required=True,
+            )
+    finally:
+        db.close()
+
+
+def test_source_led_scene_uses_real_transcript_sentence_boundary_when_available(tmp_path: Path) -> None:
+    db, assembler, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        scene = scenes[0].model_copy(update={"voice_text": "first words"})
+        clips[0] = clips[0].model_copy(update={
+            "transcript": "first words second thought",
+            "transcript_segments": [
+                TranscriptSegment(start_ms=100, end_ms=700, text="first words"),
+                TranscriptSegment(start_ms=750, end_ms=1_400, text="second thought"),
+            ],
+        })
+        ClipRepository(db).update(clips[0])
+        spec = assembler.assemble(
+            project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])},
+        )
+        assert spec.scenes[0].visual.clip_start_ms == 100
+        assert spec.scenes[0].visual.clip_end_ms == 700
+        assert [(caption.start_ms, caption.end_ms, caption.text) for caption in spec.scenes[0].captions] == [(0, 600, "first words")]
+        assert spec.scenes[0].duration_frames == 18
+    finally:
+        db.close()
+
+
+def test_terminal_source_led_scene_carries_contiguous_real_asr_tail(tmp_path: Path) -> None:
+    db, assembler, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        scene = scenes[0].model_copy(update={"purpose": "close", "voice_text": "first words"})
+        clips[0] = clips[0].model_copy(update={
+            "transcript_segments": [
+                TranscriptSegment(start_ms=100, end_ms=700, text="first words"),
+                TranscriptSegment(start_ms=700, end_ms=1_400, text="second thought"),
+            ],
+        })
+        ClipRepository(db).update(clips[0])
+        spec = assembler.assemble(project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])})
+        rendered_scene = spec.scenes[0]
+        assert rendered_scene.visual.clip_start_ms == 100
+        assert rendered_scene.visual.clip_end_ms == 1_400
+        assert rendered_scene.duration_frames == 39
+        assert [(caption.start_ms, caption.end_ms, caption.text) for caption in rendered_scene.captions] == [
+            (0, 600, "first words"),
+            (600, 1_300, "second thought"),
+        ]
+    finally:
+        db.close()
+
+
+def test_source_led_scene_matches_contiguous_transcript_segments(tmp_path: Path) -> None:
+    db, assembler, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        scene = scenes[0].model_copy(update={"voice_text": "first words second thought"})
+        clips[0] = clips[0].model_copy(update={
+            "transcript_segments": [
+                TranscriptSegment(start_ms=100, end_ms=700, text="first words"),
+                TranscriptSegment(start_ms=750, end_ms=1_400, text="second thought"),
+            ],
+        })
+        ClipRepository(db).update(clips[0])
+        spec = assembler.assemble(project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])})
+        rendered_scene = spec.scenes[0]
+        assert rendered_scene.visual.clip_start_ms == 100
+        assert rendered_scene.visual.clip_end_ms == 1_400
+        assert rendered_scene.duration_frames == 39
+        assert [(caption.start_ms, caption.end_ms, caption.text) for caption in rendered_scene.captions] == [
+            (0, 600, "first words"),
+            (650, 1_300, "second thought"),
+        ]
     finally:
         db.close()
 
