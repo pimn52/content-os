@@ -20,6 +20,7 @@
       "title": "CostCategory",
       "type": "string"
     },
+    "JsonValue": {},
     "UsageCost": {
       "additionalProperties": false,
       "properties": {
@@ -160,6 +161,19 @@
       "title": "Input Source",
       "type": "string"
     },
+    "input_digest": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Input Digest"
+    },
     "status": {
       "default": "reserved",
       "enum": [
@@ -262,6 +276,21 @@
       ],
       "default": null,
       "title": "Error Code"
+    },
+    "result_payload": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result Payload"
     },
     "created_at": {
       "format": "date-time",

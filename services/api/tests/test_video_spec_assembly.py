@@ -283,6 +283,70 @@ def test_new_script_narration_uses_measured_audio_duration_and_rejects_reuse(tmp
         db.close()
 
 
+@pytest.mark.parametrize("fps", [RationalFps(numerator=30, denominator=1), RationalFps(numerator=30_000, denominator=1_001)])
+def test_new_script_narration_never_extends_past_original_clip_boundary(tmp_path: Path, fps: RationalFps) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, fps)
+    source = tmp_path / "too-long.wav"
+    source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET,
+        source_file=str(source),
+        content_hash="c" * 64,
+        duration_ms=1_501,
+        sample_rate=48_000,
+        channels=1,
+        authorization_reference="creator-voice",
+        imported_at=NOW,
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
+        scene = scenes[0]
+        # This persisted Clip starts at 500 ms and has only 1,500 ms of
+        # authorized source. The assembler must test that original boundary,
+        # not overwrite it with start + narration duration first.
+        with pytest.raises(InsufficientSourceDuration, match="narration duration exceeds"):
+            assembler.assemble(
+                project,
+                [scene],
+                {scene.id: _candidate(scene, assets[1], clips[1])},
+                narration_asset_ids={scene.id: audio.id},
+                narration_required=True,
+            )
+        assert ClipRepository(db).get(clips[1].id).end_ms == 2_000  # type: ignore[union-attr]
+    finally:
+        db.close()
+
+
+def test_new_script_narration_rejects_nonzero_ntsc_clip_that_lacks_a_complete_frame(tmp_path: Path) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30_000, denominator=1_001))
+    source = tmp_path / "frame-boundary.wav"
+    source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET,
+        source_file=str(source),
+        content_hash="b" * 64,
+        duration_ms=1_500,
+        sample_rate=48_000,
+        channels=1,
+        authorization_reference="creator-voice",
+        imported_at=NOW,
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
+        with pytest.raises(InsufficientSourceDuration, match="frame rate"):
+            assembler.assemble(
+                project,
+                [scenes[0]],
+                {scenes[0].id: _candidate(scenes[0], assets[1], clips[1])},
+                narration_asset_ids={scenes[0].id: audio.id},
+                narration_required=True,
+            )
+    finally:
+        db.close()
+
+
 def test_source_led_scene_uses_real_transcript_sentence_boundary_when_available(tmp_path: Path) -> None:
     db, assembler, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
     try:

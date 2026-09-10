@@ -21,6 +21,7 @@ class Database:
         self.connection = sqlite3.connect(self.path, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute("PRAGMA busy_timeout = 5000")
         # WAL is useful for a local file and SQLite reports memory for :memory:.
         if self.path != ":memory:":
             self.connection.execute("PRAGMA journal_mode = WAL")
@@ -33,9 +34,14 @@ class Database:
         return self.connection
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Commit all writes, or roll all of them back if the block fails."""
-        self.connection.execute("BEGIN")
+    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        """Commit all writes, or roll all of them back if the block fails.
+
+        ``immediate`` acquires SQLite's write reservation before callers read
+        mutable budget state.  Provider-call reservations use it so two local
+        processes cannot both observe spare budget and then overspend it.
+        """
+        self.connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         try:
             yield self.connection
         except BaseException:

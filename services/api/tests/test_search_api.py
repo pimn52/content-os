@@ -81,3 +81,35 @@ def test_search_api_explicit_lexical_mode_reports_non_embedding_basis(tmp_path: 
     assert result["clip"]["id"] == str(computer.id)
     assert result["score_basis"] == "lexical_overlap"
     assert result["score"] > 0
+
+
+def test_runtime_semantic_search_requires_project_budget_and_records_its_provider_call(tmp_path: Path) -> None:
+    path = tmp_path / "search-budget.sqlite"
+    _, computer, _ = _seed(path, tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    class Provider:
+        provider_name = "test-runtime"
+        model = "semantic-search-v1"
+
+        def embed(self, texts):
+            calls.append(tuple(texts))
+            return EmbeddingBatch(((1.0, 0.0),))
+
+    with TestClient(create_app(path, embedding_provider=Provider())) as client:
+        missing_scope = client.post("/clips/search", json={"query": "本人坐在电脑前操作软件"})
+        assert missing_scope.status_code == 422
+        assert calls == []
+        project = client.post("/projects", json={"title": "Semantic search", "topic": "budgeted search"}).json()
+        assert client.put("/budget", json={"allow_unknown_cost": True}).status_code == 200
+        response = client.post(
+            "/clips/search",
+            json={"query": "本人坐在电脑前操作软件", "project_id": project["id"]},
+            headers={"Idempotency-Key": "semantic-search"},
+        )
+        assert response.status_code == 200
+        assert response.json()[0]["clip"]["id"] == str(computer.id)
+        assert len(calls) == 1
+        records = client.get(f"/projects/{project['id']}/provider-calls").json()
+        assert len(records) == 1
+        assert records[0]["operation"] == "embedding"

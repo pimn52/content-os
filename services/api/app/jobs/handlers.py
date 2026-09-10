@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Literal, Protocol, Sequence
 from uuid import UUID
 
-from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger
+from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
 from app.db import ClipRepository
 from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, UsageCost
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
@@ -413,7 +413,7 @@ def _reserve_job_provider_call(
                 note="runtime provider price is not observable; set an explicit budget policy or estimate",
             )
         )
-        return ledger.reserve(
+        reservation = ledger.reserve_execution(
             project_id=job.project_id,
             idempotency_key=f"job:{job.id}:{operation}:{job.attempt}:{call_key}",
             operation=operation,
@@ -421,9 +421,25 @@ def _reserve_job_provider_call(
             provider=provider,
             model=model,
             input_source=input_source,
+            input_digest=provider_call_input_digest({
+                "project_id": str(job.project_id),
+                "job_id": str(job.id),
+                "operation": operation,
+                "provider": provider,
+                "model": model,
+                "input_source": input_source,
+                "call_key": call_key,
+            }),
             estimated_cost=estimated_cost,
             allow_existing_unknown_cost=known_local_cost,
         )
+        if not reservation.owner:
+            raise JobExecutionError(
+                "provider_execution_recovery_required",
+                "a matching provider operation already exists; inspect its job and provider-call state before retrying",
+                retryable=False,
+            )
+        return reservation.record
     except BudgetLimitError:
         raise JobExecutionError("provider_budget_blocked", "provider call blocked by the budget policy", retryable=False) from None
     except ProviderCallError:

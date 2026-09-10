@@ -50,6 +50,15 @@ from app.providers.scene_planner import (
     ScenePlannerRateLimitError,
     ScenePlannerTimeout,
 )
+from app.provider_execution import (
+    ProviderExecutionAccountingFailure,
+    ProviderExecutionIdempotencyConflict,
+    ProviderExecutionInProgress,
+    ProviderExecutionRecordedFailure,
+    ProviderExecutionReplayUnavailable,
+    ProviderExecutionService,
+    runtime_provider_identity,
+)
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
@@ -83,6 +92,7 @@ class JobResponse(BaseModel):
 class ClipSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=10_000)
+    project_id: UUID | None = None
     top_k: int = Field(default=10, ge=1, le=100)
     asset_id: UUID | None = None
     orientation: ProjectFormat | None = None
@@ -474,6 +484,11 @@ class BudgetResponse(BaseModel):
     policy_source: Literal["project", "global", "none"]
     snapshot: BudgetSnapshotResponse
     over_budget: bool
+    period: Literal["ledger_lifetime"] = "ledger_lifetime"
+    global_policy: BudgetPolicy | None = None
+    project_policy: BudgetPolicy | None = None
+    global_snapshot: BudgetSnapshotResponse | None = None
+    project_snapshot: BudgetSnapshotResponse | None = None
 
 
 class CostReductionResponse(BaseModel):
@@ -513,89 +528,72 @@ class ProviderCallResponse(BaseModel):
     budget: BudgetResponse
 
 
-def _budget_context(db: Database, project_id: UUID | None) -> tuple[BudgetPolicy | None, Literal["project", "global", "none"], BudgetPolicy, list[ProviderCallRecord]]:
-    policies = BudgetPolicyRepository(db)
-    project_policy = policies.get_by_project(project_id) if project_id is not None else None
-    if project_policy is not None:
-        policy: BudgetPolicy | None = project_policy
-        source: Literal["project", "global", "none"] = "project"
-    else:
-        policy = policies.get_by_project(None)
-        source = "global" if policy is not None else "none"
-    effective = policy or BudgetPolicy(updated_at=datetime.now(timezone.utc))
-    calls = ProviderCallRepository(db).list_for_project(project_id) if project_id is not None else ProviderCallRepository(db).list_all()
-    return policy, source, effective, calls
-
-
 def _budget_response(db: Database, project_id: UUID | None) -> BudgetResponse:
-    policy, source, effective, calls = _budget_context(db, project_id)
-    current = snapshot(calls, effective.currency)
+    policies = BudgetPolicyRepository(db)
+    calls = ProviderCallRepository(db)
+    global_policy = policies.get_by_project(None)
+    project_policy = policies.get_by_project(project_id) if project_id is not None else None
+    policy = project_policy or global_policy
+    source: Literal["project", "global", "none"] = (
+        "project" if project_policy is not None else "global" if global_policy is not None else "none"
+    )
+    fallback = BudgetPolicy(updated_at=datetime.now(timezone.utc))
+    global_effective = global_policy or fallback
+    global_calls = calls.list_all()
+    global_current = snapshot(global_calls, global_effective.currency)
+    project_effective = project_policy or global_policy or fallback
+    project_calls = calls.list_for_project(project_id) if project_id is not None else None
+    project_current = None if project_calls is None else snapshot(project_calls, project_effective.currency)
+    primary_current = project_current or global_current
+    global_over_budget = global_policy is not None and is_over_budget(global_policy, global_calls)
+    project_over_budget = (
+        project_policy is not None
+        and project_calls is not None
+        and is_over_budget(project_policy, project_calls)
+    )
     return BudgetResponse(
         policy=policy,
         policy_source=source,
-        snapshot=BudgetSnapshotResponse(**current.__dict__),
-        over_budget=is_over_budget(effective, calls),
+        snapshot=BudgetSnapshotResponse(**primary_current.__dict__),
+        over_budget=global_over_budget or project_over_budget,
+        global_policy=global_policy,
+        project_policy=project_policy,
+        global_snapshot=BudgetSnapshotResponse(**global_current.__dict__),
+        project_snapshot=None if project_current is None else BudgetSnapshotResponse(**project_current.__dict__),
     )
 
 
-def _reserve_runtime_provider_call(
-    db: Database,
-    project_id: UUID,
-    request: Request,
-    *,
-    operation: Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render"],
-    provider: str,
-    model: str,
-    input_source: str,
-    category: CostCategory,
-) -> ProviderCallRecord:
-    """Reserve a runtime call without putting credentials in the ledger."""
-    # The header is the normal retry key; a request without one is a distinct
-    # provider attempt and therefore must be counted separately.
-    idempotency_key = request.headers.get("Idempotency-Key") or f"http-{operation}-{uuid4()}"
-    estimated_cost = request.app.state.cost_estimator.estimate(
-        operation=operation,
-        provider=provider,
-        model=model,
-        input_source=input_source,
-        category=category,
-    )
-    try:
-        return ProviderCallLedger(db).reserve(
-            project_id=project_id,
-            idempotency_key=idempotency_key,
-            operation=operation,
-            mode="runtime",
-            provider=provider,
-            model=model,
-            input_source=input_source,
-            estimated_cost=estimated_cost,
-        )
-    except BudgetLimitError as exc:
-        raise HTTPException(status_code=409, detail=exc.code) from exc
-    except ProviderCallError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+def _runtime_idempotency_key(request: Request, operation: str) -> str:
+    """Use a caller retry key when supplied; otherwise create one attempt key."""
+    return request.headers.get("Idempotency-Key") or f"http-{operation}-{uuid4()}"
 
 
-def _finish_runtime_provider_call(
-    db: Database,
-    project_id: UUID,
-    call: ProviderCallRecord,
-    *,
-    status: Literal["completed", "failed", "cancelled"],
-    error_code: str | None = None,
-) -> None:
-    """Reconcile a runtime call while preserving unknown usage/cost."""
-    try:
-        ProviderCallLedger(db).finish(
-            project_id=project_id,
-            call_id=call.id,
-            status=status,
-            usage_observable=False,
-            error_code=error_code,
-        )
-    except ProviderCallError as exc:
-        raise HTTPException(status_code=500, detail="provider call accounting failed") from exc
+def _scene_planner_error_code(error: Exception) -> str:
+    if isinstance(error, (ScenePlannerConfigurationError, ScenePlannerAuthenticationError)):
+        return "scene_planner_not_configured"
+    if isinstance(error, (ScenePlannerRateLimitError, ScenePlannerTimeout, ScenePlannerConnectionError)):
+        return "scene_planner_temporarily_unavailable"
+    if isinstance(error, ScenePlannerHTTPError):
+        return "scene_planner_request_failed"
+    if isinstance(error, ScenePlannerProviderResponseError):
+        return "scene_planner_response_invalid"
+    if isinstance(error, ScenePlannerInputError):
+        return "scene_planner_input_invalid"
+    return "scene_planner_failed"
+
+
+def _embedding_error_code(error: Exception) -> str:
+    if isinstance(error, (EmbeddingConfigurationError, EmbeddingAuthenticationError)):
+        return "embedding_not_configured"
+    if isinstance(error, (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError)):
+        return "embedding_temporarily_unavailable"
+    if isinstance(error, EmbeddingHTTPError):
+        return "embedding_request_failed"
+    if isinstance(error, EmbeddingProviderResponseError):
+        return "embedding_response_invalid"
+    if isinstance(error, (EmbeddingInputError, EmbeddingIndexError, IndexError, RoutingConfigurationError, RoutingInputError)):
+        return "embedding_input_invalid"
+    return "embedding_failed"
 
 
 def _validate_profile_reference_clips(db: Database, clip_ids: list[UUID]) -> None:
@@ -1843,20 +1841,56 @@ def create_app(
     async def search_clips(payload: ClipSearchRequest, request: Request) -> list[ClipSearchHitResponse]:
         db: Database = request.app.state.database
         retrieval_mode = os.environ.get("CONTENT_OS_RETRIEVAL_MODE", "embedding").strip().lower()
+
+        def run_search(searcher: object) -> list[ClipSearchHitResponse]:
+            hits = searcher.search(  # type: ignore[attr-defined]
+                payload.query,
+                top_k=payload.top_k,
+                asset_id=payload.asset_id,
+                orientation=payload.orientation,
+                talking_candidate=payload.talking_candidate,
+            )
+            return [ClipSearchHitResponse(clip=hit.clip, score=hit.score, score_basis=hit.score_basis) for hit in hits]
+
+        def decode_search_result(value: object) -> list[ClipSearchHitResponse]:
+            if not isinstance(value, list):
+                raise ValueError("saved search result must be a list")
+            return [ClipSearchHitResponse.model_validate(item) for item in value]
+
         try:
             if retrieval_mode == "lexical":
-                hits = ClipTextSearchService(db).search(
-                    payload.query, top_k=payload.top_k, asset_id=payload.asset_id,
-                    orientation=payload.orientation, talking_candidate=payload.talking_candidate,
-                )
+                return run_search(ClipTextSearchService(db))
             elif retrieval_mode == "embedding":
                 provider = request.app.state.embedding_provider or _embedding_provider_from_env()
-                hits = ClipEmbeddingIndexer(db, provider).search(
-                    payload.query, top_k=payload.top_k, asset_id=payload.asset_id,
-                    orientation=payload.orientation, talking_candidate=payload.talking_candidate,
+                identity = runtime_provider_identity(provider)
+                searcher = ClipEmbeddingIndexer(db, provider)
+                if identity is None:
+                    return run_search(searcher)
+                if payload.project_id is None:
+                    raise HTTPException(status_code=422, detail="project_id is required for runtime semantic search budget accounting")
+                if ProjectRepository(db).get(payload.project_id) is None:
+                    raise HTTPException(status_code=404, detail="project not found")
+                return ProviderExecutionService(db, request.app.state.cost_estimator).execute(
+                    project_id=payload.project_id,
+                    idempotency_key=_runtime_idempotency_key(request, "embedding"),
+                    operation="embedding",
+                    provider=identity,
+                    input_source=f"project:{payload.project_id}:clip-search",
+                    category=CostCategory.LLM,
+                    input_document=payload.model_dump(mode="json"),
+                    action=lambda: run_search(searcher),
+                    encode_result=lambda value: [item.model_dump(mode="json") for item in value],
+                    decode_result=decode_search_result,
+                    error_code=_embedding_error_code,
                 )
             else:
                 raise IndexError("CONTENT_OS_RETRIEVAL_MODE must be embedding or lexical")
+        except BudgetLimitError as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
+        except (ProviderExecutionIdempotencyConflict, ProviderExecutionInProgress, ProviderExecutionRecordedFailure, ProviderExecutionReplayUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
+        except ProviderExecutionAccountingFailure as exc:
+            raise HTTPException(status_code=500, detail=exc.code) from exc
         except (EmbeddingConfigurationError, EmbeddingAuthenticationError) as exc:
             raise HTTPException(status_code=503, detail="embedding provider is not configured") from exc
         except (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError) as exc:
@@ -1868,7 +1902,6 @@ def create_app(
             raise HTTPException(status_code=502, detail="embedding provider returned an invalid response") from exc
         except (EmbeddingInputError, EmbeddingIndexError, IndexError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return [ClipSearchHitResponse(clip=hit.clip, score=hit.score, score_basis=hit.score_basis) for hit in hits]
 
     @application.post("/projects/{project_id}/scene-plan", response_model=ScenePlanResponse)
     async def create_scene_plan(project_id: UUID, payload: ScenePlanRequest, request: Request) -> ScenePlanResponse:
@@ -1877,51 +1910,58 @@ def create_app(
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
         planning_context, evidence_refs = _scene_planning_context(db, project)
-        provider_call: ProviderCallRecord | None = None
+
+        def plan_response(planner: ScenePlanner, *, include_context: bool) -> ScenePlanResponse:
+            result = planner.plan(
+                project,
+                script=payload.script,
+                topic=payload.topic,
+                **({"context": planning_context} if include_context else {}),
+            )
+            scenes = tuple(scene.model_copy(update={"evidence_refs": list(evidence_refs)}) for scene in result.scenes)
+            return ScenePlanResponse(project_id=result.project_id, scenes=scenes)
+
         try:
             planner = request.app.state.scene_planner or _scene_planner_from_env()
-            if isinstance(planner, OpenAICompatibleScenePlanner):
-                provider_call = _reserve_runtime_provider_call(
-                    db,
-                    project_id,
-                    request,
+            identity = runtime_provider_identity(planner)
+            if identity is not None:
+                return ProviderExecutionService(db, request.app.state.cost_estimator).execute(
+                    project_id=project_id,
+                    idempotency_key=_runtime_idempotency_key(request, "scene-planning"),
                     operation="scene_planning",
-                    provider="openai-compatible",
-                    model=planner.model,
                     input_source=f"project:{project_id}:scene-plan",
+                    provider=identity,
                     category=CostCategory.LLM,
+                    input_document={
+                        "request": payload.model_dump(mode="json"),
+                        "planning_context": planning_context,
+                        "evidence_refs": list(evidence_refs),
+                    },
+                    action=lambda: plan_response(planner, include_context=True),
+                    encode_result=lambda value: value.model_dump(mode="json"),
+                    decode_result=ScenePlanResponse.model_validate,
+                    error_code=_scene_planner_error_code,
                 )
-                result = planner.plan(project, script=payload.script, topic=payload.topic, context=planning_context)
-            else:
-                # Preserve the narrow provider protocol used by injected test
-                # and local adapters; runtime OpenAI-compatible planning above
-                # receives the full IP/material context.
-                result = planner.plan(project, script=payload.script, topic=payload.topic)
+            # Deterministic/local test adapters retain the narrow original
+            # protocol and do not claim an externally metered identity.
+            return plan_response(planner, include_context=False)
+        except BudgetLimitError as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
+        except (ProviderExecutionIdempotencyConflict, ProviderExecutionInProgress, ProviderExecutionRecordedFailure, ProviderExecutionReplayUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
+        except ProviderExecutionAccountingFailure as exc:
+            raise HTTPException(status_code=500, detail=exc.code) from exc
         except (ScenePlannerConfigurationError, ScenePlannerAuthenticationError) as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="scene_planner_not_configured")
             raise HTTPException(status_code=503, detail="scene planner is not configured") from exc
         except (ScenePlannerRateLimitError, ScenePlannerTimeout, ScenePlannerConnectionError) as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="scene_planner_temporarily_unavailable")
             raise HTTPException(status_code=503, detail="scene planner is temporarily unavailable") from exc
         except ScenePlannerHTTPError as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="scene_planner_request_failed")
             status = 503 if exc.status_code >= 500 or exc.status_code in {408, 409, 425, 429} else 502
             raise HTTPException(status_code=status, detail="scene planner request failed") from exc
         except ScenePlannerProviderResponseError as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="scene_planner_response_invalid")
             raise HTTPException(status_code=502, detail="scene planner returned an invalid response") from exc
         except ScenePlannerInputError as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="scene_planner_input_invalid")
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if provider_call is not None:
-            _finish_runtime_provider_call(db, project_id, provider_call, status="completed")
-        scenes = tuple(scene.model_copy(update={"evidence_refs": list(evidence_refs)}) for scene in result.scenes)
-        return ScenePlanResponse(project_id=result.project_id, scenes=scenes)
 
     @application.post("/projects/{project_id}/asset-routes", response_model=list[AssetRouteResponse])
     async def route_scene_assets(project_id: UUID, payload: AssetRouteRequest, request: Request) -> list[AssetRouteResponse]:
@@ -1930,63 +1970,75 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
         if any(scene.project_id != project_id for scene in payload.scenes):
             raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
-        provider_call: ProviderCallRecord | None = None
+
+        def route_response(searcher: object) -> list[AssetRouteResponse]:
+            router = AssetRouter(
+                searcher,
+                AssetRepository(db),
+                images=ImageAssetRepository(db),
+                max_candidates=payload.max_candidates,
+                capture_gap_threshold=payload.capture_gap_threshold,
+            )
+            results = router.route_all(payload.scenes)
+            return [
+                AssetRouteResponse(
+                    scene_plan_id=result.scene_plan_id,
+                    candidates=result.candidates,
+                    shoot_list=_shoot_list_for_scene(
+                        next(scene for scene in payload.scenes if scene.id == result.scene_plan_id),
+                        result.candidates,
+                    ),
+                )
+                for result in results
+            ]
+
+        def decode_route_result(value: object) -> list[AssetRouteResponse]:
+            if not isinstance(value, list):
+                raise ValueError("saved route result must be a list")
+            return [AssetRouteResponse.model_validate(item) for item in value]
+
         try:
             retrieval_mode = os.environ.get("CONTENT_OS_RETRIEVAL_MODE", "embedding").strip().lower()
             if retrieval_mode == "lexical":
-                searcher = ClipTextSearchService(db)
+                return route_response(ClipTextSearchService(db))
             elif retrieval_mode == "embedding":
                 provider = request.app.state.embedding_provider or _embedding_provider_from_env()
-                if isinstance(provider, OpenAICompatibleEmbeddingProvider):
-                    provider_call = _reserve_runtime_provider_call(
-                        db,
-                        project_id,
-                        request,
-                        operation="embedding",
-                        provider="openai-compatible",
-                        model=provider.model,
-                        input_source=f"project:{project_id}:asset-routes",
-                        category=CostCategory.LLM,
-                    )
                 searcher = ClipEmbeddingIndexer(db, provider)
+                identity = runtime_provider_identity(provider)
+                if identity is None:
+                    return route_response(searcher)
+                return ProviderExecutionService(db, request.app.state.cost_estimator).execute(
+                    project_id=project_id,
+                    idempotency_key=_runtime_idempotency_key(request, "asset-routes-embedding"),
+                    operation="embedding",
+                    provider=identity,
+                    input_source=f"project:{project_id}:asset-routes",
+                    category=CostCategory.LLM,
+                    input_document={"request": payload.model_dump(mode="json"), "retrieval_mode": retrieval_mode},
+                    action=lambda: route_response(searcher),
+                    encode_result=lambda value: [item.model_dump(mode="json") for item in value],
+                    decode_result=decode_route_result,
+                    error_code=_embedding_error_code,
+                )
             else:
                 raise IndexError("CONTENT_OS_RETRIEVAL_MODE must be embedding or lexical")
-            router = AssetRouter(searcher, AssetRepository(db), images=ImageAssetRepository(db), max_candidates=payload.max_candidates, capture_gap_threshold=payload.capture_gap_threshold)
-            results = router.route_all(payload.scenes)
+        except BudgetLimitError as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
+        except (ProviderExecutionIdempotencyConflict, ProviderExecutionInProgress, ProviderExecutionRecordedFailure, ProviderExecutionReplayUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
+        except ProviderExecutionAccountingFailure as exc:
+            raise HTTPException(status_code=500, detail=exc.code) from exc
         except (EmbeddingConfigurationError, EmbeddingAuthenticationError) as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="embedding_not_configured")
             raise HTTPException(status_code=503, detail="embedding provider is not configured") from exc
         except (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError) as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="embedding_temporarily_unavailable")
             raise HTTPException(status_code=503, detail="embedding provider is temporarily unavailable") from exc
         except EmbeddingHTTPError as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="embedding_request_failed")
             status = 503 if exc.status_code >= 500 or exc.status_code in {408, 409, 425, 429} else 502
             raise HTTPException(status_code=status, detail="embedding provider request failed") from exc
         except EmbeddingProviderResponseError as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="embedding_response_invalid")
             raise HTTPException(status_code=502, detail="embedding provider returned an invalid response") from exc
         except (EmbeddingInputError, EmbeddingIndexError, IndexError, RoutingConfigurationError, RoutingInputError) as exc:
-            if provider_call is not None:
-                _finish_runtime_provider_call(db, project_id, provider_call, status="failed", error_code="embedding_input_invalid")
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if provider_call is not None:
-            _finish_runtime_provider_call(db, project_id, provider_call, status="completed")
-        return [
-            AssetRouteResponse(
-                scene_plan_id=result.scene_plan_id,
-                candidates=result.candidates,
-                shoot_list=_shoot_list_for_scene(
-                    next(scene for scene in payload.scenes if scene.id == result.scene_plan_id),
-                    result.candidates,
-                ),
-            )
-            for result in results
-        ]
 
     @application.post("/projects/{project_id}/video-spec", response_model=VideoSpec)
     async def assemble_video_spec(project_id: UUID, payload: VideoSpecAssemblyRequest, request: Request) -> VideoSpec:

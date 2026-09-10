@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -163,3 +164,39 @@ def test_runtime_embedding_route_reconciles_provider_call(tmp_path: Path) -> Non
         assert records[0]["operation"] == "embedding"
         assert records[0]["status"] == "completed"
         assert records[0]["usage_observable"] is False
+
+
+def test_runtime_multi_scene_route_batches_embedding_and_replays_one_ledger_result(tmp_path: Path) -> None:
+    path = tmp_path / "route-batched-budget.sqlite"
+    project, _, scene = _seed(path, tmp_path)
+    second = scene.model_copy(update={
+        "id": uuid4(),
+        "scene_id": "scene-2",
+        "order": 1,
+        "voice_text": "本人继续在电脑前解释软件操作。",
+    })
+    calls: list[tuple[str, ...]] = []
+
+    class Provider:
+        provider_name = "test-runtime"
+        model = "embedding-test-v1"
+
+        def embed(self, texts):
+            calls.append(tuple(texts))
+            return EmbeddingBatch(tuple((1.0, 0.0) for _ in texts))
+
+    with TestClient(create_app(path, embedding_provider=Provider())) as client:
+        assert client.put("/budget", json={"allow_unknown_cost": True}).status_code == 200
+        headers = {"Idempotency-Key": "batch-route"}
+        body = {"scenes": [scene.model_dump(mode="json"), second.model_dump(mode="json")]}
+        first = client.post(f"/projects/{project.id}/asset-routes", json=body, headers=headers)
+        replay = client.post(f"/projects/{project.id}/asset-routes", json=body, headers=headers)
+
+        assert first.status_code == replay.status_code == 200
+        assert replay.json() == first.json()
+        assert len(calls) == 1
+        assert len(calls[0]) == 2
+        records = client.get(f"/projects/{project.id}/provider-calls").json()
+        assert len(records) == 1
+        assert records[0]["operation"] == "embedding"
+        assert records[0]["status"] == "completed"

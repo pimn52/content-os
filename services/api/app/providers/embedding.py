@@ -117,6 +117,8 @@ class UrllibEmbeddingTransport:
 class OpenAICompatibleEmbeddingProvider:
     """Runtime-key ``POST /v1/embeddings`` adapter with ordered batch results."""
 
+    provider_name = "openai-compatible"
+
     def __init__(
         self,
         api_key: str,

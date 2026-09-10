@@ -1,6 +1,6 @@
 # 本地开发接续
 
-> 当前接续入口是 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，状态事实见 [STATUS.md](STATUS.md)，审查起点见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。本文件的早期 Task 001 提示仅保留作历史参考。
+> 当前接续入口是 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，状态事实见 [STATUS.md](STATUS.md)，当前复审证据见 [CONTENT_OS_REVIEW_2026-09-10.md](CONTENT_OS_REVIEW_2026-09-10.md)，[AUDIT_REPORT.md](AUDIT_REPORT.md) 仅保留历史起点。本文件的早期 Task 001 提示仅保留作历史参考。
 
 ## 1. 放入目录
 
@@ -29,7 +29,7 @@ py -m venv .venv
 
 在有文件访问权限的本地开发环境中打开上述项目目录，然后发送以下任务：
 
-> 继续开发 Content OS。先读 CONTENT_OS_EXECUTION_SPEC.md、AUDIT_REPORT.md、STATUS.md、DECISIONS.md 和本仓库现有模型/测试。按 STATUS.md 的当前 ready 任务继续，不重做已完成的媒体/任务基础，不重新讨论战略。普通工程选择直接执行；外部付费接口保持后置；真实模型辅助测试与 fixture、runtime 分开记录。每个任务完成后运行针对性测试，更新 STATUS.md 和必要的 DECISIONS.md，然后直接领取下一个 ready 任务。只有 U1/U2/U3、首次付费/预算、权限、不可逆数据变更或发布授权才集中等待用户。
+> 继续开发 Content OS。先读 CONTENT_OS_EXECUTION_SPEC.md、CONTENT_OS_REVIEW_2026-09-10.md、STATUS.md、DECISIONS.md 和本仓库现有模型/测试。按 STATUS.md 的当前 ready 任务继续，不重做已完成的媒体/任务基础，不重新讨论战略。普通工程选择直接执行；外部付费接口保持后置；真实模型辅助测试与 fixture、runtime 分开记录。每个工作包完成后运行针对性测试，更新 STATUS.md 和必要的 DECISIONS.md，然后直接领取下一个 ready 任务。只有 U-Voice/U-Product、首次付费/预算、权限、不可逆数据变更或发布授权才集中等待用户。
 
 任务执行依赖本地 Agent 的实际工具和模型可用性，本包本身不会自动创建子 Agent。
 

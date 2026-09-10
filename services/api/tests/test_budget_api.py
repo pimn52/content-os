@@ -105,3 +105,48 @@ def test_budget_policy_can_be_global_and_unknown_cost_can_be_explicit(tmp_path: 
         body = reserved.json()
         assert body["budget"]["snapshot"]["unknown_cost_calls"] == 1
         assert body["budget"]["over_budget"] is False
+
+
+def test_global_budget_is_enforced_across_projects_and_project_policy_is_additional(tmp_path: Path) -> None:
+    with TestClient(create_app(tmp_path / "scoped-global-budget.sqlite3")) as client:
+        first_project = _project(client)
+        second_project = _project(client)
+        assert client.put("/budget", json={"currency": "USD", "max_calls": 2, "allow_unknown_cost": True}).status_code == 200
+        assert client.put(
+            f"/projects/{first_project}/budget",
+            json={"currency": "USD", "max_calls": 1, "allow_unknown_cost": True},
+        ).status_code == 200
+
+        request = {
+            "operation": "scene_planning",
+            "mode": "runtime",
+            "provider": "test-runtime",
+            "model": "planner-v1",
+            "input_source": "project:brief",
+            "estimated_cost": _cost(None),
+        }
+        one = client.post(
+            f"/projects/{first_project}/provider-calls/reserve",
+            json={**request, "idempotency_key": "project-one"},
+        )
+        project_limited = client.post(
+            f"/projects/{first_project}/provider-calls/reserve",
+            json={**request, "idempotency_key": "project-one-over"},
+        )
+        two = client.post(
+            f"/projects/{second_project}/provider-calls/reserve",
+            json={**request, "idempotency_key": "project-two"},
+        )
+        global_limited = client.post(
+            f"/projects/{second_project}/provider-calls/reserve",
+            json={**request, "idempotency_key": "project-two-over"},
+        )
+
+        assert one.status_code == two.status_code == 201
+        assert project_limited.status_code == global_limited.status_code == 409
+        assert project_limited.json()["detail"] == "call_limit"
+        assert global_limited.json()["detail"] == "call_limit"
+        budget = client.get(f"/projects/{first_project}/budget").json()
+        assert budget["period"] == "ledger_lifetime"
+        assert budget["global_snapshot"]["calls"] == 2
+        assert budget["project_snapshot"]["calls"] == 1

@@ -175,6 +175,8 @@ class OpenAICompatibleScenePlanner:
     OpenAI Chat Completions shape instead of the Responses shape.
     """
 
+    provider_name = "openai-compatible"
+
     def __init__(
         self,
         api_key: str,

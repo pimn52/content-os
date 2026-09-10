@@ -490,6 +490,7 @@ class ProviderCallRecord(ContractModel):
     provider: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=200)
     input_source: str = Field(min_length=1, max_length=500)
+    input_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     status: Literal["reserved", "running", "completed", "failed", "cancelled"] = "reserved"
     estimated_cost: UsageCost
     actual_cost: UsageCost | None = None
@@ -499,6 +500,7 @@ class ProviderCallRecord(ContractModel):
     usage_observable: bool | None = None
     price_date: date | None = None
     error_code: str | None = Field(default=None, max_length=100)
+    result_payload: dict[str, JsonValue] | None = None
     created_at: AwareDatetime
     completed_at: AwareDatetime | None = None
 
@@ -511,6 +513,8 @@ class ProviderCallRecord(ContractModel):
             # A provider may not expose a billable amount; the record remains
             # auditable with actual_cost=null instead of silently claiming zero.
             return self
+        if self.result_payload is not None and self.status != "completed":
+            raise ValueError("result_payload requires a completed provider call")
         return self
 
 

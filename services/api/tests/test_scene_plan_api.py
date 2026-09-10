@@ -139,3 +139,32 @@ def test_runtime_scene_plan_reconciles_success_and_provider_failure(tmp_path: Pa
         assert len(records) == 2
         assert records[1]["status"] == "failed"
         assert records[1]["error_code"] == "scene_planner_temporarily_unavailable"
+
+
+def test_runtime_scene_plan_replays_one_completed_result_and_rejects_changed_retry_input(tmp_path: Path) -> None:
+    path = tmp_path / "scene-plan-idempotency.sqlite"
+    project = _project(path)
+    calls: list[object] = []
+
+    class Transport:
+        def post(self, *args):
+            calls.append(args)
+            return _runtime_plan_response()
+
+    planner = OpenAICompatibleScenePlanner("runtime-key", transport=Transport())
+    with TestClient(create_app(path, scene_planner=planner)) as client:
+        assert client.put("/budget", json={"allow_unknown_cost": True}).status_code == 200
+        headers = {"Idempotency-Key": "same-planning-request"}
+        first = client.post(f"/projects/{project.id}/scene-plan", json={"topic": "First topic"}, headers=headers)
+        replay = client.post(f"/projects/{project.id}/scene-plan", json={"topic": "First topic"}, headers=headers)
+        conflict = client.post(f"/projects/{project.id}/scene-plan", json={"topic": "Changed topic"}, headers=headers)
+
+        assert first.status_code == replay.status_code == 200
+        assert replay.json() == first.json()
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == "provider_idempotency_conflict"
+        assert len(calls) == 1
+        records = client.get(f"/projects/{project.id}/provider-calls").json()
+        assert len(records) == 1
+        assert records[0]["status"] == "completed"
+        assert records[0]["result_payload"]["result"]["project_id"] == str(project.id)

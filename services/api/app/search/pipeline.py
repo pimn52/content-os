@@ -69,3 +69,38 @@ class ClipEmbeddingIndexer:
             orientation=orientation,
             talking_candidate=talking_candidate,
         )
+
+    def search_many(
+        self,
+        queries: Sequence[str],
+        *,
+        top_k: int = 10,
+        asset_id: UUID | None = None,
+        orientation: ProjectFormat | str | None = None,
+        talking_candidate: bool | None = None,
+    ) -> list[list[ClipSearchHit]]:
+        """Embed a related set of scene queries in one provider batch.
+
+        The surrounding application service can therefore reserve and record
+        exactly one external embedding operation for a multi-scene route.
+        """
+        if isinstance(queries, (str, bytes)) or not queries:
+            raise IndexError("search queries must be a non-empty sequence")
+        values = tuple(queries)
+        if any(not isinstance(query, str) or not query.strip() or len(query) > 10_000 for query in values):
+            raise IndexError("each search query must be non-empty and at most 10000 characters")
+        if self.db.connection.in_transaction:
+            raise EmbeddingIndexError("embedding provider cannot run inside a database transaction")
+        batch = self.provider.embed(tuple(query.strip() for query in values))
+        if not isinstance(batch, EmbeddingBatch) or len(batch.vectors) != len(values):
+            raise EmbeddingCountMismatch("query embedding result count does not match input")
+        return [
+            self.search_service.search(
+                vector,
+                top_k=top_k,
+                asset_id=asset_id,
+                orientation=orientation,
+                talking_candidate=talking_candidate,
+            )
+            for vector in batch.vectors
+        ]

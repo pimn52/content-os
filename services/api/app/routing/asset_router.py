@@ -125,6 +125,9 @@ class AssetRouter:
         query = _scene_query(scene)
         # Retrieval errors retain the provider/indexer's own typed semantics.
         hits = self.searcher.search(query, top_k=self.candidate_pool_size)
+        return self._route_from_hits(scene, hits)
+
+    def _route_from_hits(self, scene: ScenePlan, hits: list[ClipSearchHit]) -> RoutingResult:
         if not isinstance(hits, list) or any(not isinstance(hit, ClipSearchHit) for hit in hits):
             raise RoutingInputError("scene searcher returned invalid Clip hits")
         candidates = self._score_hits(scene, hits)
@@ -156,6 +159,16 @@ class AssetRouter:
             raise RoutingInputError("ScenePlan IDs must be unique")
         if [scene.order for scene in ordered] != list(range(len(ordered))):
             raise RoutingInputError("ScenePlan order must be contiguous and start at zero")
+        search_many = getattr(self.searcher, "search_many", None)
+        if callable(search_many):
+            queries = tuple(_scene_query(scene) for scene in ordered)
+            batches = search_many(queries, top_k=self.candidate_pool_size)
+            if not isinstance(batches, list) or len(batches) != len(ordered):
+                raise RoutingInputError("scene searcher returned invalid batched Clip hits")
+            return tuple(
+                self._route_from_hits(scene, hits)
+                for scene, hits in zip(ordered, batches, strict=True)
+            )
         return tuple(self.route(scene) for scene in ordered)
 
     def _score_hits(self, scene: ScenePlan, hits: Sequence[ClipSearchHit]) -> list[tuple[float, CandidateAsset]]:

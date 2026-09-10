@@ -1,6 +1,6 @@
 # Content OS — 开发计划与最低成本 Agent 分工
 
-> 本文保留为历史任务拆分与成本分工参考；当前统一执行规格、任务顺序和验收以 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) 为准，历史审查证据见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。
+> 本文保留为历史任务拆分与成本分工参考；当前统一执行规格、任务顺序和验收以 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) 为准；当前复审证据见 [CONTENT_OS_REVIEW_2026-09-10.md](CONTENT_OS_REVIEW_2026-09-10.md)，[AUDIT_REPORT.md](AUDIT_REPORT.md) 是历史证据。
 
 
 > 对应 PRD：V0.1 Draft  

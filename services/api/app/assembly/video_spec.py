@@ -186,14 +186,32 @@ class VideoSpecAssembler:
                 continue
             asset, clip = self._stored_real_clip(scene, candidate)
             clip_start_ms, clip_end_ms = clip.start_ms, clip.end_ms
+            original_clip_end_ms = clip.end_ms
             captions: list[VideoCaption] = []
             source_interval_aligned = False
             if audio is not None:
                 captions = _audio_captions(audio, duration_ms)
                 if narration_required:
-                    # Keep the visual interval no longer than the corresponding
-                    # recording. The source audio is muted, so there is no hidden
-                    # tail that could continue after the new narration ends.
+                    # Check the persisted source boundary before deriving the
+                    # exact visual interval. Updating ``clip_end_ms`` first
+                    # used to make a too-long narration appear valid until the
+                    # renderer rejected it later.
+                    if duration_ms > original_clip_end_ms - clip_start_ms:
+                        raise InsufficientSourceDuration(
+                            f"scene {scene.scene_id!r} narration duration exceeds its continuous Clip"
+                        )
+                    requested_frames = milliseconds_to_frames(duration_ms, project.fps)
+                    available_frames = source_interval_to_frames(
+                        clip_start_ms,
+                        clip_start_ms + duration_ms,
+                        project.fps,
+                    )
+                    if available_frames < requested_frames:
+                        raise InsufficientSourceDuration(
+                            f"scene {scene.scene_id!r} narration duration cannot fit the Clip at the project frame rate"
+                        )
+                    # The source audio is muted, so there is no hidden tail
+                    # that could continue after the new narration ends.
                     clip_end_ms = clip_start_ms + duration_ms
             elif not narration_required:
                 aligned = _source_sentence_interval(

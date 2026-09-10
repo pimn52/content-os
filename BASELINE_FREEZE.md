@@ -1,6 +1,6 @@
 # Content OS — 开发基线修订
 
-日期：2026-09-07。本文是历史开发基线；R1 统一执行规格见 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，R1 与本文冲突时以 R1 为准；未冲突部分保留。
+日期：2026-09-07。本文是历史开发基线；当前统一执行规格见 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，当前复审证据见 [CONTENT_OS_REVIEW_2026-09-10.md](CONTENT_OS_REVIEW_2026-09-10.md)。当前规格与本文冲突时以前者为准；未冲突部分保留。
 
 ## 产品方向
 

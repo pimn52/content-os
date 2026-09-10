@@ -2,7 +2,7 @@
 
 Content OS 是一个 **Local-first / BYOK** 的个人内容引擎，长期方向是帮助专业创作者和小团队发现值得表达的内容，以自己的方式、可控成本持续经营内容资产：Know what to create → Create it as you → Learn what works。当前工程先验证本地生产链路，不能把本批次脚手架当作完整产品验收。
 
-当前统一执行入口是 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，审查起点证据是 [AUDIT_REPORT.md](AUDIT_REPORT.md)；旧 PRD、计划和冻结文件保留为历史设计参考，最新事实与接续任务见 [STATUS.md](STATUS.md)。
+当前统一执行入口是 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，当前复审证据是 [CONTENT_OS_REVIEW_2026-09-10.md](CONTENT_OS_REVIEW_2026-09-10.md)，[AUDIT_REPORT.md](AUDIT_REPORT.md) 仅保留历史起点；旧 PRD、计划和冻结文件保留为历史设计参考，最新事实与接续任务见 [STATUS.md](STATUS.md)。
 
 ## 当前开发批次
 
