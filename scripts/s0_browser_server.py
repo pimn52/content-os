@@ -1,23 +1,21 @@
 """Local S0 browser smoke server.
 
-This is an interaction-boundary harness only. It uses a real locally encoded
-MP4 and injected test providers so a browser can exercise the buttons without
-calling a paid service. Its deterministic labels must not be reported as
-assisted-test semantic quality or runtime-provider validation.
+This is an interaction-boundary harness only. It uses persisted media metadata
+and injected test providers so a browser can exercise routing/assembly buttons
+without calling a paid service or requiring a second FFmpeg distribution. Its
+deterministic labels must not be reported as assisted-test semantic quality or
+runtime-provider validation.
 """
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
 
-from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
-from app.domain.models import Asset, Clip, IPProfile, Project, RationalFps, ScenePlan, SourceKind, VisualIntent
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
+from app.domain.models import Asset, AudioAsset, Clip, IPProfile, Project, RationalFps, ScenePlan, SourceKind, VisualIntent
 from app.main import create_app
 from app.providers.embedding import EmbeddingBatch
 from app.providers.scene_planner import ScenePlanResult
@@ -52,29 +50,10 @@ class BrowserEmbedding:
         return EmbeddingBatch(tuple(vectors))
 
 
-def _ffmpeg() -> str:
-    configured = os.environ.get("CONTENT_OS_FFMPEG")
-    if configured:
-        return configured
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    bundled = Path(tempfile.gettempdir()) / "content-os-ffmpeg-9.0.1-essentials" / "ffmpeg-9.0.1-essentials_build" / "bin" / "ffmpeg.exe"
-    if bundled.is_file():
-        return str(bundled)
-    raise RuntimeError("set CONTENT_OS_FFMPEG or put ffmpeg on PATH")
-
-
 def _seed(root: Path) -> Path:
     database_path = root / "s0-browser.sqlite"
     source = root / "source.mp4"
-    subprocess.run(
-        [_ffmpeg(), "-y", "-f", "lavfi", "-i", "color=c=red:size=360x640:rate=30", "-f", "lavfi", "-i",
-         "sine=frequency=440:sample_rate=48000", "-t", "3", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac",
-         "-shortest", str(source)],
-        check=True,
-        capture_output=True,
-    )
+    source.write_bytes(b"metadata-only browser smoke fixture")
     db = Database(database_path)
     try:
         profile = IPProfile(creator_name="Browser smoke creator")
@@ -85,6 +64,16 @@ def _seed(root: Path) -> Path:
         )
         assets = []
         clips = []
+        narration = AudioAsset(
+            source_kind=SourceKind.USER_ASSET,
+            source_file=str(source),
+            content_hash="a" * 64,
+            duration_ms=3_000,
+            sample_rate=48_000,
+            channels=1,
+            authorization_reference="browser-smoke-narration",
+            imported_at=datetime.now(timezone.utc),
+        )
         for index, name in enumerate(("red", "blue")):
             asset = Asset(
                 source_file=str(source), content_hash=f"{index + 1}" * 64, duration_ms=3_000,
@@ -101,6 +90,7 @@ def _seed(root: Path) -> Path:
         with db.transaction():
             IPProfileRepository(db).create(profile)
             ProjectRepository(db).create(project)
+            AudioAssetRepository(db).create(narration)
             for asset, clip in zip(assets, clips, strict=True):
                 AssetRepository(db).create(asset)
                 ClipRepository(db).create(clip)

@@ -299,7 +299,8 @@ function App() {
 
   async function importAudio(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       const result = await api<AudioAsset[]>("/audio-imports", {
         method: "POST",
@@ -310,7 +311,7 @@ function App() {
           recursive: true,
         }),
       });
-      await loadAll(); event.currentTarget.reset();
+      await loadAll(); formElement.reset();
       setMessage({ text: `旁白导入完成：${result.length} 个文件；新文案请选择一条完整主旁白并绑定真实时间轴` });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "旁白导入失败", error: true }); }
     finally { setBusy(false); }
@@ -318,7 +319,8 @@ function App() {
 
   async function importImage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       const result = await api<unknown[]>("/image-imports", {
         method: "POST",
@@ -329,7 +331,7 @@ function App() {
           recursive: true,
         }),
       });
-      await loadAll(); event.currentTarget.reset();
+      await loadAll(); formElement.reset();
       setMessage({ text: `静态视觉导入完成：${result.length} 个文件；可作为截图/图表候选供审核` });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "静态视觉导入失败", error: true }); }
     finally { setBusy(false); }
@@ -337,7 +339,8 @@ function App() {
 
   async function importTranscript(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const assetId = String(form.get("asset_id") ?? "");
     try {
       const result = await api<{ segment_count: number; updated_clip_count: number }>(`/assets/${assetId}/transcript-imports`, {
@@ -347,7 +350,7 @@ function App() {
           source_reference: String(form.get("source_reference") ?? ""),
         }),
       });
-      await loadAll(); event.currentTarget.reset();
+      await loadAll(); formElement.reset();
       setMessage({ text: `时间轴字幕导入完成：${result.segment_count} 段，更新 ${result.updated_clip_count} 个 Clip；后续按真实句界匹配` });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "字幕导入失败", error: true }); }
     finally { setBusy(false); }
@@ -355,7 +358,8 @@ function App() {
 
   async function importAudioTranscript(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const audioId = String(form.get("audio_id") ?? "");
     try {
       const result = await api<{ segment_count: number }>(`/audio-assets/${audioId}/transcript-imports`, {
@@ -365,7 +369,7 @@ function App() {
           source_reference: String(form.get("source_reference") ?? ""),
         }),
       });
-      await loadAll(); event.currentTarget.reset();
+      await loadAll(); formElement.reset();
       setMessage({ text: `旁白时间轴导入完成：${result.segment_count} 段；组装时将按真实音频句段显示字幕` });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "旁白字幕导入失败", error: true }); }
     finally { setBusy(false); }
@@ -373,7 +377,8 @@ function App() {
 
   async function uploadMedia(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const file = form.get("file");
     if (!(file instanceof File) || !file.name) { setMessage({ text: "请选择一个视频文件", error: true }); setBusy(false); return; }
     const body = new FormData();
@@ -381,19 +386,20 @@ function App() {
     body.append("authorization_reference", String(form.get("authorization_reference") ?? ""));
     const shootTaskId = String(form.get("shoot_task_id") ?? "");
     if (shootTaskId) body.append("shoot_task_id", shootTaskId);
-    try { await api<Asset>("/uploads", { method: "POST", body }); await loadAll(); event.currentTarget.reset(); setMessage({ text: `浏览器上传完成：${file.name}` }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "上传失败", error: true }); } finally { setBusy(false); }
+    try { await api<Asset>("/uploads", { method: "POST", body }); await loadAll(); formElement.reset(); setMessage({ text: `浏览器上传完成：${file.name}` }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "上传失败", error: true }); } finally { setBusy(false); }
   }
 
   async function uploadAudio(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const file = form.get("file");
     if (!(file instanceof File) || !file.name) { setMessage({ text: "请选择一个音频文件", error: true }); setBusy(false); return; }
     const body = new FormData();
     body.append("file", file);
     body.append("authorization_reference", String(form.get("authorization_reference") ?? ""));
     body.append("language", String(form.get("language") ?? ""));
-    try { await api<AudioAsset>("/audio-uploads", { method: "POST", body }); await loadAll(); event.currentTarget.reset(); setMessage({ text: `本人录音上传完成：${file.name}` }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "录音上传失败", error: true }); } finally { setBusy(false); }
+    try { await api<AudioAsset>("/audio-uploads", { method: "POST", body }); await loadAll(); formElement.reset(); setMessage({ text: `本人录音上传完成：${file.name}` }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "录音上传失败", error: true }); } finally { setBusy(false); }
   }
 
   async function confirmShootTask(item: ShootListInstruction) {
@@ -476,7 +482,8 @@ function App() {
 
   async function importAnalysisBundle(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const file = (form.get("bundle") as File | null);
     if (!file || !file.size) { setMessage({ text: "请选择 AnalysisResultBundle JSON 文件", error: true }); return; }
     setBusy(true);
@@ -485,7 +492,7 @@ function App() {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("分析包必须是 JSON 对象");
       const bundle = await api<AnalysisResultBundle>("/analysis-results", { method: "POST", body: JSON.stringify(parsed) });
       await loadAll();
-      event.currentTarget.reset();
+      formElement.reset();
       setMessage({ text: `真实 ${bundle.mode} 分析包已导入：${bundle.source} / ${bundle.model}，${bundle.results.length} 个结果已绑定本地素材` });
     } catch (error) {
       setMessage({ text: error instanceof Error ? error.message : "分析包导入失败", error: true });
@@ -493,35 +500,35 @@ function App() {
   }
 
   async function createOpportunity(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget);
-    try { await api<Opportunity>("/opportunities", { method: "POST", body: JSON.stringify({ source_type: String(form.get("source_type")), source_ref: String(form.get("source_ref")), title: String(form.get("title")), observed_at: new Date(String(form.get("observed_at"))).toISOString(), fit_reason: String(form.get("fit_reason")), angle: String(form.get("angle")), uncertainty: String(form.get("uncertainty") ?? "") || null, evidence_refs: split(String(form.get("evidence_refs") ?? "")) }) }); await loadAll(); event.currentTarget.reset(); setMessage({ text: "有来源选题已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "选题保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try { await api<Opportunity>("/opportunities", { method: "POST", body: JSON.stringify({ source_type: String(form.get("source_type")), source_ref: String(form.get("source_ref")), title: String(form.get("title")), observed_at: new Date(String(form.get("observed_at"))).toISOString(), fit_reason: String(form.get("fit_reason")), angle: String(form.get("angle")), uncertainty: String(form.get("uncertainty") ?? "") || null, evidence_refs: split(String(form.get("evidence_refs") ?? "")) }) }); await loadAll(); formElement.reset(); setMessage({ text: "有来源选题已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "选题保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function createAccount(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget);
-    try { await api<AccountConnection>("/account-connections", { method: "POST", body: JSON.stringify({ provider: String(form.get("provider")), account_external_id: String(form.get("account_external_id")), display_name: String(form.get("display_name") ?? "") || null, connected_at: dateValue(form.get("connected_at")) }) }); await loadAll(); event.currentTarget.reset(); setMessage({ text: "只读账号记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "账号保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try { await api<AccountConnection>("/account-connections", { method: "POST", body: JSON.stringify({ provider: String(form.get("provider")), account_external_id: String(form.get("account_external_id")), display_name: String(form.get("display_name") ?? "") || null, connected_at: dateValue(form.get("connected_at")) }) }); await loadAll(); formElement.reset(); setMessage({ text: "只读账号记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "账号保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function createHistorical(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget);
-    try { await api<HistoricalContent>("/historical-content", { method: "POST", body: JSON.stringify({ account_connection_id: String(form.get("account_connection_id")), external_id: String(form.get("external_id")), title: String(form.get("title")), published_at: dateValue(form.get("published_at")), description: String(form.get("description") ?? "") || null, transcript: String(form.get("transcript") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")) }) }); await loadAll(); event.currentTarget.reset(); setMessage({ text: "历史内容记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "历史内容保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try { await api<HistoricalContent>("/historical-content", { method: "POST", body: JSON.stringify({ account_connection_id: String(form.get("account_connection_id")), external_id: String(form.get("external_id")), title: String(form.get("title")), published_at: dateValue(form.get("published_at")), description: String(form.get("description") ?? "") || null, transcript: String(form.get("transcript") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")) }) }); await loadAll(); formElement.reset(); setMessage({ text: "历史内容记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "历史内容保存失败", error: true }); } finally { setBusy(false); }
   }
 
   function consentFrom(form: FormData): ConsentRecord { const basis = String(form.get("basis")) as ConsentRecord["basis"]; return { subject_name: String(form.get("subject_name")), basis, confirmed: true, confirmed_at: new Date().toISOString(), authorization_reference: String(form.get("authorization_reference") ?? "") || null }; }
 
   async function createVoice(event: FormEvent<HTMLFormElement>, talking = false) {
-    event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); const body = { name: String(form.get("name")), provider: String(form.get("provider")), provider_profile_id: String(form.get("provider_profile_id") ?? "") || null, reference_clip_ids: split(String(form.get("reference_clip_ids"))), consent: consentFrom(form), created_at: new Date().toISOString() };
-    try { await api<VoiceProfile | TalkingProfile>(talking ? "/talking-profiles" : "/voice-profiles", { method: "POST", body: JSON.stringify(body) }); await loadAll(); event.currentTarget.reset(); setMessage({ text: talking ? "Talking Profile 注册记录已保存" : "Voice Profile 注册记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Profile 保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement); const body = { name: String(form.get("name")), provider: String(form.get("provider")), provider_profile_id: String(form.get("provider_profile_id") ?? "") || null, reference_clip_ids: split(String(form.get("reference_clip_ids"))), consent: consentFrom(form), created_at: new Date().toISOString() };
+    try { await api<VoiceProfile | TalkingProfile>(talking ? "/talking-profiles" : "/voice-profiles", { method: "POST", body: JSON.stringify(body) }); await loadAll(); formElement.reset(); setMessage({ text: talking ? "Talking Profile 注册记录已保存" : "Voice Profile 注册记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Profile 保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function recordPublication(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!selectedProject) return; setBusy(true); const form = new FormData(event.currentTarget);
-    try { await api<Publication>(`/projects/${selectedProject.id}/publications`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), platform: String(form.get("platform")), published_at: dateValue(form.get("published_at")), content_url: String(form.get("content_url") ?? "") || null, content_external_id: String(form.get("content_external_id") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")), metric_source: String(form.get("metric_source") ?? "") || null, observation_window_days: String(form.get("observation_window_days") ?? "") ? Number(form.get("observation_window_days")) : null }) }); await refreshProject(selectedProject.id); event.currentTarget.reset(); setMessage({ text: "人工发布记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "发布记录保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); if (!selectedProject) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try { await api<Publication>(`/projects/${selectedProject.id}/publications`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), platform: String(form.get("platform")), published_at: dateValue(form.get("published_at")), content_url: String(form.get("content_url") ?? "") || null, content_external_id: String(form.get("content_external_id") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")), metric_source: String(form.get("metric_source") ?? "") || null, observation_window_days: String(form.get("observation_window_days") ?? "") ? Number(form.get("observation_window_days")) : null }) }); await refreshProject(selectedProject.id); formElement.reset(); setMessage({ text: "人工发布记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "发布记录保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function recordFeedback(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!selectedProject) return; setBusy(true); const form = new FormData(event.currentTarget);
-    try { await api<Feedback>(`/projects/${selectedProject.id}/feedback`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), accepted: String(form.get("accepted")) === "true", changed_fields: split(String(form.get("changed_fields") ?? "")), rejection_reason: String(form.get("rejection_reason") ?? "") || null, notes: String(form.get("notes") ?? "") || null }) }); await refreshProject(selectedProject.id); event.currentTarget.reset(); setMessage({ text: "反馈已保存，下一轮建议已刷新" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "反馈保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); if (!selectedProject) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try { await api<Feedback>(`/projects/${selectedProject.id}/feedback`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), accepted: String(form.get("accepted")) === "true", changed_fields: split(String(form.get("changed_fields") ?? "")), rejection_reason: String(form.get("rejection_reason") ?? "") || null, notes: String(form.get("notes") ?? "") || null }) }); await refreshProject(selectedProject.id); formElement.reset(); setMessage({ text: "反馈已保存，下一轮建议已刷新" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "反馈保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -603,7 +610,8 @@ function App() {
 
   async function persistDraft(scenes = draft?.scenes ?? [], confirmed = Object.values(selections), spec = videoSpec, nextRoutes = routes, script = draft?.script ?? null, topic = draft?.topic ?? selectedProject?.topic ?? null) {
     if (!selectedProject) return;
-    const value = await api<Draft>(`/projects/${selectedProject.id}/draft`, { method: "PUT", body: JSON.stringify({ script, topic, scenes, routes: nextRoutes, confirmed, video_spec: spec }) });
+    const persistedRoutes = nextRoutes.map(({ scene_plan_id, candidates }) => ({ scene_plan_id, candidates }));
+    const value = await api<Draft>(`/projects/${selectedProject.id}/draft`, { method: "PUT", body: JSON.stringify({ script, topic, scenes, routes: persistedRoutes, confirmed, video_spec: spec }) });
     setDraft(value); setRoutes(value.routes); setSelections(Object.fromEntries(value.confirmed.map((candidate) => [candidate.scene_plan_id, candidate]))); setNarrationAssetIds(narrationForDraft(value)); setMasterNarrationAssetId(masterNarrationForDraft(value)); setVideoSpec(value.video_spec);
   }
 

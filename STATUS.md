@@ -9,6 +9,7 @@ Updated: 2026-09-12 (Asia/Shanghai)
 - Imported narration and source-led real-media renders are engineering/fallback paths, not proof that repeated filming has been replaced.
 - TTS/voice cloning and Talking/lip-sync remain the next core capability area. Do not resume broad peripheral feature work before this uncertainty is tested.
 - The local development machine previously probed as an RTX 3060 Laptop GPU with 6 GiB VRAM. This can justify bounded local experiments, but Content OS must retain a non-high-end-GPU fallback path.
+- `MasterNarration` Web build and isolated browser regression are now verified: ScenePlan → candidate persistence → timed SRT binding → aligned master-track selection → three-scene VideoSpec completed through the UI. The regression fixed two actual S0 blockers: asynchronous forms retain their form element before reset, and route persistence strips UI-only `shoot_list` before submitting the strict `DraftRoute` contract. This is UI/timeline evidence only, not Voice/Talking quality evidence.
 
 ## Active work package
 
@@ -20,7 +21,7 @@ Goal:
 
 Required implementation order:
 
-1. finish/verify any pending `MasterNarration` Web build and browser regression needed by the current branch;
+1. `MasterNarration` Web build and browser regression are verified on the current branch;
 2. add a provider-neutral Voice generation service/job if not already present;
 3. add an optional OmniVoice adapter for **non-commercial local benchmark only**;
 4. keep a schema-compatible commercial-safe local/cloud path;
