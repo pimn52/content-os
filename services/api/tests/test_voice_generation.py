@@ -16,6 +16,8 @@ from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import VoiceGenerationJobHandler
 from app.main import create_app
 from app.providers.voice import VoiceSynthesisResult
+from app.providers.asr import TranscriptionResult, TranscriptionSegment
+from app.voice_qa import apply_voice_qa, verify_generated_voice
 
 
 def _project_and_profile(db: Database, root: Path) -> tuple[Project, VoiceProfile]:
@@ -119,3 +121,21 @@ def test_generated_voice_is_blocked_from_assembly_until_qa_is_verified() -> None
     with pytest.raises(GeneratedNarrationQaPending):
         _require_generated_voice_qa(audio)
     _require_generated_voice_qa(audio.model_copy(update={"metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "verified"}}}))
+
+
+def test_voice_qa_requires_real_timing_and_records_copy_and_silence_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="c" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    transcript = TranscriptionResult("你好世界", (TranscriptionSegment(0, 1_000, "你好世界"),))
+    report = verify_generated_voice(audio, "你好世界", transcript, max_silence_ms=1_100)
+    assert report.verified and report.copy_coverage == 1 and report.longest_silence_ms == 1_000
+    updated = apply_voice_qa(audio, report, transcript, provider="qa-asr", model="qa-model")
+    assert updated.metadata["voice_generation"]["qa_state"] == "verified"
+    assert updated.transcript_source == "qa-asr:qa-model"
+    failed = verify_generated_voice(audio, "你好世界", TranscriptionResult("你好", (TranscriptionSegment(0, 500, "你好"),)))
+    assert not failed.verified and failed.missing_token_count == 2 and "copy_missing_tokens" in failed.checks
