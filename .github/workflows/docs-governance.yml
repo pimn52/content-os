@@ -1,0 +1,27 @@
+name: docs-governance
+
+on:
+  push:
+    paths:
+      - "**/*.md"
+      - "scripts/check_docs.py"
+      - ".github/workflows/docs-governance.yml"
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "scripts/check_docs.py"
+      - ".github/workflows/docs-governance.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check project documentation hierarchy
+        run: python scripts/check_docs.py
