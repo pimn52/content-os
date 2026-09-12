@@ -33,6 +33,7 @@
       "transition": "cut"
     }
   ],
+  "master_narration": null,
   "voice_profile_id": null,
   "estimated_cost": {
     "schema_version": "0.1",

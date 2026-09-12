@@ -139,6 +139,59 @@
       "title": "DraftRoute",
       "type": "object"
     },
+    "MasterNarration": {
+      "additionalProperties": false,
+      "description": "One authorized, timestamped narration track driving a whole VideoSpec.\n\nThe audio remains a single continuous local asset.  Video scenes reference\nintervals on this track for provenance and caption timing; they do not\neach replay the recording from its beginning.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "audio_asset_id": {
+          "format": "uuid",
+          "title": "Audio Asset Id",
+          "type": "string"
+        },
+        "start_ms": {
+          "default": 0,
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "transcript_source": {
+          "description": "Traceable provider alignment or imported SRT/VTT reference.",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Transcript Source",
+          "type": "string"
+        },
+        "transcript_segments": {
+          "items": {
+            "$ref": "#/$defs/TranscriptSegment"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "title": "Transcript Segments",
+          "type": "array"
+        }
+      },
+      "required": [
+        "audio_asset_id",
+        "end_ms",
+        "transcript_source",
+        "transcript_segments"
+      ],
+      "title": "MasterNarration",
+      "type": "object"
+    },
     "ProjectFormat": {
       "enum": [
         "vertical",
@@ -291,6 +344,42 @@
       ],
       "title": "SourceKind",
       "type": "string"
+    },
+    "TranscriptSegment": {
+      "additionalProperties": false,
+      "description": "A persisted, source-relative spoken interval returned by ASR.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "start_ms": {
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "text"
+      ],
+      "title": "TranscriptSegment",
+      "type": "object"
     },
     "UsageCost": {
       "additionalProperties": false,
@@ -549,6 +638,17 @@
           "minItems": 1,
           "title": "Scenes",
           "type": "array"
+        },
+        "master_narration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MasterNarration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "voice_profile_id": {
           "anyOf": [

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
 from app.domain.models import (
     Asset, AudioAsset, CandidateAsset, Clip, CostCategory, IPProfile, Project, RationalFps,
-    ScenePlan, SourceKind, UsageCost, VisualIntent,
+    ScenePlan, SourceKind, TranscriptSegment, UsageCost, VisualIntent,
 )
 from app.main import create_app
 
@@ -109,6 +109,35 @@ def test_video_spec_api_attaches_persisted_narration_asset(tmp_path: Path) -> No
         })
     assert response.status_code == 200
     assert response.json()["scenes"][0]["narration_asset_id"] == str(audio.id)
+
+
+def test_video_spec_api_assembles_a_timed_master_narration(tmp_path: Path) -> None:
+    path = tmp_path / "spec-master-audio.sqlite"
+    project, scene, candidate, _ = _seed(path, tmp_path)
+    audio_path = tmp_path / "full-voice.wav"
+    audio_path.write_bytes(b"voice")
+    db = Database(path)
+    audio = AudioAsset(
+        source_kind="user_asset", source_file=str(audio_path), content_hash="b" * 64,
+        duration_ms=3_000, sample_rate=48_000, channels=1, authorization_reference="creator-voice", imported_at=datetime.now(timezone.utc),
+        transcript_segments=[TranscriptSegment(start_ms=0, end_ms=3_000, text="Opening caption")],
+        transcript_source="provided-vtt",
+    )
+    AudioAssetRepository(db).create(audio)
+    db.close()
+    with TestClient(create_app(path)) as client:
+        response = client.post(f"/projects/{project.id}/video-spec", json={
+            "scenes": [scene.model_dump(mode="json")],
+            "selections": [candidate.model_dump(mode="json")],
+            "master_narration_asset_id": str(audio.id),
+            "narration_required": True,
+        })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["master_narration"]["audio_asset_id"] == str(audio.id)
+    assert body["master_narration"]["transcript_source"] == "provided-vtt"
+    assert body["scenes"][0]["narration_start_ms"] == 0
+    assert body["scenes"][0]["narration_end_ms"] == 3_000
 
 
 def test_video_spec_api_rejects_new_script_without_narration_when_requested(tmp_path: Path) -> None:

@@ -18,12 +18,12 @@ sys.path.insert(0, str(API_ROOT))
 from app.domain.models import (  # noqa: E402
     AccountConnection, AnalysisClipResult, AnalysisKeyframe, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ContentFeedback, ContentOpportunity, CostEstimate, CostLineItem, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, ProviderCallRecord, PublicationRecord,
     Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, RationalFps, ScenePlan, ShootTask, SourceKind, TalkingProfile, TranscriptSegment,
-    CostCategory, UsageCost, VideoCaption, VideoScene, VideoSpec, VideoVisual, VoiceProfile,
+    CostCategory, MasterNarration, UsageCost, VideoCaption, VideoScene, VideoSpec, VideoVisual, VoiceProfile,
 )
 
 SCHEMAS = (IPProfile, AccountConnection, HistoricalContent, ContentOpportunity, Asset, ImageAsset, AudioAsset, Clip, TranscriptSegment, AnalysisKeyframe, AnalysisClipResult, AnalysisResultBundle, AssetUsageEvent, PublicationRecord, ContentFeedback, BudgetPolicy, ProviderCallRecord, VoiceProfile,
            TalkingProfile, Project, ScenePlan, CandidateAsset, ShootTask, DraftRoute, ProjectDraft, ProjectDraftRevision,
-           VideoCaption, VideoSpec, Job, UsageCost, CostLineItem, CostEstimate, CostReductionSuggestion)
+           VideoCaption, MasterNarration, VideoSpec, Job, UsageCost, CostLineItem, CostEstimate, CostReductionSuggestion)
 
 
 def main() -> None:

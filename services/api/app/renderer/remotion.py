@@ -79,12 +79,18 @@ class _PreparedVisual:
     narration_start_frame: int = 0
 
 
+@dataclass(frozen=True)
+class _PreparedMasterNarration:
+    source: Path
+    start_frame: int
+
+
 class RemotionRenderer:
     """Render a validated VideoSpec to a local MP4 through ``npm exec remotion``.
 
-    Source audio is kept for scenes without narration. When a persisted local
-    narration asset is attached to a scene, the React composition mutes that
-    scene's source audio and overlays the authorized narration interval.
+    Source audio is kept only for source-led scenes. Per-scene legacy
+    narration and a single master narration track both mute source audio;
+    the master track is staged and mounted exactly once by the composition.
     """
 
     def __init__(
@@ -125,8 +131,15 @@ class RemotionRenderer:
             raise RenderInputError("minimal renderer accepts only 9:16 vertical VideoSpecs")
         output = _output_path(output_path)
         _renderer_project(self.renderer_dir)
-        prepared = {scene.scene_id: self._validate_scene(scene, spec.fps) for scene in spec.scenes}
-        if output in {visual.source for visual in prepared.values() if visual.source is not None}:
+        master_narration = self._validate_master_narration(spec, spec.fps)
+        prepared = {
+            scene.scene_id: self._validate_scene(scene, spec.fps, validate_scene_narration=master_narration is None)
+            for scene in spec.scenes
+        }
+        input_sources = {visual.source for visual in prepared.values() if visual.source is not None}
+        if master_narration is not None:
+            input_sources.add(master_narration.source)
+        if output in input_sources:
             raise RenderInputError("render output must not overwrite a source media file")
         output.parent.mkdir(parents=True, exist_ok=True)
         public_root = self.renderer_dir / "public" / "content-os-renders"
@@ -136,7 +149,7 @@ class RemotionRenderer:
         props_path: Path | None = None
         try:
             staging.mkdir()
-            props = self._stage_props(spec, prepared, staging, run_id)
+            props = self._stage_props(spec, prepared, staging, run_id, master_narration)
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", prefix="content-os-remotion-", delete=False) as handle:
                 json.dump(props, handle, ensure_ascii=False, separators=(",", ":"))
                 props_path = Path(handle.name)
@@ -158,11 +171,19 @@ class RemotionRenderer:
             if staging.exists():
                 shutil.rmtree(staging)
 
-    def _validate_scene(self, scene: VideoScene, composition_fps: RationalFps) -> _PreparedVisual:
+    def _validate_scene(
+        self,
+        scene: VideoScene,
+        composition_fps: RationalFps,
+        *,
+        validate_scene_narration: bool = True,
+    ) -> _PreparedVisual:
         visual = scene.visual
         if scene.transition != "cut":
             raise RenderInputError("minimal renderer supports only cut transitions")
-        narration_source, narration_start_frame = self._validate_narration(scene, composition_fps)
+        narration_source, narration_start_frame = (
+            self._validate_narration(scene, composition_fps) if validate_scene_narration else (None, 0)
+        )
         if visual.source_kind == SourceKind.TYPOGRAPHY:
             if any(value is not None for value in (visual.asset_id, visual.clip_id, visual.clip_start_ms, visual.clip_end_ms, visual.source_duration_ms)):
                 raise RenderInputError("typography visual must not reference a media Clip")
@@ -226,12 +247,29 @@ class RemotionRenderer:
             raise RenderInputError("narration interval is shorter than the scene")
         return _local_existing_audio(audio), _ceil_frames(start_ms, composition_fps)
 
+    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps) -> _PreparedMasterNarration | None:
+        master = spec.master_narration
+        if master is None:
+            return None
+        if self.audios is None:
+            raise LocalResourceError("audio asset repository is unavailable")
+        audio = self.audios.get(master.audio_asset_id)
+        if audio is None:
+            raise LocalResourceError("referenced master narration audio is unavailable")
+        if master.end_ms > audio.duration_ms:
+            raise RenderInputError("master narration interval exceeds audio duration")
+        return _PreparedMasterNarration(
+            source=_local_existing_audio(audio),
+            start_frame=_ceil_frames(master.start_ms, composition_fps),
+        )
+
     def _stage_props(
         self,
         spec: VideoSpec,
         prepared: Mapping[str, _PreparedVisual],
         staging: Path,
         run_id: str,
+        master_narration: _PreparedMasterNarration | None,
     ) -> dict[str, object]:
         staged_by_source: dict[Path, str] = {}
         staged_by_audio: dict[Path, str] = {}
@@ -272,10 +310,21 @@ class RemotionRenderer:
             if narration_relative is not None:
                 scene_sources[scene.scene_id]["narrationSrc"] = narration_relative
                 scene_sources[scene.scene_id]["narrationStartFrame"] = visual.narration_start_frame
+        master_props: dict[str, object] | None = None
+        if master_narration is not None:
+            master_relative = staged_by_audio.get(master_narration.source)
+            if master_relative is None:
+                filename = f"master-narration-{len(staged_by_audio):03d}-{master_narration.source.name}"
+                destination = staging / filename
+                shutil.copy2(master_narration.source, destination)
+                master_relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
+                staged_by_audio[master_narration.source] = master_relative
+            master_props = {"src": master_relative, "startFrame": master_narration.start_frame}
         return {
             "videoSpec": spec.model_dump(mode="json"),
             "sceneSources": scene_sources,
-            "audioMode": "narration" if any(value.narration_source is not None for value in prepared.values()) else "source",
+            "audioMode": "master_narration" if master_props is not None else "narration" if any(value.narration_source is not None for value in prepared.values()) else "source",
+            "masterNarration": master_props,
         }
 
 

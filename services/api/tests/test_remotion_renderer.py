@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository
-from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, ProjectFormat, RationalFps, SourceKind, VideoScene, VideoSpec, VideoVisual
+from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, MasterNarration, ProjectFormat, RationalFps, SourceKind, TranscriptSegment, VideoScene, VideoSpec, VideoVisual
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, UnauthorizedVisualError
 
 
@@ -32,6 +32,9 @@ class _Runner:
                 self.staged_bytes[scene["src"]] = (cwd / "public" / scene["src"]).read_bytes()
             if "narrationSrc" in scene:
                 self.staged_bytes[scene["narrationSrc"]] = (cwd / "public" / scene["narrationSrc"]).read_bytes()
+        if props.get("masterNarration"):
+            master = props["masterNarration"]
+            self.staged_bytes[master["src"]] = (cwd / "public" / master["src"]).read_bytes()
         if self.returncode == 0:
             output = Path(argv[7])
             output.write_bytes(b"minimal-mp4")
@@ -232,6 +235,66 @@ def test_remotion_adapter_mixes_authorized_narration_audio(tmp_path: Path) -> No
         db.close()
 
 
+def test_remotion_adapter_stages_one_master_narration_and_mutes_all_source_audio(tmp_path: Path) -> None:
+    db, _, _, spec = _setup(tmp_path)
+    audio_source = tmp_path / "full-voice.wav"
+    audio_source.write_bytes(b"master-voice-bytes")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET,
+        source_file=str(audio_source),
+        content_hash="f" * 64,
+        duration_ms=2_000,
+        sample_rate=48_000,
+        channels=1,
+        authorization_reference="creator-voice",
+        imported_at=NOW,
+        transcript_segments=[
+            TranscriptSegment(start_ms=0, end_ms=1_001, text="First timed line"),
+            TranscriptSegment(start_ms=1_001, end_ms=2_000, text="Second timed line"),
+        ],
+        transcript_source="provider-alignment:render-test",
+    )
+    AudioAssetRepository(db).create(audio)
+    runner = _Runner()
+    try:
+        root = _renderer_project(tmp_path / "renderer")
+        first = spec.scenes[0].model_copy(update={
+            "narration_asset_id": audio.id,
+            "narration_start_ms": 0,
+            "narration_end_ms": 1_001,
+        })
+        tail = VideoScene(
+            scene_id="scene_02",
+            start_frame=30,
+            duration_frames=30,
+            visual=VideoVisual(source_kind=SourceKind.TYPOGRAPHY, authorization_reference="local-typography"),
+            narration_asset_id=audio.id,
+            narration_start_ms=1_001,
+            narration_end_ms=2_000,
+            caption="Second timed line",
+        )
+        master_spec = spec.model_copy(update={
+            "scenes": [first, tail],
+            "master_narration": MasterNarration(
+                audio_asset_id=audio.id,
+                start_ms=0,
+                end_ms=2_000,
+                transcript_source="provider-alignment:render-test",
+                transcript_segments=audio.transcript_segments,
+            ),
+        })
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db), renderer_dir=root, runner=runner).render(
+            master_spec, tmp_path / "output" / "master.mp4"
+        )
+        props = runner.calls[0][3]
+        assert props["audioMode"] == "master_narration"
+        assert props["masterNarration"]["startFrame"] == 0
+        assert "narrationSrc" not in props["sceneSources"]["scene_01"]
+        assert runner.staged_bytes[props["masterNarration"]["src"]] == audio_source.read_bytes()
+    finally:
+        db.close()
+
+
 def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_source_audio() -> None:
     root = Path(__file__).parents[3] / "apps" / "renderer"
     manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
@@ -241,7 +304,7 @@ def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_sourc
     assert all(not value.startswith(("^", "~")) for value in manifest["dependencies"].values())
     timeline = (root / "src" / "video.tsx").read_text(encoding="utf-8")
     assert "trimBefore" in timeline and "trimAfter" in timeline and "typography" in timeline and "narrationSrc" in timeline
-    assert "scene.caption" in timeline and "scene.captions" in timeline and "audioMode === 'narration'" in timeline
+    assert "scene.caption" in timeline and "scene.captions" in timeline and "masterNarration" in timeline
     assert "objectFit: 'contain'" in timeline
     assert "objectFit: 'cover'" not in timeline
-    assert "scene.caption && audioMode === 'narration'" in timeline
+    assert "scene.caption && audioMode !== 'source'" in timeline

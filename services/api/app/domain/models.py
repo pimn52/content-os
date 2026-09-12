@@ -641,6 +641,34 @@ class VideoScene(ContractModel):
         return self
 
 
+class MasterNarration(ContractModel):
+    """One authorized, timestamped narration track driving a whole VideoSpec.
+
+    The audio remains a single continuous local asset.  Video scenes reference
+    intervals on this track for provenance and caption timing; they do not
+    each replay the recording from its beginning.
+    """
+
+    audio_asset_id: UUID
+    start_ms: NonNegativeMs = 0
+    end_ms: PositiveFrames
+    transcript_source: str = Field(min_length=1, max_length=500, description="Traceable provider alignment or imported SRT/VTT reference.")
+    transcript_segments: list[TranscriptSegment] = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def complete_timed_track(self) -> "MasterNarration":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("master narration end_ms must be greater than start_ms")
+        previous_end = self.start_ms
+        for segment in self.transcript_segments:
+            if segment.start_ms < self.start_ms or segment.end_ms > self.end_ms:
+                raise ValueError("master narration transcript segment exceeds its audio interval")
+            if segment.start_ms < previous_end:
+                raise ValueError("master narration transcript segments must be ordered and non-overlapping")
+            previous_end = segment.end_ms
+        return self
+
+
 class VideoSpec(ContractModel):
     project_id: UUID
     format: ProjectFormat
@@ -648,6 +676,7 @@ class VideoSpec(ContractModel):
     height: int = Field(gt=0, le=16_384)
     fps: RationalFps
     scenes: list[VideoScene] = Field(min_length=1, max_length=1_000)
+    master_narration: MasterNarration | None = None
     voice_profile_id: UUID | None = None
     estimated_cost: UsageCost | None = None
 
@@ -666,6 +695,32 @@ class VideoSpec(ContractModel):
                 required_frame_count = scene.duration_frames - 1
                 if source_ms * self.fps.numerator < required_frame_count * self.fps.denominator * 1_000:
                     raise ValueError("source clip is shorter than the scene duration")
+        if self.master_narration is not None:
+            master = self.master_narration
+            if ordered[0].start_frame != 0:
+                raise ValueError("master narration timeline must start with the first video scene")
+            expected_audio_start = master.start_ms
+            expected_video_start = 0
+            for scene in ordered:
+                if scene.start_frame != expected_video_start:
+                    raise ValueError("master narration video scenes must be contiguous")
+                if (
+                    scene.narration_asset_id != master.audio_asset_id
+                    or scene.narration_start_ms is None
+                    or scene.narration_end_ms is None
+                ):
+                    raise ValueError("each master narration video scene must reference its timed master audio interval")
+                if scene.narration_start_ms != expected_audio_start:
+                    raise ValueError("master narration video scene intervals must be contiguous")
+                expected_audio_start = scene.narration_end_ms
+                expected_video_start = scene.start_frame + scene.duration_frames
+            if expected_audio_start != master.end_ms:
+                raise ValueError("master narration video scenes must cover the complete audio interval")
+            master_frames = (master.end_ms - master.start_ms) * self.fps.numerator
+            frame_denominator = 1_000 * self.fps.denominator
+            required_frames = (master_frames + frame_denominator - 1) // frame_denominator
+            if expected_video_start < required_frames:
+                raise ValueError("master narration video timeline ends before its audio")
         return self
 
 

@@ -14,6 +14,7 @@ from app.domain.models import (
     Clip,
     CostCategory,
     ImageAsset,
+    MasterNarration,
     Project,
     RationalFps,
     ScenePlan,
@@ -63,6 +64,12 @@ class NarrationBindingError(VideoSpecAssemblyError):
     pass
 
 
+class NarrationTimelineError(VideoSpecAssemblyError):
+    """An audio asset lacks a real, complete mapping to the planned copy."""
+
+    pass
+
+
 _REAL_CONTINUOUS_SOURCES = frozenset((SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET))
 _TEXT_TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
 _TERMINAL_PURPOSES = frozenset(("close", "closing", "boundary", "cta", "outro", "ending"))
@@ -99,6 +106,7 @@ class VideoSpecAssembler:
         *,
         explicit_scene_ids: Iterable[UUID] = (),
         narration_asset_ids: Mapping[UUID, UUID] | None = None,
+        master_narration_asset_id: UUID | None = None,
         narration_required: bool = False,
     ) -> VideoSpec:
         if not isinstance(project, Project):
@@ -107,6 +115,15 @@ class VideoSpecAssembler:
         selections = _selections(selected_by_scene, ordered)
         explicit = _explicit_ids(explicit_scene_ids, ordered)
         narration = _narration_ids(narration_asset_ids, ordered)
+        master_audio_id = _master_narration_id(master_narration_asset_id, narration, ordered)
+        if master_audio_id is not None:
+            return self._assemble_master_narration(
+                project,
+                ordered,
+                selections,
+                explicit,
+                master_audio_id,
+            )
         if narration_required:
             missing = next((scene.scene_id for scene in ordered if scene.id not in narration), None)
             if missing is not None:
@@ -122,10 +139,6 @@ class VideoSpecAssembler:
                 if audio is None:
                     raise CandidateNotFound("selected narration audio does not exist")
                 narration_audio[scene_id] = audio
-            if narration_required and len({audio.id for audio in narration_audio.values()}) != len(narration_audio):
-                raise NarrationBindingError(
-                    "each new-script scene must bind a separate authorized narration asset; split a full recording into scene files before rendering"
-                )
         video_scenes: list[VideoScene] = []
         start_frame = 0
         selected_sources: list[SourceKind] = []
@@ -268,6 +281,197 @@ class VideoSpecAssembler:
             estimated_cost=_local_assembly_cost(selected_sources),
         )
 
+    def _assemble_master_narration(
+        self,
+        project: Project,
+        scenes: Sequence[ScenePlan],
+        selections: Mapping[UUID, CandidateAsset],
+        explicit: frozenset[UUID],
+        master_audio_id: UUID,
+    ) -> VideoSpec:
+        """Assemble one continuous, timed narration track across many visuals.
+
+        A master recording is not cut into user-managed files.  Its persisted
+        timing is the source of truth for both the video timeline and captions.
+        When a selected continuous visual runs out, local typography covers the
+        remaining timestamped audio rather than extending playback past the
+        authorized source Clip.
+        """
+
+        if self.audios is None:
+            raise CandidateNotFound("master narration audio repository is unavailable")
+        audio = self.audios.get(master_audio_id)
+        if audio is None:
+            raise CandidateNotFound("selected master narration audio does not exist")
+        if not audio.transcript_source or not audio.transcript_segments:
+            raise NarrationTimelineError(
+                "master narration requires a persisted actual SRT/VTT or provider timing result before it can drive video scenes"
+            )
+        try:
+            master = MasterNarration(
+                audio_asset_id=audio.id,
+                start_ms=0,
+                end_ms=audio.duration_ms,
+                transcript_source=audio.transcript_source,
+                transcript_segments=audio.transcript_segments,
+            )
+        except ValueError as exc:
+            raise NarrationTimelineError("master narration has invalid persisted timestamp intervals") from exc
+
+        intervals = _master_narration_intervals(audio, scenes)
+        video_scenes: list[VideoScene] = []
+        selected_sources: list[SourceKind] = []
+        for scene, narration_start_ms, narration_end_ms in intervals:
+            candidate = selections[scene.id]
+            if candidate.source_kind == SourceKind.CAPTURE or candidate.requires_capture:
+                raise CaptureGapSelected(f"scene {scene.scene_id!r} requires capture and cannot be assembled")
+            if not candidate.recommended and scene.id not in explicit:
+                raise InvalidCandidateSelection(f"scene {scene.scene_id!r} must use a recommended or explicit candidate")
+
+            start_frame = _master_offset_to_frames(narration_start_ms - master.start_ms, project.fps)
+            end_frame = milliseconds_to_frames(narration_end_ms - master.start_ms, project.fps)
+            duration_frames = end_frame - start_frame
+            if duration_frames <= 0:
+                raise NarrationTimelineError(f"scene {scene.scene_id!r} has no renderable master narration frames")
+            if video_scenes and start_frame != video_scenes[-1].start_frame + video_scenes[-1].duration_frames:
+                raise NarrationTimelineError("master narration scene timestamps do not form a contiguous video timeline")
+
+            fragments = self._master_visual_fragments(
+                scene,
+                candidate,
+                audio,
+                narration_start_ms=narration_start_ms,
+                narration_end_ms=narration_end_ms,
+                start_frame=start_frame,
+                duration_frames=duration_frames,
+                fps=project.fps,
+                master_audio_id=audio.id,
+            )
+            video_scenes.extend(fragments)
+            selected_sources.extend(fragment.visual.source_kind for fragment in fragments)
+
+        return VideoSpec(
+            project_id=project.id,
+            format=project.format,
+            width=project.resolution_width,
+            height=project.resolution_height,
+            fps=project.fps,
+            scenes=video_scenes,
+            master_narration=master,
+            estimated_cost=_local_assembly_cost(selected_sources),
+        )
+
+    def _master_visual_fragments(
+        self,
+        scene: ScenePlan,
+        candidate: CandidateAsset,
+        audio: AudioAsset,
+        *,
+        narration_start_ms: int,
+        narration_end_ms: int,
+        start_frame: int,
+        duration_frames: int,
+        fps: RationalFps,
+        master_audio_id: UUID,
+    ) -> list[VideoScene]:
+        """Make valid visual fragments for one timed section of master audio."""
+
+        if candidate.source_kind == SourceKind.TYPOGRAPHY:
+            return [_master_video_scene(
+                scene_id=scene.scene_id,
+                start_frame=start_frame,
+                duration_frames=duration_frames,
+                visual=VideoVisual(source_kind=SourceKind.TYPOGRAPHY, authorization_reference="local-typography"),
+                audio=audio,
+                narration_asset_id=master_audio_id,
+                narration_start_ms=narration_start_ms,
+                narration_end_ms=narration_end_ms,
+                caption=scene.voice_text,
+            )]
+        if candidate.source_kind in {SourceKind.SCREENSHOT, SourceKind.CHART}:
+            image = self._stored_image(candidate)
+            return [_master_video_scene(
+                scene_id=scene.scene_id,
+                start_frame=start_frame,
+                duration_frames=duration_frames,
+                visual=VideoVisual(
+                    source_kind=image.source_kind,
+                    authorization_reference=image.authorization_reference,
+                    asset_id=image.id,
+                ),
+                audio=audio,
+                narration_asset_id=master_audio_id,
+                narration_start_ms=narration_start_ms,
+                narration_end_ms=narration_end_ms,
+                caption=scene.voice_text,
+            )]
+
+        asset, clip = self._stored_real_clip(scene, candidate)
+        source_frames = source_interval_to_frames(clip.start_ms, clip.end_ms, fps)
+        visual = VideoVisual(
+            source_kind=asset.source_kind,
+            authorization_reference=asset.authorization_reference,
+            asset_id=asset.id,
+            clip_id=clip.id,
+            clip_start_ms=clip.start_ms,
+            clip_end_ms=clip.end_ms,
+            source_duration_ms=asset.duration_ms,
+        )
+        if source_frames >= duration_frames:
+            return [_master_video_scene(
+                scene_id=scene.scene_id,
+                start_frame=start_frame,
+                duration_frames=duration_frames,
+                visual=visual,
+                audio=audio,
+                narration_asset_id=master_audio_id,
+                narration_start_ms=narration_start_ms,
+                narration_end_ms=narration_end_ms,
+                caption=scene.voice_text,
+            )]
+
+        # The source Clip remains a first-class visual for as long as it has
+        # real frames. The tail is an explicit local typography fallback rather
+        # than a frozen final source frame or an unauthorized extension.
+        if source_frames <= 0:
+            return [_master_video_scene(
+                scene_id=scene.scene_id,
+                start_frame=start_frame,
+                duration_frames=duration_frames,
+                visual=VideoVisual(source_kind=SourceKind.TYPOGRAPHY, authorization_reference="local-typography"),
+                audio=audio,
+                narration_asset_id=master_audio_id,
+                narration_start_ms=narration_start_ms,
+                narration_end_ms=narration_end_ms,
+                caption=scene.voice_text,
+            )]
+
+        split_frame = start_frame + source_frames
+        split_ms = _master_time_for_frame(split_frame, fps, narration_start_ms, narration_end_ms)
+        head = _master_video_scene(
+            scene_id=scene.scene_id,
+            start_frame=start_frame,
+            duration_frames=source_frames,
+            visual=visual,
+            audio=audio,
+            narration_asset_id=master_audio_id,
+            narration_start_ms=narration_start_ms,
+            narration_end_ms=split_ms,
+            caption=scene.voice_text,
+        )
+        tail = _master_video_scene(
+            scene_id=_continuation_scene_id(scene, 1),
+            start_frame=split_frame,
+            duration_frames=duration_frames - source_frames,
+            visual=VideoVisual(source_kind=SourceKind.TYPOGRAPHY, authorization_reference="local-typography"),
+            audio=audio,
+            narration_asset_id=master_audio_id,
+            narration_start_ms=split_ms,
+            narration_end_ms=narration_end_ms,
+            caption=scene.voice_text,
+        )
+        return [head, tail]
+
     def _stored_real_clip(self, scene: ScenePlan, candidate: CandidateAsset) -> tuple[Asset, Clip]:
         if candidate.source_kind not in _REAL_CONTINUOUS_SOURCES:
             raise InvalidCandidateSelection(f"scene {scene.scene_id!r} does not select a real continuous Clip")
@@ -384,6 +588,133 @@ def _narration_ids(narration_asset_ids: Mapping[UUID, UUID] | None, scenes: Sequ
     if not set(values).issubset(expected):
         raise InvalidCandidateSelection("narration assets must belong to supplied ScenePlans")
     return values
+
+
+def _master_narration_id(
+    explicit_master_id: UUID | None,
+    narration: Mapping[UUID, UUID],
+    scenes: Sequence[ScenePlan],
+) -> UUID | None:
+    """Resolve the new single-track path without breaking legacy bindings."""
+
+    if explicit_master_id is not None:
+        if not isinstance(explicit_master_id, UUID):
+            raise InvalidCandidateSelection("master narration asset must be a UUID")
+        if narration and any(audio_id != explicit_master_id for audio_id in narration.values()):
+            raise NarrationBindingError("per-scene narration bindings conflict with the selected master narration asset")
+        return explicit_master_id
+    # Existing API clients that selected one complete recording for every
+    # scene are safely upgraded to the master-track path. A one-scene legacy
+    # binding retains its old behavior for compatibility.
+    if len(scenes) > 1 and len(narration) == len(scenes) and len(set(narration.values())) == 1:
+        return next(iter(narration.values()))
+    return None
+
+
+def _master_narration_intervals(audio: AudioAsset, scenes: Sequence[ScenePlan]) -> list[tuple[ScenePlan, int, int]]:
+    """Match each ordered scene copy to actual, sequential audio timestamps.
+
+    This deliberately uses exact normalized text containment. If a supplied
+    recording has no real timing result or does not say the planned copy, the
+    caller receives a recoverable error instead of a guessed cut or a fixed
+    test transcript standing in for semantic evidence.
+    """
+
+    segments = tuple(audio.transcript_segments)
+    cursor = 0
+    matches: list[tuple[ScenePlan, int]] = []
+    for scene in scenes:
+        target = "".join(_TEXT_TOKEN.findall(scene.voice_text.lower()))
+        if not target:
+            raise NarrationTimelineError(f"scene {scene.scene_id!r} has no alignable narration text")
+        matched = _find_timed_text_span(segments, target, cursor)
+        if matched is None:
+            raise NarrationTimelineError(
+                f"master narration timestamps do not contain the planned text for scene {scene.scene_id!r}; regenerate or supply aligned audio"
+            )
+        _, end_index = matched
+        matches.append((scene, end_index))
+        cursor = end_index + 1
+
+    intervals: list[tuple[ScenePlan, int, int]] = []
+    interval_start = 0
+    for index, (scene, end_index) in enumerate(matches):
+        interval_end = audio.duration_ms if index == len(matches) - 1 else segments[end_index].end_ms
+        if interval_end <= interval_start:
+            raise NarrationTimelineError(f"scene {scene.scene_id!r} has no positive master narration interval")
+        intervals.append((scene, interval_start, interval_end))
+        interval_start = interval_end
+    return intervals
+
+
+def _find_timed_text_span(
+    segments: Sequence[TranscriptSegment],
+    target: str,
+    start_index: int,
+) -> tuple[int, int] | None:
+    """Find one exact normalized phrase in sequential persisted segments."""
+
+    for start in range(start_index, len(segments)):
+        combined = ""
+        for end in range(start, len(segments)):
+            combined += "".join(_TEXT_TOKEN.findall(segments[end].text.lower()))
+            if target in combined:
+                return start, end
+            # This is a bounded literal search, not a semantic similarity
+            # fallback. It prevents an unbounded quadratic scan on malformed
+            # transcript imports while allowing a short leading/following
+            # phrase inside a normal ASR segment.
+            if len(combined) > len(target) + 1_000:
+                break
+    return None
+
+
+def _master_time_for_frame(frame: int, fps: RationalFps, lower_ms: int, upper_ms: int) -> int:
+    """Map a composition boundary back to a strictly interior audio point."""
+
+    numerator = frame * 1_000 * fps.denominator
+    frame_ms = (numerator + fps.numerator - 1) // fps.numerator
+    return min(upper_ms - 1, max(lower_ms + 1, frame_ms))
+
+
+def _master_offset_to_frames(offset_ms: int, fps: RationalFps) -> int:
+    """Convert a non-negative master-track offset without treating 0 as duration."""
+
+    if offset_ms < 0:
+        raise NarrationTimelineError("master narration interval starts before the track")
+    return 0 if offset_ms == 0 else milliseconds_to_frames(offset_ms, fps)
+
+
+def _continuation_scene_id(scene: ScenePlan, part: int) -> str:
+    # ScenePlan.order is unique in a valid assembly, so it keeps a truncated
+    # long scene_id collision-free while staying inside VideoScene's 100-char
+    # contract limit.
+    return f"{scene.scene_id[:70]}--{scene.order}-fill-{part}"
+
+
+def _master_video_scene(
+    *,
+    scene_id: str,
+    start_frame: int,
+    duration_frames: int,
+    visual: VideoVisual,
+    audio: AudioAsset,
+    narration_asset_id: UUID,
+    narration_start_ms: int,
+    narration_end_ms: int,
+    caption: str,
+) -> VideoScene:
+    return VideoScene(
+        scene_id=scene_id,
+        start_frame=start_frame,
+        duration_frames=duration_frames,
+        visual=visual,
+        narration_asset_id=narration_asset_id,
+        narration_start_ms=narration_start_ms,
+        narration_end_ms=narration_end_ms,
+        caption=caption,
+        captions=_audio_captions_for_interval(audio, narration_start_ms, narration_end_ms),
+    )
 
 
 def _source_sentence_interval(
@@ -510,14 +841,20 @@ def _source_captions(clip: Clip, start_ms: int, end_ms: int) -> list[VideoCaptio
 
 
 def _audio_captions(audio: AudioAsset, duration_ms: int) -> list[VideoCaption]:
+    return _audio_captions_for_interval(audio, 0, duration_ms)
+
+
+def _audio_captions_for_interval(audio: AudioAsset, start_ms: int, end_ms: int) -> list[VideoCaption]:
+    """Project real audio transcript intervals onto one visual fragment."""
+
     return [
         VideoCaption(
-            start_ms=segment.start_ms,
-            end_ms=min(segment.end_ms, duration_ms),
+            start_ms=max(segment.start_ms, start_ms) - start_ms,
+            end_ms=min(segment.end_ms, end_ms) - start_ms,
             text=segment.text,
         )
         for segment in audio.transcript_segments
-        if segment.start_ms < duration_ms and min(segment.end_ms, duration_ms) > segment.start_ms
+        if segment.start_ms < end_ms and min(segment.end_ms, end_ms) > max(segment.start_ms, start_ms)
     ]
 
 

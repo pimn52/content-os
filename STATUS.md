@@ -1,10 +1,10 @@
 # Content OS 当前状态
 
-更新时间：2026-09-10（Asia/Shanghai）
+更新时间：2026-09-12（Asia/Shanghai）
 
 ## 当前事实
 
-- 基线 HEAD：`f1ef82c Fix provider execution accounting boundaries`。工作区只保留用户提供且未跟踪的复审证据 `CONTENT_OS_REVIEW_2026-09-10.md`、`reproduce.py`、`test-results.txt`；没有 reset、checkout、删除用户素材或调用外部付费 Provider。
+- 基线 HEAD：`402e9dd Persist revisioned copy and IP invalidation`（此前 P1 为 `f1ef82c`）。工作区保留用户提供且未跟踪的复审证据 `CONTENT_OS_REVIEW_2026-09-10.md`、`reproduce.py`、`test-results.txt`；另有未提交的 D 实现及其契约/测试修改。没有 reset、checkout、删除用户素材或调用外部付费 Provider。
 - 当前统一目标已更新为：在明确授权、可用样本和预算具备后，验证“新文案 → 本人新声音 → 本人新的 Talking/口型片段 → 30–60 秒成片”。现有导入旁白、source-led 剪辑、旧原声/旧口型只保留为基础或历史路径，不标记为此目标完成。
 - 工作包 A / P1 已提交并有定向证据：
   - P1-A：Provider 请求摘要绑定项目、操作、Provider/模型和输入；同键同输入回放持久结果，同键改输入返回 `409 provider_idempotency_conflict`，未知运行状态不盲目重发。
@@ -17,10 +17,13 @@
 - 已导入的四段用户指定 MP4 都保留了 production 授权标签，但抽查画面显示素材混有不同出镜主体、旧成片和 B-roll；现有元数据没有可靠的本人身份、清晰正脸/嘴部质量或 Voice/Talking 候选结论，不能据此自动登记或调用本人 Profile。未读取桌面密钥文件、未输出任何密钥值。
 - B 的首选待验证路线是本地 Chatterbox Multilingual V3（新声音）加 MuseTalk 1.5（新口型）：二者公开许可允许商用，MuseTalk 官方在 Windows 4 GiB 显存设备上验证过 fp16 的 8 秒生成，因而该机 6 GiB 显存具备有限小样验证条件。模型权重、PyTorch/依赖和实际样本授权尚未就绪；唯一保留的云备选是需要单独账号/预付额度和同意流程的 HeyGen，未接入或调用。
 - 工作包 C 的可追溯草稿链已完成并作了真实浏览器验收：新文案、IP 版本、证据引用和输入指纹会持久化为不可变的 Draft revision；脚本、场景文案或 IP 更新会由服务端清除旧 ScenePlan 后继的路由、候选、VideoSpec 和本地渲染预览，旧标签页不能重新提交它们。浏览器实际创建项目、保存文案、两次更新 IP 后，草稿从 `v1/r1` 变为 `v3/r3` 并即时显示失效状态；在无 Provider 配置时“生成文案 + ScenePlan”如实返回 `scene planner is not configured`，没有以夹具或旧稿冒充模型结果。
+- D 已完成未提交的后端/渲染契约实现：`MasterNarration` 将一条完整、已授权且有真实 SRT/VTT 或 Provider 对齐结果的音频作为唯一主轨；场景只引用其连续时间区间。主轨从 0 ms 开始时不再被误判为无效时长；短实拍 Clip 只用真实可用帧，余下时长转为显式 typography 片段，绝不冻结/延长原片。Remotion 仅在根时间线播放一次主音轨，并静音被该轨覆盖的原视频声音。
+- D 已有 API、装配和 Remotion 定向测试，以及全量 `pytest -q` 和 `py_compile` 通过；覆盖 30fps 与 30000/1001fps、非零源片段、短视觉+长旁白、连续字幕区间、缺少真实时间轴拒绝和主音轨只 stage 一次。导出的 JSON Schema 已包含 `MasterNarration`。这些是时间轴/文件边界证据，不是本人声音、口型或自然度验收。
+- D 尚缺前端重新构建和实际浏览器点击证据。本轮尝试需要提升权限的 web build 被 Codex 用量限制拒绝，未绕过或改走隐蔽路径；现有已构建页面仍是 C 的版本，不能把它当作 D 浏览器验收。现有 UI 已提供“导入完整旁白 → 绑定真实 SRT/VTT → 选择主旁白 → 组装”的入口，待构建成功后点击验证。
 
 ## 当前工作包
 
-**D：主声音时间线与成片不截断（进行中；B 的 U-Voice 验收待定）**
+**D：主声音时间线与成片不截断（收尾验证中；B 的 U-Voice 验收待定）**
 
 工作包 A 已提交，C 的服务端/浏览器实现与回归已完成。B 的本机能力、候选路线和样本缺口已记录；不在未取得声音/形象同意前下载模型、读取密钥或产生外部调用。现在移除“每场景一段音频”的人为限制，改为一个完整的本人新声音主时间线驱动多场景视频、字幕和 Talking 片段；该工程不依赖 U-Voice 的实际样本。
 
@@ -28,13 +31,14 @@
 
 **D：主声音时间线与不截断装配（进行中）**
 
-以一条完整、经授权且有真实时间轴的旁白作为主轨，自动按其句界分配场景、字幕和 Talking 片段。视觉不足时拆分/补齐视觉而不是延长源 Clip；渲染只播放一次主音轨并静音被覆盖的原声。之后接续 E 的 Voice/Talking Job 状态机。
+先在本机用最新 Web 构建点击完整旁白、真实 SRT/VTT 绑定、主旁白组装和渲染入口；不能使用固定语义/声音夹具替代这条验证。成功后直接领取 E 的 Voice/Talking Job 状态机。
 
 ## 当前阻塞与授权边界
 
 - B 尚缺 U-Voice：确认哪一位出镜者是本人、允许以哪些清晰声音/正脸样本做本地声音与口型生成、接受两条未见新台词的试听/预览，以及允许一次本地模型/权重下载。不得将先前的“素材可用于生产”或桌面暂存密钥解释为声音克隆/口型生成的无限授权。
 - Talking/TTS 生成仍未实现；不能以旧素材、导入旁白或通用头像冒充新 Talking。
 - 不存在新的外部 API 调用或费用。本机环境变量/桌面文件只可在明确路线、费用和 U-Voice 授权后被最小范围地配置使用；现有 Kimi/Anthropic 凭据不是本地 Voice/Talking 路线的直接配置。
+- 当前自动化用量限制是 D 前端构建/浏览器验证的操作阻塞，而非产品/模型路线重议。恢复时先重新构建 Web；如失败，保留错误输出后修复，不以旧产物验收。
 
 ## 恢复命令
 
@@ -42,6 +46,7 @@
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe .\reproduce.py .
 git diff --check
+# 用量恢复后：npm --prefix apps\web run build；启动干净本地服务并点击 D 的主旁白流程。
 ```
 
 历史状态日志保留在 Git 基线 `f4da613:STATUS.md`；索引见 [`docs/history/STATUS_HISTORY.md`](docs/history/STATUS_HISTORY.md)。

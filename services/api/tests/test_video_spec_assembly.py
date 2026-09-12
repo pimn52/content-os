@@ -13,7 +13,7 @@ from app.assembly import (
     CandidateNotFound,
     InsufficientSourceDuration,
     InvalidCandidateSelection,
-    NarrationBindingError,
+    NarrationTimelineError,
     VideoSpecAssembler,
     milliseconds_to_frames,
 )
@@ -239,7 +239,7 @@ def test_assembler_attaches_existing_authorized_narration_per_scene(tmp_path: Pa
         db.close()
 
 
-def test_new_script_narration_uses_measured_audio_duration_and_rejects_reuse(tmp_path: Path) -> None:
+def test_legacy_single_scene_narration_uses_measured_audio_duration(tmp_path: Path) -> None:
     db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
     audio_source = tmp_path / "scene-01.wav"
     audio_source.write_bytes(b"voice")
@@ -270,14 +270,76 @@ def test_new_script_narration_uses_measured_audio_duration_and_rejects_reuse(tmp
         assert rendered_scene.visual.clip_end_ms == clips[0].start_ms + 800
         assert [(caption.start_ms, caption.end_ms) for caption in rendered_scene.captions] == [(0, 300), (350, 800)]
 
-        second = scenes[1]
-        with pytest.raises(NarrationBindingError, match="separate authorized narration"):
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("fps", [RationalFps(numerator=30, denominator=1), RationalFps(numerator=30_000, denominator=1_001)])
+def test_master_narration_uses_one_aligned_audio_for_multiple_scenes_and_fills_short_visual(
+    tmp_path: Path, fps: RationalFps
+) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, fps)
+    audio_source = tmp_path / "full-narration.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="9" * 64,
+        duration_ms=3_500, sample_rate=48_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+        transcript_segments=[
+            TranscriptSegment(start_ms=0, end_ms=700, text="First new line."),
+            TranscriptSegment(start_ms=800, end_ms=3_200, text="Second new line."),
+        ],
+        transcript_source="provider-alignment:local-test",
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
+        first = scenes[0].model_copy(update={"voice_text": "First new line."})
+        second = scenes[1].model_copy(update={"voice_text": "Second new line."})
+        spec = assembler.assemble(
+            project,
+            [first, second],
+            {first.id: _candidate(first, assets[0], clips[0]), second.id: _candidate(second, assets[1], clips[1])},
+            master_narration_asset_id=audio.id,
+            narration_required=True,
+        )
+
+        assert spec.master_narration is not None
+        assert spec.master_narration.audio_asset_id == audio.id
+        assert [scene.scene_id for scene in spec.scenes] == ["scene_00", "scene_01", "scene_01--1-fill-1"]
+        intervals = [(scene.narration_start_ms, scene.narration_end_ms) for scene in spec.scenes]
+        assert intervals[0] == (0, 700)
+        assert all(start == previous_end for (_, previous_end), (start, _) in zip(intervals, intervals[1:]))
+        assert intervals[-1][1] == audio.duration_ms
+        assert all(end > start for start, end in intervals)
+        assert spec.scenes[1].visual.source_kind is SourceKind.USER_ASSET
+        assert spec.scenes[2].visual.source_kind is SourceKind.TYPOGRAPHY
+        tail = spec.scenes[2]
+        expected_tail_caption_end = min(3_200, tail.narration_end_ms) - max(800, tail.narration_start_ms)
+        assert [(caption.start_ms, caption.end_ms) for caption in tail.captions] == [(0, expected_tail_caption_end)]
+        assert spec.scenes[-1].start_frame + spec.scenes[-1].duration_frames == milliseconds_to_frames(audio.duration_ms, fps)
+    finally:
+        db.close()
+
+
+def test_master_narration_rejects_audio_without_actual_timing(tmp_path: Path) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    audio_source = tmp_path / "unmapped.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="a" * 64,
+        duration_ms=1_000, sample_rate=48_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
+        scene = scenes[0]
+        with pytest.raises(NarrationTimelineError, match="actual SRT/VTT"):
             assembler.assemble(
-                project, [scene, second], {
-                    scene.id: _candidate(scene, assets[0], clips[0]),
-                    second.id: _candidate(second, assets[1], clips[1]),
-                },
-                narration_asset_ids={scene.id: audio.id, second.id: audio.id}, narration_required=True,
+                project,
+                [scene],
+                {scene.id: _candidate(scene, assets[0], clips[0])},
+                master_narration_asset_id=audio.id,
+                narration_required=True,
             )
     finally:
         db.close()

@@ -170,6 +170,7 @@ class VideoSpecAssemblyRequest(BaseModel):
     selections: list[CandidateAsset] = Field(min_length=1, max_length=1_000)
     explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
     narration_asset_ids: dict[UUID, UUID] = Field(default_factory=dict, max_length=1_000)
+    master_narration_asset_id: UUID | None = None
     narration_required: bool = False
 
 
@@ -182,6 +183,7 @@ class RenderRequest(BaseModel):
     selections: list[CandidateAsset] | None = Field(default=None, min_length=1, max_length=1_000)
     explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
     narration_asset_ids: dict[UUID, UUID] = Field(default_factory=dict, max_length=1_000)
+    master_narration_asset_id: UUID | None = None
 
     @model_validator(mode="after")
     def one_render_input_shape(self) -> "RenderRequest":
@@ -195,6 +197,8 @@ class RenderRequest(BaseModel):
             raise ValueError("explicit_scene_ids is only valid with scenes and selections")
         if has_spec and self.narration_asset_ids:
             raise ValueError("narration_asset_ids is only valid with scenes and selections")
+        if has_spec and self.master_narration_asset_id is not None:
+            raise ValueError("master_narration_asset_id is only valid with scenes and selections")
         return self
 
 
@@ -2118,6 +2122,7 @@ def create_app(
                 selected,
                 explicit_scene_ids=payload.explicit_scene_ids,
                 narration_asset_ids=payload.narration_asset_ids,
+                master_narration_asset_id=payload.master_narration_asset_id,
                 narration_required=payload.narration_required,
             )
         except VideoSpecAssemblyError as exc:
@@ -2236,6 +2241,7 @@ def _resolve_render_spec(db: Database, project: Project, project_id: UUID, paylo
         return VideoSpecAssembler(AssetRepository(db), ClipRepository(db), ImageAssetRepository(db), AudioAssetRepository(db)).assemble(
             project, payload.scenes, selected, explicit_scene_ids=payload.explicit_scene_ids,
             narration_asset_ids=payload.narration_asset_ids,
+            master_narration_asset_id=payload.master_narration_asset_id,
         )
     except VideoSpecAssemblyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

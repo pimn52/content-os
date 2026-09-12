@@ -26,11 +26,13 @@ export type RenderProps = {
   sceneSources: Record<string, SceneSource>;
   // Runtime providers are outside this renderer; attached local narration is
   // already persisted and staged by the Python boundary.
-  audioMode: 'source' | 'narration';
+  audioMode: 'source' | 'narration' | 'master_narration';
+  masterNarration?: {src: string; startFrame?: number} | null;
 };
 
-export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, audioMode}) => (
+export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, audioMode, masterNarration}) => (
   <AbsoluteFill style={{backgroundColor: 'black'}}>
+    {masterNarration ? <Audio src={staticFile(masterNarration.src)} startFrom={masterNarration.startFrame ?? 0} volume={1} /> : null}
     {videoSpec.scenes.map((scene) => {
       const source = sceneSources[scene.scene_id];
       if (!source) {
@@ -44,7 +46,7 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
                 src={staticFile(source.src)}
                 trimBefore={source.trimBefore}
                 trimAfter={source.trimAfter}
-                volume={audioMode === 'narration' && source.narrationSrc ? 0 : 1}
+                volume={audioMode === 'source' ? 1 : 0}
                 // Creator footage is a first-class source. Preserve the full
                 // frame when adapting horizontal media to the vertical
                 // composition; a deliberate letterbox is safer than silently
@@ -63,7 +65,7 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
               const startFrame = Math.max(0, Math.round(caption.start_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
               const endFrame = Math.max(startFrame + 1, Math.round(caption.end_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
               return <Sequence key={`${caption.start_ms}-${caption.end_ms}-${caption.text}`} from={startFrame} durationInFrames={endFrame - startFrame}><Caption text={caption.text} /></Sequence>;
-            }) : scene.caption && audioMode === 'narration' ? <Caption text={scene.caption} /> : null}
+            }) : scene.caption && audioMode !== 'source' ? <Caption text={scene.caption} /> : null}
           </AbsoluteFill>
         </Sequence>
       );

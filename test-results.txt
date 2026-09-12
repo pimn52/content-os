@@ -1,0 +1,49 @@
+......................................................................F. [ 22%]
+.......................................................s................ [ 44%]
+.................................FF...................F................. [ 66%]
+........................................................................ [ 88%]
+....................................                                     [100%]
+=================================== FAILURES ===================================
+_ test_full_local_e2e_import_analyze_plan_match_voice_gate_talking_and_render __
+services/api/tests/test_full_local_e2e.py:241: in test_full_local_e2e_import_analyze_plan_match_voice_gate_talking_and_render
+    assert rendered.status_code == 200, rendered.text
+E   AssertionError: {"detail":"local renderer failed"}
+E   assert 502 == 200
+E    +  where 502 = <Response [502 Bad Gateway]>.status_code
+_______ test_real_remotion_renders_persisted_two_clip_vertical_timeline ________
+services/api/tests/test_remotion_e2e.py:117: in test_real_remotion_renders_persisted_two_clip_vertical_timeline
+    ).render(spec, output)
+      ^^^^^^^^^^^^^^^^^^^^
+services/api/app/renderer/remotion.py:149: in render
+    raise RenderProcessError(completed.returncode)
+E   app.renderer.remotion.RenderProcessError: local renderer exited with status 1
+____ test_real_remotion_renders_authorized_local_narration_over_source_clip ____
+services/api/tests/test_remotion_e2e.py:175: in test_real_remotion_renders_authorized_local_narration_over_source_clip
+    ).render(spec, output)
+      ^^^^^^^^^^^^^^^^^^^^
+services/api/app/renderer/remotion.py:149: in render
+    raise RenderProcessError(completed.returncode)
+E   app.renderer.remotion.RenderProcessError: local renderer exited with status 1
+_ test_local_executable_resolution_prefers_explicit_override_and_bundled_tools _
+services/api/tests/test_runtime_readiness.py:65: in test_local_executable_resolution_prefers_explicit_override_and_bundled_tools
+    assert bundled.endswith("compositor-win32-x64-msvc\\ffprobe.exe")
+E   AssertionError: assert False
+E    +  where False = <built-in method endswith of str object at 0x7f6334771c20>('compositor-win32-x64-msvc\\ffprobe.exe')
+E    +    where <built-in method endswith of str object at 0x7f6334771c20> = 'ffprobe'.endswith
+=============================== warnings summary ===============================
+../audit-venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /workspace/scratch/d63a2e31785b/audit-venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+../audit-venv/lib/python3.12/site-packages/starlette/testclient.py:53
+  /workspace/scratch/d63a2e31785b/audit-venv/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] services/api/tests/test_local_codex_fixture_e2e.py:79: set CONTENT_OS_FFMPEG and CONTENT_OS_FFPROBE to run this real-media fixture
+FAILED services/api/tests/test_full_local_e2e.py::test_full_local_e2e_import_analyze_plan_match_voice_gate_talking_and_render
+FAILED services/api/tests/test_remotion_e2e.py::test_real_remotion_renders_persisted_two_clip_vertical_timeline
+FAILED services/api/tests/test_remotion_e2e.py::test_real_remotion_renders_authorized_local_narration_over_source_clip
+FAILED services/api/tests/test_runtime_readiness.py::test_local_executable_resolution_prefers_explicit_override_and_bundled_tools
+4 failed, 319 passed, 1 skipped, 2 warnings in 52.35s
