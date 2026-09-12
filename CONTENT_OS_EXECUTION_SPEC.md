@@ -1,221 +1,283 @@
-# Content OS R1 — 统一发布目标与连续执行规格
+# Content OS R1 — Execution Specification
 
-版本：2026-09-10。审查起点：`f4da6135ee2c1a8d75e945f9ae7721f1e15e50ad`。
-用途：交给本地 Codex 持续实施；不要求重建仓库。当前复审证据见 `CONTENT_OS_REVIEW_2026-09-10.md`；`AUDIT_REPORT.md` 只保留为较早历史证据。
+Updated: 2026-09-12 (Asia/Shanghai)
 
-## 0. 唯一基线与第一项动作
+This is the **single authoritative product/execution contract** for R1. Read `START_HERE.md` for navigation and `STATUS.md` for current progress.
 
-这是本轮全局审查形成的执行规格。用户让本地 Agent 按本文接续后，本文取代旧文档中相冲突的阶段划分、停止条件、任务顺序和验收标准；不取消用户后续明确指令或平台权限约束。
+## 1. Product direction
 
-第一项工作：读取当前 HEAD、工作区改动和旧文档；将当前成果映射到本文，保留未提交工作。不要把审查起点强行 reset 到当前分支。若审查项已经被本地后续修复，验证后标记完成，不重复修改。
+Long-term loop:
 
-同步 AGENTS.md、README.md、STATUS.md、DEVELOPMENT_PLAN.md、PRD.md、BASELINE_FREEZE.md、LOCAL_HANDOFF.md 的入口：统一指向本文；旧 PRD/计划保留为历史设计参考，移除“Task015 后停止所有后续工作”“核心 schema 一概要请用户批准”等冲突要求。保留 STRATEGY_BASELINE.md 作为战略背景，本文负责 R1 的工程范围。不要再新增一份更高优先级冻结补丁。
+> **Know what to create → Create it as you → Learn what works**
 
-只维护：本文（目标、范围、验收）、STATUS.md（顶部只放最新事实和下一任务，历史日志分离）、DECISIONS.md（简短重大取舍）。审查报告是证据和已授权的复审输入，不另建并行规格；日常代码实现不修改发布目标。
+Content OS is Local-first / BYOK infrastructure for an individual creator or small creator workflow. It is not a generic AI video generator and R1 is not a broad market-intelligence SaaS.
 
-### 2026-09-10 当前阶段覆盖条款
+R1 focuses on `Create it as you` while preserving extension points for account intelligence, market signals and performance learning.
 
-在保留 Local-first、BYOK、个人 IP 内容运营定位和已有可用底座的前提下，下一阶段的唯一核心验收为：
+## 2. R1 product gate
 
-> 一位已授权创作者提供可用的历史/素材/清晰样本并确认 IP；输入新主题后，系统生成可编辑的新文案，合成本人的新声音，生成至少一个说出新台词的本人 Talking/口型镜头，结合 B-roll、排版、字幕和封面，输出 30–60 秒新视频。重复制作时不要求用户逐条重拍、录音或手工剪片。
+R1 is not complete until an explicitly authorized creator can:
 
-导入旁白、旧素材裁切、原声字幕、通用 TTS、旧口型和通用头像都不是上述目标完成依据。一次性补充样本可以；不得静默降级为这些替代物。Voice/face 相关调用只能在明确同意、样本权利、可运行路线和预算都具备后进行。
+1. initialize one persistent IP profile from confirmed information and real materials;
+2. enter a new topic and obtain editable copy that uses the current IP context/evidence;
+3. generate **new speech in the creator's authorized cloned voice**;
+4. generate at least one **new Talking/lip-sync segment of that creator speaking new words**;
+5. combine that with reusable real clips, optional capture, typography/static material and subtitles;
+6. export a 30–60 second vertical video through the normal UI;
+7. repeat the flow without re-recording complete narration or manually cutting all media again.
 
-## 1. 产品终点
+Source-led recuts, imported finished narration, old mouth motion, generic TTS or generic avatars may remain explicit fallback paths but **do not satisfy this gate**.
 
-帮助一个有专业知识和素材积累的创作者，在 Windows 本地完成一次初始化后，持续获得有依据且适合自己的内容建议；选择主题后自动生成脚本、选择镜头、配音、字幕与短视频；用户审核导出，记录发布表现与修改，用于下一轮建议。电脑在线时手机可上传素材和审核。
+Human judgment is required for creator voice likeness/naturalness and Talking likeness/naturalness.
 
-长期价值：Know what to create → Create it as you → Learn what works。R1 是这个循环的有限、可重复使用版本，不是全市场情报系统或无人运营 SaaS。
+## 3. Product invariants
 
-R1 默认：单用户、单个活跃个人 IP、一个本地工作空间、多条内容项目。一个项目代表一次内容制作，不能每创建项目就重新创建一份空的 IP。不建设团队/RBAC/多租户/跨 IP 素材共享系统。
+- **Local-first, not desktop-only.** The home computer can be the processing/storage node; browser/mobile can capture, review and control while it is online.
+- **BYOK / replaceable providers.** Core contracts do not depend on one model/vendor.
+- **Real user media first.** Use existing creator assets before generated media when quality is adequate.
+- **Continuous clips are playback assets.** Keyframes exist for understanding/search, not as the default playback unit.
+- **Upload once.** Derive audio, transcript, keyframes and metadata automatically when capabilities exist.
+- **Capture is a low-cost option.** Missing material should produce an optional shoot list before expensive generation where appropriate.
+- **No hidden downgrade.** Unavailable Voice/Talking/market capabilities are shown as unavailable, not silently replaced and declared complete.
+- **Consent and rights are explicit.** Voice/face generation only uses authorized references.
+- **Unknown cost is not zero.** Paid/runtime calls use persistent budget/idempotency/usage accounting.
 
-成功使用流程：打开产品 → 查看建议或输入主题 → 选角度/确认稿 → 自动形成可预览草稿 → 仅处理低置信度/缺口 → 审核导出 → 记录发布及结果。
+## 4. Current architecture to preserve
 
-用户正常操作不需要编辑 JSON、填写 ScenePlan UUID、逐步调用接口、手工切片或重复启动 API/Worker 两个终端。
+Keep the existing:
 
-## 2. 开发模式和发布模式必须区分
+- FastAPI local API;
+- SQLite persistence;
+- provider-neutral domain contracts;
+- idempotent Job/Worker model with retry/recovery;
+- local media import, ffprobe/FFmpeg, segmentation, extraction and ASR/vision/index boundaries;
+- IP profile and revisioned project/draft state;
+- ScenePlan and Hybrid Asset Router;
+- `MasterNarration` / timeline assembly boundary;
+- Remotion + FFmpeg render path;
+- browser/mobile upload and private-network access boundary;
+- cost/budget/provider-call ledger;
+- backup/restore and dependency inventory.
 
-用户已明确：外部接口暂后置，开发测试可以使用 Codex 能力。沿用该偏好，不擅自开通付费服务，也不能借此无限制作假数据演示。
+R1 does **not** require Redis, Celery, n8n, Kubernetes or a microservice rewrite.
 
-| 模式 | 目的 | 数据来源 | 能证明什么 |
-|---|---|---|---|
-| fixture | 回归测试 | 固定脚本/固定向量/合成视频 | 编码、契约和流程正确性 |
-| assisted-test | 当前真实样本研发验证 | 当前 Agent/已安装 Codex 实际分析可访问的材料，或导入有来源的真实分析结果 | 该输入的语义理解、推荐和人工质量；不能代表独立应用全自动运行 |
-| runtime | 产品独立运行 | 已配置的本地或 BYOK Provider，来自同一业务接口 | 无开发 Agent 介入的重复使用与发布验收 |
+## 5. Development evidence modes
 
-三者走相同 domain/service/renderer，生产代码不依赖 tests 模块。不得用固定向量冒充语义匹配，不得将“Codex 写了测试代码”标为“Codex 完成了素材理解”。界面明确显示当前模式、哪些阶段真实执行、哪些不可用。
+Keep these separate:
 
-开发测试桥优先做一个受控的分析结果导入器/任务包：输入 material IDs、区间、关键帧、可用字幕、用户资料；输出带 schema、input hash、来源、模型/工具、时间戳和置信度的分析结果。先有实际分析与可回放结果，不先建设复杂代理网关。
-
-本机若已有支持的 Codex CLI，可探测其版本、登录状态、help 与结构化输出能力后，用官方非交互能力完成开发测试任务；限定工作目录和输入、遵循本机权限，不修改/搬运认证凭据、不公开为远程任意命令接口、不嵌套无限启动 Agent。若当前环境不支持，保存具体失败，继续可做任务；不能悄悄换成 fixture 再宣布语义验证完成。
-
-文字和图片能力不能推导出可靠音频识别、TTS、声音克隆、口型或 embedding 能力。ASR 用实际可用工具或真实提供字幕；缺失就记录缺失。无 embedding 服务时，小样本可用真实文字检索加模型重排验证选片，保留现有向量接口；不得编造向量并称为真实 embedding。
-
-发布模式接入集中在 S4：配置页面、能力探测、估价、超时/重试和预算接口提前完成；待具备具体可运行方案时，一次性请用户配置必需凭据/预算。无独立推理运行时只能宣布 assisted-test 通过，不能宣布成熟产品完成。
-
-参考：[官方非交互模式](https://developers.openai.com/codex/non-interactive-mode) 支持结构化输出、JSONL 和 usage 事件；本机模型、额度和模态能力仍需探测。
-
-## 3. R1 功能边界
-
-### 3.1 一次初始化与素材持续进入
-
-- 复用一个默认 IP；读取专业领域、受众、知识、观点、表达、禁忌和历史内容。先自动推断，再集中确认，支持修改及版本记录。
-- 本地文件/目录导入、Inbox 增量发现、内容 hash 去重；浏览器文件上传，手机相册/文件入口；失败可重试。无需改名、转 MP3、手动打标签。
-- 显示独立阶段：已导入、媒体预处理完成、转写可用、视觉分析可用、索引可用；某个 ANALYZE_ASSET completed 不等于所有理解完成。
-- 原始媒体与派生数据分离；混合画幅保留原件，渲染时预览裁切；避免裁掉主体。
-- 数据在重启后保留；阶段失败只重跑失效或缺失步骤。
-
-### 3.2 素材身份和用途：保持简单，但不混淆
-
-必须拆开两个问题：谁代表我的身份？这段素材能否用于当前输出？上传来源本身不是身份或授权证明。
-
-界面建议分组确认而非每 Clip 逐项询问：本人形象、可用辅助画面、仅参考、暂不使用。辅助画面包括自己拍摄的办公环境、产品、屏幕、物件及已允许使用的第三方素材，可以没人出镜，也可以有其他人；不能因“不是本人”一律排除。
-
-内部用简洁的用途/身份记录（sidecar 表或最小兼容字段，Terra 自主选择并记决定），无需多 IP 多对多权限系统。用途至少可表达 unknown/reference/production；身份至少 creator/other/none/unknown；按需允许片段覆盖素材级默认。用户只确认代表自己的形象样本和批量用途，不承担人脸数据库管理。
-
-未知身份不自动冒充本人；仅参考内容不默认变成可发布素材。研究测试与对外导出分开记录，测试产物不自动获得可发布资格。用户此前“只研究”的陈述保留为用途背景，不推断为任意后续商业使用授权。
-
-Router、Assembler、Renderer 使用同一个可用性判断服务，避免三套互相冲突的规则；对本人出镜场景查身份，对 B-roll 查使用范围。可用辅助镜头无需属于本人形象。
-
-### 3.3 有依据的选题与 IP 表达
-
-- 手动输入主题始终可用，完整稿件不是必填项。
-- 从导入的专业资料、历史字幕、评论/问题、用户提供的近期参考来源提出 3–5 个机会；记录支持来源、日期、为何适合该 IP、内容角度与不确定性。
-- 有外部信号才称市场机会；仅由本人资料推断时标为选题建议。无信号就显示缺失，不能生成虚构趋势数字。
-- R1 不抓取全网，不做竞争矩阵。提供一个有来源的外部信号输入通道及可替换 Provider；YouTube 只读 Account Intelligence 作为首个账号路径，权限不足时支持导入历史数据/字幕。
-- 脚本生成必须读取当前 IPProfile 内容与版本、选题证据和可用素材概况，而不是只传一个 profile UUID。输出 Hook、观点展开、事实来源与 CTA；用户修改/拒绝入库。
-- Scene Planner 在初稿后结合素材缺口做一次受预算约束的调整。不要因现有镜头少，扭曲用户观点；允许 B-roll/排版替代。
-
-### 3.4 Hybrid 生产链
-
-- 连续 Clip 为播放单位，关键帧用于理解。镜头可多段组合覆盖一个语义 Scene；不要强制每个 Scene 只能找一条足够长的 Clip。
-- 首选语义和质量合格的已有真实素材；参考近期使用、跨场景多样性，避免同一镜头连续重复。
-- 按场景分配：本人讲话、辅助画面、解释图形；R1 必须落地本地视频、静态图片/截图、Typography 三类可渲染来源。
-- 缺素材给可选 Shoot List（拍什么、机位、时长、是否需说话）；用户拒绝补拍仍可用图片/排版完成可行场景，无法表达则明确标明缺口。补拍是选择，不是默认停止所有制作。
-- Stock、AI Image、AI Video 等保留可替换边界和能力状态；没有接入不能显示“可用”。付费视频生成、高级数字人不是首发基础路径硬依赖。
-- 成功导出保存 AssetUsage 事件：按项目版本/输出去重，推导 used_count/last_used_at。预览、失败、重试不重复计为发布使用；发布使用与制作使用分别统计。
-- 素材语义分数是排序值，不宣称校准后的准确概率。
-
-### 3.5 音频、字幕、Voice 和 Talking
-
-当前 source-only renderer、导入旁白和旧片裁切都是已保留的基础能力，不是当前核心终点。当前阶段必须支持新稿件对应的新声音与新的本人 Talking/口型片段；导入用户已有配音只能用于过渡和对齐工程，不能作为该目标通过依据。
-
-新增媒体类别/音频资产及混音表示，兼容旧视频 Asset；不要求把只有视频字段的模型推翻重建。记录来源、声音授权、时长、语言和生成版本。
-
-明确区分：
-1. 保留原声：字幕源于对应区间的真实说话内容；不得把新脚本全文覆盖到旧台词上冒充同一内容。
-2. 新旁白配 B-roll：原音静音或按配置压低，字幕按新音频时间对齐。
-3. 本人新口播：只有经过实际 Voice/Talking 路径和质量检查才启用；不拿旧口型当新讲话。
-
-Voice/Talking 候选发现、用户授权确认、试听/预览和真实能力验证是当前依赖链的一部分。没有经过 U-Voice 的清晰样本、两条未见新句、可播放新声音与 5–10 秒 Talking 片段、完整文案覆盖和明显同步检查时，Talking 必须标记未通过；不得用通用 TTS、旧原声、旧口型或通用头像静默降级。用户可一次性补充可用样本，重复制作不应要求逐镜录音或剪音频。
-
-字幕按音频片段/词句定时，避免整场景一大段固定字幕；封面和标题至少有一个可编辑可导出的基础模板。
-
-### 3.6 审核、发布记录与效果学习
-
-- 产品自动生成整条草稿，默认只向用户呈现整条预览、低置信度例外与备选；可展开 Scene 编辑，但不强制用户逐 Scene 点击确认。
-- 用户批准后导出 MP4、封面和文案；R1 默认人工发布，不自动发帖。保存发布平台、日期、内容 URL/ID。
-- 导入或手工录入真实表现，保留指标定义、来源、观察窗口；平台不给的指标为空，不跨平台假装可比。
-- 记录内容选择、脚本修改、素材替换、拒绝原因、制作时间和实际成本。下一轮建议能读取这些记录，至少形成可解释的建议变化，不声称已训练复杂学习模型或证明增长提升。
-
-### 3.7 日常运行与移动端
-
-- Windows 一个启动入口管理 API 与 Worker，显示健康状态、失败原因、恢复动作；安装检查 Python/Node/FFmpeg/Renderer，记录实际版本，提供稳定依赖约束。
-- 使用 React/Vite/TypeScript 构建用户页面，复用当前 FastAPI；现有 Python HTML 仅保留开发诊断，不作为最终交互目标。迁移按页面逐步做，不等前端重写完才修现有 422。
-- 手机：上传、查看草稿、轻改、确认补拍、审核。先本地验证，再私网访问；远程开启前完成身份验证与文件访问控制。
-- PC 离线时明确提示不可执行，不承诺离线 relay；NAS、Cloud Worker、原生 App 后置。
-
-## 4. 架构保留与需要补齐的边界
-
-保留 FastAPI/Pydantic、SQLite、当前 JobStore/Runner/lease、FFmpeg 媒体链、Provider 抽象、向量检索和 Remotion。保持本地优先、BYOK、普通 CPU 最低路径。不引入 Redis、Celery、微服务或通用 Agent 平台。
-
-服务层负责 workflow：用户意图 → 数据就绪检查 → 推理/素材匹配 → 预算 → 渲染 → 审核结果。长调用通过现有 Worker 执行，不能在 async HTTP handler 里同步阻塞 LLM/embedding/render；保持 SQLite 连接归属线程清晰，不直接把共用连接丢入线程池。
-
-需要的持久化能力按任务新增，不先建全套空表：默认 IP/版本、素材用途、内容证据、脚本/ScenePlan/候选确认、VideoSpec/输出版本、旁白、使用事件、预算/调用记录、发布与反馈。字段变化、兼容迁移、契约导出和调用方同步属于已授权工程实现；不因“涉及 schema”就重新问用户。
-
-索引记录 provider/model/revision/dimension/input hash；换模型后旧向量不得混算，即使维度一样。更新 transcript/vision 后标记向量过期并按依赖重建。底层 Clip ID/原件 hash 尽量保持。
-
-项目草稿保存到数据库，刷新/重启可恢复。更换项目/稿件/选片后使旧 VideoSpec 和渲染请求失效，不能继续导出陈旧选择。
-
-## 5. 成本与能力检查
-
-分开记录开发 Agent 消耗和产品运行消耗。
-
-实际模型/Provider、操作、输入来源、结果状态、usage 是否可观测、input/output/cache tokens、估价币种与价格日期、实际账单金额分别保存。无法观测写 unknown/null；“Luna 10M tokens”是示例预算，不是实际调用证据。token 估价不是订阅额度的实付账单。
-
-业务调用：估算 → 预算预留 → 执行 → 实际对账；重试纳入预算，未知价格不能当零成本。达到预算/次数上限只暂停相关生成，保留其他操作与草稿。默认不启用付费生成，已有明确预算内无需每次询问。
-
-能力检查覆盖完整链路，而非只检查 KEY 存在：文本、图像、ASR、检索、音频生成、render、worker。把“功能未开发”“Provider 未配置”“运行失败”分开显示。用户不需要理解四个环境变量才知道下一步。
-
-## 6. 持续任务队列与验收
-
-下列为依赖顺序，不是每行结束都请求用户确认。首轮复用已有 001–015，禁止从零重做。
-
-### 当前工作包 A–F（优先于下方历史 S0–S5 映射）
-
-| 包 | 交付与依赖 | 责任与证据 |
+| Mode | Purpose | May prove |
 |---|---|---|
-| A：收口基础与 P1 | 原位同步本文/AGENTS/STATUS；把 P1-A 请求幂等、P1-B 全局+项目预算、P1-C 每个真实 Provider 调用账本化/批量嵌入、P1-D 原始 Clip 边界修复为回归。 | Terra 负责跨模块预算、媒体与恢复；Luna 负责确定契约下的文档/UI/回归。每项留真实测试或可复现输出。 |
-| B：真实能力探针 | 仅读取 CPU/GPU/VRAM、已授权样本、已批准 Provider 路线与可见成本；选择一条可行的 Voice+Talking 路线，最多一个备选。对两条未见新句产出新声音与 5–10 秒 Talking。 | Terra；不得并接五个 Provider。若没有明确声音/形象授权、可用样本、Provider 或预算，整理 U-Voice 所需最小决策后暂停外部调用。 |
-| C：真实模型文案与 IP 上下文 | 用当前 IP 版本、素材/历史证据生成可编辑稿；修改稿或 IP 后使下游失效；比较同题不同 IP 的差异。 | Terra 核心，Luna 做已定 UI/CRUD；固定夹具不能替代语义结果。 |
-| D：主声音时间线 | 支持一个主声音资产的句/词级区间、字幕、B-roll/静态/排版和多镜头覆盖；不要求用户为每个 Scene 手工切音频。 | Terra；在装配前处理短 Clip 的多镜头、静态延展或明确缺口，不能越界交给渲染器。 |
-| E：真实生成编排 | Script → Voice → Talking → Router → Render 使用既有 Job/SQLite 恢复、缓存、预算和错误边界；改稿/重试正确失效或复用。 | Terra；不拆微服务。 |
-| F：创作者验收 | 两个新主题，各 30–60 秒，至少一个真正新的 Talking 片段，正常 UI 完成、可重试/恢复、能查看成本。 | U-Product；通过后才领取运营/产品化外围工作。 |
+| fixture | deterministic regression | contracts, state, encoding, orchestration |
+| assisted-test | real samples analyzed with an authorized development tool/model | quality for those samples; not independent runtime |
+| runtime | application executes configured local/BYOK provider itself | repeatable product capability |
 
-P1 之后暂停非必要外围模块。每个完成包自动领取下一个 ready 包；核心能力瓶颈才升级审查，不能以较低单价代替交付责任。
+Do not call fixture success “AI understanding”, and do not call assisted-test success an independently runnable product.
 
-### 历史 S0–S5 能力映射
+## 6. Voice strategy
 
-| 阶段 | 可交付结果及任务 | 最低可实施调度 | 工程验收 |
-|---|---|---|---|
-| S0 修复真实入口 | 两个 422、预览区间、指标未确认计数、旧状态失效、默认 IP 复用；建立实际浏览器按钮回归 | Luna 做局部 UI；Terra 校验 API/状态边界 | 选择第二候选也能组装；正确 payload 入队；源片段按区间预览；刷新/切项目不串状态 |
-| S1 形成可保存的用户流程 | 页面壳、初始化/资料/用途分组确认、导入入口、草稿版本；把“新主题→草稿”作为主动作 | Luna UI/CRUD；Terra workflow/迁移 | 多项目共享同一 IP；本人/辅助/参考区分正确；刷新和重启保留修改 |
-| S2 真实语义与最小成片 | assisted-test 真实材料分析、IP-aware 稿件/规划、检索重排、视频+图片+排版、真实配音导入及对齐 | Terra 核心；Luna 输入/结果页面 | 至少一组真实材料、两个新主题；内容依据可追溯；不存在新字幕+无关旧声；出可观看成片 |
-| S3 完整运营循环 | 有来源选题、历史/账号导入、Voice/Talking 候选与验证、可选补拍、使用记录、发布/反馈、下一轮建议 | Terra integration；Luna UI/记录 | 输出经历修改→导出→记录→下一轮建议；拒绝补拍仍有已实现替代；无内容归属混淆 |
-| S4 独立运行与预算 | 整合 runtime Provider、一次配置、能力探测、费用预算/重试、实际语义/音频验证 | Terra；Luna 设置页 | 关闭开发 Agent 后从 UI 完成循环；超预算不偷偷继续；失败可恢复 |
-| S5 发布候选 | Windows 启动/安装、移动上传审核、认证私网访问、升级备份恢复、许可清单及全链路回归 | Terra 稳定性；Luna 文档/UI；Sol 仅最终关键审查 | 真实 Windows、真实 Provider、真实音画、刷新重启、失败重试和手机检查完成 |
+`VoiceProvider` remains a replaceable capability layer.
 
-若 S2 的某模态没有工具，做已支持模态的真实验证、音频导入和其他阶段的工程工作；记录一个具体阻塞。不能靠生成新的 fixture 报告无限延长 S2。S4 凭据未提供时只标记 runtime 受阻；不伪造通过，不回头改战略。
+### 6.1 OmniVoice
 
-## 7. 用户只参加必要的产品检查点
+OmniVoice is approved for a **local non-commercial evaluation provider / benchmark** because it is a strong technical fit:
 
-- U-Voice（B）：确认本人声音/形象样本的使用授权，并评估两条未见新句生成的新声音和 5–10 秒 Talking 片段是否像本人且可接受。自动检查仅覆盖可播放性、完整文案、音视频时长、重复/缺失句和明显不同步；相似度、自然度与可接受性必须由用户判断。
-- U-Product（F）：在正常 UI 中看两个新主题的 30–60 秒结果，确认每条都有新声音、至少一个真正新 Talking 片段，不需逐 Scene 准备声音或手剪片段，并检查重试/恢复/成本呈现。
-- U3（发布候选）：只在 U-Product 完成后进行最终真实使用验收。
+- zero-shot voice cloning;
+- short reference samples;
+- 600+ languages;
+- reusable clone prompt;
+- local Python API;
+- pronunciation/expressive controls.
 
-等待用户的主观反馈期间，可以继续无依赖的任务；但不能把该检查点标成通过。每个工程任务自己测试、审查、提交和更新状态，随后直接领取下一个 ready 任务。
+License boundary:
 
-如果需要运行时凭据/额度，把支持的能力、实际估价、输入将去哪里和本地配置动作一次汇总到 U-Voice/U-Product 或实际资源阻塞处；不把旧密钥、环境变量存在或历史授权解释为无限额度授权，也不索要用户在会话粘贴密钥。
+- repository/source code: Apache-2.0;
+- official pretrained weights: currently CC-BY-NC due to upstream training-data constraints.
 
-## 8. 最终完成定义
+Therefore R1 may evaluate OmniVoice locally, but Content OS must **not**:
 
-这是目标阈值，不是当前实测，也不是对增长/爆款的承诺。
+- bundle official OmniVoice weights in a commercial release;
+- advertise those weights as a commercial-safe default;
+- store OmniVoice-specific state in core contracts;
+- require OmniVoice for the minimum installation.
 
-1. 一次初始化后，从同一 IP 的材料发起至少 3 个不同主题项目，每个输出 30–60 秒可观看竖屏视频；当前核心验收中的两个新主题必须走“新文案→本人新声音→至少一个本人新 Talking/口型镜头→成片”，没有开发 Agent 手工改数据。
-2. 至少一次新增素材被自动发现/导入/分析并用于新草稿，无重新整理历史材料。
-3. 稿件体现确认过的知识/观点/表达；引用事实可追溯；两份不同表达约束产生可解释变化。
-4. 音画字幕一致，无用无关原音朗读新稿、明显时间错位或未处理黑场；主声音、字幕和 Talking 句界实际可听/可看/可读，短 Clip 在装配前有多镜头、静态延展或明确缺口方案。
-5. 每次用户必做动作限于选题/必要稿件确认/关键例外/最终审核，不逐 Scene 强制确认；首次配置与重型批处理单列，重复制作人工活跃操作时间目标不超过 20 分钟。
-6. 素材替换与复用有记录，按已确认样本统计 Top-1/Top-3；未确认不能计成功；可用性、身份一致性和真人素材使用率分开统计。
-7. 覆盖取消、重启恢复、重复点击幂等、至少一种 Provider 失败、预算上限、源文件缺失；无丢草稿、隐性重复费用、重复发布记录。
-8. 一次人工发布记录与真实数据导入可进入下一轮建议；效果提升需要长期观察，首发不宣称验证。
-9. Windows 启动后无需维护两个终端，手机上传/审核可用；离线边界明确。
-10. runtime 模式真实执行并有可查证的 Provider、模型、输入/输出、成本、失败和恢复记录。fixture/assisted-test 不能替代发布验收。Talking 若未通过必须清楚列为未提供，不能以导入配音、原片合成、旧口型或通用头像冒充新口播。
+Install it only as an optional provider/worker dependency.
 
-## 9. 自主执行与停止规则
+When Content OS already has an authorized clean reference clip and transcript, reuse them rather than redundantly invoking another ASR pass.
 
-无需再询问：修 bug、局部重构、必要字段/表/迁移、接口同步、UI、测试、文档、现有技术栈内依赖锁定、可逆的实现选择。模型遵循已约定 Luna→Terra→Sol 的能力/成本分层；不可用时记录实际模型，优先转向能做的任务，不伪称已分派。不是每个缺失字段都需要 Sol。
+### 6.2 Commercial-safe paths
 
-仅以下事项需要具体用户输入：改变本文发布承诺；不可逆破坏现有数据；首次付费/超出既定预算；发布或账号授权等外部动作；U-Voice 的声音/形象相似度与样本授权；U-Product 的成片体验确认；或无法从现有材料判断的本人身份/主观效果。平台限制仍须遵守，不得用本文绕过。
+Maintain a schema-compatible path for:
 
-技术不确定性先查当前代码/测试/官方资料；在既有范围内做最小决定并记录。不把缺一个音频实体讲成“架构推翻”。连续两次有实质差异的修复仍失败时升级能力或保存最小复现，不无限烧同一测试。
+- a commercially usable local voice provider (e.g. Chatterbox candidate, subject to release-time source/model license verification);
+- a BYOK cloud provider for machines without suitable local inference or when local quality is insufficient.
 
-主协调 Agent 负责全局完成标准和跨模块集成；子 Agent 收到业务目的、读入上下文、允许文件、验收与非目标。同一核心契约单一负责人，独立 UI/CRUD 可并行。子任务结束不等于用户任务结束。
+No provider becomes “commercial-safe” solely because its source repository uses a permissive license; model-weight and dependency licenses must also pass the dependency inventory/release review.
 
-不得反复全量测试只为增加信心；每次先测改动风险，里程碑全量回归，真实媒体关键路径保留可重复样本。浏览器测试必须点击实际流程，不以字符串标记存在充当按钮可用证明。
+### 6.3 Voice QA gate
 
-中断时 STATUS.md 顶部精简记录：HEAD/工作区、已通过项及证据、当前阻塞、正在做的任务、下一个 ready 任务、使用模式、下次仅需运行的命令。历史日志移至独立归档。恢复从此处接续，不重新征询整个项目方向。
+Generated narration cannot flow directly to final render without QA. At minimum record/check:
 
-## 10. 本地启动任务
+- copy coverage via ASR/alignment or equivalent;
+- missing/duplicated sentence detection;
+- duration and long-silence sanity;
+- playable/non-clipped output;
+- provider/model/version and reference provenance;
+- retry/fallback outcome.
 
-读取本文和当前复审报告，先核对 HEAD 与未提交修改。先完成工作包 A 的 P1 与入口同步，再按 B–F 依赖连续执行。首个返回用户的核心产品结果应为 U-Voice 的两条未见新句声音和 Talking 探针；普通工程任务完成后不要用“下一步建议……是否继续”结束。无法达到 U-Voice 时，先完成其他 ready 工作，再返回明确的授权/样本/Provider/预算阻塞与已准备好的最小动作。
+Naturalness and likeness remain a U-Voice human gate.
+
+Scene-based generation/retry is preferred over regenerating a complete long narration when it improves reliability, but the final timeline may use one normalized `MasterNarration` track with aligned ranges.
+
+## 7. Talking strategy
+
+`TalkingHeadProvider` remains replaceable.
+
+R1 must prove at least one real new creator Talking segment, but does not lock to one implementation.
+
+Preferred evaluation order:
+
+1. reuse a suitable authorized Talking clip as reference;
+2. local lip-sync provider when the machine/reference quality supports it;
+3. BYOK cloud Digital Twin / avatar as optional fallback if explicitly approved and budgeted.
+
+Do not build the product around a high-end-GPU-only route. Runtime readiness must distinguish:
+
+- implemented;
+- configured;
+- locally available;
+- verified.
+
+## 8. Hybrid Asset Router
+
+Per scene, prefer the lowest-cost adequate route rather than maximum AI generation.
+
+### TALKING
+
+1. original suitable Talking content when the original words actually match;
+2. authorized lip-synced creator clip;
+3. authorized digital twin / avatar provider;
+4. explicit fallback or gap.
+
+### B-roll
+
+1. user/historical production-authorized clip;
+2. optional low-cost capture;
+3. local static/screenshot/typography;
+4. stock if implemented;
+5. AI image/video only if implemented, approved and budgeted.
+
+### Explainer
+
+Prefer screenshot / typography / chart / real media before generated video when adequate.
+
+Reuse penalty is a ranking input, not a reason to discard good real material when alternatives are poor.
+
+## 9. Account vs Market intelligence
+
+Keep these separate.
+
+### Account Intelligence
+
+R1 may use/import the creator's own historical account/content data to understand what that creator has published and how it performed. Account access remains read-only unless explicitly changed.
+
+### Market Intelligence
+
+Broad competitor/trend crawling and market prediction are not R1 requirements. Future market signals must be evidence-backed and provider-neutral; absent external evidence, label suggestions as creator/content recommendations rather than invented market trends.
+
+## 10. Mobile / remote operation
+
+R1 architecture should support:
+
+- browser/mobile upload;
+- shoot-task capture;
+- review/approval/status from a phone;
+- private LAN/Tailscale-style access while the local node is online.
+
+Do not make remote Windows desktop the primary UX. Do not automatically open firewall/router access.
+
+## 11. Cost and capability discipline
+
+Separate **development-agent cost** from **product runtime/provider cost**.
+
+Runtime provider flow:
+
+> estimate (when known) → reserve budget/idempotency ownership → execute → persist result/usage → reconcile actual/unknown cost.
+
+Retries count. Unknown price remains unknown.
+
+Capability UI/status must distinguish `not implemented`, `not configured`, `locally unavailable`, `verification failed`, and `verified`.
+
+## 12. Implementation model policy
+
+Quality first, then lowest capable cost:
+
+`Luna → Terra → Sol`
+
+- **Luna**: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
+- **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations.
+- **Sol**: architecture/security/critical quality gate, or unresolved Terra failure with a concrete reproduction.
+
+Task importance alone never justifies Sol. Lower token price never justifies assigning architecture-changing work to Luna.
+
+Detailed constraints are in `AGENTS.md`.
+
+## 13. Current dependency order
+
+Do not restart old numbered plans. Continue from `STATUS.md` using these gates:
+
+### Gate A — Foundation integrity
+
+Provider accounting/idempotency, revision invalidation, real media/timeline boundaries remain green.
+
+### Gate B — Voice evaluation
+
+- establish explicitly authorized reference audio;
+- implement provider-neutral Voice generation job;
+- evaluate OmniVoice as non-commercial benchmark and at least one commercial-safe/fallback path where feasible;
+- add Voice QA and human U-Voice comparison.
+
+### Gate C — Talking evaluation
+
+- establish authorized Talking reference;
+- implement one real Talking provider path;
+- verify new words, basic sync/playability and human likeness/naturalness.
+
+### Gate D — Integrated creator flow
+
+new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry.
+
+### Gate E — U-Product
+
+Two real new topics, 30–60 second exports, normal UI, recoverable failures, no manual per-scene audio cutting, and no false capability claims.
+
+After Gate E, account/market/performance expansion may resume according to product evidence.
+
+## 14. User input / stop conditions
+
+Implementation should proceed autonomously for reversible engineering work inside this contract.
+
+Pause only when required for:
+
+- identity/voice/face consent or subjective likeness judgment;
+- first paid provider use or budget increase;
+- external account authorization/publishing action;
+- irreversible user-data change;
+- material product-scope change;
+- a blocker that cannot be resolved from current repository/evidence.
+
+Do not create a new strategy/freeze/review document for a normal blocker. Record current facts in `STATUS.md`, durable choices in `DECISIONS.md`, and continue the next ready dependency.
+
+## 15. Documentation system
+
+Only six root documents are active controls:
+
+- `START_HERE.md` — navigation;
+- `CONTENT_OS_EXECUTION_SPEC.md` — this contract;
+- `STATUS.md` — current truth and next task;
+- `DECISIONS.md` — durable decisions;
+- `AGENTS.md` — implementation/model policy;
+- `README.md` — user/contributor overview.
+
+Old PRDs, development plans, freezes, handoffs and review reports are historical evidence available through Git history and must not compete with this hierarchy.
+
+Run `python scripts/check_docs.py` before handoff. CI should enforce the same document rules.
