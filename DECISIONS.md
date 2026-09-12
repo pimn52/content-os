@@ -1,32 +1,44 @@
-# Content OS R1 重大取舍
+# Content OS — Durable Decisions
 
-仅记录会影响后续实现的短决策；产品范围和验收以 `CONTENT_OS_EXECUTION_SPEC.md` 为准，事实证据以 `STATUS.md` 为准。
+This file records only decisions that should survive individual tasks. Current scope/acceptance is in `CONTENT_OS_EXECUTION_SPEC.md`; current facts and next work are in `STATUS.md`.
 
-## 2026-09-10
+## 2026-09-12 — Documentation governance
 
-- 保留已有 Local-first、BYOK、个人 IP、真实素材优先底座；下一阶段核心验收改为“新文案 → 已授权本人的新声音 → 已授权本人的新 Talking/口型 → 成片”。导入旁白、旧片裁切、旧原声、旧口型和通用头像都不能作为完成证据。
-- Provider 调用的预算与幂等统一到持久化执行边界：请求摘要绑定项目、操作、Provider/模型和输入；同键不同输入拒绝，同键同输入回放已保存结果或公开已有状态，未知执行中的调用不盲目重发。
-- 全局预算是工作区账本生命周期总上限，项目预算是叠加限制；所有实际模型语义检索/规划及批量嵌入必须留账。没有可归属的项目预算时，不调用外部语义检索。
-- 新旁白时，Assembler 必须先检查原始连续 Clip 的真实边界和帧容量；多镜头覆盖、静态延展或明确缺口属于下一步主声音时间线工作，不能把越界问题交给渲染器。
-- Voice/Talking 路线只在 U-Voice 集中确认样本/授权、实际 Provider 和预算；不把已有环境变量或历史密钥视作无限付费授权。
+- Root project control is reduced to six active documents: `START_HERE.md`, `CONTENT_OS_EXECUTION_SPEC.md`, `STATUS.md`, `DECISIONS.md`, `AGENTS.md`, `README.md`.
+- Old PRD/plan/freeze/handoff/review files are historical evidence and must not compete with the active hierarchy. Git history is the default archive.
+- Normal work must not create a new top-level strategy/freeze/review/handoff document.
+- `STATUS.md` is updated after each completed work package; `DECISIONS.md` changes only for durable choices; the execution spec changes only for material scope/acceptance/order changes.
+- `scripts/check_docs.py` and CI enforce the active-doc set and stale-reference rules.
 
-## 2026-09-09
+## 2026-09-12 — Voice provider strategy
 
-- 保留现有 FastAPI、SQLite、Job Runner、媒体管线、Provider 边界和 Remotion；不因审查起点重建或回滚。
-- 单用户 R1 的项目复用第一个本地 IPProfile；创建后续项目不再生成空白 IP。多用户、多 IP 权限系统后置。
-- `/m1-gate` 继续作为开发诊断入口。S0 先修真实请求体、状态失效、指标口径和 Clip 区间预览；正式 React/Vite 页面按 S1 逐步迁移。
-- 浏览器 S0 回归可以注入测试 Provider 验证交互边界，但不计为 assisted-test 语义质量或 runtime 通过；真实模型辅助结果必须单独记录来源和模式。
-- S2 前置采用 `analysis_result_bundles` 作为受控回放边界：结果包保留 input hash、模式、来源、模型/工具、时间戳、IP 快照、区间、字幕、关键帧和置信度；导入只回放已有资产/Clip 语义，重复 hash 幂等，冲突拒绝，且不改变素材的 production 用途。这样可接入真实分析结果而不把 fixture 或未授权素材冒充语义验收。
-- 混合视觉先落地本地可审计路径：Typography 不依赖外部媒体，截图/图表用独立 `ImageAsset` 与 hash 去重；两者都必须经过候选显式选择、来源授权绑定和 Renderer 校验，不能伪称为视频语义匹配或自动生产授权。
-- 配音先走已有本地音频：独立 `AudioAsset` 保留采样率、声道、时长、语言和授权引用；VideoScene 只允许经过时长校验的音频区间，Renderer 在存在新旁白时静音原声并混入该音频。TTS、Voice/Talking 和声音克隆继续后置，不能用旧原声覆盖新稿。
-- 成功导出后的素材使用通过按项目/输出版本/媒体区间生成确定性 event key 幂等记录；只有 production usage endpoint 会增加 Clip 使用次数，预览、失败和重试不计入复用统计。
-- S4 先落地 side-effect-free runtime readiness：只检查本机 ffmpeg/ffprobe/npm 和运行时 Provider 配置，不探测外部服务、不回显密钥，并明确区分 `provider_not_configured`、`not_developed` 与 `unavailable`；真实付费调用和预算授权仍集中后置到 U1/U2 的运行时准备环节。
-- S4 预算边界先以 SQLite `budget_policies` + `provider_call_records` 落地：外部调用必须先 reserve，未知价格不能默认为零，失败/重试各自保留记录，complete 才写 actual cost；该边界不自动启用任何付费 Provider。
-- S3 选题机会先落地为 `content_opportunities` 的人工/历史内容/账号信号输入记录：以来源引用幂等、可标记使用/忽略，并将机会与底层证据引用注入 ScenePlan；不在 R1 内抓取全网或虚构趋势。
-- S3 账号路径先落地为 schema v15 的只读 `account_connections` + `historical_content` 导入边界：只保存外部标识、历史元数据、字幕和指标，不接受令牌，不自动同步或发布；未来 YouTube 等 Provider 可替换接入。
-- 本地 Inbox 采用按需轮询 `POST /inbox/scan`，复用 Asset content hash 去重并返回每次扫描的新增/已有/失败计数；不在 R1 引入常驻 watcher、线程或新的队列基础设施，也不把导入冒充分析完成。
-- Voice/Talking 先落地 schema v16 的 consent-gated profile registry：参考 Clip 必须已存在且 consent 明确确认，profile 只保存 provider/profile 标识与授权记录；生成、试听和质量验证继续保持未开发，不以旧口型或旧原声替代新口播。
-- 正式 Web UI 采用 `apps/web` 的 React/Vite 增量迁移：后端 API、SQLite、任务队列与 Remotion 保持不变；生产构建静态挂载到 `/app/`，未构建时保留 `/workspace` 过渡壳，避免把 UI 迁移误做成后台重建。
-- S5 升级恢复采用本地 zip + SQLite backup API + SHA-256 manifest：恢复必须落到新的不存在目录，并重定位数据根内媒体路径；不覆盖现有数据、不备份 live WAL/SHM、不接触 Provider 密钥。
-- 手机/浏览器素材入口采用 `POST /uploads` 的单文件 multipart 流式导入，受 5 GiB 上限和视频扩展名校验约束；私网访问使用可选 `CONTENT_OS_ACCESS_TOKEN`，LAN 绑定没有 token 时由启动脚本阻断，默认 localhost 不增加登录步骤。
-- assisted-test 允许显式选择 Anthropic 或 OpenAI-compatible 适配路由，各自只读取对应 key/base URL/model 环境变量；适配层只保存真实返回和结构校验结果，不在 Provider 不可用时跨服务猜测或生成语义替代物。
+- Voice remains provider-neutral; no model name is allowed to become a core schema dependency.
+- OmniVoice is approved as a local **non-commercial technical evaluation / quality benchmark** provider.
+- OmniVoice source code is Apache-2.0, but official pretrained weights are currently CC-BY-NC because of upstream training-data constraints; those weights must not be bundled or presented as a commercial-safe default.
+- A commercial-safe local path and BYOK cloud fallback remain interchangeable behind the same `VoiceProvider` boundary.
+- Voice generation requires automatic QA before final render: copy coverage, missing/duplicate text, duration/silence sanity, playability, provenance and retry/fallback result. Human likeness/naturalness remains an explicit U-Voice gate.
+- Local model dependencies remain optional; base Content OS installation must stay lightweight and cannot require a high-end GPU.
+
+## 2026-09-12 — Implementation model cost policy
+
+- Development uses the cheapest model that can reliably complete the task: `Luna → Terra → Sol`.
+- Luna is default for isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
+- Terra owns cross-module media/timeline/provider/planner/router/job/migration work.
+- Sol is reserved for architecture/security/critical quality gates or unresolved Terra failures with a concrete reproduction.
+- Task importance alone does not justify Sol; cost alone does not justify giving architecture-changing work to Luna.
+
+## Existing architecture retained
+
+- Keep FastAPI + SQLite + local Job/Worker + provider-neutral contracts + Remotion/FFmpeg; no R1 microservice/Redis/Celery/n8n/Kubernetes rewrite.
+- Maintain durable provider idempotency, global/project budget enforcement and actual/unknown cost accounting.
+- Keep one persistent default creator/IP context for R1 rather than building multi-tenant or multi-IP permissions.
+- Continuous media clips are first-class playback assets; keyframes support understanding/search.
+- Real creator assets are preferred; optional capture and low-cost static/typography paths precede expensive generation when adequate.
+- Successful production usage, not previews/failures/retries, drives reuse history.
+- Account Intelligence and broad Market Intelligence remain separate; R1 may use/import the creator's own history while broad market crawling/prediction is deferred.
+
+## Core product gate
+
+- The central R1 proof remains: `new topic → editable IP-aware copy → authorized creator voice → new creator Talking/lip-sync → hybrid real-media timeline → 30–60s export`.
+- Imported finished narration, source-led recuts, old mouth motion, generic TTS or generic avatars cannot be used as evidence that this gate passed.
+- Consent/rights, first paid usage and subjective creator likeness remain explicit human boundaries.
