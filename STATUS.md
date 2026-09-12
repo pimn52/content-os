@@ -12,6 +12,7 @@ Updated: 2026-09-12 (Asia/Shanghai)
 - `MasterNarration` Web build and isolated browser regression are now verified: ScenePlan → candidate persistence → timed SRT binding → aligned master-track selection → three-scene VideoSpec completed through the UI. The regression fixed two actual S0 blockers: asynchronous forms retain their form element before reset, and route persistence strips UI-only `shoot_list` before submitting the strict `DraftRoute` contract. This is UI/timeline evidence only, not Voice/Talking quality evidence.
 - Voice now has a provider-neutral persisted request/job boundary: a consented `VoiceProfile` plus credential-free copy/authorization input becomes `GENERATE_VOICE`; the handler reserves/reconciles `tts`, imports the local output as an `AudioAsset`, and persists provider/profile/job provenance. Generated narration is blocked from VideoSpec assembly until recorded QA is `verified`. The optional OmniVoice adapter is lazy and explicitly non-commercial-benchmark-only; no weight, dependency, credential, or paid-provider call has been used.
 - Voice QA now consumes a real generated-file transcription/alignment result and persists provider/model evidence, copy coverage, missing/duplicate tokens, timed-segment gaps/long silence and basic local-file playability. Missing or fabricated semantic evidence is failed rather than treated as a fixture pass. It is unit-verified only; no creator sample or model inference has been run.
+- U-Voice authorization now covers all four latest MP4 files in `C:\Users\ASUS\Downloads` and the first non-commercial model download. Their 10-second 24 kHz mono reference candidates are isolated under `content-os-data/omnivoice-evaluation/references`; originals remain unchanged. An isolated CPU OmniVoice 0.2.1 environment is installed because the CUDA 12.6 wheel transfer stalled. Official `k2-fsa/OmniVoice` model download then stalled under both Xet and standard unauthenticated Hub transport after small metadata files; no generated audio or semantic/likeness claim exists. Resume with the same environment/cache when a read-only HF token or viable network route is available.
 
 ## Active work package
 
@@ -59,7 +60,7 @@ Do not treat a single successful WAV as provider acceptance.
 
 ## Next ready task
 
-**With explicit U-Voice authorization, run the optional OmniVoice non-commercial benchmark or an approved commercial-safe/BYOK path against the selected creator reference; collect actual QA evidence and human likeness/naturalness judgment.**
+**Resume the authorized OmniVoice weight transfer with a viable Hub route, then run the non-commercial benchmark against the isolated references; collect actual QA evidence and human likeness/naturalness judgment.**
 
 Default implementation tier: **Terra**, because this crosses provider, job, media asset, runtime readiness and QA boundaries. Luna may handle isolated UI/tests/docs after the interfaces are fixed. Sol is not needed unless a real architecture/security conflict appears.
 
