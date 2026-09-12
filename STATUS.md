@@ -10,6 +10,7 @@ Updated: 2026-09-12 (Asia/Shanghai)
 - TTS/voice cloning and Talking/lip-sync remain the next core capability area. Do not resume broad peripheral feature work before this uncertainty is tested.
 - The local development machine previously probed as an RTX 3060 Laptop GPU with 6 GiB VRAM. This can justify bounded local experiments, but Content OS must retain a non-high-end-GPU fallback path.
 - `MasterNarration` Web build and isolated browser regression are now verified: ScenePlan → candidate persistence → timed SRT binding → aligned master-track selection → three-scene VideoSpec completed through the UI. The regression fixed two actual S0 blockers: asynchronous forms retain their form element before reset, and route persistence strips UI-only `shoot_list` before submitting the strict `DraftRoute` contract. This is UI/timeline evidence only, not Voice/Talking quality evidence.
+- Voice now has a provider-neutral persisted request/job boundary: a consented `VoiceProfile` plus credential-free copy/authorization input becomes `GENERATE_VOICE`; the handler reserves/reconciles `tts`, imports the local output as an `AudioAsset`, and persists provider/profile/job provenance. Generated narration is blocked from VideoSpec assembly until recorded QA is `verified`. The optional OmniVoice adapter is lazy and explicitly non-commercial-benchmark-only; no weight, dependency, credential, or paid-provider call has been used.
 
 ## Active work package
 
@@ -57,7 +58,7 @@ Do not treat a single successful WAV as provider acceptance.
 
 ## Next ready task
 
-**Implement the provider-neutral Voice generation job/service and OmniVoice optional evaluation adapter, then add Voice QA.**
+**Implement Voice QA: real output playability/duration/silence checks plus ASR/alignment-backed copy coverage, then persist verified/failed evidence and enable a real authorized provider evaluation.**
 
 Default implementation tier: **Terra**, because this crosses provider, job, media asset, runtime readiness and QA boundaries. Luna may handle isolated UI/tests/docs after the interfaces are fixed. Sol is not needed unless a real architecture/security conflict appears.
 

@@ -19,7 +19,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingProfile, UsageCost, VideoSpec, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingProfile, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -450,6 +450,17 @@ class VoiceProfileRequest(BaseModel):
     consent: ConsentRecord
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     created_at: AwareDatetime
+
+
+class VoiceGenerationJobRequest(BaseModel):
+    """One persisted, explicit voice-clone request with no credentials."""
+
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    voice_profile_id: UUID
+    text: str = Field(min_length=1, max_length=100_000)
+    authorization_reference: str = Field(min_length=1, max_length=500)
+    language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
 
 
 class TalkingProfileRequest(BaseModel):
@@ -1877,6 +1888,38 @@ def create_app(
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 
+    @application.post("/projects/{project_id}/voice-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
+    async def enqueue_voice_generation(project_id: UUID, payload: VoiceGenerationJobRequest, request: Request) -> dict[str, Any]:
+        """Persist one authorized VoiceProvider request for a local worker."""
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        profile = VoiceProfileRepository(db).get(payload.voice_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="voice profile not found")
+        if not profile.consent.confirmed:
+            raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
+        now = datetime.now(timezone.utc)
+        voice_payload = VoiceGenerationJobPayload(
+            project_id=project_id,
+            voice_profile_id=payload.voice_profile_id,
+            text=payload.text,
+            authorization_reference=payload.authorization_reference,
+            language=payload.language,
+        )
+        job = Job(
+            id=uuid4(), project_id=project_id, type=JobType.GENERATE_VOICE,
+            idempotency_key=payload.idempotency_key, created_at=now, updated_at=now, payload=voice_payload,
+        )
+        persisted = JobRepository(db).create(job)
+        if (
+            persisted.type is not JobType.GENERATE_VOICE
+            or persisted.project_id != project_id
+            or persisted.payload != voice_payload
+        ):
+            raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+        return _job_response(db, persisted)
+
     @application.post("/clips/search", response_model=list[ClipSearchHitResponse])
     async def search_clips(payload: ClipSearchRequest, request: Request) -> list[ClipSearchHitResponse]:
         db: Database = request.app.state.database
@@ -2212,7 +2255,7 @@ def _job_response(db: Database, job: Job) -> dict[str, Any]:
     values.pop("schema_version", None)
     values.pop("payload", None)
     render = job.payload
-    if render is not None:
+    if isinstance(render, RenderVideoJobPayload):
         values.update({
             "render_id": render.render_id,
             "download_url": f"/projects/{render.project_id}/renders/{render.render_id}",

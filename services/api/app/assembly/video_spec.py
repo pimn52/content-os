@@ -70,6 +70,12 @@ class NarrationTimelineError(VideoSpecAssemblyError):
     pass
 
 
+class GeneratedNarrationQaPending(VideoSpecAssemblyError):
+    """A generated voice asset is not eligible until its recorded QA passes."""
+
+    pass
+
+
 _REAL_CONTINUOUS_SOURCES = frozenset((SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET))
 _TEXT_TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
 _TERMINAL_PURPOSES = frozenset(("close", "closing", "boundary", "cta", "outro", "ending"))
@@ -138,6 +144,7 @@ class VideoSpecAssembler:
                 audio = self.audios.get(audio_id)
                 if audio is None:
                     raise CandidateNotFound("selected narration audio does not exist")
+                _require_generated_voice_qa(audio)
                 narration_audio[scene_id] = audio
         video_scenes: list[VideoScene] = []
         start_frame = 0
@@ -303,6 +310,7 @@ class VideoSpecAssembler:
         audio = self.audios.get(master_audio_id)
         if audio is None:
             raise CandidateNotFound("selected master narration audio does not exist")
+        _require_generated_voice_qa(audio)
         if not audio.transcript_source or not audio.transcript_segments:
             raise NarrationTimelineError(
                 "master narration requires a persisted actual SRT/VTT or provider timing result before it can drive video scenes"
@@ -499,6 +507,23 @@ class VideoSpecAssembler:
         if image is None or image.source_kind != candidate.source_kind:
             raise CandidateNotFound("selected static visual does not exist")
         return image
+
+
+def _require_generated_voice_qa(audio: AudioAsset) -> None:
+    """Keep generated narration out of final assembly until QA is evidenced.
+
+    Imported/recorded narration predates this provider boundary and remains an
+    explicit fallback. Only assets explicitly marked as generated voice are
+    subject to this guard.
+    """
+
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict):
+        return
+    if generation.get("qa_state") != "verified":
+        raise GeneratedNarrationQaPending(
+            "generated voice narration requires verified copy, duration, silence and playability QA before final assembly"
+        )
 
 
 def milliseconds_to_frames(duration_ms: int, fps: RationalFps) -> int:

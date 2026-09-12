@@ -58,6 +58,19 @@ from .scene_planner import (
     ScenePlannerRateLimitError,
     ScenePlannerTimeout,
 )
+from .voice import (
+    OmniVoiceProvider,
+    VoiceAuthenticationError,
+    VoiceConfigurationError,
+    VoiceConnectionError,
+    VoiceError,
+    VoiceInputError,
+    VoiceProvider,
+    VoiceProviderResponseError,
+    VoiceRateLimitError,
+    VoiceSynthesisResult,
+    VoiceTimeout,
+)
 
 __all__ = [
     "ASRAuthenticationError",
@@ -110,4 +123,15 @@ __all__ = [
     "ScenePlannerProviderResponseError",
     "ScenePlannerRateLimitError",
     "ScenePlannerTimeout",
+    "OmniVoiceProvider",
+    "VoiceAuthenticationError",
+    "VoiceConfigurationError",
+    "VoiceConnectionError",
+    "VoiceError",
+    "VoiceInputError",
+    "VoiceProvider",
+    "VoiceProviderResponseError",
+    "VoiceRateLimitError",
+    "VoiceSynthesisResult",
+    "VoiceTimeout",
 ]

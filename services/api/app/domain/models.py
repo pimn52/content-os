@@ -812,6 +812,16 @@ class RenderVideoJobPayload(ContractModel):
         return self
 
 
+class VoiceGenerationJobPayload(ContractModel):
+    """Credential-free input for one authorized, persisted voice request."""
+
+    project_id: UUID
+    voice_profile_id: UUID
+    text: str = Field(min_length=1, max_length=100_000)
+    authorization_reference: str = Field(min_length=1, max_length=500)
+    language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
+
+
 class Job(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID | None = None
@@ -823,7 +833,7 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | None = None
+    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
@@ -834,6 +844,13 @@ class Job(ContractModel):
             # missing payload before side effects.
             if self.payload is not None and self.project_id != self.payload.project_id:
                 raise ValueError("render job project_id must match its payload")
+            if self.payload is not None and not isinstance(self.payload, RenderVideoJobPayload):
+                raise ValueError("render job payload must be a RenderVideoJobPayload")
+        elif self.type is JobType.GENERATE_VOICE:
+            if self.payload is not None and not isinstance(self.payload, VoiceGenerationJobPayload):
+                raise ValueError("voice generation job payload must be a VoiceGenerationJobPayload")
+            if self.payload is not None and self.project_id != self.payload.project_id:
+                raise ValueError("voice generation job project_id must match its payload")
         elif self.payload is not None:
-            raise ValueError("only render jobs may contain a payload")
+            raise ValueError("only render and voice generation jobs may contain a payload")
         return self

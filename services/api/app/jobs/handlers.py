@@ -7,8 +7,9 @@ from typing import Literal, Protocol, Sequence
 from uuid import UUID
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
-from app.db import ClipRepository
-from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, UsageCost
+from app.db import AudioAssetRepository, ClipRepository, VoiceProfileRepository
+from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, UsageCost, VoiceGenerationJobPayload
+from app.media.audio_importer import AudioImportError, AudioImporter
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.media.extraction import (
     AudioExtraction,
@@ -73,6 +74,16 @@ from app.providers.vision import (
     VisionProviderResponseError,
     VisionRateLimitError,
     VisionTimeout,
+)
+from app.providers.voice import (
+    VoiceAuthenticationError,
+    VoiceConfigurationError,
+    VoiceConnectionError,
+    VoiceInputError,
+    VoiceProvider,
+    VoiceProviderResponseError,
+    VoiceRateLimitError,
+    VoiceTimeout,
 )
 from app.search import EmbeddingCountMismatch, EmbeddingIndexError, IndexError
 
@@ -140,6 +151,75 @@ class RenderVideoJobHandler:
         except (RenderInputError, LocalResourceError, UnauthorizedVisualError):
             output.unlink(missing_ok=True)
             raise JobExecutionError("render_invalid", "render input is not processable", retryable=False) from None
+
+
+class VoiceGenerationJobHandler:
+    """Generate one authorized narration file through a replaceable provider.
+
+    The job already owns retry/recovery. This handler reserves its provider
+    call before inference, imports the returned local audio into the normal
+    asset library, and records provenance without storing credentials.
+    Generated audio is deliberately QA-pending until a verification handler
+    supplies real copy/silence/playability evidence.
+    """
+
+    def __init__(self, profiles: VoiceProfileRepository, audios: AudioAssetRepository, importer: AudioImporter, provider: VoiceProvider, output_root: str | Path, ledger: ProviderCallLedger | None = None) -> None:
+        self._profiles = profiles
+        self._audios = audios
+        self._importer = importer
+        self._provider = provider
+        self._output_root = Path(output_root).resolve()
+        self._ledger = ledger
+
+    def __call__(self, job: Job) -> None:
+        if job.status is not JobStatus.RUNNING:
+            raise JobExecutionError("job_not_claimed", "job must be claimed before execution", retryable=False)
+        if job.type is not JobType.GENERATE_VOICE or not isinstance(job.payload, VoiceGenerationJobPayload):
+            raise JobExecutionError("voice_payload_invalid", "voice generation job input is invalid", retryable=False)
+        if job.project_id != job.payload.project_id:
+            raise JobExecutionError("voice_project_missing", "voice generation project is unavailable", retryable=False)
+        profile = self._profiles.get(job.payload.voice_profile_id)
+        if profile is None or not profile.consent.confirmed:
+            raise JobExecutionError("voice_profile_not_authorized", "an explicitly consented voice profile is required", retryable=False)
+        provider_name = getattr(self._provider, "provider_name", None)
+        model = getattr(self._provider, "model", None)
+        if not isinstance(provider_name, str) or not provider_name.strip() or not isinstance(model, str) or not model.strip():
+            raise JobExecutionError("voice_provider_invalid", "voice provider does not expose safe runtime identity", retryable=False)
+        if profile.provider != provider_name.strip():
+            raise JobExecutionError("voice_profile_provider_mismatch", "voice profile does not belong to the configured provider", retryable=False)
+        call = _reserve_job_provider_call(
+            self._ledger, job, operation="tts", category=CostCategory.VOICE,
+            provider=provider_name.strip(), model=model.strip(), input_source=f"voice-profile:{profile.id}",
+            known_local_cost=bool(getattr(self._provider, "is_local", False)),
+        )
+        output = self._output_root / "voice" / f"{job.id}-attempt-{job.attempt}.wav"
+        try:
+            result = self._provider.synthesize(profile, job.payload.text, output, language=job.payload.language or profile.language)
+        except (VoiceRateLimitError, VoiceTimeout, VoiceConnectionError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_temporarily_unavailable")
+            raise JobExecutionError("voice_temporarily_unavailable", "voice provider is temporarily unavailable", retryable=True) from None
+        except (VoiceAuthenticationError, VoiceConfigurationError, VoiceInputError, VoiceProviderResponseError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_invalid_request")
+            raise JobExecutionError("voice_invalid_request", "voice request cannot be processed", retryable=False) from None
+        except Exception:
+            # Third-party adapters may fail before they can translate an SDK
+            # exception. Reconcile the durable reservation without persisting
+            # provider text, then let the local Job retry policy decide.
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_provider_failed")
+            raise JobExecutionError("voice_provider_failed", "voice provider failed unexpectedly", retryable=True) from None
+        try:
+            audio = self._importer.import_path(result.audio_path, job.payload.authorization_reference, language=job.payload.language or profile.language)
+            metadata = dict(audio.metadata)
+            metadata["voice_generation"] = {
+                "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
+                "voice_profile_id": str(profile.id), "job_id": str(job.id), "attempt": job.attempt, "qa_state": "pending",
+            }
+            with self._audios.db.transaction():
+                self._audios.update(audio.model_copy(update={"metadata": metadata}))
+        except (AudioImportError, FileNotFoundError, OSError, ValueError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_output_invalid")
+            raise JobExecutionError("voice_output_invalid", "voice provider output cannot be imported as audio", retryable=False) from None
+        _finish_job_provider_call(self._ledger, job, call, status="completed")
 
 
 class ExtractedKeyframeResolver:
@@ -381,7 +461,7 @@ def _reserve_job_provider_call(
     ledger: ProviderCallLedger | None,
     job: Job,
     *,
-    operation: Literal["asr", "vision", "embedding"],
+    operation: Literal["asr", "vision", "embedding", "tts"],
     category: CostCategory,
     provider: str,
     model: str,
