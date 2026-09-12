@@ -1,89 +1,149 @@
-# AGENTS.md — Content OS
+# AGENTS.md — Content OS implementation contract
 
-> 统一执行规格见 [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md)，本轮工程范围、阶段顺序和验收以它为准；当前复审证据见 [CONTENT_OS_REVIEW_2026-09-10.md](CONTENT_OS_REVIEW_2026-09-10.md)，旧 [AUDIT_REPORT.md](AUDIT_REPORT.md) 仅保留历史起点。不要新建并行的更高优先级规格。
-
-
-## Read first
-
-Before changing code, read:
-
-1. `CONTENT_OS_EXECUTION_SPEC.md`、`CONTENT_OS_REVIEW_2026-09-10.md`、`STATUS.md`、`DECISIONS.md`
-2. `STRATEGY_BASELINE.md`、`BASELINE_FREEZE.md`、`LOCAL_HANDOFF.md`、`PRD.md`、`DEVELOPMENT_PLAN.md`
-3. The schemas/interfaces for the module you are changing.
+Read [`START_HERE.md`](START_HERE.md) first. It defines the document hierarchy.
 
 ## Product invariant
 
-Content OS is not a generic AI video generator.
+Content OS is a Local-first / BYOK personal content engine, not a generic AI video generator.
 
-V0.1 goal:
+R1 must prove:
 
-> Understand the creator, their voice, their talking footage, and their media library; reuse real assets first; minimize reshooting/editing; generate a personalized short video.
+> new topic → editable new copy → authorized creator voice → at least one new creator Talking/lip-sync segment → real B-roll/typography/subtitles → 30–60s export.
 
-当前核心验收不是“导入旁白”或“裁切旧口播”：在获得明确授权、可用样本和预算后，必须证明“新文案 → 本人新声音 → 本人新的 Talking/口型片段 → 30–60 秒成片”。旧片原声、通用 TTS、旧口型和通用头像都不能冒充这一链路完成；它们只能作为已明确标注的历史/降级路径。
+Imported narration, source-led recuts, old mouth motion, generic TTS or generic avatars may exist as labeled fallback paths, but do not satisfy this gate.
 
-## Core engineering invariants
+## Engineering invariants
 
-- Local-first.
-- BYOK.
-- User media first.
-- Continuous video clips are first-class assets; keyframes are for understanding, not final playback.
-- Upload once, extract audio/transcript/visual metadata automatically.
-- Provider implementations are replaceable.
-- Core domain logic must not depend on one vendor.
-- Do not require a GPU for the minimum end-to-end path.
-- Do not introduce Redis, Celery, n8n, Kubernetes, or microservices in V0.1.
-- Do not add Market Brain or broad web scraping in V0.1.
-- YouTube account integration is read-only in V0.1.
-- Do not implement unconsented voice/face cloning.
-- Never log API keys or secrets.
-- 外部 Provider 调用必须经持久化的请求身份、预算预留、单一执行 owner、结果/Job 状态和失败对账边界；不得用 Provider 的具体 `isinstance` 分支绕过账本。
-- 全局预算是工作区总上限，项目预算是叠加限制；当前预算周期明确为本地账本生命周期，不能标称为月度额度。
-- 真实模型辅助测试不能用固定夹具替代语义、声音或口型结果；保存输入、输出、Provider/模型、成本、失败与可播放产物证据。
+- Local-first; user media first; continuous clips are first-class assets.
+- Upload once: derive audio/transcript/keyframes/metadata automatically where supported.
+- Provider-neutral core. Never hard-wire a vendor/model into domain contracts.
+- Minimum end-to-end path must not require a high-end GPU.
+- No Redis/Celery/n8n/Kubernetes/microservices in R1 unless the execution spec is explicitly changed.
+- No broad Market Brain/web scraping in R1.
+- YouTube account path remains read-only until explicitly changed.
+- Voice/face cloning requires explicit rights/consent records.
+- Never log secrets.
+- Runtime provider calls use the existing durable idempotency/budget/usage boundary; unknown cost is not zero.
+- Fixture, assisted-test and runtime evidence remain distinct. Never promote fixture success to product-quality success.
 
-## Scope discipline
+## Voice / Talking provider policy
 
-Do not perform unrelated refactors.
+Voice and Talking are replaceable provider layers.
 
-Core schema changes may be made when they are needed by the active execution package; include a compatible migration, contracts, callers and regression coverage rather than treating schema work as a separate approval gate.
+### OmniVoice
 
-Do not introduce large dependencies without explaining:
+OmniVoice is approved for **local non-commercial technical evaluation / benchmark** in Content OS.
 
-- why needed;
-- license;
-- runtime impact;
-- lighter alternatives considered.
+- Source code license: Apache-2.0.
+- Official pretrained weights: currently CC-BY-NC because of upstream training-data constraints.
+- Therefore: do not bundle those weights in a commercial release, do not present them as a commercial-safe default, and do not let Core depend on OmniVoice-specific state.
+- Install only as an optional extra/provider worker, never as a mandatory base dependency.
+- Reuse existing ASR/reference transcript when available instead of re-running Whisper unnecessarily.
+- Generated speech must pass QA before render: copy coverage, duration/silence sanity, playable audio, and retry/fallback behavior.
+
+A commercial-safe local provider and a BYOK cloud fallback must remain possible without schema changes.
+
+## Model cost policy
+
+Use the cheapest model that can complete the task with the required quality.
+
+### Luna — default worker
+
+Use for:
+
+- isolated UI/CRUD;
+- tests and fixtures;
+- docs and repository hygiene;
+- simple adapters with fixed interfaces;
+- mechanical refactors and local bug fixes.
+
+Do **not** let Luna independently redesign core schemas, execution semantics, provider accounting or media/timeline architecture.
+
+### Terra — core implementation
+
+Use for:
+
+- media/timeline logic;
+- Voice/Talking provider integration;
+- planner/router/search semantics;
+- multi-file state changes;
+- jobs/retry/recovery/idempotency;
+- migrations and compatibility-sensitive implementation;
+- complex debugging with a reproducible failure.
+
+### Sol — gate/review only
+
+Use only for:
+
+- architecture conflicts with no obvious local resolution;
+- security/privacy/release reviews;
+- final Talking/voice quality gate design;
+- a Terra task that still fails after materially different attempts and has a minimal reproduction.
+
+Task importance alone is not a reason to use Sol.
+
+## Escalation rule
+
+`Luna → Terra → Sol`
+
+Escalate when either:
+
+1. the task is inherently outside the lower tier's allowed scope; or
+2. the lower tier has a concrete, reproducible failure after a materially different repair attempt.
+
+Never spend a higher tier merely to avoid writing a precise task boundary.
+
+## Task contract
+
+Every implementation task must specify:
+
+- Objective
+- Allowed files/modules
+- Interfaces that must stay stable
+- Acceptance criteria
+- Tests/build commands
+- Non-goals
+
+Completion report must include:
+
+- changed files;
+- tests/builds run;
+- acceptance criteria status;
+- known limitations;
+- new dependency/license concerns;
+- next ready task.
+
+## Documentation maintenance
+
+Only these files are active project-control documents:
+
+- `START_HERE.md` — navigation only;
+- `CONTENT_OS_EXECUTION_SPEC.md` — current scope and acceptance contract;
+- `STATUS.md` — current facts, active package, blockers, next ready task;
+- `DECISIONS.md` — durable decisions only;
+- `AGENTS.md` — implementation/model policy;
+- `README.md` — user/contributor overview and run instructions.
+
+Rules:
+
+- Do not create a new top-level review/freeze/handoff/plan document for normal work.
+- Update `STATUS.md` after every completed work package.
+- Update `DECISIONS.md` only for durable choices.
+- Update the execution spec only when product scope/acceptance/order materially changes.
+- Historical evidence stays in Git history or `docs/history/`; it does not outrank active docs.
+- Run `python scripts/check_docs.py` before handoff.
 
 ## Testing
 
-Every behavior change must have:
+Every behavior change needs the smallest meaningful verification. Media tests must validate real timestamps/files where practical, not only mocked return values.
 
-- unit tests where practical;
-- integration tests for provider boundaries;
-- fixture-based tests for media pipelines.
+Voice/Talking acceptance additionally checks:
 
-Media pipeline tests must verify timestamps and produced files, not only mocked return values.
+- full copy coverage;
+- playable output;
+- duration and silence sanity;
+- missing/duplicate sentence detection;
+- obvious sync failure detection;
+- explicit human U-Voice judgment for likeness/naturalness.
 
-Voice/Talking acceptance must additionally check playability, complete copy coverage, audio/video duration, duplicate or missing sentences and obvious sync failures. Likeness and naturalness remain U-Voice human judgments.
-
-## Agent cost policy
-
-Use the cheapest capable model:
-
-- Luna: isolated implementation, CRUD, UI, tests, docs, simple adapters.
-- Terra: media pipelines, cross-file logic, provider integration, planners, routers, concurrency/recovery.
-- Sol: architecture/security/critical quality gates only.
-
-Escalate only after a lower-cost agent has a concrete failure or the task is inherently cross-system.
-
-## Required completion report
-
-At the end of each task report:
-
-- Changed files
-- Tests run
-- Acceptance criteria status
-- Known limitations
-- New dependency/license concerns
-- Recommended next task
-
-After a completed work package, update `STATUS.md` with current facts and directly claim the next ready dependency; pause only for U-Voice, U-Product, explicit budget/permission needs, or irreversible scope changes.
+After a work package passes, update `STATUS.md` and directly claim the next ready task. Pause only for explicit consent/identity, first paid use or budget change, irreversible data/scope change, or a human product-quality gate.
