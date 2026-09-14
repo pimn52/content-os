@@ -180,6 +180,32 @@ def inspect_runtime_capabilities(
             "CONTENT_OS_ASR_PROVIDER must be local or openai-compatible",
         )
 
+    talking_provider = values.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
+    talking_paths = (
+        values.get("CONTENT_OS_MUSETALK_BRIDGE_SCRIPT", "").strip(),
+        values.get("CONTENT_OS_MUSETALK_RUNTIME_PYTHON", "").strip(),
+        values.get("CONTENT_OS_MUSETALK_ROOT", "").strip(),
+        values.get("CONTENT_OS_MUSETALK_MODELS_ROOT", "").strip(),
+        values.get("CONTENT_OS_MUSETALK_FFMPEG_DIR", "").strip(),
+    )
+    if talking_provider == "musetalk" and all(talking_paths):
+        missing_paths = [path for path in talking_paths if not Path(path).exists()]
+        talking = RuntimeCapability(
+            "talking", "ready" if not missing_paths else "unavailable", "musetalk",
+            selected_model("CONTENT_OS_MUSETALK_MODEL") or "1.5",
+            "optional local MuseTalk worker is configured" if not missing_paths else "configured MuseTalk runtime path is unavailable",
+        )
+    elif talking_provider in {"", "musetalk"}:
+        talking = RuntimeCapability(
+            "talking", "provider_not_configured", "musetalk", "1.5",
+            "optional local MuseTalk worker requires explicit runtime paths",
+        )
+    else:
+        talking = RuntimeCapability(
+            "talking", "unavailable", talking_provider, None,
+            "CONTENT_OS_TALKING_PROVIDER must be musetalk for the local worker",
+        )
+
     return (
         local_media,
         renderer,
@@ -201,6 +227,6 @@ def inspect_runtime_capabilities(
         embedding,
         retrieval,
         RuntimeCapability("tts", "not_developed", None, None, "TTS is intentionally deferred; import an authorized local recording instead"),
-        RuntimeCapability("talking", "not_developed", None, None, "Talking generation is intentionally deferred and requires explicit consent"),
+        talking,
         RuntimeCapability("publishing", "not_developed", None, None, "automatic publishing is not enabled; use the manual publication record flow"),
     )

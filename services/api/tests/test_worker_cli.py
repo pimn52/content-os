@@ -9,6 +9,7 @@ from app.jobs.handlers import AssetAnalysisJobHandler
 from app.jobs.targets import AssetJobTargetStore
 from app.jobs.store import JobStore
 from app.providers.asr import ASRConfigurationError
+from app.providers.talking import TalkingConfigurationError
 from app.providers.vision import VisionConfigurationError
 from app.runtime import resolve_local_executable
 from app.worker_cli import build_runner, parse_config, run
@@ -22,6 +23,7 @@ def test_worker_defaults_and_type_selection(monkeypatch):
     assert config.job_types == (JobType.ANALYZE_ASSET,)
     assert config.db_path == Path("content-os-data/content-os.sqlite3")
     assert config.ffmpeg == resolve_local_executable("ffmpeg")
+    assert config.ffprobe == resolve_local_executable("ffprobe")
 
 
 def test_transcribe_requires_runtime_key_but_analyze_does_not(tmp_path: Path, monkeypatch):
@@ -68,6 +70,38 @@ def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Pat
         monkeypatch.setenv("CONTENT_OS_EMBEDDING_API_KEY", "runtime-only-embedding-key")
         runner = build_runner(config, db)
         assert runner.handler_types == {JobType.INDEX_CLIPS}
+    finally:
+        db.close()
+
+
+def test_talking_requires_explicit_local_runtime_and_registers_only_when_configured(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "talking-worker.sqlite"
+    config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
+    monkeypatch.delenv("CONTENT_OS_TALKING_PROVIDER", raising=False)
+    db = Database(db_path)
+    try:
+        with pytest.raises(TalkingConfigurationError, match="TALKING_PROVIDER"):
+            build_runner(config, db)
+    finally:
+        db.close()
+
+    bridge, runtime = tmp_path / "bridge.py", tmp_path / "python.exe"
+    bridge.write_bytes(b"bridge")
+    runtime.write_bytes(b"runtime")
+    for name, value in {
+        "CONTENT_OS_TALKING_PROVIDER": "musetalk",
+        "CONTENT_OS_MUSETALK_BRIDGE_SCRIPT": str(bridge),
+        "CONTENT_OS_MUSETALK_RUNTIME_PYTHON": str(runtime),
+        "CONTENT_OS_MUSETALK_ROOT": str(tmp_path),
+        "CONTENT_OS_MUSETALK_MODELS_ROOT": str(tmp_path),
+        "CONTENT_OS_MUSETALK_FFMPEG_DIR": str(tmp_path),
+    }.items():
+        monkeypatch.setenv(name, value)
+    db = Database(db_path)
+    try:
+        runner = build_runner(config, db)
+        assert runner.handler_types == {JobType.GENERATE_TALKING}
+        assert runner._handlers[JobType.GENERATE_TALKING]._provider.provider_name == "musetalk"
     finally:
         db.close()
 
@@ -162,6 +196,17 @@ def test_analysis_handler_resolves_asset_through_target_store(tmp_path: Path):
         handler = AssetAnalysisJobHandler(AssetJobTargetStore(db), AssetRepository(db), Pipeline())
         handler(claimed)
         assert seen == [asset.id]
+    finally:
+        db.close()
+
+
+def test_render_worker_composes_audio_and_image_repositories(tmp_path: Path):
+    db = Database(tmp_path / "render.sqlite")
+    try:
+        runner = build_runner(parse_config(["--once", "--db", str(tmp_path / "render.sqlite"), "--job-type", "render"]), db)
+        renderer = runner._handlers[JobType.RENDER]._renderer
+        assert renderer.audios is not None
+        assert renderer.images is not None
     finally:
         db.close()
 

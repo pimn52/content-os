@@ -139,3 +139,38 @@ def test_voice_qa_requires_real_timing_and_records_copy_and_silence_evidence(tmp
     assert updated.transcript_source == "qa-asr:qa-model"
     failed = verify_generated_voice(audio, "你好世界", TranscriptionResult("你好", (TranscriptionSegment(0, 500, "你好"),)))
     assert not failed.verified and failed.missing_token_count == 2 and "copy_missing_tokens" in failed.checks
+
+
+def test_voice_qa_accepts_traditional_asr_glyphs_but_not_new_words(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="d" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    traditional = TranscriptionResult("第一，先寫出一句能被記住的結論", (TranscriptionSegment(0, 1_500, "第一，先寫出一句能被記住的結論"),))
+    assert verify_generated_voice(audio, "第一，先写出一句能被记住的结论。", traditional).verified
+    progressive_variant = TranscriptionResult("接著，把支撐結論的畫面按順序放進去", (TranscriptionSegment(0, 1_500, "接著，把支撐結論的畫面按順序放進去"),))
+    assert verify_generated_voice(audio, "接着，把支撑结论的画面按顺序放进去。", progressive_variant).verified
+    extra_word = TranscriptionResult("第一，先寫出一句能被記住的結論和例子", (TranscriptionSegment(0, 1_500, "第一，先寫出一句能被記住的結論和例子"),))
+    report = verify_generated_voice(audio, "第一，先写出一句能被记住的结论。", extra_word)
+    assert not report.verified and report.duplicate_token_count == 3
+
+
+def test_voice_qa_rejects_unrecognized_leading_audio_gap(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="e" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    report = verify_generated_voice(
+        audio,
+        "你好世界",
+        TranscriptionResult("你好世界", (TranscriptionSegment(600, 1_600, "你好世界"),)),
+    )
+    assert not report.verified
+    assert report.leading_silence_ms == 600
+    assert "leading_silence_or_unrecognized_audio" in report.checks

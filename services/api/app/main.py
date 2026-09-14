@@ -19,7 +19,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingProfile, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -64,6 +64,7 @@ from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingInd
 from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
+from app.talking import select_talking_reference
 
 
 class JobEnqueueRequest(BaseModel):
@@ -461,6 +462,31 @@ class VoiceGenerationJobRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
+
+
+class TalkingGenerationJobRequest(BaseModel):
+    """One persisted, explicit Talking request with no credentials."""
+
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    talking_profile_id: UUID
+    reference_clip_id: UUID
+    narration_audio_id: UUID
+    authorization_reference: str = Field(min_length=1, max_length=500)
+
+
+class TalkingReferenceSelectionRequest(BaseModel):
+    """Requirements for finding a usable existing Talking reference."""
+
+    model_config = ConfigDict(extra="forbid")
+    brief: TalkingPerformanceBrief
+
+
+class TalkingReferenceAssessmentRequest(BaseModel):
+    """Sourced assessment; values are observed, never generated instructions."""
+
+    model_config = ConfigDict(extra="forbid")
+    assessment: TalkingReferenceAssessment
 
 
 class TalkingProfileRequest(BaseModel):
@@ -1330,6 +1356,37 @@ def create_app(
             repository.create(value)
         return value
 
+    @application.put("/clips/{clip_id}/talking-reference-assessment", response_model=Clip, tags=["voice"])
+    async def assess_talking_reference(clip_id: UUID, payload: TalkingReferenceAssessmentRequest, request: Request) -> Clip:
+        """Persist observed performance evidence for a reusable Talking reference."""
+        repository = ClipRepository(request.app.state.database)
+        clip = repository.get(clip_id)
+        if clip is None:
+            raise HTTPException(status_code=404, detail="clip not found")
+        updated = clip.model_copy(update={"talking_reference_assessment": payload.assessment})
+        with request.app.state.database.transaction():
+            repository.update(updated)
+        return updated
+
+    @application.post("/talking-profiles/{talking_profile_id}/reference-selection", response_model=TalkingReferenceSelection, tags=["voice"])
+    async def select_talking_profile_reference(
+        talking_profile_id: UUID,
+        payload: TalkingReferenceSelectionRequest,
+        request: Request,
+    ) -> TalkingReferenceSelection:
+        """Choose a sourced reference or produce a small, explicit capture gap."""
+        db: Database = request.app.state.database
+        profile = TalkingProfileRepository(db).get(talking_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="talking profile not found")
+        if not profile.consent.confirmed:
+            raise HTTPException(status_code=422, detail="talking profile requires explicit consent")
+        clips = ClipRepository(db)
+        references = [clips.get(clip_id) for clip_id in profile.reference_clip_ids]
+        if any(clip is None for clip in references):
+            raise HTTPException(status_code=422, detail="talking profile reference clip is unavailable")
+        return select_talking_reference([clip for clip in references if clip is not None], payload.brief)
+
     @application.get("/assets", response_model=list[Asset], tags=["assets"])
     async def list_assets() -> list[Asset]:
         return AssetRepository(application.state.database).list()
@@ -1916,6 +1973,48 @@ def create_app(
             persisted.type is not JobType.GENERATE_VOICE
             or persisted.project_id != project_id
             or persisted.payload != voice_payload
+        ):
+            raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+        return _job_response(db, persisted)
+
+    @application.post("/projects/{project_id}/talking-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
+    async def enqueue_talking_generation(project_id: UUID, payload: TalkingGenerationJobRequest, request: Request) -> dict[str, Any]:
+        """Persist one consented TalkingProvider request for a local worker."""
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        profile = TalkingProfileRepository(db).get(payload.talking_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="talking profile not found")
+        if not profile.consent.confirmed:
+            raise HTTPException(status_code=422, detail="talking profile requires explicit consent")
+        if payload.reference_clip_id not in profile.reference_clip_ids:
+            raise HTTPException(status_code=422, detail="selected talking reference is not part of the consented profile")
+        if ClipRepository(db).get(payload.reference_clip_id) is None:
+            raise HTTPException(status_code=422, detail="selected talking reference clip is unavailable")
+        narration = AudioAssetRepository(db).get(payload.narration_audio_id)
+        generation = None if narration is None else narration.metadata.get("voice_generation")
+        if narration is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+            raise HTTPException(status_code=422, detail="talking generation requires QA-verified generated narration")
+        now = datetime.now(timezone.utc)
+        talking_payload = TalkingGenerationJobPayload(
+            project_id=project_id,
+            talking_profile_id=payload.talking_profile_id,
+            reference_clip_id=payload.reference_clip_id,
+            narration_audio_id=payload.narration_audio_id,
+            authorization_reference=payload.authorization_reference,
+        )
+        job = Job(
+            id=uuid4(), project_id=project_id, type=JobType.GENERATE_TALKING,
+            idempotency_key=payload.idempotency_key, created_at=now, updated_at=now, payload=talking_payload,
+        )
+        persisted = JobRepository(db).create(job)
+        if (
+            persisted.type is not JobType.GENERATE_TALKING
+            or persisted.project_id != project_id
+            or persisted.payload != talking_payload
         ):
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)

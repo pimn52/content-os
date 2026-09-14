@@ -77,6 +77,8 @@ class _PreparedVisual:
     kind: str
     narration_source: Path | None = None
     narration_start_frame: int = 0
+    vertical_reframe_mode: str = "contain"
+    source_bottom_crop_ratio: float = 0
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,7 @@ class RemotionRenderer:
             if image is None or image.source_kind != visual.source_kind or image.authorization_reference != visual.authorization_reference:
                 raise UnauthorizedVisualError("VideoSpec static visual does not match the authorized stored image")
             return _PreparedVisual(source=_local_existing_image(image), trim_before=0, trim_after=0, kind="image", narration_source=narration_source, narration_start_frame=narration_start_frame)
-        if visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}:
+        if visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO}:
             raise UnauthorizedVisualError("renderer accepts only authorized user or historical local media")
         if visual.asset_id is None or visual.clip_id is None or visual.clip_start_ms is None or visual.clip_end_ms is None:
             raise RenderInputError("renderer requires a complete local Clip visual reference")
@@ -217,6 +219,12 @@ class RemotionRenderer:
             or clip.end_ms > asset.duration_ms
         ):
             raise UnauthorizedVisualError("VideoSpec visual does not match the authorized stored Clip")
+        if asset.source_kind is SourceKind.AI_VIDEO:
+            generation = asset.metadata.get("talking_generation")
+            if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+                raise UnauthorizedVisualError("generated Talking visual requires verified automated QA")
+            if generation.get("human_review_state") == "rejected":
+                raise UnauthorizedVisualError("generated Talking visual was rejected by U-Talking and cannot be rendered")
         source = _local_existing_file(asset)
         # Remotion trimBefore/trimAfter are measured in composition frames,
         # not the source file's native frame rate.
@@ -224,11 +232,21 @@ class RemotionRenderer:
         trim_after = _floor_frames(visual.clip_end_ms, composition_fps)
         if trim_after <= trim_before:
             raise RenderInputError("Clip interval cannot be represented as positive source frames")
-        # VideoSpec's own validator enforces source duration relative to the
-        # project timeline. This checks the adapter's source-frame trim too.
-        if scene.duration_frames > trim_after - trim_before:
-            raise RenderInputError("Clip source frame range is shorter than the requested scene")
-        return _PreparedVisual(source=source, trim_before=trim_before, trim_after=trim_after, kind="video", narration_source=narration_source, narration_start_frame=narration_start_frame)
+        # Source and composition may use different native frame rates (for
+        # example a 25fps Talking result in a 29.97fps vertical project).
+        # Comparing their frame counts directly rejects valid intervals.  The
+        # last displayed composition frame must instead begin within the
+        # authorized millisecond interval; the renderer may repeat a source
+        # frame during rate conversion, but never plays past the Clip end.
+        required_last_frame_ms = ((scene.duration_frames - 1) * 1_000 * composition_fps.denominator) / composition_fps.numerator
+        if required_last_frame_ms > visual.clip_end_ms - visual.clip_start_ms:
+            raise RenderInputError("Clip duration is shorter than the requested scene timeline")
+        return _PreparedVisual(
+            source=source, trim_before=trim_before, trim_after=trim_after, kind="video",
+            narration_source=narration_source, narration_start_frame=narration_start_frame,
+            vertical_reframe_mode=visual.vertical_reframe_mode.value,
+            source_bottom_crop_ratio=visual.source_bottom_crop_ratio,
+        )
 
     def _validate_narration(self, scene: VideoScene, composition_fps: RationalFps) -> tuple[Path | None, int]:
         if scene.narration_asset_id is None:
@@ -306,6 +324,8 @@ class RemotionRenderer:
                 "src": relative,
                 "trimBefore": visual.trim_before,
                 "trimAfter": visual.trim_after,
+                "verticalReframeMode": visual.vertical_reframe_mode,
+                "sourceBottomCropRatio": visual.source_bottom_crop_ratio,
             }
             if narration_relative is not None:
                 scene_sources[scene.scene_id]["narrationSrc"] = narration_relative

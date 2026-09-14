@@ -19,6 +19,21 @@ This file records only decisions that should survive individual tasks. Current s
 - Voice generation requires automatic QA before final render: copy coverage, missing/duplicate text, duration/silence sanity, playability, provenance and retry/fallback result. Human likeness/naturalness remains an explicit U-Voice gate.
 - Local model dependencies remain optional; base Content OS installation must stay lightweight and cannot require a high-end GPU.
 
+## 2026-09-13 — Chatterbox comparison outcome
+
+- Chatterbox was tested only in an isolated environment and remains outside Core contracts and dependencies.
+- The local Chatterbox multilingual checkpoint plus runtime occupies roughly 5.376 GB before any Windows cache duplication; its raw outputs also required measured edge handling in the comparison.
+- Explicit U-Voice side-by-side judgment found Chatterbox clearly worse than OmniVoice for timbre similarity and naturalness. Chatterbox is therefore not selected for the R1 default voice path.
+- Following that rejection, its isolated local runtime, checkpoint and comparison output were removed; Chatterbox remains historical evidence only.
+- OmniVoice remains the preferred local technical-benchmark path for this spike, but its CC-BY-NC weights still prohibit treating it as a commercial-safe default. A separate commercial-safe provider must remain possible behind the same provider-neutral boundary.
+
+## 2026-09-14 — Daily-material Talking admission and rejected local candidates
+
+- Mature Content OS Talking paths must accept ordinary, consented creator footage. Special AI-only capture (for example, a deliberately silent or closed-mouth reference clip) cannot be required and cannot by itself satisfy the product-quality gate.
+- MuseTalk 1.5 failed the U-Talking product review on ordinary material: visible lip motion did not match the new speech, and its inherited performance/gaze did not fit the delivery. It is not admitted as a mature-product provider.
+- The isolated MuseTalk runtime, weights, cache, evaluation outputs and rejected generated media were removed. Its generic provider contract, durable QA/review gates and historical decision evidence remain so a replacement can be evaluated without Core redesign.
+- VideoReTalking is the next isolated local candidate. Its source license, model-weight/dependency licenses, runtime feasibility, ordinary-material quality and U-Talking review all remain separate acceptance checks.
+
 ## 2026-09-12 — Implementation model cost policy
 
 - Development uses the cheapest model that can reliably complete the task: `Luna → Terra → Sol`.

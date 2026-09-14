@@ -7,9 +7,10 @@ from typing import Literal, Protocol, Sequence
 from uuid import UUID
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
-from app.db import AudioAssetRepository, ClipRepository, VoiceProfileRepository
-from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, UsageCost, VoiceGenerationJobPayload
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, TalkingProfileRepository, VoiceProfileRepository
+from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, UsageCost, VoiceGenerationJobPayload
 from app.media.audio_importer import AudioImportError, AudioImporter
+from app.media.importer import MediaImportError, MediaImporter
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.media.extraction import (
     AudioExtraction,
@@ -84,6 +85,17 @@ from app.providers.voice import (
     VoiceProviderResponseError,
     VoiceRateLimitError,
     VoiceTimeout,
+)
+from app.providers.talking import (
+    TalkingAuthenticationError,
+    TalkingConfigurationError,
+    TalkingConnectionError,
+    TalkingHeadProvider,
+    TalkingInputError,
+    TalkingProviderResponseError,
+    TalkingReference,
+    TalkingRateLimitError,
+    TalkingTimeout,
 )
 from app.search import EmbeddingCountMismatch, EmbeddingIndexError, IndexError
 
@@ -219,6 +231,105 @@ class VoiceGenerationJobHandler:
         except (AudioImportError, FileNotFoundError, OSError, ValueError):
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_output_invalid")
             raise JobExecutionError("voice_output_invalid", "voice provider output cannot be imported as audio", retryable=False) from None
+        _finish_job_provider_call(self._ledger, job, call, status="completed")
+
+
+class TalkingGenerationJobHandler:
+    """Generate one consented Talking video from verified new creator narration.
+
+    Provider adapters receive only local paths and typed consented profiles.
+    The resulting video is imported through the normal media library and is
+    QA-pending until a separate sync/playability verifier records evidence.
+    """
+
+    def __init__(
+        self,
+        profiles: TalkingProfileRepository,
+        audios: AudioAssetRepository,
+        assets: AssetRepository,
+        importer: MediaImporter,
+        provider: TalkingHeadProvider,
+        output_root: str | Path,
+        ledger: ProviderCallLedger | None = None,
+    ) -> None:
+        self._profiles = profiles
+        self._audios = audios
+        self._assets = assets
+        self._clips = ClipRepository(assets.db)
+        self._importer = importer
+        self._provider = provider
+        self._output_root = Path(output_root).resolve()
+        self._ledger = ledger
+
+    def __call__(self, job: Job) -> None:
+        if job.status is not JobStatus.RUNNING:
+            raise JobExecutionError("job_not_claimed", "job must be claimed before execution", retryable=False)
+        if job.type is not JobType.GENERATE_TALKING or not isinstance(job.payload, TalkingGenerationJobPayload):
+            raise JobExecutionError("talking_payload_invalid", "talking generation job input is invalid", retryable=False)
+        if job.project_id != job.payload.project_id:
+            raise JobExecutionError("talking_project_missing", "talking generation project is unavailable", retryable=False)
+        profile = self._profiles.get(job.payload.talking_profile_id)
+        if profile is None or not profile.consent.confirmed:
+            raise JobExecutionError("talking_profile_not_authorized", "an explicitly consented talking profile is required", retryable=False)
+        narration = self._audios.get(job.payload.narration_audio_id)
+        generation = None if narration is None else narration.metadata.get("voice_generation")
+        if narration is None or not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+            raise JobExecutionError("talking_narration_not_verified", "Talking generation requires a QA-verified generated narration asset", retryable=False)
+        if job.payload.reference_clip_id not in profile.reference_clip_ids:
+            raise JobExecutionError("talking_reference_not_authorized", "selected Talking reference is not part of the consented profile", retryable=False)
+        reference_clip = self._clips.get(job.payload.reference_clip_id)
+        reference_asset = None if reference_clip is None else self._assets.get(reference_clip.asset_id)
+        if reference_clip is None or reference_asset is None:
+            raise JobExecutionError("talking_reference_missing", "selected Talking reference is unavailable", retryable=False)
+        try:
+            reference = TalkingReference(
+                clip_id=reference_clip.id, source_path=Path(reference_asset.source_file),
+                start_ms=reference_clip.start_ms, end_ms=reference_clip.end_ms,
+                subtitle_crop_bottom_ratio=0.18 if reference_clip.talking_reference_assessment is not None and reference_clip.talking_reference_assessment.burned_in_subtitles is True else 0,
+            )
+        except TalkingInputError:
+            raise JobExecutionError("talking_reference_invalid", "selected Talking reference cannot be used locally", retryable=False) from None
+        provider_name = getattr(self._provider, "provider_name", None)
+        model = getattr(self._provider, "model", None)
+        if not isinstance(provider_name, str) or not provider_name.strip() or not isinstance(model, str) or not model.strip():
+            raise JobExecutionError("talking_provider_invalid", "talking provider does not expose safe runtime identity", retryable=False)
+        if profile.provider != provider_name.strip():
+            raise JobExecutionError("talking_profile_provider_mismatch", "talking profile does not belong to the configured provider", retryable=False)
+        call = _reserve_job_provider_call(
+            self._ledger, job, operation="talking", category=CostCategory.TALKING,
+            provider=provider_name.strip(), model=model.strip(),
+            input_source=f"talking-profile:{profile.id}:narration:{narration.id}",
+            known_local_cost=bool(getattr(self._provider, "is_local", False)),
+        )
+        output = self._output_root / "talking" / f"{job.id}-attempt-{job.attempt}.mp4"
+        try:
+            result = self._provider.synthesize(profile, narration, reference, output)
+        except (TalkingRateLimitError, TalkingTimeout, TalkingConnectionError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_temporarily_unavailable")
+            raise JobExecutionError("talking_temporarily_unavailable", "talking provider is temporarily unavailable", retryable=True) from None
+        except (TalkingAuthenticationError, TalkingConfigurationError, TalkingInputError, TalkingProviderResponseError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_invalid_request")
+            raise JobExecutionError("talking_invalid_request", "talking request cannot be processed", retryable=False) from None
+        except Exception:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_provider_failed")
+            raise JobExecutionError("talking_provider_failed", "talking provider failed unexpectedly", retryable=True) from None
+        try:
+            video = self._importer.import_path(
+                result.video_path,
+                job.payload.authorization_reference,
+                source_kind=SourceKind.AI_VIDEO,
+            )
+            metadata = dict(video.metadata)
+            metadata["talking_generation"] = {
+                "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
+                "talking_profile_id": str(profile.id), "reference_clip_id": str(reference.clip_id), "reference_subtitle_crop_bottom_ratio": reference.subtitle_crop_bottom_ratio, "narration_audio_id": str(narration.id),
+                "job_id": str(job.id), "attempt": job.attempt, "qa_state": "pending",
+            }
+            with self._assets.db.transaction():
+                self._assets.update(video.model_copy(update={"metadata": metadata}))
+        except (MediaImportError, FileNotFoundError, OSError, ValueError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_output_invalid")
+            raise JobExecutionError("talking_output_invalid", "talking provider output cannot be imported as video", retryable=False) from None
         _finish_job_provider_call(self._ledger, job, call, status="completed")
 
 

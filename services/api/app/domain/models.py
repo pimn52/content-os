@@ -313,6 +313,7 @@ class Clip(ContractModel):
     face_visibility: Score | None = None
     mouth_visibility: Score | None = None
     talking_candidate: bool = False
+    talking_reference_assessment: "TalkingReferenceAssessment | None" = None
     voice_candidate: bool = False
     embedding_ref: str | None = Field(default=None, max_length=500)
     used_count: int = Field(default=0, ge=0)
@@ -346,6 +347,66 @@ class TalkingProfile(ContractModel):
     reference_clip_ids: list[UUID] = Field(min_length=1, max_length=100)
     consent: ConsentRecord
     created_at: AwareDatetime
+
+
+class GazeDirection(StrEnum):
+    """Visible face direction recorded for a Talking reference, never inferred later."""
+
+    CAMERA = "camera"
+    AWAY = "away"
+    UNCERTAIN = "uncertain"
+
+
+class TalkingReferenceAssessment(ContractModel):
+    """Sourced evidence about a specific reference Clip's usable performance.
+
+    These fields describe observed source material.  They are deliberately
+    distinct from Talking-provider capabilities: an audio-driven lip-sync
+    model may preserve an observed gaze, but must not be treated as able to
+    create a new one.
+    """
+
+    start_gaze: GazeDirection | None = None
+    end_gaze: GazeDirection | None = None
+    expression_labels: list[str] = Field(default_factory=list, max_length=20)
+    burned_in_subtitles: bool | None = None
+    evidence_reference: str = Field(min_length=1, max_length=500)
+
+
+class TalkingPerformanceBrief(ContractModel):
+    """Product-level requirements for selecting a creator Talking reference."""
+
+    start_gaze: GazeDirection | None = None
+    end_gaze: GazeDirection | None = None
+    expression_labels: list[str] = Field(default_factory=list, max_length=20)
+    require_no_burned_subtitles: bool = True
+    minimum_reference_duration_ms: PositiveFrames = 3_000
+
+
+class TalkingReferenceFit(ContractModel):
+    clip_id: UUID
+    eligible: bool
+    score: Score = 0
+    reasons: list[str] = Field(default_factory=list, max_length=20)
+
+
+class TalkingReferenceSelection(ContractModel):
+    """One transparent reference choice or a capture requirement."""
+
+    fits: list[TalkingReferenceFit] = Field(min_length=1, max_length=100)
+    selected_clip_id: UUID | None = None
+    requires_capture: bool = False
+    capture_instruction: str | None = Field(default=None, max_length=2_000)
+
+    @model_validator(mode="after")
+    def selection_is_explicit(self) -> "TalkingReferenceSelection":
+        if self.selected_clip_id is None and not self.requires_capture:
+            raise ValueError("Talking reference selection requires a selected clip or capture")
+        if self.selected_clip_id is not None and self.requires_capture:
+            raise ValueError("Talking reference selection cannot select a clip and require capture")
+        if self.requires_capture and not self.capture_instruction:
+            raise ValueError("Talking reference capture requirement needs an instruction")
+        return self
 
 
 class Project(ContractModel):
@@ -532,7 +593,7 @@ class CandidateAsset(ContractModel):
 
     @model_validator(mode="after")
     def candidate_references_match_source(self) -> "CandidateAsset":
-        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.SCREENSHOT, SourceKind.CHART}
+        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO, SourceKind.SCREENSHOT, SourceKind.CHART}
         has_reference = self.asset_id is not None or self.clip_id is not None
         if self.source_kind == SourceKind.CAPTURE and not self.requires_capture:
             raise ValueError("capture candidates must require_capture")
@@ -579,6 +640,13 @@ class DraftRoute(ContractModel):
     candidates: tuple[CandidateAsset, ...] = Field(min_length=1, max_length=20)
 
 
+class VerticalReframeMode(StrEnum):
+    """An explicit, reviewable treatment of non-vertical source media."""
+
+    CONTAIN = "contain"
+    CENTER_CROP = "center_crop"
+
+
 class VideoVisual(ContractModel):
     source_kind: SourceKind
     authorization_reference: str = Field(min_length=1, max_length=500, description="Reference to the source rights record; never credentials.")
@@ -587,10 +655,13 @@ class VideoVisual(ContractModel):
     clip_start_ms: NonNegativeMs | None = None
     clip_end_ms: NonNegativeMs | None = None
     source_duration_ms: PositiveFrames | None = None
+    vertical_reframe_mode: VerticalReframeMode = VerticalReframeMode.CONTAIN
+    vertical_reframe_evidence_reference: str | None = Field(default=None, max_length=500)
+    source_bottom_crop_ratio: float = Field(default=0, ge=0, le=0.4)
 
     @model_validator(mode="after")
     def visual_source_is_complete(self) -> "VideoVisual":
-        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.SCREENSHOT, SourceKind.CHART}
+        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO, SourceKind.SCREENSHOT, SourceKind.CHART}
         if self.source_kind in existing_media and self.asset_id is None and self.clip_id is None:
             raise ValueError("existing-media visuals need an asset_id or clip_id")
         values = (self.clip_start_ms, self.clip_end_ms)
@@ -601,6 +672,12 @@ class VideoVisual(ContractModel):
                 raise ValueError("clip interval exceeds source duration")
         elif self.source_duration_ms is not None:
             raise ValueError("source_duration_ms requires a clip interval")
+        if self.vertical_reframe_mode is VerticalReframeMode.CENTER_CROP and not self.vertical_reframe_evidence_reference:
+            raise ValueError("center crop requires a reviewable vertical reframe evidence reference")
+        if self.vertical_reframe_mode is VerticalReframeMode.CONTAIN and self.vertical_reframe_evidence_reference is not None:
+            raise ValueError("vertical reframe evidence is only valid for an explicit center crop")
+        if self.source_bottom_crop_ratio and not self.vertical_reframe_evidence_reference:
+            raise ValueError("bottom source crop requires a reviewable vertical reframe evidence reference")
         return self
 
 
@@ -822,6 +899,16 @@ class VoiceGenerationJobPayload(ContractModel):
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
 
 
+class TalkingGenerationJobPayload(ContractModel):
+    """Credential-free input for one authorized Talking/lip-sync request."""
+
+    project_id: UUID
+    talking_profile_id: UUID
+    reference_clip_id: UUID
+    narration_audio_id: UUID
+    authorization_reference: str = Field(min_length=1, max_length=500)
+
+
 class Job(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID | None = None
@@ -833,7 +920,7 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | None = None
+    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | TalkingGenerationJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
@@ -851,6 +938,11 @@ class Job(ContractModel):
                 raise ValueError("voice generation job payload must be a VoiceGenerationJobPayload")
             if self.payload is not None and self.project_id != self.payload.project_id:
                 raise ValueError("voice generation job project_id must match its payload")
+        elif self.type is JobType.GENERATE_TALKING:
+            if self.payload is not None and not isinstance(self.payload, TalkingGenerationJobPayload):
+                raise ValueError("talking generation job payload must be a TalkingGenerationJobPayload")
+            if self.payload is not None and self.project_id != self.payload.project_id:
+                raise ValueError("talking generation job project_id must match its payload")
         elif self.payload is not None:
-            raise ValueError("only render and voice generation jobs may contain a payload")
+            raise ValueError("only render, voice generation and talking generation jobs may contain a payload")
         return self

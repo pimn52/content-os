@@ -10,7 +10,7 @@ type VideoScene = {
 };
 
 type SceneSource =
-  | {kind: 'video'; src: string; trimBefore: number; trimAfter: number; narrationSrc?: string; narrationStartFrame?: number}
+  | {kind: 'video'; src: string; trimBefore: number; trimAfter: number; verticalReframeMode?: 'contain' | 'center_crop'; sourceBottomCropRatio?: number; narrationSrc?: string; narrationStartFrame?: number}
   | {kind: 'image'; src: string; narrationSrc?: string; narrationStartFrame?: number}
   | {kind: 'typography'; text: string; narrationSrc?: string; narrationStartFrame?: number};
 
@@ -40,18 +40,23 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
       }
       return (
         <Sequence key={scene.scene_id} from={scene.start_frame} durationInFrames={scene.duration_frames}>
-          <AbsoluteFill>
+          <AbsoluteFill style={{overflow: 'hidden'}}>
             {source.kind === 'video' ? (
               <OffthreadVideo
                 src={staticFile(source.src)}
                 trimBefore={source.trimBefore}
                 trimAfter={source.trimAfter}
                 volume={audioMode === 'source' ? 1 : 0}
-                // Creator footage is a first-class source. Preserve the full
-                // frame when adapting horizontal media to the vertical
-                // composition; a deliberate letterbox is safer than silently
-                // cropping the speaker or the visual context.
-                style={{width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#111'}}
+                // Crop only when the persisted VideoSpec names an evidence-
+                // backed review decision. The default preserves the full
+                // frame, so the renderer never silently crops a face.
+                style={{
+                  width: '100%', height: '100%',
+                  objectFit: source.verticalReframeMode === 'center_crop' ? 'cover' : 'contain',
+                  objectPosition: source.sourceBottomCropRatio ? 'center top' : 'center',
+                  transform: source.sourceBottomCropRatio ? `scale(${1 / (1 - source.sourceBottomCropRatio)})` : undefined,
+                  transformOrigin: 'top center', backgroundColor: '#111',
+                }}
               />
             ) : source.kind === 'image' ? (
               <Img src={staticFile(source.src)} style={{width: '100%', height: '100%', objectFit: 'contain'}} />

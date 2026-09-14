@@ -13,6 +13,7 @@ from .video_spec import (
     VideoSpecAssembler,
     VideoSpecAssemblyError,
     milliseconds_to_frames,
+    source_interval_to_frames,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "VideoSpecAssembler",
     "VideoSpecAssemblyError",
     "milliseconds_to_frames",
+    "source_interval_to_frames",
 ]

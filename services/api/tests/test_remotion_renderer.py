@@ -115,6 +115,47 @@ def test_remotion_adapter_accepts_authorized_subinterval_inside_clip(tmp_path: P
         db.close()
 
 
+def test_remotion_adapter_allows_frame_rate_conversion_within_authorized_duration(tmp_path: Path) -> None:
+    db, asset, clip, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        converted = asset.model_copy(update={"id": uuid4(), "content_hash": "b" * 64, "fps": RationalFps(numerator=25, denominator=1), "duration_ms": 4_000})
+        AssetRepository(db).create(converted)
+        updated_clip = Clip(asset_id=converted.id, start_ms=0, end_ms=3_480, asset_duration_ms=4_000)
+        ClipRepository(db).create(updated_clip)
+        visual = spec.scenes[0].visual.model_copy(update={"asset_id": converted.id, "clip_id": updated_clip.id, "clip_start_ms": 0, "clip_end_ms": 3_480, "source_duration_ms": 4_000})
+        scene = spec.scenes[0].model_copy(update={"duration_frames": 105, "visual": visual})
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner).render(
+            spec.model_copy(update={"scenes": [scene]}), tmp_path / "converted.mp4"
+        )
+        assert runner.calls
+    finally:
+        db.close()
+
+
+def test_remotion_adapter_rejects_a_human_rejected_talking_asset(tmp_path: Path) -> None:
+    db, asset, _, spec = _setup(tmp_path)
+    try:
+        rejected = asset.model_copy(update={
+            "id": uuid4(), "content_hash": "c" * 64, "source_kind": SourceKind.AI_VIDEO,
+            "metadata": {"talking_generation": {"qa_state": "verified", "human_review_state": "rejected"}},
+        })
+        AssetRepository(db).create(rejected)
+        clip = Clip(asset_id=rejected.id, start_ms=0, end_ms=1_001, asset_duration_ms=rejected.duration_ms)
+        ClipRepository(db).create(clip)
+        visual = spec.scenes[0].visual.model_copy(update={
+            "source_kind": SourceKind.AI_VIDEO, "asset_id": rejected.id, "clip_id": clip.id,
+            "clip_start_ms": 0, "clip_end_ms": 1_001,
+        })
+        blocked = spec.model_copy(update={"scenes": [spec.scenes[0].model_copy(update={"visual": visual})]})
+        with pytest.raises(UnauthorizedVisualError, match="rejected by U-Talking"):
+            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=_Runner()).render(
+                blocked, tmp_path / "blocked.mp4"
+            )
+    finally:
+        db.close()
+
+
 def test_remotion_adapter_rejects_remote_unauthorized_and_unsupported_visuals(tmp_path: Path) -> None:
     db, asset, clip, spec = _setup(tmp_path)
     runner = _Runner()

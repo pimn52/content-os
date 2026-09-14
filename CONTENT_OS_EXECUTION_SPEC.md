@@ -134,6 +134,8 @@ Scene-based generation/retry is preferred over regenerating a complete long narr
 
 R1 must prove at least one real new creator Talking segment, but does not lock to one implementation.
 
+**Daily-material admission rule.** A mature-provider candidate must work from ordinary, consented creator footage, including footage where the creator is naturally speaking or moving. Content OS must not require creators to record special silent, closed-mouth, expressionless, or otherwise AI-only reference clips as a condition of producing a new Talking segment. A provider may offer reference selection or reversible preparation, but a result from special-purpose capture alone is not product-quality evidence.
+
 Preferred evaluation order:
 
 1. reuse a suitable authorized Talking clip as reference;

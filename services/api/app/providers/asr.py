@@ -232,6 +232,8 @@ class FasterWhisperASRProvider:
         *,
         device: str = "cpu",
         compute_type: str = "int8",
+        vad_filter: bool = True,
+        word_timestamps: bool = False,
         download_root: str | Path | None = None,
         model_factory: Callable[..., object] | None = None,
     ) -> None:
@@ -241,11 +243,17 @@ class FasterWhisperASRProvider:
             raise ASRConfigurationError("local ASR device must not be empty")
         if not isinstance(compute_type, str) or not compute_type.strip():
             raise ASRConfigurationError("local ASR compute type must not be empty")
+        if not isinstance(vad_filter, bool):
+            raise ASRConfigurationError("local ASR vad_filter must be a boolean")
+        if not isinstance(word_timestamps, bool):
+            raise ASRConfigurationError("local ASR word_timestamps must be a boolean")
         if download_root is not None and not isinstance(download_root, (str, Path)):
             raise ASRConfigurationError("local ASR model directory is invalid")
         self.model = model.strip()
         self.device = device.strip()
         self.compute_type = compute_type.strip()
+        self.vad_filter = vad_filter
+        self.word_timestamps = word_timestamps
         self.download_root = Path(download_root) if download_root is not None else None
         self._model_factory = model_factory
         self._model: object | None = None
@@ -262,12 +270,14 @@ class FasterWhisperASRProvider:
         prompt_value = _validate_optional_text(prompt, "prompt")
         model = self._loaded_model()
         try:
-            raw_segments, info = model.transcribe(
-                str(path),
-                language=language_value,
-                initial_prompt=prompt_value,
-                vad_filter=True,
-            )
+            transcribe_kwargs: dict[str, object] = {
+                "language": language_value,
+                "initial_prompt": prompt_value,
+                "vad_filter": self.vad_filter,
+            }
+            if self.word_timestamps:
+                transcribe_kwargs["word_timestamps"] = True
+            raw_segments, info = model.transcribe(str(path), **transcribe_kwargs)
             segments: list[TranscriptionSegment] = []
             for raw in raw_segments:
                 text = getattr(raw, "text", None)
@@ -275,6 +285,10 @@ class FasterWhisperASRProvider:
                 end = getattr(raw, "end", None)
                 if not isinstance(text, str) or not text.strip():
                     continue
+                if self.word_timestamps:
+                    word_span = _word_span(getattr(raw, "words", None))
+                    if word_span is not None:
+                        start, end = word_span
                 start_ms = _start_ms(start)
                 end_ms = _end_ms(end)
                 if end_ms <= start_ms:
@@ -321,6 +335,22 @@ class FasterWhisperASRProvider:
         except Exception:
             raise ASRConfigurationError("local ASR model could not be loaded") from None
         return self._model
+
+
+def _word_span(words: object) -> tuple[float, float] | None:
+    if not isinstance(words, (list, tuple)) or not words:
+        return None
+    starts: list[float] = []
+    ends: list[float] = []
+    for word in words:
+        start = getattr(word, "start", None)
+        end = getattr(word, "end", None)
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end > start:
+            starts.append(float(start))
+            ends.append(float(end))
+    if not starts:
+        return None
+    return min(starts), max(ends)
 
 
 def _validate_audio_path(audio_path: str | Path) -> Path:

@@ -180,6 +180,36 @@ def test_assembler_builds_local_typography_fallback_without_media(tmp_path: Path
         db.close()
 
 
+def test_assembler_requires_verified_talking_qa_before_using_generated_talking_video(tmp_path: Path) -> None:
+    db, assembler, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        source = tmp_path / "talking.mp4"
+        source.write_bytes(b"talking")
+        asset = Asset(
+            source_kind=SourceKind.AI_VIDEO, source_file=str(source), content_hash="t" * 64,
+            duration_ms=1_000, width=720, height=1_280, fps=RationalFps(numerator=30, denominator=1), has_audio=True,
+            authorization_reference="talking-consent", imported_at=NOW,
+            metadata={"talking_generation": {"provider": "musetalk", "qa_state": "pending"}},
+        )
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=1_000, asset_duration_ms=1_000))
+        scene = _scene(project, 0, duration_ms=800)
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
+            match_score=1.0, why=["authorized generated Talking"], recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TALKING, amount=Decimal("0"), currency="USD"),
+        )
+        with pytest.raises(InvalidCandidateSelection, match="verified automated QA"):
+            assembler.assemble(project, [scene], {scene.id: candidate})
+        metadata = dict(asset.metadata)
+        metadata["talking_generation"] = {"provider": "musetalk", "qa_state": "verified"}
+        AssetRepository(db).update(asset.model_copy(update={"metadata": metadata}))
+        spec = assembler.assemble(project, [scene], {scene.id: candidate})
+        assert spec.scenes[0].visual.source_kind is SourceKind.AI_VIDEO
+    finally:
+        db.close()
+
+
 def test_assembler_builds_imported_static_image_visual(tmp_path: Path) -> None:
     db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
     try:
@@ -341,6 +371,30 @@ def test_master_narration_rejects_audio_without_actual_timing(tmp_path: Path) ->
                 master_narration_asset_id=audio.id,
                 narration_required=True,
             )
+    finally:
+        db.close()
+
+
+def test_master_narration_matches_traditional_asr_text_without_rewriting_evidence(tmp_path: Path) -> None:
+    db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    audio_source = tmp_path / "traditional.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="f" * 64,
+        duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+        transcript_segments=[TranscriptSegment(start_ms=100, end_ms=800, text="第一，先寫出一句能被記住的結論")],
+        transcript_source="independent-asr:local",
+        metadata={"voice_generation": {"provider": "local", "qa_state": "verified"}},
+    )
+    AudioAssetRepository(db).create(audio)
+    try:
+        scene = scenes[0].model_copy(update={"voice_text": "第一，先写出一句能被记住的结论。"})
+        spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db)).assemble(
+            project, [scene], {scene.id: _candidate(scene, assets[0], clips[0])},
+            master_narration_asset_id=audio.id, narration_required=True,
+        )
+        assert spec.master_narration is not None
+        assert spec.master_narration.transcript_segments[0].text == "第一，先寫出一句能被記住的結論"
     finally:
         db.close()
 

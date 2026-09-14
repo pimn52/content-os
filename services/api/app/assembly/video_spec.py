@@ -26,6 +26,7 @@ from app.domain.models import (
     VideoSpec,
     VideoVisual,
 )
+from app.voice_qa import comparison_tokens
 
 
 class VideoSpecAssemblyError(ValueError):
@@ -76,7 +77,7 @@ class GeneratedNarrationQaPending(VideoSpecAssemblyError):
     pass
 
 
-_REAL_CONTINUOUS_SOURCES = frozenset((SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET))
+_REAL_CONTINUOUS_SOURCES = frozenset((SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO))
 _TEXT_TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
 _TERMINAL_PURPOSES = frozenset(("close", "closing", "boundary", "cta", "outro", "ending"))
 _SOURCE_TAIL_MAX_MS = 4_000
@@ -498,6 +499,16 @@ class VideoSpecAssembler:
             or clip.end_ms > asset.duration_ms
         ):
             raise AssetIdentityMismatch(f"selected Asset and Clip do not match for scene {scene.scene_id!r}")
+        if asset.source_kind is SourceKind.AI_VIDEO:
+            generation = asset.metadata.get("talking_generation")
+            if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+                raise InvalidCandidateSelection(
+                    f"scene {scene.scene_id!r} generated Talking video requires verified automated QA before assembly"
+                )
+            if generation.get("human_review_state") == "rejected":
+                raise InvalidCandidateSelection(
+                    f"scene {scene.scene_id!r} generated Talking video was rejected by U-Talking and cannot be assembled"
+                )
         return asset, clip
 
     def _stored_image(self, candidate: CandidateAsset) -> ImageAsset:
@@ -649,7 +660,7 @@ def _master_narration_intervals(audio: AudioAsset, scenes: Sequence[ScenePlan]) 
     cursor = 0
     matches: list[tuple[ScenePlan, int]] = []
     for scene in scenes:
-        target = "".join(_TEXT_TOKEN.findall(scene.voice_text.lower()))
+        target = "".join(comparison_tokens(scene.voice_text))
         if not target:
             raise NarrationTimelineError(f"scene {scene.scene_id!r} has no alignable narration text")
         matched = _find_timed_text_span(segments, target, cursor)
@@ -682,7 +693,7 @@ def _find_timed_text_span(
     for start in range(start_index, len(segments)):
         combined = ""
         for end in range(start, len(segments)):
-            combined += "".join(_TEXT_TOKEN.findall(segments[end].text.lower()))
+            combined += "".join(comparison_tokens(segments[end].text))
             if target in combined:
                 return start, end
             # This is a bounded literal search, not a semantic similarity

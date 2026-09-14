@@ -7,11 +7,18 @@ from pathlib import Path
 import re
 from typing import Sequence
 
+from opencc import OpenCC
+
 from app.domain.models import AudioAsset, TranscriptSegment
 from app.providers.asr import TranscriptionResult
 
 
 _TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
+_TRADITIONAL_TO_SIMPLIFIED = OpenCC("t2s")
+# OpenCC intentionally retains some context-dependent CJK variants.  In
+# speech-copy comparison, the Mandarin progressive glyph variants 著/着 are
+# indistinguishable; normalize them only in the ephemeral comparison stream.
+_SPOKEN_GLYPH_VARIANTS = str.maketrans({"著": "着"})
 
 
 @dataclass(frozen=True)
@@ -23,6 +30,7 @@ class VoiceQaReport:
     copy_coverage: float
     missing_token_count: int
     duplicate_token_count: int
+    leading_silence_ms: int
     longest_silence_ms: int
     transcript_segment_count: int
     checks: tuple[str, ...]
@@ -36,6 +44,7 @@ class VoiceQaReport:
             "copy_coverage": self.copy_coverage,
             "missing_token_count": self.missing_token_count,
             "duplicate_token_count": self.duplicate_token_count,
+            "leading_silence_ms": self.leading_silence_ms,
             "longest_silence_ms": self.longest_silence_ms,
             "transcript_segment_count": self.transcript_segment_count,
             "checks": list(self.checks),
@@ -52,6 +61,7 @@ def verify_generated_voice(
     transcription: TranscriptionResult,
     *,
     max_silence_ms: int = 2_000,
+    max_leading_silence_ms: int = 500,
 ) -> VoiceQaReport:
     """Validate a real ASR/alignment result without inventing semantic output.
 
@@ -68,15 +78,18 @@ def verify_generated_voice(
         raise VoiceQaError("voice QA requires a real TranscriptionResult")
     if isinstance(max_silence_ms, bool) or not isinstance(max_silence_ms, int) or max_silence_ms < 0:
         raise VoiceQaError("max_silence_ms must be a non-negative integer")
+    if isinstance(max_leading_silence_ms, bool) or not isinstance(max_leading_silence_ms, int) or max_leading_silence_ms < 0:
+        raise VoiceQaError("max_leading_silence_ms must be a non-negative integer")
 
     playable = Path(audio.source_file).is_file() and Path(audio.source_file).stat().st_size > 0
-    target = _tokens(target_text)
-    observed = _tokens(transcription.text)
+    target = comparison_tokens(target_text)
+    observed = comparison_tokens(transcription.text)
     target_counts, observed_counts = Counter(target), Counter(observed)
     missing = sum((target_counts - observed_counts).values())
     duplicate = sum((observed_counts - target_counts).values())
     coverage = 0.0 if not target else max(0.0, min(1.0, (len(target) - missing) / len(target)))
     segments = _segments(transcription.segments, audio.duration_ms)
+    leading_silence = segments[0].start_ms if segments else audio.duration_ms
     longest_silence = _longest_silence(segments, audio.duration_ms)
     checks: list[str] = []
     if not playable:
@@ -87,6 +100,8 @@ def verify_generated_voice(
         checks.append("copy_missing_tokens")
     if duplicate:
         checks.append("copy_duplicate_tokens")
+    if leading_silence > max_leading_silence_ms:
+        checks.append("leading_silence_or_unrecognized_audio")
     if longest_silence > max_silence_ms:
         checks.append("long_silence")
     if not checks:
@@ -97,6 +112,7 @@ def verify_generated_voice(
         copy_coverage=coverage,
         missing_token_count=missing,
         duplicate_token_count=duplicate,
+        leading_silence_ms=leading_silence,
         longest_silence_ms=longest_silence,
         transcript_segment_count=len(segments),
         checks=tuple(checks),
@@ -129,8 +145,15 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
     })
 
 
-def _tokens(value: str) -> tuple[str, ...]:
-    return tuple(item.casefold() for item in _TOKEN.findall(value))
+def comparison_tokens(value: str) -> tuple[str, ...]:
+    """Return an auditable comparison stream without changing stored text."""
+
+    # Local ASR can legitimately choose traditional glyphs for spoken
+    # Mandarin when the requested copy uses simplified Chinese.  Normalize
+    # only for the comparison token stream; retain the original transcript in
+    # persisted QA evidence so review remains auditable.
+    normalized = _TRADITIONAL_TO_SIMPLIFIED.convert(value).translate(_SPOKEN_GLYPH_VARIANTS)
+    return tuple(item.casefold() for item in _TOKEN.findall(normalized))
 
 
 def _segments(values: Sequence[object], duration_ms: int) -> tuple[TranscriptSegment, ...]:

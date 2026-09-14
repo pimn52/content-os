@@ -71,6 +71,21 @@ from .voice import (
     VoiceSynthesisResult,
     VoiceTimeout,
 )
+from .talking import (
+    TalkingAuthenticationError,
+    TalkingConfigurationError,
+    TalkingConnectionError,
+    TalkingError,
+    TalkingHeadProvider,
+    TalkingInputError,
+    MuseTalkLocalRunner,
+    MuseTalkProvider,
+    TalkingProviderResponseError,
+    TalkingRateLimitError,
+    TalkingReference,
+    TalkingSynthesisResult,
+    TalkingTimeout,
+)
 
 __all__ = [
     "ASRAuthenticationError",
@@ -134,4 +149,17 @@ __all__ = [
     "VoiceRateLimitError",
     "VoiceSynthesisResult",
     "VoiceTimeout",
+    "TalkingAuthenticationError",
+    "TalkingConfigurationError",
+    "TalkingConnectionError",
+    "TalkingError",
+    "TalkingHeadProvider",
+    "TalkingInputError",
+    "MuseTalkLocalRunner",
+    "MuseTalkProvider",
+    "TalkingProviderResponseError",
+    "TalkingRateLimitError",
+    "TalkingReference",
+    "TalkingSynthesisResult",
+    "TalkingTimeout",
 ]
