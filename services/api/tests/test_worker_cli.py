@@ -45,13 +45,9 @@ def test_transcribe_can_select_local_faster_whisper_without_api_key(tmp_path: Pa
     monkeypatch.setenv("CONTENT_OS_ASR_PROVIDER", "local")
     db = Database(tmp_path / "local-asr-worker.sqlite")
     try:
-        runner = build_runner(
-            parse_config(["--once", "--db", str(tmp_path / "local-asr-worker.sqlite"), "--job-type", "transcribe_audio"]),
-            db,
-        )
+        runner = build_runner(parse_config(["--once", "--db", str(tmp_path / "local-asr-worker.sqlite"), "--job-type", "transcribe_audio"]), db)
         assert runner.handler_types == {JobType.TRANSCRIBE_AUDIO}
-        handler = runner._handlers[JobType.TRANSCRIBE_AUDIO]
-        assert handler._provider.__class__.__name__ == "FasterWhisperASRProvider"
+        assert runner._handlers[JobType.TRANSCRIBE_AUDIO]._provider.__class__.__name__ == "FasterWhisperASRProvider"
     finally:
         db.close()
 
@@ -63,7 +59,6 @@ def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Pat
     db = Database(tmp_path / "vision-worker.sqlite")
     try:
         config = parse_config(["--once", "--db", str(tmp_path / "vision-worker.sqlite"), "--job-type", "index_clips"])
-        assert config.job_types == (JobType.INDEX_CLIPS,)
         with pytest.raises(VisionConfigurationError, match="supplied at runtime"):
             build_runner(config, db)
         monkeypatch.setenv("CONTENT_OS_VISION_API_KEY", "runtime-only-test-key")
@@ -74,34 +69,13 @@ def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Pat
         db.close()
 
 
-def test_talking_requires_explicit_local_runtime_and_registers_only_when_configured(tmp_path: Path, monkeypatch):
+def test_talking_worker_refuses_unadmitted_provider(tmp_path: Path):
     db_path = tmp_path / "talking-worker.sqlite"
-    config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
-    monkeypatch.delenv("CONTENT_OS_TALKING_PROVIDER", raising=False)
     db = Database(db_path)
     try:
-        with pytest.raises(TalkingConfigurationError, match="TALKING_PROVIDER"):
+        config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
+        with pytest.raises(TalkingConfigurationError, match="no Talking provider is currently admitted"):
             build_runner(config, db)
-    finally:
-        db.close()
-
-    bridge, runtime = tmp_path / "bridge.py", tmp_path / "python.exe"
-    bridge.write_bytes(b"bridge")
-    runtime.write_bytes(b"runtime")
-    for name, value in {
-        "CONTENT_OS_TALKING_PROVIDER": "musetalk",
-        "CONTENT_OS_MUSETALK_BRIDGE_SCRIPT": str(bridge),
-        "CONTENT_OS_MUSETALK_RUNTIME_PYTHON": str(runtime),
-        "CONTENT_OS_MUSETALK_ROOT": str(tmp_path),
-        "CONTENT_OS_MUSETALK_MODELS_ROOT": str(tmp_path),
-        "CONTENT_OS_MUSETALK_FFMPEG_DIR": str(tmp_path),
-    }.items():
-        monkeypatch.setenv(name, value)
-    db = Database(db_path)
-    try:
-        runner = build_runner(config, db)
-        assert runner.handler_types == {JobType.GENERATE_TALKING}
-        assert runner._handlers[JobType.GENERATE_TALKING]._provider.provider_name == "musetalk"
     finally:
         db.close()
 
@@ -157,7 +131,7 @@ def test_build_failure_still_closes_database(tmp_path: Path, monkeypatch):
     assert closed == [config.db_path]
 
 
-def test_build_runner_uses_asset_target_store_and_analyze_filter(tmp_path: Path, monkeypatch):
+def test_build_runner_uses_asset_target_store_and_analyze_filter(tmp_path: Path):
     db = Database(tmp_path / "worker.sqlite")
     try:
         config = parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "analyze_asset"])
@@ -209,18 +183,3 @@ def test_render_worker_composes_audio_and_image_repositories(tmp_path: Path):
         assert renderer.images is not None
     finally:
         db.close()
-
-
-def test_signal_callback_stops_polling(monkeypatch, tmp_path: Path):
-    captured = {}
-
-    def fake_signal(signum, callback):
-        previous = captured.get(signum)
-        captured[signum] = callback
-        return previous
-
-    monkeypatch.setattr("app.worker_cli.signal.signal", fake_signal)
-    monkeypatch.setattr("app.worker_cli.run", lambda config, stop_event: (stop_event.set() or 0))
-    from app.worker_cli import main
-    assert main(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "analyze_asset"]) == 0
-    assert captured

@@ -12,17 +12,15 @@ from pathlib import Path
 from threading import Event
 from typing import Sequence
 
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, ProjectRepository, TalkingProfileRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, ProjectRepository
 from app.budget import ProviderCallLedger
 from app.domain.models import JobType
-from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler
+from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore
 from app.jobs.worker import JobWorker
 from app.media.extraction import FFmpegExtractionService
-from app.media.ffprobe import FFProbeAdapter
-from app.media.importer import MediaImporter
 from app.media.pipeline import MediaAnalysisPipeline
 from app.media.segmentation import FFmpegSceneDetector
 from app.media.transcripts import ClipTranscriptPersistence
@@ -30,7 +28,7 @@ from app.media.vision_pipeline import MediaVisionPipeline
 from app.providers.asr import ASRConfigurationError, FasterWhisperASRProvider, OpenAICompatibleASRProvider
 from app.providers.embedding import EmbeddingConfigurationError, OpenAICompatibleEmbeddingProvider
 from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigurationError
-from app.providers.talking import MuseTalkLocalRunner, MuseTalkProvider, TalkingConfigurationError
+from app.providers.talking import TalkingConfigurationError
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
 from app.runtime import resolve_local_executable
@@ -177,33 +175,8 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             config.data_root / "renders",
         )
     if JobType.GENERATE_TALKING in config.job_types:
-        provider_kind = os.environ.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
-        if provider_kind != "musetalk":
-            raise TalkingConfigurationError("CONTENT_OS_TALKING_PROVIDER must be musetalk for local Talking jobs")
-        required = {
-            "bridge script": os.environ.get("CONTENT_OS_MUSETALK_BRIDGE_SCRIPT", "").strip(),
-            "runtime Python": os.environ.get("CONTENT_OS_MUSETALK_RUNTIME_PYTHON", "").strip(),
-            "MuseTalk root": os.environ.get("CONTENT_OS_MUSETALK_ROOT", "").strip(),
-            "models root": os.environ.get("CONTENT_OS_MUSETALK_MODELS_ROOT", "").strip(),
-            "FFmpeg directory": os.environ.get("CONTENT_OS_MUSETALK_FFMPEG_DIR", "").strip(),
-        }
-        missing = [name for name, value in required.items() if not value]
-        if missing:
-            raise TalkingConfigurationError("local MuseTalk requires configured " + ", ".join(missing))
-        local_runner = MuseTalkLocalRunner(
-            bridge_script=required["bridge script"], runtime_python=required["runtime Python"],
-            musetalk_root=required["MuseTalk root"], models_root=required["models root"],
-            ffmpeg_dir=required["FFmpeg directory"],
-            batch_size=int(os.environ.get("CONTENT_OS_MUSETALK_BATCH_SIZE", "1")),
-            timeout_seconds=int(os.environ.get("CONTENT_OS_MUSETALK_TIMEOUT_SECONDS", "1800")),
-        )
-        provider = MuseTalkProvider(
-            model=os.environ.get("CONTENT_OS_MUSETALK_MODEL", "1.5"), synthesizer=local_runner,
-        )
-        handlers[JobType.GENERATE_TALKING] = TalkingGenerationJobHandler(
-            TalkingProfileRepository(db), AudioAssetRepository(db), assets,
-            MediaImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)), provider, config.data_root / "generated",
-            ProviderCallLedger(db),
+        raise TalkingConfigurationError(
+            "no Talking provider is currently admitted in the Core worker; evaluate candidates in isolation and add an adapter only after the quality gate passes"
         )
     return JobRunner(store, handlers, worker_id=config.worker_id, lease_duration=timedelta(seconds=config.lease_seconds), heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts)
 

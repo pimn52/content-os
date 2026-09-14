@@ -1,22 +1,14 @@
-"""Provider-neutral runtime capability inspection.
-
-The readiness check is deliberately side-effect free: it never sends a
-provider request and never returns credential values.  It exists so the UI
-can distinguish a missing implementation from a missing runtime configuration
-before a user starts a workflow.
-"""
+"""Provider-neutral runtime capability inspection."""
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
-import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
-
 CapabilityStatus = str
-
 
 @dataclass(frozen=True)
 class RuntimeCapability:
@@ -26,30 +18,20 @@ class RuntimeCapability:
     model: str | None
     detail: str
 
-
 def resolve_local_executable(
     name: str,
     env: Mapping[str, str] | None = None,
     *,
     executable_lookup: Callable[[str], str | None] | None = None,
 ) -> str:
-    """Resolve a local media/runtime command without coupling to a provider.
-
-    Explicit environment overrides win, followed by PATH, then the Remotion
-    compositor package bundled with this checkout. Returning the unresolved
-    command name preserves the normal subprocess error when nothing exists.
-    """
-
     values = env if env is not None else os.environ
     override = values.get(f"CONTENT_OS_{name.upper()}", "").strip()
     if override:
         return override
-
     locate = executable_lookup or shutil.which
     found = locate(name)
     if found:
         return found
-
     repository_root = Path(__file__).resolve().parents[3]
     package_root = repository_root / "apps" / "renderer" / "node_modules" / "@remotion" / "compositor-win32-x64-msvc"
     for candidate in (package_root / f"{name}.exe", package_root / name):
@@ -57,20 +39,11 @@ def resolve_local_executable(
             return str(candidate)
     return name
 
-
 def inspect_runtime_capabilities(
     env: Mapping[str, str] | None = None,
     *,
     executable_lookup: Callable[[str], str | None] | None = None,
 ) -> tuple[RuntimeCapability, ...]:
-    """Return a stable, non-secret snapshot of local runtime readiness.
-
-    ``provider_not_configured`` means the capability has an implementation but
-    no runtime credential was supplied. ``not_developed`` is reserved for
-    capabilities intentionally outside the current local runtime surface.
-    ``unavailable`` means local execution prerequisites are missing.
-    """
-
     values = env if env is not None else os.environ
     locate = executable_lookup or shutil.which
 
@@ -104,13 +77,13 @@ def inspect_runtime_capabilities(
     def available(command: str) -> bool:
         return locate(command) is not None or Path(command).is_file()
 
-    local_media_missing = [name for name, command in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)) if not available(command)]
+    missing = [name for name, command in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)) if not available(command)]
     local_media = RuntimeCapability(
         "local_media",
-        "ready" if not local_media_missing else "unavailable",
+        "ready" if not missing else "unavailable",
         "local",
         None,
-        "ffmpeg and ffprobe are available" if not local_media_missing else f"missing local executable(s): {', '.join(local_media_missing)}",
+        "ffmpeg and ffprobe are available" if not missing else f"missing local executable(s): {', '.join(missing)}",
     )
     renderer = RuntimeCapability(
         "render",
@@ -129,42 +102,21 @@ def inspect_runtime_capabilities(
     )
     retrieval_mode = values.get("CONTENT_OS_RETRIEVAL_MODE", "embedding").strip().lower()
     if retrieval_mode == "lexical":
-        retrieval = RuntimeCapability(
-            "retrieval", "ready", "local", None,
-            "explicit local lexical retrieval is available; it does not create or write vectors",
-        )
+        retrieval = RuntimeCapability("retrieval", "ready", "local", None, "explicit local lexical retrieval is available; it does not create or write vectors")
     elif retrieval_mode == "embedding":
-        retrieval = RuntimeCapability(
-            "retrieval", embedding.status, embedding.provider, embedding.model,
-            f"embedding retrieval: {embedding.detail}",
-        )
+        retrieval = RuntimeCapability("retrieval", embedding.status, embedding.provider, embedding.model, f"embedding retrieval: {embedding.detail}")
     else:
-        retrieval = RuntimeCapability(
-            "retrieval", "unavailable", "local", None,
-            "CONTENT_OS_RETRIEVAL_MODE must be embedding or lexical",
-        )
+        retrieval = RuntimeCapability("retrieval", "unavailable", "local", None, "CONTENT_OS_RETRIEVAL_MODE must be embedding or lexical")
 
     asr_provider = values.get("CONTENT_OS_ASR_PROVIDER", "openai-compatible").strip().lower()
     if asr_provider == "local":
         asr_model = selected_model("CONTENT_OS_ASR_LOCAL_MODEL") or "small"
         if importlib.util.find_spec("faster_whisper") is None:
-            asr_capability = RuntimeCapability(
-                "asr",
-                "unavailable",
-                "faster-whisper",
-                asr_model,
-                "local ASR selected but optional faster-whisper is not installed",
-            )
+            asr = RuntimeCapability("asr", "unavailable", "faster-whisper", asr_model, "local ASR selected but optional faster-whisper is not installed")
         else:
-            asr_capability = RuntimeCapability(
-                "asr",
-                "ready",
-                "faster-whisper",
-                asr_model,
-                "local CPU ASR is installed; model weights may download on the first explicit transcription job",
-            )
+            asr = RuntimeCapability("asr", "ready", "faster-whisper", asr_model, "local CPU ASR is installed; model weights may download on the first explicit transcription job")
     elif asr_provider in {"", "openai-compatible"}:
-        asr_capability = provider_capability(
+        asr = provider_capability(
             "asr",
             names=("CONTENT_OS_ASR_API_KEY", "OPENAI_API_KEY"),
             provider="openai-compatible",
@@ -172,38 +124,24 @@ def inspect_runtime_capabilities(
             default_model="whisper-1",
         )
     else:
-        asr_capability = RuntimeCapability(
-            "asr",
-            "unavailable",
-            asr_provider,
-            selected_model("CONTENT_OS_ASR_MODEL", "CONTENT_OS_ASR_LOCAL_MODEL"),
-            "CONTENT_OS_ASR_PROVIDER must be local or openai-compatible",
-        )
+        asr = RuntimeCapability("asr", "unavailable", asr_provider, selected_model("CONTENT_OS_ASR_MODEL", "CONTENT_OS_ASR_LOCAL_MODEL"), "CONTENT_OS_ASR_PROVIDER must be local or openai-compatible")
 
-    talking_provider = values.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
-    talking_paths = (
-        values.get("CONTENT_OS_MUSETALK_BRIDGE_SCRIPT", "").strip(),
-        values.get("CONTENT_OS_MUSETALK_RUNTIME_PYTHON", "").strip(),
-        values.get("CONTENT_OS_MUSETALK_ROOT", "").strip(),
-        values.get("CONTENT_OS_MUSETALK_MODELS_ROOT", "").strip(),
-        values.get("CONTENT_OS_MUSETALK_FFMPEG_DIR", "").strip(),
-    )
-    if talking_provider == "musetalk" and all(talking_paths):
-        missing_paths = [path for path in talking_paths if not Path(path).exists()]
+    selected_talking = values.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
+    if selected_talking:
         talking = RuntimeCapability(
-            "talking", "ready" if not missing_paths else "unavailable", "musetalk",
-            selected_model("CONTENT_OS_MUSETALK_MODEL") or "1.5",
-            "optional local MuseTalk worker is configured" if not missing_paths else "configured MuseTalk runtime path is unavailable",
-        )
-    elif talking_provider in {"", "musetalk"}:
-        talking = RuntimeCapability(
-            "talking", "provider_not_configured", "musetalk", "1.5",
-            "optional local MuseTalk worker requires explicit runtime paths",
+            "talking",
+            "unavailable",
+            selected_talking,
+            selected_model("CONTENT_OS_TALKING_MODEL"),
+            "selected Talking provider has no admitted Core adapter in this revision",
         )
     else:
         talking = RuntimeCapability(
-            "talking", "unavailable", talking_provider, None,
-            "CONTENT_OS_TALKING_PROVIDER must be musetalk for the local worker",
+            "talking",
+            "provider_not_configured",
+            None,
+            None,
+            "no Talking provider is currently admitted/configured in Core; candidates are evaluated in isolation before adapter admission",
         )
 
     return (
@@ -216,7 +154,7 @@ def inspect_runtime_capabilities(
             model_names=("CONTENT_OS_LLM_MODEL",),
             default_model="gpt-4o-mini",
         ),
-        asr_capability,
+        asr,
         provider_capability(
             "vision",
             names=("CONTENT_OS_VISION_API_KEY", "OPENAI_API_KEY"),
@@ -226,7 +164,7 @@ def inspect_runtime_capabilities(
         ),
         embedding,
         retrieval,
-        RuntimeCapability("tts", "not_developed", None, None, "TTS is intentionally deferred; import an authorized local recording instead"),
+        RuntimeCapability("tts", "not_developed", None, None, "no commercial-safe default Voice runtime is admitted yet"),
         talking,
         RuntimeCapability("publishing", "not_developed", None, None, "automatic publishing is not enabled; use the manual publication record flow"),
     )

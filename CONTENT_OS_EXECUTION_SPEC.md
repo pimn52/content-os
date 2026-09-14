@@ -1,6 +1,6 @@
 # Content OS R1 — Execution Specification
 
-Updated: 2026-09-12 (Asia/Shanghai)
+Updated: 2026-09-14 (Asia/Shanghai)
 
 This is the **single authoritative product/execution contract** for R1. Read `START_HERE.md` for navigation and `STATUS.md` for current progress.
 
@@ -10,49 +10,46 @@ Long-term loop:
 
 > **Know what to create → Create it as you → Learn what works**
 
-Content OS is Local-first / BYOK infrastructure for an individual creator or small creator workflow. It is not a generic AI video generator and R1 is not a broad market-intelligence SaaS.
-
-R1 focuses on `Create it as you` while preserving extension points for account intelligence, market signals and performance learning.
+Content OS is Local-first / BYOK infrastructure for an individual creator or small creator workflow. R1 focuses on `Create it as you`; it is not a generic AI video generator and broad Market Intelligence is not an R1 requirement.
 
 ## 2. R1 product gate
 
 R1 is not complete until an explicitly authorized creator can:
 
 1. initialize one persistent IP profile from confirmed information and real materials;
-2. enter a new topic and obtain editable copy that uses the current IP context/evidence;
+2. enter a new topic and obtain editable copy using current IP context/evidence;
 3. generate **new speech in the creator's authorized cloned voice**;
 4. generate at least one **new Talking/lip-sync segment of that creator speaking new words**;
-5. combine that with reusable real clips, optional capture, typography/static material and subtitles;
+5. combine it with reusable real clips, optional capture, typography/static material and subtitles;
 6. export a 30–60 second vertical video through the normal UI;
-7. repeat the flow without re-recording complete narration or manually cutting all media again.
+7. repeat without re-recording complete narration or manually cutting all media again.
 
 Source-led recuts, imported finished narration, old mouth motion, generic TTS or generic avatars may remain explicit fallback paths but **do not satisfy this gate**.
 
-Human judgment is required for creator voice likeness/naturalness and Talking likeness/naturalness.
+Human judgment is required for creator voice likeness/naturalness and Talking likeness/naturalness/publishability.
 
 ## 3. Product invariants
 
-- **Local-first, not desktop-only.** The home computer can be the processing/storage node; browser/mobile can capture, review and control while it is online.
+- **Local-first, not desktop-only and not local-inference-only.** Creator media/library/control remain local-first; heavy model inference may use an explicitly approved replaceable remote provider.
 - **BYOK / replaceable providers.** Core contracts do not depend on one model/vendor.
 - **Real user media first.** Use existing creator assets before generated media when quality is adequate.
-- **Continuous clips are playback assets.** Keyframes exist for understanding/search, not as the default playback unit.
+- **Continuous clips are playback assets.** Keyframes support understanding/search.
 - **Upload once.** Derive audio, transcript, keyframes and metadata automatically when capabilities exist.
-- **Capture is a low-cost option.** Missing material should produce an optional shoot list before expensive generation where appropriate.
-- **No hidden downgrade.** Unavailable Voice/Talking/market capabilities are shown as unavailable, not silently replaced and declared complete.
+- **Capture is a low-cost option.** Missing material can produce a shoot list before expensive generation.
+- **No hidden downgrade or cloud fallback.** Unavailable capability, remote data transfer and estimated/unknown cost must be visible.
 - **Consent and rights are explicit.** Voice/face generation only uses authorized references.
-- **Unknown cost is not zero.** Paid/runtime calls use persistent budget/idempotency/usage accounting.
+- **Unknown cost is not zero.** Runtime calls use persistent budget/idempotency/usage accounting.
 
-## 4. Current architecture to preserve
+## 4. Architecture to preserve
 
-Keep the existing:
+Keep:
 
-- FastAPI local API;
-- SQLite persistence;
+- FastAPI local API + SQLite;
 - provider-neutral domain contracts;
 - idempotent Job/Worker model with retry/recovery;
-- local media import, ffprobe/FFmpeg, segmentation, extraction and ASR/vision/index boundaries;
+- local media import, FFmpeg/ffprobe, continuous segmentation and ASR/vision/index boundaries;
 - IP profile and revisioned project/draft state;
-- ScenePlan and Hybrid Asset Router;
+- ScenePlan + real-media-first Hybrid Asset Router;
 - `MasterNarration` / timeline assembly boundary;
 - Remotion + FFmpeg render path;
 - browser/mobile upload and private-network access boundary;
@@ -61,9 +58,7 @@ Keep the existing:
 
 R1 does **not** require Redis, Celery, n8n, Kubernetes or a microservice rewrite.
 
-## 5. Development evidence modes
-
-Keep these separate:
+## 5. Evidence modes
 
 | Mode | Purpose | May prove |
 |---|---|---|
@@ -75,90 +70,67 @@ Do not call fixture success “AI understanding”, and do not call assisted-tes
 
 ## 6. Voice strategy
 
-`VoiceProvider` remains a replaceable capability layer.
+`VoiceProvider` remains replaceable.
 
-### 6.1 OmniVoice
+### OmniVoice
 
-OmniVoice is approved for a **local non-commercial evaluation provider / benchmark** because it is a strong technical fit:
-
-- zero-shot voice cloning;
-- short reference samples;
-- 600+ languages;
-- reusable clone prompt;
-- local Python API;
-- pronunciation/expressive controls.
+OmniVoice is approved as a **local non-commercial evaluation provider / quality benchmark**. Its technical fit includes zero-shot cloning, short references, multilingual coverage and reusable clone prompts.
 
 License boundary:
 
-- repository/source code: Apache-2.0;
-- official pretrained weights: currently CC-BY-NC due to upstream training-data constraints.
+- repository/source: Apache-2.0;
+- official pretrained weights: currently CC-BY-NC.
 
-Therefore R1 may evaluate OmniVoice locally, but Content OS must **not**:
+Therefore official OmniVoice weights must not be bundled or advertised as a commercial-safe default. OmniVoice-specific state must not leak into Core contracts.
 
-- bundle official OmniVoice weights in a commercial release;
-- advertise those weights as a commercial-safe default;
-- store OmniVoice-specific state in core contracts;
-- require OmniVoice for the minimum installation.
+### Current provider decision
 
-Install it only as an optional provider/worker dependency.
+- Chatterbox has been tested and **rejected for the current R1 path** because creator timbre similarity/naturalness were clearly below the OmniVoice benchmark.
+- A commercial-safe local Voice provider is currently **unselected**.
+- A BYOK/cloud Voice path remains valid for machines without suitable local inference or where quality/license constraints require it.
 
-When Content OS already has an authorized clean reference clip and transcript, reuse them rather than redundantly invoking another ASR pass.
+### Voice QA
 
-### 6.2 Commercial-safe paths
+Generated narration cannot reach final render without recorded QA covering at least copy coverage, missing/duplicate content, duration/silence sanity, playability and provider/reference provenance. Naturalness and likeness remain an explicit U-Voice human gate.
 
-Maintain a schema-compatible path for:
+## 7. Talking / lip-sync strategy
 
-- a commercially usable local voice provider (e.g. Chatterbox candidate, subject to release-time source/model license verification);
-- a BYOK cloud provider for machines without suitable local inference or when local quality is insufficient.
+`TalkingHeadProvider` remains replaceable. R1 must prove at least one real new creator Talking segment but does not lock to one model.
 
-No provider becomes “commercial-safe” solely because its source repository uses a permissive license; model-weight and dependency licenses must also pass the dependency inventory/release review.
+### Admission rule
 
-### 6.3 Voice QA gate
+A mature Talking candidate must work from **ordinary, consented creator footage**, including material where the creator is naturally speaking or moving. It cannot require special silent/closed-mouth/expressionless AI-only recordings as a product prerequisite.
 
-Generated narration cannot flow directly to final render without QA. At minimum record/check:
+For the primary R1 path, prefer models/services that perform:
 
-- copy coverage via ASR/alignment or equivalent;
-- missing/duplicated sentence detection;
-- duration and long-silence sanity;
-- playable/non-clipped output;
-- provider/model/version and reference provenance;
-- retry/fallback outcome.
+> **existing creator video + new audio → minimal necessary lip/face retargeting while preserving identity, original motion/gaze/background and visual quality**
 
-Naturalness and likeness remain a U-Voice human gate.
+over systems that regenerate the whole person/video when that regeneration is not required.
 
-Scene-based generation/retry is preferred over regenerating a complete long narration when it improves reliability, but the final timeline may use one normalized `MasterNarration` track with aligned ranges.
+### Current provider decision
 
-## 7. Talking strategy
+- MuseTalk 1.5 has been **rejected** by U-Talking on ordinary material and is not an admitted product provider.
+- VideoReTalking is the active isolated local benchmark candidate. Do not add its Core adapter until ordinary-material quality, runtime, license/dependency and human publishability gates pass.
+- If needed after VideoReTalking, evaluate KeySync, then LatentSync 1.5 before widening to unrelated Avatar models.
 
-`TalkingHeadProvider` remains replaceable.
+### Runtime routing
 
-R1 must prove at least one real new creator Talking segment, but does not lock to one implementation.
+Do not build the product around a high-end-GPU-only route.
 
-**Daily-material admission rule.** A mature-provider candidate must work from ordinary, consented creator footage, including footage where the creator is naturally speaking or moving. Content OS must not require creators to record special silent, closed-mouth, expressionless, or otherwise AI-only reference clips as a condition of producing a new Talking segment. A provider may offer reference selection or reversible preparation, but a result from special-purpose capture alone is not product-quality evidence.
+For compute-heavy Talking on low-spec PCs, an external/BYOK API may be the **default mature path** if it passes the same quality gate and the user explicitly accepts media transfer and cost. Local inference is optional when provider-specific readiness, privacy, quality and total runtime cost justify it.
 
-Preferred evaluation order:
-
-1. reuse a suitable authorized Talking clip as reference;
-2. local lip-sync provider when the machine/reference quality supports it;
-3. BYOK cloud Digital Twin / avatar as optional fallback if explicitly approved and budgeted.
-
-Do not build the product around a high-end-GPU-only route. Runtime readiness must distinguish:
-
-- implemented;
-- configured;
-- locally available;
-- verified.
+Do not hard-code one universal VRAM threshold. Runtime readiness is provider-specific and must distinguish implemented / configured / locally available / verified.
 
 ## 8. Hybrid Asset Router
 
-Per scene, prefer the lowest-cost adequate route rather than maximum AI generation.
+Per scene prefer the lowest-cost adequate route.
 
 ### TALKING
 
 1. original suitable Talking content when the original words actually match;
-2. authorized lip-synced creator clip;
-3. authorized digital twin / avatar provider;
-4. explicit fallback or gap.
+2. authorized lip-synced creator clip — local or remote Provider according to readiness/cost/privacy;
+3. authorized digital twin/avatar only as an explicit fallback;
+4. explicit gap/capture option.
 
 ### B-roll
 
@@ -168,46 +140,25 @@ Per scene, prefer the lowest-cost adequate route rather than maximum AI generati
 4. stock if implemented;
 5. AI image/video only if implemented, approved and budgeted.
 
-### Explainer
+Reuse penalty is a ranking input, not a reason to discard strong real material when alternatives are poor.
 
-Prefer screenshot / typography / chart / real media before generated video when adequate.
+## 9. Account vs Market Intelligence
 
-Reuse penalty is a ranking input, not a reason to discard good real material when alternatives are poor.
-
-## 9. Account vs Market intelligence
-
-Keep these separate.
-
-### Account Intelligence
-
-R1 may use/import the creator's own historical account/content data to understand what that creator has published and how it performed. Account access remains read-only unless explicitly changed.
-
-### Market Intelligence
-
-Broad competitor/trend crawling and market prediction are not R1 requirements. Future market signals must be evidence-backed and provider-neutral; absent external evidence, label suggestions as creator/content recommendations rather than invented market trends.
+R1 may use/import the creator's own historical account/content data. Broad competitor/trend crawling and market prediction remain deferred. Future market signals must be evidence-backed and provider-neutral.
 
 ## 10. Mobile / remote operation
 
-R1 architecture should support:
-
-- browser/mobile upload;
-- shoot-task capture;
-- review/approval/status from a phone;
-- private LAN/Tailscale-style access while the local node is online.
-
-Do not make remote Windows desktop the primary UX. Do not automatically open firewall/router access.
+R1 architecture supports browser/mobile upload, shoot-task capture, review/status from a phone and private LAN/Tailscale-style access while the local node is online. Remote Windows desktop is not the primary UX.
 
 ## 11. Cost and capability discipline
 
-Separate **development-agent cost** from **product runtime/provider cost**.
+Separate development-agent cost from product runtime/provider cost.
 
 Runtime provider flow:
 
-> estimate (when known) → reserve budget/idempotency ownership → execute → persist result/usage → reconcile actual/unknown cost.
+> estimate when known → reserve budget/idempotency ownership → execute → persist result/usage → reconcile actual/unknown cost
 
-Retries count. Unknown price remains unknown.
-
-Capability UI/status must distinguish `not implemented`, `not configured`, `locally unavailable`, `verification failed`, and `verified`.
+Retries count. Unknown price remains unknown. Remote media transfer must be explicit.
 
 ## 12. Implementation model policy
 
@@ -219,67 +170,29 @@ Quality first, then lowest capable cost:
 - **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations.
 - **Sol**: architecture/security/critical quality gate, or unresolved Terra failure with a concrete reproduction.
 
-Task importance alone never justifies Sol. Lower token price never justifies assigning architecture-changing work to Luna.
+Task importance alone never justifies Sol; lower token price never justifies architecture-changing work by Luna.
 
-Detailed constraints are in `AGENTS.md`.
-
-## 13. Current dependency order
-
-Do not restart old numbered plans. Continue from `STATUS.md` using these gates:
+## 13. Current gates
 
 ### Gate A — Foundation integrity
+Provider accounting/idempotency, revision invalidation and real media/timeline boundaries remain green.
 
-Provider accounting/idempotency, revision invalidation, real media/timeline boundaries remain green.
+### Gate B — Voice
+Maintain provider-neutral Voice jobs/QA. OmniVoice is the benchmark; select a commercial-safe production path later without changing Core contracts.
 
-### Gate B — Voice evaluation
-
-- establish explicitly authorized reference audio;
-- implement provider-neutral Voice generation job;
-- evaluate OmniVoice as non-commercial benchmark and at least one commercial-safe/fallback path where feasible;
-- add Voice QA and human U-Voice comparison.
-
-### Gate C — Talking evaluation
-
-- establish authorized Talking reference;
-- implement one real Talking provider path;
-- verify new words, basic sync/playability and human likeness/naturalness.
+### Gate C — Talking
+Finish VideoReTalking isolated evaluation. Admit a provider only after ordinary-material automated evidence plus U-Talking publishability review.
 
 ### Gate D — Integrated creator flow
-
-new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry.
+`new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.
 
 ### Gate E — U-Product
+Two real new topics, 30–60 second exports, normal UI, recoverable failures, no manual per-scene audio cutting and no false capability claims.
 
-Two real new topics, 30–60 second exports, normal UI, recoverable failures, no manual per-scene audio cutting, and no false capability claims.
+## 14. Stop conditions
 
-After Gate E, account/market/performance expansion may resume according to product evidence.
-
-## 14. User input / stop conditions
-
-Implementation should proceed autonomously for reversible engineering work inside this contract.
-
-Pause only when required for:
-
-- identity/voice/face consent or subjective likeness judgment;
-- first paid provider use or budget increase;
-- external account authorization/publishing action;
-- irreversible user-data change;
-- material product-scope change;
-- a blocker that cannot be resolved from current repository/evidence.
-
-Do not create a new strategy/freeze/review document for a normal blocker. Record current facts in `STATUS.md`, durable choices in `DECISIONS.md`, and continue the next ready dependency.
+Proceed autonomously for reversible engineering work inside this contract. Pause only for identity/voice/face consent or subjective likeness judgment, first paid provider use/budget increase, external account authorization/publishing, irreversible user-data change, material product-scope change, or an unresolved blocker requiring user input.
 
 ## 15. Documentation system
 
-Only six root documents are active controls:
-
-- `START_HERE.md` — navigation;
-- `CONTENT_OS_EXECUTION_SPEC.md` — this contract;
-- `STATUS.md` — current truth and next task;
-- `DECISIONS.md` — durable decisions;
-- `AGENTS.md` — implementation/model policy;
-- `README.md` — user/contributor overview.
-
-Old PRDs, development plans, freezes, handoffs and review reports are historical evidence available through Git history and must not compete with this hierarchy.
-
-Run `python scripts/check_docs.py` before handoff. CI should enforce the same document rules.
+Only six root documents are active controls: `START_HERE.md`, `CONTENT_OS_EXECUTION_SPEC.md`, `STATUS.md`, `DECISIONS.md`, `AGENTS.md`, `README.md`. Historical experiments belong to Git history or local evaluation evidence. Run `python scripts/check_docs.py` before handoff.
