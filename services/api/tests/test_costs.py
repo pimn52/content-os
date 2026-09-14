@@ -61,7 +61,7 @@ def test_selected_candidate_cost_summary_is_scene_complete_and_explicit() -> Non
 def test_cost_reduction_prefers_known_cheaper_candidate_within_score_tolerance() -> None:
     scene_id = uuid4()
     expensive = CandidateAsset(
-        scene_plan_id=scene_id, source_kind=SourceKind.AI_VIDEO, match_score=0.9, why=["expensive"],
+        scene_plan_id=scene_id, source_kind=SourceKind.AI_VIDEO, asset_id=uuid4(), match_score=0.9, why=["expensive"],
         recommended=True, estimated_cost=UsageCost(category=CostCategory.AI_VIDEO, amount=Decimal("1.00"), currency="USD"),
     )
     cheaper = expensive.model_copy(update={

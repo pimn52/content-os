@@ -110,8 +110,8 @@ over systems that regenerate the whole person/video when that regeneration is no
 ### Current provider decision
 
 - MuseTalk 1.5 has been **rejected** by U-Talking on ordinary material and is not an admitted product provider.
-- VideoReTalking is the active isolated local benchmark candidate. Do not add its Core adapter until ordinary-material quality, runtime, license/dependency and human publishability gates pass.
-- If needed after VideoReTalking, evaluate KeySync, then LatentSync 1.5 before widening to unrelated Avatar models.
+- VideoReTalking has been **rejected** by U-Talking on ordinary material: the real run showed severe mouth deformation, blur and local scale/warp artifacts. It is not an admitted product provider and has no Core adapter.
+- LatentSync 1.5 is the active next isolated benchmark candidate in a compatible CUDA environment. Its official README states an 8 GB minimum for inference, so it cannot be run on the current 6 GB laptop GPU. Defer KeySync to a later compatible machine; do not treat either candidate as admitted before the U-Talking gate.
 
 ### Runtime routing
 
@@ -181,7 +181,7 @@ Provider accounting/idempotency, revision invalidation and real media/timeline b
 Maintain provider-neutral Voice jobs/QA. OmniVoice is the benchmark; select a commercial-safe production path later without changing Core contracts.
 
 ### Gate C — Talking
-Finish VideoReTalking isolated evaluation. Admit a provider only after ordinary-material automated evidence plus U-Talking publishability review.
+Benchmark LatentSync 1.5 on ordinary material in a compatible CUDA environment after the VideoReTalking failure. If it fails, defer KeySync to another compatible machine. Admit a provider only after ordinary-material automated evidence plus U-Talking publishability review.
 
 ### Gate D — Integrated creator flow
 `new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.

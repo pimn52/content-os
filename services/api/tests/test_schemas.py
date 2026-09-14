@@ -71,11 +71,11 @@ def test_candidate_requires_reference_unless_it_is_a_capture() -> None:
                        why=["matches the requested action"], estimated_cost=cost)
 
 
-def test_candidate_allows_unmaterialized_generation_and_enforces_capture_consistency() -> None:
+def test_candidate_rejects_unmaterialized_video_and_enforces_capture_consistency() -> None:
     unknown = UsageCost(category=CostCategory.AI_VIDEO)
-    proposal = CandidateAsset(scene_plan_id=uuid4(), source_kind=SourceKind.AI_VIDEO, match_score=0.5,
-                              why=["fallback generation"], estimated_cost=unknown)
-    assert proposal.asset_id is None
+    with pytest.raises(ValidationError, match="existing-media candidates need an asset_id or clip_id"):
+        CandidateAsset(scene_plan_id=uuid4(), source_kind=SourceKind.AI_VIDEO, match_score=0.5,
+                       why=["fallback generation"], estimated_cost=unknown)
     with pytest.raises(ValidationError, match="must require_capture"):
         CandidateAsset(scene_plan_id=uuid4(), source_kind=SourceKind.CAPTURE, match_score=0.5,
                        why=["film a new shot"], estimated_cost=UsageCost(category=CostCategory.CAPTURE))
