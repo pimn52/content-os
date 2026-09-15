@@ -175,6 +175,15 @@ try {
             throw "content-os-worker is not installed; run the documented editable install first"
         }
         $workerArguments = @("--job-type", "analyze_asset", "--job-type", "render")
+        if ($env:CONTENT_OS_VOICE_PROVIDER) {
+            $workerArguments += @("--job-type", "generate_voice")
+        }
+        if ($env:CONTENT_OS_VOICE_QA_ASR_MODEL) {
+            $workerArguments += @("--job-type", "verify_voice")
+        }
+        if ($env:CONTENT_OS_TALKING_PROVIDER) {
+            $workerArguments += @("--job-type", "generate_talking")
+        }
         $asrConfigured = Test-AsrConfigured
         if ($asrConfigured) {
             $workerArguments += @("--job-type", "transcribe_audio")
@@ -187,6 +196,9 @@ try {
     $workerText = if ($NoWorker) { "worker disabled" } else { "API + local analyze/render worker" }
     if (-not $NoWorker -and $asrConfigured) {
         $workerText += " + configured ASR"
+    }
+    if (-not $NoWorker -and $env:CONTENT_OS_VOICE_QA_ASR_MODEL) {
+        $workerText += " + local Voice QA ASR"
     }
     Write-Host "Content OS running at http://$HostAddress`:$Port ($workerText). Press Ctrl+C to stop."
     while (-not $ApiProcess.HasExited) {

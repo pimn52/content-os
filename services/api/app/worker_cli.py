@@ -6,21 +6,26 @@ import math
 import os
 import signal
 import socket
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from threading import Event
 from typing import Sequence
 
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, ProjectRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, ProjectRepository, TalkingProfileRepository, VoiceProfileRepository
 from app.budget import ProviderCallLedger
 from app.domain.models import JobType
-from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler
+from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler, VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore
 from app.jobs.worker import JobWorker
 from app.media.extraction import FFmpegExtractionService
+from app.media.ffprobe import FFProbeAdapter
+from app.media.audio_importer import AudioImporter
+from app.media.importer import MediaImporter
 from app.media.pipeline import MediaAnalysisPipeline
 from app.media.segmentation import FFmpegSceneDetector
 from app.media.transcripts import ClipTranscriptPersistence
@@ -28,7 +33,9 @@ from app.media.vision_pipeline import MediaVisionPipeline
 from app.providers.asr import ASRConfigurationError, FasterWhisperASRProvider, OpenAICompatibleASRProvider
 from app.providers.embedding import EmbeddingConfigurationError, OpenAICompatibleEmbeddingProvider
 from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigurationError
+from app.providers.latentsync import LatentSyncProvider
 from app.providers.talking import TalkingConfigurationError
+from app.providers.voice import OmniVoiceProvider, VoiceConfigurationError, VoiceConnectionError, VoiceInputError, VoiceProviderResponseError, VoiceTimeout
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
 from app.runtime import resolve_local_executable
@@ -59,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_TALKING, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
+    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_VOICE, JobType.VERIFY_VOICE, JobType.GENERATE_TALKING, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
     parser.add_argument("--ffmpeg", default=resolve_local_executable("ffmpeg"))
     parser.add_argument("--ffprobe", default=resolve_local_executable("ffprobe"))
     return parser
@@ -174,11 +181,227 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             ),
             config.data_root / "renders",
         )
+    if JobType.GENERATE_VOICE in config.job_types:
+        provider = _build_voice_provider(config, db)
+        handlers[JobType.GENERATE_VOICE] = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db),
+            AudioAssetRepository(db),
+            AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
+            provider,
+            config.data_root / "generated",
+            ProviderCallLedger(db),
+        )
+    if JobType.VERIFY_VOICE in config.job_types:
+        qa_model = os.environ.get("CONTENT_OS_VOICE_QA_ASR_MODEL", "").strip()
+        if not qa_model or not Path(qa_model).exists():
+            raise ASRConfigurationError("CONTENT_OS_VOICE_QA_ASR_MODEL must point to a local ASR model directory")
+        qa_provider = FasterWhisperASRProvider(
+            model=qa_model,
+            device=os.environ.get("CONTENT_OS_VOICE_QA_ASR_DEVICE", "cpu"),
+            compute_type=os.environ.get("CONTENT_OS_VOICE_QA_ASR_COMPUTE_TYPE", "int8"),
+            vad_filter=False,
+            word_timestamps=True,
+        )
+        handlers[JobType.VERIFY_VOICE] = VoiceQaJobHandler(
+            AudioAssetRepository(db), qa_provider, ProviderCallLedger(db),
+            provider_name="faster-whisper", provider_model=qa_model,
+            max_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
+            max_leading_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500")),
+        )
     if JobType.GENERATE_TALKING in config.job_types:
-        raise TalkingConfigurationError(
-            "no Talking provider is currently admitted in the Core worker; evaluate candidates in isolation and add an adapter only after the quality gate passes"
+        provider = _build_talking_provider(config)
+        handlers[JobType.GENERATE_TALKING] = TalkingGenerationJobHandler(
+            TalkingProfileRepository(db),
+            AudioAssetRepository(db),
+            AssetRepository(db),
+            MediaImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
+            provider,
+            config.data_root / "generated",
+            ProviderCallLedger(db),
         )
     return JobRunner(store, handlers, worker_id=config.worker_id, lease_duration=timedelta(seconds=config.lease_seconds), heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts)
+
+
+def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvider:
+    """Build the optional local OmniVoice benchmark provider from explicit paths."""
+    provider_kind = os.environ.get("CONTENT_OS_VOICE_PROVIDER", "").strip().lower()
+    if provider_kind != "omnivoice":
+        raise VoiceConfigurationError(
+            "no Voice provider is configured; set CONTENT_OS_VOICE_PROVIDER=omnivoice and its runtime paths before running Voice jobs"
+        )
+
+    def required_file(name: str) -> Path:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            raise VoiceConfigurationError(f"{name} must be supplied for the selected Voice provider")
+        path = Path(value)
+        if not path.is_file():
+            raise VoiceConfigurationError(f"{name} does not point to a local file")
+        return path
+
+    runtime = required_file("CONTENT_OS_OMNIVOICE_PYTHON")
+    model_value = os.environ.get("CONTENT_OS_OMNIVOICE_MODEL", "").strip()
+    if not model_value or not Path(model_value).exists():
+        raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_MODEL must point to a local model snapshot")
+    model = Path(model_value)
+    try:
+        num_step = int(os.environ.get("CONTENT_OS_OMNIVOICE_NUM_STEP", "32"))
+        speed = float(os.environ.get("CONTENT_OS_OMNIVOICE_SPEED", "1.0"))
+        timeout_seconds = float(os.environ.get("CONTENT_OS_OMNIVOICE_TIMEOUT_SECONDS", "900"))
+    except ValueError as exc:
+        raise VoiceConfigurationError("OmniVoice step, speed and timeout settings must be numeric") from exc
+    if num_step < 1 or not math.isfinite(speed) or speed <= 0 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise VoiceConfigurationError("OmniVoice step, speed and timeout settings must be positive")
+
+    clips = ClipRepository(db)
+    assets = AssetRepository(db)
+    ffmpeg = Path(config.ffmpeg)
+
+    def reference_window(clip: object) -> tuple[int, int, str]:
+        """Use one observed spoken interval as the cloning reference.
+
+        Long ordinary clips are valid source material, but feeding an entire
+        minute of speech to OmniVoice can cause it to replay a tail of the
+        reference before starting the requested copy.  The provider boundary
+        may derive a short window from the persisted ASR evidence; Core still
+        stores the original Clip and transcript unchanged.
+        """
+
+        clip_start = int(getattr(clip, "start_ms"))
+        clip_end = int(getattr(clip, "end_ms"))
+        segments = getattr(clip, "transcript_segments", ())
+        for segment in segments:
+            start = getattr(segment, "start_ms", None)
+            end = getattr(segment, "end_ms", None)
+            text_value = getattr(segment, "text", None)
+            if not isinstance(start, int) or not isinstance(end, int) or not isinstance(text_value, str):
+                continue
+            if start < clip_start or end > clip_end or end <= start or not text_value.strip():
+                continue
+            # A single clean sentence is a better reference than replaying a
+            # whole source-led monologue.  Keep the original absolute timing.
+            return start, end, text_value.strip()
+        transcript = getattr(clip, "transcript", None)
+        if not isinstance(transcript, str) or not transcript.strip():
+            raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
+        return clip_start, clip_end, transcript.strip()
+
+    def provider_language(language: str | None) -> str | None:
+        # The public contract uses compact language codes.  OmniVoice accepts
+        # them, but its current CLI/model path is materially more reliable
+        # when Chinese/English are passed as full language names.
+        normalized = language.strip().lower() if isinstance(language, str) and language.strip() else None
+        return {"zh": "Chinese", "en": "English"}.get(normalized, language.strip() if normalized else None)
+
+    def synthesize(profile: object, text: str, target: Path, language: str | None) -> Path:
+        # Resolve the first real Clip only at the worker boundary. This keeps
+        # vendor-specific reference audio/text out of the Core VoiceProfile.
+        reference_ids = getattr(profile, "reference_clip_ids", None)
+        if not reference_ids:
+            raise VoiceInputError("OmniVoice requires at least one consented reference Clip")
+        clip = clips.get(reference_ids[0])
+        if clip is None:
+            raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
+        asset = assets.get(clip.asset_id)
+        if asset is None or not Path(asset.source_file).is_file():
+            raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
+        reference_start_ms, reference_end_ms, reference_text = reference_window(clip)
+        resolved_language = provider_language(language or getattr(profile, "language", None))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="content-os-omnivoice-", dir=str(target.parent)) as temporary:
+            reference_audio = Path(temporary) / "reference.wav"
+            try:
+                extraction = subprocess.run(
+                    [
+                        str(ffmpeg), "-y", "-ss", f"{reference_start_ms / 1000:.3f}", "-i", asset.source_file,
+                        "-t", f"{(reference_end_ms - reference_start_ms) / 1000:.3f}", "-vn", "-ac", "1", "-ar", "24000",
+                        "-c:a", "pcm_s16le", str(reference_audio),
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise VoiceTimeout("reference audio extraction timed out") from exc
+            if extraction.returncode != 0 or not reference_audio.is_file() or reference_audio.stat().st_size == 0:
+                raise VoiceProviderResponseError("OmniVoice reference audio extraction failed")
+            command = [
+                str(runtime), "-m", "omnivoice.cli.infer", "--model", str(model), "--text", text,
+                "--ref_audio", str(reference_audio), "--ref_text", reference_text, "--output", str(target),
+                "--language", resolved_language or "Chinese", "--num_step", str(num_step),
+                "--speed", str(speed), "--device", os.environ.get("CONTENT_OS_OMNIVOICE_DEVICE", "cpu"),
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise VoiceTimeout("local OmniVoice inference timed out") from exc
+            except OSError as exc:
+                raise VoiceConnectionError("local OmniVoice runtime could not be started") from exc
+            if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
+                raise VoiceProviderResponseError("local OmniVoice inference failed")
+        return target
+
+    return OmniVoiceProvider(model=str(model), synthesizer=synthesize)
+
+
+def _build_talking_provider(config: WorkerConfig) -> LatentSyncProvider:
+    """Build an explicitly selected optional Talking provider from runtime env."""
+    provider_kind = os.environ.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
+    if not provider_kind:
+        raise TalkingConfigurationError(
+            "no Talking provider is currently admitted; set CONTENT_OS_TALKING_PROVIDER=latentsync and its runtime paths before running Talking jobs"
+        )
+    if provider_kind != "latentsync":
+        raise TalkingConfigurationError("CONTENT_OS_TALKING_PROVIDER must be latentsync in this revision")
+
+    def required(name: str) -> str:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            raise TalkingConfigurationError(f"{name} must be supplied for the selected Talking provider")
+        return value
+
+    def optional_int(name: str, default: int) -> int:
+        value = os.environ.get(name)
+        if value is None or not value.strip():
+            return default
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise TalkingConfigurationError(f"{name} must be an integer") from exc
+
+    def optional_float(name: str, default: float) -> float:
+        value = os.environ.get(name)
+        if value is None or not value.strip():
+            return default
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise TalkingConfigurationError(f"{name} must be a number") from exc
+
+    return LatentSyncProvider(
+        required("CONTENT_OS_LATENTSYNC_PYTHON"),
+        required("CONTENT_OS_LATENTSYNC_REPO"),
+        required("CONTENT_OS_LATENTSYNC_CHECKPOINT"),
+        model=os.environ.get("CONTENT_OS_TALKING_MODEL", "LatentSync-1.5").strip() or "LatentSync-1.5",
+        runner_path=os.environ.get("CONTENT_OS_LATENTSYNC_RUNNER") or None,
+        unet_config_path=os.environ.get("CONTENT_OS_LATENTSYNC_UNET_CONFIG") or None,
+        # The bundled Remotion FFmpeg is sufficient for most Core media work,
+        # but the LatentSync post-process needs the provider runtime's filter
+        # set (notably ``tpad``). Keep the override at the worker boundary so
+        # the Core/provider contract remains vendor-neutral.
+        ffmpeg_command=os.environ.get("CONTENT_OS_LATENTSYNC_FFMPEG") or config.ffmpeg,
+        inference_steps=optional_int("CONTENT_OS_LATENTSYNC_STEPS", 20),
+        guidance_scale=optional_float("CONTENT_OS_LATENTSYNC_GUIDANCE_SCALE", 1.5),
+        seed=optional_int("CONTENT_OS_LATENTSYNC_SEED", 1247),
+        timeout_seconds=optional_float("CONTENT_OS_LATENTSYNC_TIMEOUT_SECONDS", 900.0),
+    )
 
 
 def run(config: WorkerConfig, *, stop_event: Event | None = None) -> int:

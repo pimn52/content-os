@@ -111,7 +111,7 @@ over systems that regenerate the whole person/video when that regeneration is no
 
 - MuseTalk 1.5 has been **rejected** by U-Talking on ordinary material and is not an admitted product provider.
 - VideoReTalking has been **rejected** by U-Talking on ordinary material: the real run showed severe mouth deformation, blur and local scale/warp artifacts. It is not an admitted product provider and has no Core adapter.
-- LatentSync 1.5 is the active next isolated benchmark candidate in a compatible CUDA environment. Its official README states an 8 GB minimum for inference, so it cannot be run on the current 6 GB laptop GPU. Defer KeySync to a later compatible machine; do not treat either candidate as admitted before the U-Talking gate.
+- LatentSync 1.5 completed the bounded ordinary-material benchmark, and the normal-resolution sample received an acceptable user U-Talking judgment to continue. A minimal optional benchmark-only Core adapter now exists behind explicit runtime paths. Its pinned 1.5 README states a 6.5 GB inference requirement and 256px processing; the current 6 GB laptop GPU relies on an eval-only attention compatibility fallback. The adapter is not a commercial-safe default and LatentSync is not fully admitted for R1 until the integrated 30–60s product gate passes. Defer KeySync to a later compatible machine.
 
 ### Runtime routing
 
@@ -181,7 +181,7 @@ Provider accounting/idempotency, revision invalidation and real media/timeline b
 Maintain provider-neutral Voice jobs/QA. OmniVoice is the benchmark; select a commercial-safe production path later without changing Core contracts.
 
 ### Gate C — Talking
-Benchmark LatentSync 1.5 on ordinary material in a compatible CUDA environment after the VideoReTalking failure. If it fails, defer KeySync to another compatible machine. Admit a provider only after ordinary-material automated evidence plus U-Talking publishability review.
+Benchmark LatentSync 1.5 on ordinary material in a compatible CUDA environment after the VideoReTalking failure, then complete the U-Talking gate on the resulting evidence. The current sample is acceptable to continue, so the optional adapter may be exercised in Gate D. Admit a provider for the mature R1 path only after ordinary-material automated evidence plus U-Talking publishability review.
 
 ### Gate D — Integrated creator flow
 `new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.

@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 type UUID = string;
-type RuntimeCapability = { key: string; status: string; provider: string | null; model: string | null; detail: string };
+type RuntimeCapability = { key: string; status: string; provider: string | null; model: string | null; detail: string; estimated_cost?: { amount: string | null; currency: string | null; note: string | null } | null; constraints?: string[] };
 type RuntimeReadiness = { runtime_ready: boolean; capabilities: RuntimeCapability[] };
 type BudgetResponse = { policy: { currency: string; max_amount: string | null; max_calls: number | null; allow_unknown_cost: boolean } | null; policy_source: string; snapshot: { currency: string; known_amount: string; unknown_cost_calls: number; calls: number; reserved_calls: number }; over_budget: boolean };
 type CostLineItem = { scope: "scene" | "provider" | "render" | "audio"; scene_plan_id: UUID | null; label: string; cost: { category: string; amount: string | null; currency: string | null; provider?: string | null; note?: string | null } };
@@ -21,7 +21,7 @@ type AssetStage = { status: "not_started" | "pending" | "running" | "completed" 
 type AssetReadiness = { asset_id: UUID; stages: Record<string, AssetStage> };
 type JobResponse = { id: UUID; type: string; status: AssetStage["status"]; attempt: number; error_code: string | null; error_message: string | null };
 type AnalysisResultBundle = { id: UUID; input_hash: string; mode: "assisted_test" | "runtime"; source: string; model: string; tool: string; analyzed_at: string; results: unknown[] };
-type AudioAsset = { id: UUID; source_file: string; duration_ms: number; sample_rate: number; channels: number; language: string | null; authorization_reference: string; transcript_source: string | null; transcript_segments: Array<{ start_ms: number; end_ms: number; text: string }> };
+type AudioAsset = { id: UUID; source_file: string; duration_ms: number; sample_rate: number; channels: number; language: string | null; authorization_reference: string; transcript_source: string | null; transcript_segments: Array<{ start_ms: number; end_ms: number; text: string }>; metadata: Record<string, unknown> };
 type ShootTask = { id: UUID; project_id: UUID; scene_plan_id: UUID; scene_id: string; what_to_shoot: string; framing: string; duration_ms: number; requires_speaking: boolean; status: "confirmed" | "fulfilled" | "dismissed"; asset_id: UUID | null; created_at: string; updated_at: string };
 type ScenePlan = { id: UUID; project_id: UUID; scene_id: string; order: number; purpose: string; voice_text: string; duration_target_ms: number; preferred_sources: string[]; fallback_sources: string[]; evidence_refs: string[] };
 type Candidate = { scene_plan_id: UUID; source_kind: string; asset_id: UUID | null; clip_id: UUID | null; match_score: number; why: string[]; recommended: boolean; requires_capture: boolean; estimated_cost: { category: string; amount: string | null; currency: string | null } };
@@ -33,7 +33,7 @@ type ScenePlanResponse = { project_id: UUID; scenes: ScenePlan[]; script: string
 type Opportunity = { id: UUID; source_type: string; source_ref: string; title: string; observed_at: string; fit_reason: string; angle: string; uncertainty: string | null; evidence_refs: string[]; status: string };
 type AccountConnection = { id: UUID; provider: string; account_external_id: string; display_name: string | null; read_only: boolean; connected_at: string; last_synced_at: string | null };
 type HistoricalContent = { id: UUID; account_connection_id: UUID; external_id: string; title: string; published_at: string | null; description: string | null; transcript: string | null; metrics: Record<string, number> };
-type Clip = { id: UUID; asset_id: UUID; start_ms: number; end_ms: number; visual_description: string | null; transcript: string | null };
+type Clip = { id: UUID; asset_id: UUID; start_ms: number; end_ms: number; visual_description: string | null; transcript: string | null; talking_candidate?: boolean; talking_reference_assessment?: Record<string, unknown> | null };
 type ConsentRecord = { subject_name: string; basis: "self" | "explicit_authorization"; confirmed: boolean; confirmed_at: string; authorization_reference?: string | null };
 type VoiceProfile = { id: UUID; name: string; provider: string; provider_profile_id: string; reference_clip_ids: UUID[]; consent: ConsentRecord; language: string | null; created_at: string };
 type TalkingProfile = { id: UUID; name: string; provider: string; provider_profile_id: string | null; reference_clip_ids: UUID[]; consent: ConsentRecord; created_at: string };
@@ -80,6 +80,14 @@ function sourceEndWarning(spec: VideoSpec | null): string | null {
   return visual.clip_end_ms >= visual.source_duration_ms - 1_500
     ? "末场已接近原文件末尾，没有后续真实语音可补完；若听感不完整，请绑定新旁白或重新选择结尾镜头。"
     : null;
+}
+function voiceGenerationFor(audio: AudioAsset): Record<string, unknown> | null {
+  const generation = audio.metadata?.voice_generation;
+  return generation && typeof generation === "object" && !Array.isArray(generation) ? generation as Record<string, unknown> : null;
+}
+function isVoiceQaCandidate(audio: AudioAsset): boolean {
+  const generation = voiceGenerationFor(audio);
+  return Boolean(generation && (generation.qa_state === "pending" || generation.qa_state === "failed"));
 }
 function downloadBlob(filename: string, content: BlobPart, type: string): void {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -130,6 +138,10 @@ function App() {
   const [budgetAmount, setBudgetAmount] = useState("");
   const [budgetCalls, setBudgetCalls] = useState("");
   const [allowUnknownCost, setAllowUnknownCost] = useState(false);
+  const [voiceJob, setVoiceJob] = useState<JobResponse | null>(null);
+  const [voiceQaJob, setVoiceQaJob] = useState<JobResponse | null>(null);
+  const [voiceQaText, setVoiceQaText] = useState("");
+  const [talkingJob, setTalkingJob] = useState<JobResponse | null>(null);
   const latestProjectId = useRef<UUID | null>(null);
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? null, [projects, selectedProjectId]);
@@ -521,6 +533,65 @@ function App() {
     try { await api<VoiceProfile | TalkingProfile>(talking ? "/talking-profiles" : "/voice-profiles", { method: "POST", body: JSON.stringify(body) }); await loadAll(); formElement.reset(); setMessage({ text: talking ? "Talking Profile 注册记录已保存" : "Voice Profile 注册记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Profile 保存失败", error: true }); } finally { setBusy(false); }
   }
 
+  async function waitForJob(jobId: UUID): Promise<JobResponse> {
+    for (let attempt = 0; attempt < 1_800; attempt += 1) {
+      const job = await api<JobResponse>(`/jobs/${jobId}`);
+      if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return job;
+      await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+    }
+    throw new Error("本地 Job 等待超时；可在后台继续运行后重新加载查看状态");
+  }
+
+  async function enqueueVoiceGeneration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedProject) return; setBusy(true);
+    const form = new FormData(event.currentTarget);
+    try {
+      const job = await api<JobResponse>(`/projects/${selectedProject.id}/voice-jobs`, { method: "POST", body: JSON.stringify({
+        idempotency_key: `web-voice:${selectedProject.id}:${Date.now()}`,
+        voice_profile_id: String(form.get("voice_profile_id")), text: String(form.get("text")),
+        authorization_reference: String(form.get("authorization_reference")), language: String(form.get("language") ?? "") || null,
+      }) });
+      setVoiceJob(job); setMessage({ text: "OmniVoice 已入队；Worker 完成后会刷新本地录音，随后必须单独完成真实 ASR/文案 QA" });
+      const completed = await waitForJob(job.id); setVoiceJob(completed); await loadAll();
+      if (completed.status !== "completed") throw new Error(completed.error_code || "Voice Job 未完成");
+      setMessage({ text: "新声音已生成并导入本地库，但仍是 QA pending；通过真实文案/静音/可播放检查后才能用于 Talking" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Voice Job 失败", error: true }); }
+    finally { setBusy(false); }
+  }
+
+  async function enqueueVoiceQa(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedProject) return; setBusy(true);
+    const form = new FormData(event.currentTarget);
+    try {
+      const job = await api<JobResponse>(`/projects/${selectedProject.id}/voice-qa-jobs`, { method: "POST", body: JSON.stringify({
+        idempotency_key: `web-voice-qa:${selectedProject.id}:${Date.now()}`,
+        narration_audio_id: String(form.get("narration_audio_id")), target_text: String(form.get("target_text")),
+      }) });
+      setVoiceQaJob(job); setMessage({ text: "Voice QA 已入队；Worker 将用独立本地 ASR 检查文案、时长、静音和可播放性" });
+      const completed = await waitForJob(job.id); setVoiceQaJob(completed); await loadAll();
+      if (completed.status !== "completed") throw new Error(completed.error_code || "Voice QA 未通过");
+      setMessage({ text: "Voice QA 已通过；现在才允许将这条新旁白提交给 Talking" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Voice QA 失败", error: true }); }
+    finally { setBusy(false); }
+  }
+
+  async function enqueueTalkingGeneration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedProject) return; setBusy(true);
+    const form = new FormData(event.currentTarget);
+    try {
+      const job = await api<JobResponse>(`/projects/${selectedProject.id}/talking-jobs`, { method: "POST", body: JSON.stringify({
+        idempotency_key: `web-talking:${selectedProject.id}:${Date.now()}`,
+        talking_profile_id: String(form.get("talking_profile_id")), reference_clip_id: String(form.get("reference_clip_id")),
+        narration_audio_id: String(form.get("narration_audio_id")), authorization_reference: String(form.get("authorization_reference")),
+      }) });
+      setTalkingJob(job); setMessage({ text: "LatentSync Talking 已入队；本地 Worker 将使用授权普通素材与已通过 Voice QA 的新旁白" });
+      const completed = await waitForJob(job.id); setTalkingJob(completed); await loadAll();
+      if (completed.status !== "completed") throw new Error(completed.error_code || "Talking Job 未完成");
+      setMessage({ text: "新 Talking 已导入本地素材库；请先完成独立播放/时长/文案 QA，再进行视觉与口型 U-Talking 审核" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Talking Job 失败", error: true }); }
+    finally { setBusy(false); }
+  }
+
   async function recordPublication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selectedProject) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
     try { await api<Publication>(`/projects/${selectedProject.id}/publications`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), platform: String(form.get("platform")), published_at: dateValue(form.get("published_at")), content_url: String(form.get("content_url") ?? "") || null, content_external_id: String(form.get("content_external_id") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")), metric_source: String(form.get("metric_source") ?? "") || null, observation_window_days: String(form.get("observation_window_days") ?? "") ? Number(form.get("observation_window_days")) : null }) }); await refreshProject(selectedProject.id); formElement.reset(); setMessage({ text: "人工发布记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "发布记录保存失败", error: true }); } finally { setBusy(false); }
@@ -727,13 +798,14 @@ function App() {
         {routes.length > 0 && <div className="cost-actions"><button disabled={busy} className="button" onClick={() => void reduceCostProject()}>按低成本替代方案</button><small className="muted">只比较当前候选；未知价格不会被当作便宜，应用后仍需审核匹配度。</small></div>}
         {draft && <div className="draft-editor"><label>脚本 / 旁白稿（可选）<textarea value={draft.script ?? ""} onChange={(event) => updateDraftScript(event.target.value)} placeholder="可以先写要表达的观点；留空时由模型生成可编辑文案。" /></label><button disabled={busy} className="button" onClick={() => void saveDraftText()}>保存稿件</button><small className="muted">服务端会记录稿件与 IP 证据版本；编辑脚本、场景文案或 IP 后，旧计划、候选和渲染都会失效，不能被旧标签页重新提交。</small>{draft.invalidation_reasons.length > 0 && <small className="error">已失效：{draft.invalidation_reasons.join("、")}；请重新生成后续结果。</small>}</div>}
         {draft?.scenes.length ? <div className="draft-editor"><label>完整本人新旁白（主时间线）<select value={masterNarrationAssetId ?? ""} onChange={(event) => { setMasterNarrationAssetId(event.target.value || null); setNarrationAssetIds({}); setVideoSpec(null); invalidateProjectRender(); }}><option value="">选择一条完整、已授权的旁白</option>{audioAssets.map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s · {audio.transcript_source ? "已对齐" : "缺时间轴"}</option>)}</select></label><small className="muted">只选一次完整录音：系统按真实 SRT/VTT 或后续生成 Provider 的对齐时间戳自动分配场景、字幕和镜头；不会要求你手工拆音频，也不会把无时间轴录音伪装成已对齐。</small></div> : null}
+        {selectedProject && <div className="columns compact job-panel"><form onSubmit={(event) => void enqueueVoiceGeneration(event)}><h3>生成本人新声音（可选本地 benchmark）</h3><label>Voice Profile<select name="voice_profile_id" required disabled={!voiceProfiles.length}><option value="">选择已授权 Voice Profile</option>{voiceProfiles.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider}</option>)}</select></label><label>新旁白文案<textarea name="text" required placeholder="输入本项目要说的新内容" /></label><Field label="授权记录引用" name="authorization_reference" placeholder="u1-20260913-biyingjie-tim-internal" /><Field label="语言（可选）" name="language" placeholder="zh" /><button disabled={busy || !voiceProfiles.length} className="button">提交 Voice Job</button><small className="muted">仅在 readiness 显示可用且 Worker 已配置时执行；生成结果仍必须经过真实 ASR、文案覆盖、静音和可播放 QA。</small>{voiceJob && <small className={voiceJob.status === "failed" ? "error" : "muted"}>最近 Voice Job：{voiceJob.status}{voiceJob.error_code ? ` · ${voiceJob.error_code}` : ""}</small>}</form><form onSubmit={(event) => void enqueueVoiceQa(event)}><h3>独立 Voice QA（本地真实 ASR）</h3><label>待 QA 的新旁白<select name="narration_audio_id" required disabled={!audioAssets.some(isVoiceQaCandidate)} onChange={(event) => { const audio = audioAssets.find((item) => item.id === event.target.value); const generation = audio ? voiceGenerationFor(audio) : null; setVoiceQaText(typeof generation?.target_text === "string" ? generation.target_text : ""); }}><option value="">选择待 QA 录音</option>{audioAssets.filter(isVoiceQaCandidate).map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label><label>生成时的目标文案<textarea name="target_text" required value={voiceQaText} onChange={(event) => setVoiceQaText(event.target.value)} placeholder="选择录音后自动带出；仅用于核对，不作为 ASR 结果" /></label><button disabled={busy || !audioAssets.some(isVoiceQaCandidate)} className="button">提交 Voice QA Job</button><small className="muted">必须用独立 ASR 读取生成文件；目标文案不能替代观察到的转写。{voiceQaJob && ` 最近 Voice QA：${voiceQaJob.status}${voiceQaJob.error_code ? ` · ${voiceQaJob.error_code}` : ""}`}</small></form><form onSubmit={(event) => void enqueueTalkingGeneration(event)}><h3>生成本人 Talking / 口型片段</h3><label>Talking Profile<select name="talking_profile_id" required disabled={!talkingProfiles.length}><option value="">选择已授权 Talking Profile</option>{talkingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider}</option>)}</select></label><label>参考 Clip<select name="reference_clip_id" required disabled={!clips.length}><option value="">选择已观察评估的普通素材 Clip</option>{clips.filter((clip) => Boolean(clip.transcript && clip.end_ms - clip.start_ms >= 3000 && (clip.talking_candidate === true || clip.talking_reference_assessment))).map((clip) => <option key={clip.id} value={clip.id}>{clip.id} · {Math.round((clip.end_ms - clip.start_ms) / 1000)}s</option>)}</select></label><label>已通过 QA 的新旁白<select name="narration_audio_id" required disabled={!audioAssets.some((audio) => { const generation = voiceGenerationFor(audio); return generation?.qa_state === "verified"; })}><option value="">选择 Voice QA verified 录音</option>{audioAssets.filter((audio) => voiceGenerationFor(audio)?.qa_state === "verified").map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label><Field label="授权记录引用" name="authorization_reference" placeholder="u1-20260913-biyingjie-tim-internal" /><button disabled={busy || !talkingProfiles.length || !clips.some((clip) => Boolean(clip.transcript && clip.end_ms - clip.start_ms >= 3000 && (clip.talking_candidate === true || clip.talking_reference_assessment))) || !audioAssets.some((audio) => voiceGenerationFor(audio)?.qa_state === "verified")} className="button">提交 Talking Job</button><small className="muted">只接受 Voice QA verified 的新旁白；视觉身份、自然度、口型和结尾神态仍需 U-Talking 人审。</small>{talkingJob && <small className={talkingJob.status === "failed" ? "error" : "muted"}>最近 Talking Job：{talkingJob.status}{talkingJob.error_code ? ` · ${talkingJob.error_code}` : ""}</small>}</form></div>}
           {draft?.scenes.length ? <div className="scene-list">{draft.scenes.map((scene) => <article className="scene" key={scene.id}><div className="row-between"><div><span className="scene-number">{String(scene.order + 1).padStart(2, "0")}</span><strong>{scene.purpose}</strong><label className="scene-script">场景文案<textarea value={scene.voice_text} onChange={(event) => updateSceneVoiceText(scene.id, event.target.value)} rows={3} /></label></div><span className="badge">{scene.duration_target_ms}ms</span></div><div className="candidates">{(routes.find((route) => route.scene_plan_id === scene.id)?.candidates ?? []).map((candidate, index) => <button key={`${candidate.scene_plan_id}-${candidate.asset_id ?? candidate.source_kind}-${index}`} className={`candidate ${selections[scene.id] === candidate ? "selected" : ""}`} onClick={() => selectCandidate(candidate)}><span><b>{index + 1}. {candidate.source_kind}</b><small>{candidate.why.join(" · ")}</small></span><span className="candidate-score">{Math.round(candidate.match_score * 100)}%</span></button>)}{!routes.find((route) => route.scene_plan_id === scene.id) && <p className="muted">点击“查找候选”开始。</p>}</div></article>)}</div> : <div className="empty-state"><strong>从主题开始</strong><p>输入主题后生成 ScenePlan；系统会读取当前 IP、选题证据和素材摘要。</p></div>}
           {routes.length > 0 && <section className="shoot-list" aria-label="Shoot List"><div className="row-between"><div><span className="kicker">OPTIONAL / CAPTURE GAP</span><h3>补拍清单</h3></div><span className="badge">可选，不阻断制作</span></div>{shootList.length > 0 ? shootList.map((item) => { const task = shootTasks.find((value) => value.scene_plan_id === item.scene_plan_id); return <article className="shoot-item" key={`${item.scene_plan_id}-${item.scene_id}`}><div className="row-between"><strong>场景 {item.scene_id}</strong><span className="badge">至少 {Math.ceil(item.duration_ms / 1000)} 秒</span></div><p><b>拍什么：</b>{item.what_to_shoot}</p><p><b>机位：</b>{item.framing}</p><p><b>是否需说话：</b>{item.requires_speaking ? "是" : "否"}</p><small>{item.speaking_note}</small><small>{item.fallback}</small><div className="shoot-actions">{task?.status === "fulfilled" ? <span className="ok">已上传并绑定补拍视频</span> : task?.status === "confirmed" ? <><span className="muted">已确认，等待上传</span><button disabled={busy} className="button" onClick={() => void dismissShootTask(item)}>不补拍，使用替代</button></> : task?.status === "dismissed" ? <button disabled={busy} className="button" onClick={() => void confirmShootTask(item)}>恢复补拍</button> : <button disabled={busy} className="button primary" onClick={() => void confirmShootTask(item)}>确认补拍</button>}</div></article>; }) : <p className="muted">当前候选没有需要补拍的场景；出现素材缺口时，这里会给出可执行建议。</p>}</section>}
           {videoSpec && <div className="result-panel"><strong>{isNarratedSpec(videoSpec) ? "新旁白 VideoSpec" : "Source-led VideoSpec"}</strong><span>{videoSpec.scenes.length} 个场景 · 可本地渲染</span>{sourceEndWarning(videoSpec) && <small className="error">{sourceEndWarning(videoSpec)}</small>}</div>}{renderUrl && <><video className="render-preview" controls src={renderUrl} /><div className="export-actions"><a className="button primary" href={renderUrl} download={`${selectedProject.title || "content-os"}.mp4`}>下载 MP4</a><button disabled={busy || !draft} className="button" onClick={exportDraftCover}>下载基础封面</button><button disabled={busy || !draft} className="button" onClick={exportDraftText}>下载文案</button><button disabled={busy} className="button" onClick={() => void recordRenderedUsage()}>确认导出并记录素材使用</button></div><small className="muted">MP4、封面和文案均先下载到本机；只有点击确认后才记录素材 production usage。预览、失败和重试不计入使用。</small></>}
           {costEstimate && (routes.length > 0 || costEstimate.required_scene_count > 0) && <section className="cost-panel" aria-label="项目成本估价"><div className="row-between"><div><span className="kicker">BEFORE EXECUTION</span><h3>项目执行前成本估价</h3></div><span className="badge">不自动扣费</span></div><div className="cost-total"><strong>{costEstimate.known_amount} {costEstimate.currency}</strong><span>已知金额 · 已选 {costEstimate.selected_scene_count}/{costEstimate.required_scene_count} 个场景</span></div>{costEstimate.unknown_cost_count > 0 && <p className="error">另有 {costEstimate.unknown_cost_count} 项价格未知；系统不会按 0 计入，需明确价格或显式允许未知成本后才会执行 Provider 调用。</p>}{costEstimate.line_items.length > 0 && <div className="cost-lines">{costEstimate.line_items.map((item, index) => <div className="cost-line" key={`${item.label}-${index}`}><span>{item.label}</span><span>{costLabel(item.cost)}</span></div>)}</div>}{costEstimate.selected_scene_count < costEstimate.required_scene_count && <small className="muted">完成所有场景选片后才会加入本地渲染项；当前摘要仅覆盖已确认的场景。</small>}</section>}
         </div>}
       </section>
-      <section className="card"><div className="section-heading"><div><span className="kicker">05 / READINESS</span><h2>运行能力与预算</h2></div><span className="badge">不探测外部服务</span></div><div className="columns compact"><div className="capability-grid">{(readiness?.capabilities ?? []).map((capability) => <div className="capability" key={capability.key}><div className="row-between"><strong>{capability.key}</strong><span className={capability.status === "ready" ? "ok" : capability.status === "not_developed" ? "muted" : "error"}>{prettyStatus(capability.status)}</span></div><small>{capability.detail}{capability.model ? ` · ${capability.model}` : ""}</small></div>)}</div><form onSubmit={(event) => void saveBudget(event)}><h3>一次设置运行预算</h3><label>金额上限（USD，可留空）<input value={budgetAmount} onChange={(event) => setBudgetAmount(event.target.value)} inputMode="decimal" placeholder="例如 5.00" /></label><label>调用次数上限（可留空）<input value={budgetCalls} onChange={(event) => setBudgetCalls(event.target.value)} inputMode="numeric" placeholder="例如 20" /></label><label className="checkbox-line"><input type="checkbox" checked={allowUnknownCost} onChange={(event) => setAllowUnknownCost(event.target.checked)} /> 允许 Provider 未返回账单金额</label><button disabled={busy} className="button primary">保存预算策略</button><small className="muted">当前：{budget?.snapshot.calls ?? 0} 次调用 · 已知金额 {budget?.snapshot.known_amount ?? "0"} {budget?.snapshot.currency ?? "USD"} · 未知金额 {budget?.snapshot.unknown_cost_calls ?? 0} 次。Provider 调用仍会记录成功/失败和未知成本。</small></form></div></section>
+      <section className="card"><div className="section-heading"><div><span className="kicker">05 / READINESS</span><h2>运行能力与预算</h2></div><span className="badge">不探测外部服务</span></div><div className="columns compact"><div className="capability-grid">{(readiness?.capabilities ?? []).map((capability) => <div className="capability" key={capability.key}><div className="row-between"><strong>{capability.key}</strong><span className={capability.status === "ready" ? "ok" : capability.status === "not_developed" ? "muted" : "error"}>{prettyStatus(capability.status)}</span></div><small>{capability.detail}{capability.model ? ` · ${capability.model}` : ""}</small>{capability.estimated_cost?.amount !== null && capability.estimated_cost?.amount !== undefined ? <small className="muted">成本：{capability.estimated_cost.amount} {capability.estimated_cost.currency ?? ""}{capability.estimated_cost.note ? ` · ${capability.estimated_cost.note}` : ""}</small> : null}{capability.constraints?.length ? <small className="muted">约束：{capability.constraints.join(" · ")}</small> : null}</div>)}</div><form onSubmit={(event) => void saveBudget(event)}><h3>一次设置运行预算</h3><label>金额上限（USD，可留空）<input value={budgetAmount} onChange={(event) => setBudgetAmount(event.target.value)} inputMode="decimal" placeholder="例如 5.00" /></label><label>调用次数上限（可留空）<input value={budgetCalls} onChange={(event) => setBudgetCalls(event.target.value)} inputMode="numeric" placeholder="例如 20" /></label><label className="checkbox-line"><input type="checkbox" checked={allowUnknownCost} onChange={(event) => setAllowUnknownCost(event.target.checked)} /> 允许 Provider 未返回账单金额</label><button disabled={busy} className="button primary">保存预算策略</button><small className="muted">当前：{budget?.snapshot.calls ?? 0} 次调用 · 已知金额 {budget?.snapshot.known_amount ?? "0"} {budget?.snapshot.currency ?? "USD"} · 未知金额 {budget?.snapshot.unknown_cost_calls ?? 0} 次。Provider 调用仍会记录成功/失败和未知成本。</small></form></div></section>
       <section className="card"><div className="section-heading"><div><span className="kicker">06 / INTELLIGENCE</span><h2>账号、历史与声音</h2></div><span className="badge">只读 / consent-gated</span></div>
         <div className="columns compact">
           <div><form onSubmit={(event) => void createAccount(event)}><h3>只读账号记录</h3><Field label="Provider" name="provider" placeholder="youtube" /><Field label="账号外部 ID" name="account_external_id" placeholder="channel-id" /><Field label="显示名称" name="display_name" placeholder="我的频道" /><label>记录时间<input name="connected_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} required /></label><button disabled={busy} className="button primary">保存账号</button></form><div className="asset-list">{accounts.map((account) => <div className="asset-row" key={account.id}><div><strong>{account.display_name || account.account_external_id}</strong><small>{account.provider} · {account.read_only ? "只读" : "请检查权限"}</small></div><span className="badge">历史 {historicalContent.filter((item) => item.account_connection_id === account.id).length}</span></div>)}{accounts.length === 0 && <p className="muted">尚无账号连接；不会在此保存令牌。</p>}</div></div>

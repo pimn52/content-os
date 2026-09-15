@@ -5,8 +5,18 @@ import importlib.util
 import os
 import shutil
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Mapping
+
+from app.domain.models import CostCategory, UsageCost
+
+from app.providers.latentsync import (
+    LATENTSYNC_MODEL,
+    LATENTSYNC_PROCESSING_RESOLUTION_PX,
+    LATENTSYNC_PROVIDER,
+    LATENTSYNC_STATED_MINIMUM_VRAM_GB,
+)
 
 CapabilityStatus = str
 
@@ -17,6 +27,8 @@ class RuntimeCapability:
     provider: str | None
     model: str | None
     detail: str
+    estimated_cost: UsageCost | None = None
+    constraints: tuple[str, ...] = ()
 
 def resolve_local_executable(
     name: str,
@@ -127,13 +139,57 @@ def inspect_runtime_capabilities(
         asr = RuntimeCapability("asr", "unavailable", asr_provider, selected_model("CONTENT_OS_ASR_MODEL", "CONTENT_OS_ASR_LOCAL_MODEL"), "CONTENT_OS_ASR_PROVIDER must be local or openai-compatible")
 
     selected_talking = values.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
-    if selected_talking:
+    if selected_talking == LATENTSYNC_PROVIDER:
+        talking_model = selected_model("CONTENT_OS_TALKING_MODEL") or LATENTSYNC_MODEL
+        estimated_cost = UsageCost(
+            category=CostCategory.TALKING,
+            amount=Decimal("0"),
+            currency="USD",
+            provider=LATENTSYNC_PROVIDER,
+            note="local inference; no external provider charge",
+        )
+        repo_value = values.get("CONTENT_OS_LATENTSYNC_REPO", "").strip()
+        checkpoint_value = values.get("CONTENT_OS_LATENTSYNC_CHECKPOINT", "").strip()
+        python_value = values.get("CONTENT_OS_LATENTSYNC_PYTHON", "").strip()
+        repo_path = Path(repo_value) if repo_value else None
+        runner_path = Path(values.get("CONTENT_OS_LATENTSYNC_RUNNER", "").strip() or (repo_path / "scripts" / "inference.py" if repo_path else ""))
+        config_path = Path(values.get("CONTENT_OS_LATENTSYNC_UNET_CONFIG", "").strip() or (repo_path / "configs" / "unet" / "stage2.yaml" if repo_path else ""))
+        missing_talking = []
+        if not python_value or not (Path(python_value).is_file() or locate(python_value) is not None):
+            missing_talking.append("Python runtime")
+        if repo_path is None or not repo_path.is_dir():
+            missing_talking.append("repository")
+        if not checkpoint_value or not Path(checkpoint_value).is_file():
+            missing_talking.append("checkpoint")
+        if not runner_path.is_file():
+            missing_talking.append("runner")
+        if not config_path.is_file():
+            missing_talking.append("U-Net config")
+        talking = RuntimeCapability(
+            "talking",
+            "ready" if not missing_talking else "unavailable",
+            LATENTSYNC_PROVIDER,
+            talking_model,
+            (
+                "local LatentSync 1.5 is configured; readiness checks paths only and sends no inference request"
+                if not missing_talking
+                else f"LatentSync 1.5 is selected but missing local runtime item(s): {', '.join(missing_talking)}"
+            ),
+            estimated_cost,
+            (
+                f"processing_resolution={LATENTSYNC_PROCESSING_RESOLUTION_PX}px",
+                f"stated_minimum_vram={LATENTSYNC_STATED_MINIMUM_VRAM_GB:g}GB",
+                "official benchmark weights are non-commercial",
+                "no inference probe request sent",
+            ),
+        )
+    elif selected_talking:
         talking = RuntimeCapability(
             "talking",
             "unavailable",
             selected_talking,
             selected_model("CONTENT_OS_TALKING_MODEL"),
-            "selected Talking provider has no admitted Core adapter in this revision",
+            "selected Talking provider is not implemented in this revision",
         )
     else:
         talking = RuntimeCapability(
@@ -142,6 +198,80 @@ def inspect_runtime_capabilities(
             None,
             None,
             "no Talking provider is currently admitted/configured in Core; candidates are evaluated in isolation before adapter admission",
+        )
+
+    selected_voice = values.get("CONTENT_OS_VOICE_PROVIDER", "").strip().lower()
+    if selected_voice == "omnivoice":
+        voice_model = selected_model("CONTENT_OS_OMNIVOICE_MODEL") or "official-pretrained"
+        voice_python = values.get("CONTENT_OS_OMNIVOICE_PYTHON", "").strip()
+        voice_checkpoint = values.get("CONTENT_OS_OMNIVOICE_MODEL", "").strip()
+        missing_voice = []
+        if not voice_python or not (Path(voice_python).is_file() or locate(voice_python) is not None):
+            missing_voice.append("Python runtime")
+        if not voice_checkpoint or not Path(voice_checkpoint).exists():
+            missing_voice.append("model snapshot")
+        voice = RuntimeCapability(
+            "tts",
+            "ready" if not missing_voice else "unavailable",
+            "omnivoice",
+            voice_model,
+            (
+                "local OmniVoice benchmark is configured; readiness checks paths only and sends no inference request"
+                if not missing_voice
+                else f"OmniVoice is selected but missing local runtime item(s): {', '.join(missing_voice)}"
+            ),
+            UsageCost(
+                category=CostCategory.VOICE,
+                amount=Decimal("0"),
+                currency="USD",
+                provider="omnivoice",
+                note="local benchmark inference; no external provider charge",
+            ),
+            (
+                "official pretrained weights are non-commercial",
+                "reference Clip must have a real transcript",
+                "no inference probe request sent",
+            ),
+        )
+    elif selected_voice:
+        voice = RuntimeCapability(
+            "tts",
+            "unavailable",
+            selected_voice,
+            selected_model("CONTENT_OS_VOICE_MODEL"),
+            "selected Voice provider is not implemented in this revision",
+        )
+    else:
+        voice = RuntimeCapability("tts", "not_developed", None, None, "no optional Voice benchmark provider is configured")
+
+    qa_model = values.get("CONTENT_OS_VOICE_QA_ASR_MODEL", "").strip()
+    if not qa_model:
+        voice_qa = RuntimeCapability(
+            "voice_qa", "provider_not_configured", "faster-whisper", None,
+            "local Voice QA ASR is not configured; generated narration remains QA-pending",
+        )
+    elif importlib.util.find_spec("faster_whisper") is None:
+        voice_qa = RuntimeCapability(
+            "voice_qa", "unavailable", "faster-whisper", qa_model,
+            "Voice QA selected but optional faster-whisper is not installed",
+        )
+    elif not Path(qa_model).exists():
+        voice_qa = RuntimeCapability(
+            "voice_qa", "unavailable", "faster-whisper", qa_model,
+            "Voice QA is selected but the local ASR model directory is missing",
+        )
+    else:
+        voice_qa = RuntimeCapability(
+            "voice_qa", "ready", "faster-whisper", qa_model,
+            "local real-ASR Voice QA is configured; readiness checks paths only and sends no inference request",
+            UsageCost(
+                category=CostCategory.ASR,
+                amount=Decimal("0"),
+                currency="USD",
+                provider="faster-whisper",
+                note="local QA inference; no external provider charge",
+            ),
+            ("independent ASR evidence is required before Talking", "no inference probe request sent"),
         )
 
     return (
@@ -164,7 +294,8 @@ def inspect_runtime_capabilities(
         ),
         embedding,
         retrieval,
-        RuntimeCapability("tts", "not_developed", None, None, "no commercial-safe default Voice runtime is admitted yet"),
+        voice,
+        voice_qa,
         talking,
         RuntimeCapability("publishing", "not_developed", None, None, "automatic publishing is not enabled; use the manual publication record flow"),
     )

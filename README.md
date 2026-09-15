@@ -86,6 +86,59 @@ $env:CONTENT_OS_ASR_COMPUTE_TYPE = "int8"
 
 Model weights are not bundled in the base installation.
 
+## Optional local Talking / LatentSync 1.5
+
+LatentSync is an optional local benchmark adapter for ordinary authorized
+creator footage. It does not download a model automatically and is not a
+commercial-safe default because the official benchmark weights are
+non-commercial. Configure it only for an explicit Talking worker run:
+
+```powershell
+$env:CONTENT_OS_TALKING_PROVIDER = "latentsync"
+$env:CONTENT_OS_LATENTSYNC_PYTHON = "C:\path\to\latentsync-runtime\python.exe"
+$env:CONTENT_OS_LATENTSYNC_REPO = "C:\path\to\LatentSync"
+$env:CONTENT_OS_LATENTSYNC_CHECKPOINT = "C:\path\to\latentsync_unet.pt"
+# Recommended when the bundled FFmpeg lacks the tpad filter used for output normalization.
+$env:CONTENT_OS_LATENTSYNC_FFMPEG = "C:\path\to\latentsync-runtime\Library\bin\ffmpeg.exe"
+.\scripts\start-worker.ps1 --job-type generate_talking
+```
+
+The optional `CONTENT_OS_LATENTSYNC_RUNNER` and
+`CONTENT_OS_LATENTSYNC_UNET_CONFIG` variables override the official runner
+and U-Net config when a compatible local wrapper is required.
+`CONTENT_OS_LATENTSYNC_FFMPEG` selects the provider runtime's FFmpeg for
+staging, audio preparation and output duration normalization; this is needed
+when the general-purpose bundled FFmpeg does not include `tpad`. Optional
+`CONTENT_OS_LATENTSYNC_STEPS`, `CONTENT_OS_LATENTSYNC_GUIDANCE_SCALE`,
+`CONTENT_OS_LATENTSYNC_SEED` and `CONTENT_OS_LATENTSYNC_TIMEOUT_SECONDS`
+control bounded inference settings. Readiness checks local paths only; local
+inference is recorded as USD 0 external cost, while the provider-call ledger
+still records the operation.
+
+## Optional local Voice / OmniVoice benchmark
+
+The formal UI can enqueue a local OmniVoice Voice Job when the benchmark
+runtime and model snapshot are explicitly configured. The worker resolves the
+first consented reference Clip and extracts its real audio/transcript; it does
+not accept a path or text from an untrusted profile field and does not download
+weights automatically:
+
+```powershell
+$env:CONTENT_OS_VOICE_PROVIDER = "omnivoice"
+$env:CONTENT_OS_OMNIVOICE_PYTHON = "C:\path\to\omnivoice-runtime\Scripts\python.exe"
+$env:CONTENT_OS_OMNIVOICE_MODEL = "C:\path\to\models--k2-fsa--OmniVoice\snapshots\<revision>"
+$env:CONTENT_OS_OMNIVOICE_DEVICE = "cuda" # use "cpu" only when CUDA is unavailable
+$env:CONTENT_OS_VOICE_QA_ASR_MODEL = "C:\path\to\faster-whisper-small\snapshot"
+.\scripts\start.ps1
+```
+
+OmniVoice remains a non-commercial benchmark because its official pretrained
+weights are CC-BY-NC. Generated audio stays QA-pending until independent real
+ASR verifies copy coverage, silence, timing and playability; only then can the
+Talking form use it. Setting `CONTENT_OS_VOICE_QA_ASR_MODEL` enables the local
+`verify_voice` worker and the UI's separate Voice QA Job; it must point to an
+already-downloaded local model directory and never downloads weights implicitly.
+
 ## Repository map
 
 ```text

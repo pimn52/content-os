@@ -20,6 +20,7 @@ from app.domain.models import (
     ScenePlan,
     SourceKind,
     TranscriptSegment,
+    VerticalReframeMode,
     UsageCost,
     VideoCaption,
     VideoScene,
@@ -252,6 +253,7 @@ class VideoSpecAssembler:
                 if source_interval_aligned
                 else milliseconds_to_frames(duration_ms, project.fps)
             )
+            vertical_reframe_mode, vertical_reframe_evidence, source_bottom_crop_ratio = _talking_visual_treatment(asset)
             visual = VideoVisual(
                 source_kind=asset.source_kind,
                 authorization_reference=asset.authorization_reference,
@@ -260,6 +262,9 @@ class VideoSpecAssembler:
                 clip_start_ms=clip_start_ms,
                 clip_end_ms=clip_end_ms,
                 source_duration_ms=asset.duration_ms,
+                vertical_reframe_mode=vertical_reframe_mode,
+                vertical_reframe_evidence_reference=vertical_reframe_evidence,
+                source_bottom_crop_ratio=source_bottom_crop_ratio,
             )
             video_scenes.append(VideoScene(
                 scene_id=scene.scene_id,
@@ -535,6 +540,21 @@ def _require_generated_voice_qa(audio: AudioAsset) -> None:
         raise GeneratedNarrationQaPending(
             "generated voice narration requires verified copy, duration, silence and playability QA before final assembly"
         )
+
+
+def _talking_visual_treatment(asset: Asset) -> tuple[VerticalReframeMode, str | None, float]:
+    """Carry an evidence-backed reference subtitle treatment into render."""
+    if asset.source_kind is not SourceKind.AI_VIDEO:
+        return VerticalReframeMode.CONTAIN, None, 0
+    generation = asset.metadata.get("talking_generation")
+    if not isinstance(generation, dict):
+        return VerticalReframeMode.CONTAIN, None, 0
+    raw_ratio = generation.get("reference_subtitle_crop_bottom_ratio")
+    if isinstance(raw_ratio, bool) or not isinstance(raw_ratio, (int, float)) or not 0 < float(raw_ratio) <= 0.4:
+        return VerticalReframeMode.CONTAIN, None, 0
+    job_id = generation.get("job_id")
+    evidence = f"talking-generation:{job_id}" if isinstance(job_id, str) and job_id else "talking-generation:reference-subtitle-review"
+    return VerticalReframeMode.CENTER_CROP, evidence[:500], float(raw_ratio)
 
 
 def milliseconds_to_frames(duration_ms: int, fps: RationalFps) -> int:

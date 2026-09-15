@@ -8,7 +8,7 @@ from uuid import UUID
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import Asset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, UsageCost, VoiceGenerationJobPayload
+from app.domain.models import Asset, AudioAsset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, UsageCost, VoiceGenerationJobPayload, VoiceQaJobPayload
 from app.media.audio_importer import AudioImportError, AudioImporter
 from app.media.importer import MediaImportError, MediaImporter
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
@@ -97,6 +97,7 @@ from app.providers.talking import (
     TalkingRateLimitError,
     TalkingTimeout,
 )
+from app.voice_qa import VoiceQaError, apply_voice_qa, verify_generated_voice
 from app.search import EmbeddingCountMismatch, EmbeddingIndexError, IndexError
 
 from .runner import JobExecutionError
@@ -224,7 +225,8 @@ class VoiceGenerationJobHandler:
             metadata = dict(audio.metadata)
             metadata["voice_generation"] = {
                 "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
-                "voice_profile_id": str(profile.id), "job_id": str(job.id), "attempt": job.attempt, "qa_state": "pending",
+                "voice_profile_id": str(profile.id), "job_id": str(job.id), "attempt": job.attempt,
+                "target_text": job.payload.text, "qa_state": "pending",
             }
             with self._audios.db.transaction():
                 self._audios.update(audio.model_copy(update={"metadata": metadata}))
@@ -232,6 +234,87 @@ class VoiceGenerationJobHandler:
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_output_invalid")
             raise JobExecutionError("voice_output_invalid", "voice provider output cannot be imported as audio", retryable=False) from None
         _finish_job_provider_call(self._ledger, job, call, status="completed")
+
+
+class VoiceQaJobHandler:
+    """Verify generated narration with a separate real local ASR provider."""
+
+    def __init__(
+        self,
+        audios: AudioAssetRepository,
+        asr: ASRProvider,
+        ledger: ProviderCallLedger | None = None,
+        *,
+        provider_name: str,
+        provider_model: str,
+        max_silence_ms: int = 2_000,
+        max_leading_silence_ms: int = 500,
+    ) -> None:
+        self._audios = audios
+        self._asr = asr
+        self._ledger = ledger
+        self._provider_name = provider_name.strip()
+        self._provider_model = provider_model.strip()
+        self._max_silence_ms = max_silence_ms
+        self._max_leading_silence_ms = max_leading_silence_ms
+
+    def __call__(self, job: Job) -> None:
+        if job.status is not JobStatus.RUNNING:
+            raise JobExecutionError("job_not_claimed", "job must be claimed before execution", retryable=False)
+        if job.type is not JobType.VERIFY_VOICE or not isinstance(job.payload, VoiceQaJobPayload):
+            raise JobExecutionError("voice_qa_payload_invalid", "voice QA job input is invalid", retryable=False)
+        if job.project_id != job.payload.project_id:
+            raise JobExecutionError("voice_qa_project_missing", "voice QA project is unavailable", retryable=False)
+        audio = self._audios.get(job.payload.narration_audio_id)
+        generation = None if audio is None else audio.metadata.get("voice_generation")
+        if audio is None or not isinstance(generation, dict):
+            raise JobExecutionError("voice_qa_audio_missing", "generated narration audio is unavailable", retryable=False)
+        if generation.get("qa_state") == "verified":
+            raise JobExecutionError("voice_qa_already_verified", "generated narration is already Voice QA verified", retryable=False)
+        stored_target_text = generation.get("target_text")
+        if stored_target_text is not None and stored_target_text != job.payload.target_text:
+            raise JobExecutionError("voice_qa_text_mismatch", "Voice QA target text does not match the generated request", retryable=False)
+        if stored_target_text is None:
+            metadata = dict(audio.metadata)
+            updated_generation = dict(generation)
+            updated_generation["target_text"] = job.payload.target_text
+            metadata["voice_generation"] = updated_generation
+            audio = audio.model_copy(update={"metadata": metadata})
+        call = _reserve_job_provider_call(
+            self._ledger, job, operation="asr", category=CostCategory.ASR,
+            provider=self._provider_name, model=self._provider_model,
+            input_source=f"voice-qa:{audio.id}",
+            known_local_cost=bool(getattr(self._asr, "is_local", True)),
+        )
+        try:
+            transcription = self._asr.transcribe(audio.source_file, language=audio.language)
+        except (ASRRateLimitError, ASRTimeout, ASRConnectionError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_qa_asr_temporarily_unavailable")
+            raise JobExecutionError("voice_qa_asr_temporarily_unavailable", "Voice QA ASR is temporarily unavailable", retryable=True) from None
+        except (ASRAuthenticationError, ASRConfigurationError, ASRInputError, ASRProviderResponseError, ASRHTTPError):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_qa_asr_invalid")
+            raise JobExecutionError("voice_qa_asr_invalid", "Voice QA ASR could not process the generated narration", retryable=False) from None
+        except Exception:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_qa_asr_failed")
+            raise JobExecutionError("voice_qa_asr_failed", "Voice QA ASR failed unexpectedly", retryable=True) from None
+        try:
+            report = verify_generated_voice(
+                audio, job.payload.target_text, transcription,
+                max_silence_ms=self._max_silence_ms,
+                max_leading_silence_ms=self._max_leading_silence_ms,
+            )
+            updated = apply_voice_qa(
+                audio, report, transcription,
+                provider=self._provider_name, model=self._provider_model,
+            )
+            with self._audios.db.transaction():
+                self._audios.update(updated)
+        except VoiceQaError:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_qa_invalid")
+            raise JobExecutionError("voice_qa_invalid", "Voice QA evidence is invalid", retryable=False) from None
+        _finish_job_provider_call(self._ledger, job, call, status="completed")
+        if not report.verified:
+            raise JobExecutionError("voice_qa_failed", "generated narration did not pass copy, silence or playability QA", retryable=False)
 
 
 class TalkingGenerationJobHandler:
@@ -572,7 +655,7 @@ def _reserve_job_provider_call(
     ledger: ProviderCallLedger | None,
     job: Job,
     *,
-    operation: Literal["asr", "vision", "embedding", "tts"],
+    operation: Literal["asr", "vision", "embedding", "tts", "talking"],
     category: CostCategory,
     provider: str,
     model: str,

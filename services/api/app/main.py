@@ -19,7 +19,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -464,6 +464,15 @@ class VoiceGenerationJobRequest(BaseModel):
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
 
 
+class VoiceQaJobRequest(BaseModel):
+    """One local real-ASR QA request for a generated narration asset."""
+
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    narration_audio_id: UUID
+    target_text: str = Field(min_length=1, max_length=100_000)
+
+
 class TalkingGenerationJobRequest(BaseModel):
     """One persisted, explicit Talking request with no credentials."""
 
@@ -696,6 +705,8 @@ class RuntimeCapabilityResponse(BaseModel):
     provider: str | None
     model: str | None
     detail: str
+    estimated_cost: UsageCost | None = None
+    constraints: list[str] = Field(default_factory=list)
 
 
 class RuntimeReadinessResponse(BaseModel):
@@ -1974,6 +1985,45 @@ def create_app(
             or persisted.project_id != project_id
             or persisted.payload != voice_payload
         ):
+            raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+        return _job_response(db, persisted)
+
+    @application.post("/projects/{project_id}/voice-qa-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
+    async def enqueue_voice_qa(project_id: UUID, payload: VoiceQaJobRequest, request: Request) -> dict[str, Any]:
+        """Persist one local real-ASR QA request for a generated narration."""
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        narration = AudioAssetRepository(db).get(payload.narration_audio_id)
+        generation = None if narration is None else narration.metadata.get("voice_generation")
+        if narration is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if not isinstance(generation, dict):
+            raise HTTPException(status_code=422, detail="voice QA requires a generated narration asset")
+        expected_text = generation.get("target_text")
+        if expected_text is None and isinstance(generation.get("job_id"), str):
+            try:
+                source_job = JobRepository(db).get(UUID(generation["job_id"]))
+            except (ValueError, TypeError):
+                source_job = None
+            if source_job is not None and source_job.type is JobType.GENERATE_VOICE and isinstance(source_job.payload, VoiceGenerationJobPayload):
+                expected_text = source_job.payload.text
+        if not isinstance(expected_text, str) or expected_text.strip() != payload.target_text.strip():
+            raise HTTPException(status_code=422, detail="voice QA target text must match the generated request")
+        if generation.get("qa_state") == "verified":
+            raise HTTPException(status_code=409, detail="narration audio is already Voice QA verified")
+        now = datetime.now(timezone.utc)
+        qa_payload = VoiceQaJobPayload(
+            project_id=project_id,
+            narration_audio_id=payload.narration_audio_id,
+            target_text=payload.target_text,
+        )
+        job = Job(
+            id=uuid4(), project_id=project_id, type=JobType.VERIFY_VOICE,
+            idempotency_key=payload.idempotency_key, created_at=now, updated_at=now, payload=qa_payload,
+        )
+        persisted = JobRepository(db).create(job)
+        if persisted.type is not JobType.VERIFY_VOICE or persisted.project_id != project_id or persisted.payload != qa_payload:
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 

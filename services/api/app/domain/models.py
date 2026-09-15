@@ -93,6 +93,7 @@ class JobType(StrEnum):
     PLAN_CONTENT = "plan_content"
     MATCH_ASSETS = "match_assets"
     GENERATE_VOICE = "generate_voice"
+    VERIFY_VOICE = "verify_voice"
     GENERATE_TALKING = "generate_talking"
     RENDER = "render"
     SYNC_ACCOUNT = "sync_account"
@@ -899,6 +900,14 @@ class VoiceGenerationJobPayload(ContractModel):
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
 
 
+class VoiceQaJobPayload(ContractModel):
+    """Credential-free input for one local, real-ASR voice QA request."""
+
+    project_id: UUID
+    narration_audio_id: UUID
+    target_text: str = Field(min_length=1, max_length=100_000)
+
+
 class TalkingGenerationJobPayload(ContractModel):
     """Credential-free input for one authorized Talking/lip-sync request."""
 
@@ -920,7 +929,7 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | TalkingGenerationJobPayload | None = None
+    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoiceQaJobPayload | TalkingGenerationJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
@@ -938,6 +947,11 @@ class Job(ContractModel):
                 raise ValueError("voice generation job payload must be a VoiceGenerationJobPayload")
             if self.payload is not None and self.project_id != self.payload.project_id:
                 raise ValueError("voice generation job project_id must match its payload")
+        elif self.type is JobType.VERIFY_VOICE:
+            if self.payload is not None and not isinstance(self.payload, VoiceQaJobPayload):
+                raise ValueError("voice QA job payload must be a VoiceQaJobPayload")
+            if self.payload is not None and self.project_id != self.payload.project_id:
+                raise ValueError("voice QA job project_id must match its payload")
         elif self.type is JobType.GENERATE_TALKING:
             if self.payload is not None and not isinstance(self.payload, TalkingGenerationJobPayload):
                 raise ValueError("talking generation job payload must be a TalkingGenerationJobPayload")

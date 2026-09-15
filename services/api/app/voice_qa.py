@@ -1,8 +1,9 @@
 """Provider-neutral, evidence-based quality checks for generated narration."""
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+import math
 from pathlib import Path
 import re
 from typing import Sequence
@@ -30,6 +31,7 @@ class VoiceQaReport:
     copy_coverage: float
     missing_token_count: int
     duplicate_token_count: int
+    substitution_token_count: int
     leading_silence_ms: int
     longest_silence_ms: int
     transcript_segment_count: int
@@ -44,6 +46,7 @@ class VoiceQaReport:
             "copy_coverage": self.copy_coverage,
             "missing_token_count": self.missing_token_count,
             "duplicate_token_count": self.duplicate_token_count,
+            "substitution_token_count": self.substitution_token_count,
             "leading_silence_ms": self.leading_silence_ms,
             "longest_silence_ms": self.longest_silence_ms,
             "transcript_segment_count": self.transcript_segment_count,
@@ -62,6 +65,7 @@ def verify_generated_voice(
     *,
     max_silence_ms: int = 2_000,
     max_leading_silence_ms: int = 500,
+    max_substitution_ratio: float = 0.05,
 ) -> VoiceQaReport:
     """Validate a real ASR/alignment result without inventing semantic output.
 
@@ -80,13 +84,13 @@ def verify_generated_voice(
         raise VoiceQaError("max_silence_ms must be a non-negative integer")
     if isinstance(max_leading_silence_ms, bool) or not isinstance(max_leading_silence_ms, int) or max_leading_silence_ms < 0:
         raise VoiceQaError("max_leading_silence_ms must be a non-negative integer")
+    if isinstance(max_substitution_ratio, bool) or not isinstance(max_substitution_ratio, (int, float)) or not math.isfinite(float(max_substitution_ratio)) or not 0 <= float(max_substitution_ratio) <= 1:
+        raise VoiceQaError("max_substitution_ratio must be between 0 and 1")
 
     playable = Path(audio.source_file).is_file() and Path(audio.source_file).stat().st_size > 0
     target = comparison_tokens(target_text)
     observed = comparison_tokens(transcription.text)
-    target_counts, observed_counts = Counter(target), Counter(observed)
-    missing = sum((target_counts - observed_counts).values())
-    duplicate = sum((observed_counts - target_counts).values())
+    missing, duplicate, substitutions = _alignment_counts(target, observed)
     coverage = 0.0 if not target else max(0.0, min(1.0, (len(target) - missing) / len(target)))
     segments = _segments(transcription.segments, audio.duration_ms)
     leading_silence = segments[0].start_ms if segments else audio.duration_ms
@@ -100,18 +104,36 @@ def verify_generated_voice(
         checks.append("copy_missing_tokens")
     if duplicate:
         checks.append("copy_duplicate_tokens")
+    if substitutions and substitutions / len(target) > float(max_substitution_ratio):
+        checks.append("copy_substitution_tokens")
+    elif substitutions:
+        # ASR can substitute a homophone or split/merge a product name even
+        # when the generated speech contains the full requested copy. Keep
+        # this uncertainty explicit and bounded; never turn arbitrary ASR
+        # disagreement into a pass.
+        checks.append("copy_substitutions_within_tolerance")
     if leading_silence > max_leading_silence_ms:
         checks.append("leading_silence_or_unrecognized_audio")
     if longest_silence > max_silence_ms:
         checks.append("long_silence")
-    if not checks:
+    blocking = {
+        "audio_file_missing_or_empty",
+        "timed_transcript_missing",
+        "copy_missing_tokens",
+        "copy_duplicate_tokens",
+        "copy_substitution_tokens",
+        "leading_silence_or_unrecognized_audio",
+        "long_silence",
+    }
+    if not any(check in blocking for check in checks):
         checks.append("verified")
     return VoiceQaReport(
-        verified=checks == ["verified"],
+        verified=not any(check in blocking for check in checks),
         playable=playable,
         copy_coverage=coverage,
         missing_token_count=missing,
         duplicate_token_count=duplicate,
+        substitution_token_count=substitutions,
         leading_silence_ms=leading_silence,
         longest_silence_ms=longest_silence,
         transcript_segment_count=len(segments),
@@ -153,7 +175,37 @@ def comparison_tokens(value: str) -> tuple[str, ...]:
     # only for the comparison token stream; retain the original transcript in
     # persisted QA evidence so review remains auditable.
     normalized = _TRADITIONAL_TO_SIMPLIFIED.convert(value).translate(_SPOKEN_GLYPH_VARIANTS)
+    # Keep product names with CamelCase boundaries comparable when the
+    # requested copy contains a space but ASR returns a single word, e.g.
+    # ``Content OS`` versus ``ContentOS``.
+    normalized = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", normalized)
     return tuple(item.casefold() for item in _TOKEN.findall(normalized))
+
+
+def _alignment_counts(target: Sequence[str], observed: Sequence[str]) -> tuple[int, int, int]:
+    """Classify ordered ASR disagreement as missing, extra, or substitution.
+
+    Counter-only comparison reports every ASR substitution twice (one missing
+    token plus one duplicate).  Ordered alignment preserves the important
+    distinction: a deletion or insertion is a copy-coverage failure, while a
+    bounded same-position recognition substitution is retained as explicit
+    uncertainty for review.
+    """
+
+    missing = duplicate = substitutions = 0
+    matcher = SequenceMatcher(None, target, observed, autojunk=False)
+    for tag, target_start, target_end, observed_start, observed_end in matcher.get_opcodes():
+        if tag == "delete":
+            missing += target_end - target_start
+        elif tag == "insert":
+            duplicate += observed_end - observed_start
+        elif tag == "replace":
+            target_count = target_end - target_start
+            observed_count = observed_end - observed_start
+            substitutions += min(target_count, observed_count)
+            missing += max(0, target_count - observed_count)
+            duplicate += max(0, observed_count - target_count)
+    return missing, duplicate, substitutions
 
 
 def _segments(values: Sequence[object], duration_ms: int) -> tuple[TranscriptSegment, ...]:

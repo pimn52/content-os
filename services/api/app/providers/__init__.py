@@ -35,5 +35,9 @@ from .talking import (
     TalkingError, TalkingHeadProvider, TalkingInputError, TalkingProviderResponseError,
     TalkingRateLimitError, TalkingReference, TalkingSynthesisResult, TalkingTimeout,
 )
+from .latentsync import (
+    LATENTSYNC_MODEL, LATENTSYNC_PROCESSING_RESOLUTION_PX, LATENTSYNC_PROVIDER,
+    LATENTSYNC_STATED_MINIMUM_VRAM_GB, LatentSyncProvider, LatentSyncRuntimeMetadata,
+)
 
 __all__ = [name for name in globals() if not name.startswith("_")]

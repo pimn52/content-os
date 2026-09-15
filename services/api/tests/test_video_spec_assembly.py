@@ -202,10 +202,16 @@ def test_assembler_requires_verified_talking_qa_before_using_generated_talking_v
         with pytest.raises(InvalidCandidateSelection, match="verified automated QA"):
             assembler.assemble(project, [scene], {scene.id: candidate})
         metadata = dict(asset.metadata)
-        metadata["talking_generation"] = {"provider": "musetalk", "qa_state": "verified"}
+        metadata["talking_generation"] = {
+            "provider": "musetalk", "qa_state": "verified",
+            "reference_subtitle_crop_bottom_ratio": 0.18,
+            "job_id": str(uuid4()),
+        }
         AssetRepository(db).update(asset.model_copy(update={"metadata": metadata}))
         spec = assembler.assemble(project, [scene], {scene.id: candidate})
         assert spec.scenes[0].visual.source_kind is SourceKind.AI_VIDEO
+        assert spec.scenes[0].visual.source_bottom_crop_ratio == 0.18
+        assert spec.scenes[0].visual.vertical_reframe_evidence_reference.startswith("talking-generation:")
     finally:
         db.close()
 

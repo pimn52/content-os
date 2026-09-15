@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -76,6 +77,55 @@ def test_talking_worker_refuses_unadmitted_provider(tmp_path: Path):
         config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
         with pytest.raises(TalkingConfigurationError, match="no Talking provider is currently admitted"):
             build_runner(config, db)
+    finally:
+        db.close()
+
+
+def test_talking_worker_builds_explicit_latentsync_provider(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "latentsync"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "configs" / "unet").mkdir(parents=True)
+    (repo / "scripts" / "inference.py").write_text("", encoding="utf-8")
+    (repo / "configs" / "unet" / "stage2.yaml").write_text("", encoding="utf-8")
+    checkpoint = tmp_path / "latentsync_unet.pt"
+    checkpoint.write_bytes(b"weights")
+    provider_ffmpeg = tmp_path / "latentsync-ffmpeg.exe"
+    provider_ffmpeg.write_bytes(b"ffmpeg")
+    monkeypatch.setenv("CONTENT_OS_TALKING_PROVIDER", "latentsync")
+    monkeypatch.setenv("CONTENT_OS_LATENTSYNC_PYTHON", sys.executable)
+    monkeypatch.setenv("CONTENT_OS_LATENTSYNC_REPO", str(repo))
+    monkeypatch.setenv("CONTENT_OS_LATENTSYNC_CHECKPOINT", str(checkpoint))
+    monkeypatch.setenv("CONTENT_OS_LATENTSYNC_FFMPEG", str(provider_ffmpeg))
+    db_path = tmp_path / "talking-latentsync-worker.sqlite"
+    db = Database(db_path)
+    try:
+        config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
+        runner = build_runner(config, db)
+        provider = runner._handlers[JobType.GENERATE_TALKING]._provider
+        assert provider.__class__.__name__ == "LatentSyncProvider"
+        assert provider.provider_name == "latentsync"
+        assert provider.ffmpeg_command == (str(provider_ffmpeg),)
+        assert provider.runtime_metadata.estimated_cost.amount == 0
+    finally:
+        db.close()
+
+
+def test_voice_worker_builds_explicit_omnivoice_provider(tmp_path: Path, monkeypatch):
+    runtime = tmp_path / "python.exe"
+    runtime.write_bytes(b"runtime")
+    model = tmp_path / "omnivoice-snapshot"
+    model.mkdir()
+    monkeypatch.setenv("CONTENT_OS_VOICE_PROVIDER", "omnivoice")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_PYTHON", str(runtime))
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_MODEL", str(model))
+    db_path = tmp_path / "voice-omnivoice-worker.sqlite"
+    db = Database(db_path)
+    try:
+        config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_voice"])
+        runner = build_runner(config, db)
+        provider = runner._handlers[JobType.GENERATE_VOICE]._provider
+        assert provider.__class__.__name__ == "OmniVoiceProvider"
+        assert provider.provider_name == "omnivoice"
     finally:
         db.close()
 

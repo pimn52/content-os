@@ -13,9 +13,10 @@ from app.domain.models import Asset, AudioAsset, BudgetPolicy, Clip, ConsentReco
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import TalkingGenerationJobHandler
 from app.main import create_app
+from app.media.ffprobe import ProbeMetadata
 from app.providers.talking import TalkingReference, TalkingSynthesisResult
 from app.talking import select_talking_reference
-from app.talking_qa import TalkingHumanReview, TalkingQaReport, apply_talking_human_review, apply_talking_qa
+from app.talking_qa import TalkingHumanReview, TalkingQaReport, apply_talking_human_review, apply_talking_qa, verify_talking_output
 
 
 def test_talking_job_requires_verified_new_narration_and_persists_video_provenance(tmp_path: Path) -> None:
@@ -224,3 +225,58 @@ def test_talking_qa_and_human_rejection_are_provider_neutral(tmp_path: Path) -> 
     rejected = apply_talking_human_review(verified, TalkingHumanReview(approved=False, evidence_reference="human-review:rejected", findings=("visible lip movement mismatched", "ending expression did not fit delivery")))
     assert rejected.metadata["talking_generation"]["human_review_state"] == "rejected"
     assert rejected.metadata["talking_generation"]["human_review"]["findings"] == ["visible lip movement mismatched", "ending expression did not fit delivery"]
+
+
+def test_talking_output_qa_requires_real_playable_video_audio_and_matching_narration(tmp_path: Path) -> None:
+    video = tmp_path / "generated.mp4"
+    video.write_bytes(b"generated")
+    asset = Asset(
+        source_kind=SourceKind.AI_VIDEO, source_file=str(video), content_hash="k" * 64,
+        duration_ms=1_000, width=720, height=1_280, fps=RationalFps(numerator=25, denominator=1), has_audio=True,
+        authorization_reference="talking-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"talking_generation": {"provider": "latentsync", "qa_state": "pending"}},
+    )
+    narration = AudioAsset(
+        source_file=str(tmp_path / "narration.wav"), content_hash="l" * 64, duration_ms=1_000,
+        sample_rate=24_000, channels=1, authorization_reference="voice-consent-1",
+        imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {
+            "provider": "omnivoice", "qa_state": "verified",
+            "qa": {"qa_state": "verified", "copy_coverage": 1.0, "missing_token_count": 0, "duplicate_token_count": 0},
+        }},
+    )
+    narration_path = Path(narration.source_file)
+    narration_path.write_bytes(b"narration")
+
+    class Probe:
+        def probe(self, path: Path) -> ProbeMetadata:
+            assert path == video
+            return ProbeMetadata(
+                duration_ms=1_020, width=720, height=1_280,
+                fps=RationalFps(numerator=25, denominator=1), has_audio=True,
+                metadata={"streams": [{"codec_type": "video"}, {"codec_type": "audio"}]},
+            )
+
+    report = verify_talking_output(asset, narration, Probe(), evidence_reference="qa:latentsync-output")
+    assert report.automated_verified is True
+    assert report.playable is True
+    assert report.duration_drift_ms == 20
+    assert report.copy_coverage == 1.0
+    updated = apply_talking_qa(asset, report)
+    assert updated.metadata["talking_generation"]["qa"]["duration_drift_ms"] == 20
+    assert updated.metadata["talking_generation"]["qa"]["copy_coverage"] == 1.0
+    assert updated.metadata["talking_generation"]["qa"]["missing_token_count"] == 0
+    assert updated.metadata["talking_generation"]["qa"]["duplicate_token_count"] == 0
+
+    class BadProbe(Probe):
+        def probe(self, path: Path) -> ProbeMetadata:
+            return ProbeMetadata(
+                duration_ms=1_300, width=720, height=1_280,
+                fps=RationalFps(numerator=25, denominator=1), has_audio=False,
+                metadata={"streams": [{"codec_type": "video"}]},
+            )
+
+    failed = verify_talking_output(asset, narration, BadProbe(), evidence_reference="qa:latentsync-output")
+    assert failed.automated_verified is False
+    assert "output_not_playable_video_audio" in failed.checks
+    assert "output_duration_drift" in failed.checks

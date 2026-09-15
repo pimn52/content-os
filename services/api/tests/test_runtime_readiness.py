@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -82,3 +84,78 @@ def test_local_asr_readiness_is_explicit_and_does_not_need_provider_key(monkeypa
     assert asr.provider == "faster-whisper"
     assert asr.model == "tiny"
     assert "key" not in asr.detail.lower()
+
+
+def test_latentsync_readiness_reports_local_cost_and_constraints(tmp_path) -> None:
+    repo = tmp_path / "latentsync"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "configs" / "unet").mkdir(parents=True)
+    (repo / "scripts" / "inference.py").write_text("", encoding="utf-8")
+    (repo / "configs" / "unet" / "stage2.yaml").write_text("", encoding="utf-8")
+    checkpoint = tmp_path / "latentsync_unet.pt"
+    checkpoint.write_bytes(b"weights")
+    capabilities = inspect_runtime_capabilities(
+        {
+            "CONTENT_OS_TALKING_PROVIDER": "latentsync",
+            "CONTENT_OS_LATENTSYNC_PYTHON": sys.executable,
+            "CONTENT_OS_LATENTSYNC_REPO": str(repo),
+            "CONTENT_OS_LATENTSYNC_CHECKPOINT": str(checkpoint),
+        },
+        executable_lookup=lambda command: f"C:/{command}.exe",
+    )
+    talking = next(value for value in capabilities if value.key == "talking")
+    assert talking.status == "ready"
+    assert talking.provider == "latentsync"
+    assert talking.model == "LatentSync-1.5"
+    assert talking.estimated_cost is not None
+    assert talking.estimated_cost.amount == 0
+    assert "processing_resolution=256px" in talking.constraints
+    assert "6.5GB" in " ".join(talking.constraints)
+
+
+def test_latentsync_readiness_does_not_claim_ready_for_missing_runtime(tmp_path) -> None:
+    capabilities = inspect_runtime_capabilities(
+        {
+            "CONTENT_OS_TALKING_PROVIDER": "latentsync",
+            "CONTENT_OS_LATENTSYNC_PYTHON": str(tmp_path / "missing-python.exe"),
+            "CONTENT_OS_LATENTSYNC_REPO": str(tmp_path / "missing-repo"),
+            "CONTENT_OS_LATENTSYNC_CHECKPOINT": str(tmp_path / "missing-checkpoint.pt"),
+        },
+        executable_lookup=lambda command: None,
+    )
+    talking = next(value for value in capabilities if value.key == "talking")
+    assert talking.status == "unavailable"
+    assert "missing local runtime item" in talking.detail
+
+
+def test_omnivoice_readiness_reports_benchmark_cost_and_constraints(tmp_path) -> None:
+    runtime = tmp_path / "python.exe"
+    runtime.write_bytes(b"runtime")
+    model = tmp_path / "omnivoice-snapshot"
+    model.mkdir()
+    capabilities = inspect_runtime_capabilities(
+        {
+            "CONTENT_OS_VOICE_PROVIDER": "omnivoice",
+            "CONTENT_OS_OMNIVOICE_PYTHON": str(runtime),
+            "CONTENT_OS_OMNIVOICE_MODEL": str(model),
+        },
+        executable_lookup=lambda command: f"C:/{command}.exe",
+    )
+    voice = next(value for value in capabilities if value.key == "tts")
+    assert voice.status == "ready"
+    assert voice.provider == "omnivoice"
+    assert voice.estimated_cost is not None and voice.estimated_cost.amount == 0
+    assert "non-commercial" in " ".join(voice.constraints)
+
+
+def test_voice_qa_readiness_requires_an_existing_local_asr_model(tmp_path) -> None:
+    model = tmp_path / "faster-whisper-small"
+    model.mkdir()
+    capabilities = inspect_runtime_capabilities(
+        {"CONTENT_OS_VOICE_QA_ASR_MODEL": str(model)},
+        executable_lookup=lambda command: f"C:/{command}.exe",
+    )
+    voice_qa = next(value for value in capabilities if value.key == "voice_qa")
+    assert voice_qa.status == "ready"
+    assert voice_qa.provider == "faster-whisper"
+    assert voice_qa.estimated_cost is not None and voice_qa.estimated_cost.amount == 0

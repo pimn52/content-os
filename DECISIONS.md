@@ -22,8 +22,8 @@ This file records only decisions that should survive individual tasks. Current s
 - Mature Talking paths must accept ordinary, consented creator footage. Special silent/closed-mouth/expressionless AI-only capture cannot be a product prerequisite.
 - **MuseTalk 1.5 is rejected** after ordinary-material U-Talking review found visible sync/performance quality below the product bar.
 - Rejected model-specific runners/adapters do not remain in the active Core provider surface. Core keeps only provider-neutral contracts, Jobs, QA, reference selection and provenance boundaries.
-- **VideoReTalking is the current isolated local candidate.** It must pass ordinary-material quality, runtime, dependency/model-license and U-Talking gates before a Core adapter is added.
-- If VideoReTalking fails, benchmark KeySync next, then LatentSync 1.5 if useful. Do not integrate broad avatar-generation models merely because they produce talking heads.
+- **VideoReTalking is rejected** after ordinary-material U-Talking review found severe mouth deformation, blur and local scale/warp artifacts; it has no Core adapter.
+- The pinned **LatentSync 1.5** benchmark passed the user's sample-level continue judgment. Keep its Core adapter optional and benchmark-only behind explicit runtime paths; do not treat it as a commercial-safe default or mature R1 admission until the integrated 30–60s gate passes. Defer KeySync to a later compatible machine and do not integrate broad avatar-generation models merely because they produce talking heads.
 
 ## Talking runtime routing on consumer hardware
 

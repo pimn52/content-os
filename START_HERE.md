@@ -38,8 +38,9 @@ R1 当前先攻克 `Create it as you`：
 
 - `TalkingHeadProvider` 永远可替换。
 - **MuseTalk 1.5 已被产品质量 Gate 淘汰**，不属于当前受支持 Provider。
-- **VideoReTalking** 正在隔离实测；实测通过 U-Talking 前不得进入 Core adapter。
-- 若 VideoReTalking 不达标，优先继续 benchmark KeySync，再考虑 LatentSync 1.5；不要同时安装大量 Avatar 模型。
+- **VideoReTalking 已被产品质量 Gate 淘汰**，不属于当前受支持 Provider。
+- **LatentSync 1.5** 已完成普通素材 benchmark，并在人工样片判断可接受后接入一个可选、benchmark-only 的 Core adapter；完整 30–60 秒产品链路仍待验证。
+- KeySync 延后到其它兼容机器，不在当前本机继续安装；不要同时安装大量 Avatar 模型。
 - Local-first **不等于所有模型必须本地推理**。对于重型 Talking/lip-sync，低配电脑可以优先使用用户明确授权、可计费、可替换的外部/BYOK API；本地推理仅在硬件、隐私、质量与运行成本合适时启用。
 
 模型名称不是产品架构。Content OS 保存 Profile、参考来源、授权、质量证据、成本和 Provider metadata，允许替换底层实现。
