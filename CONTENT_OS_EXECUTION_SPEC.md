@@ -114,18 +114,26 @@ over systems that regenerate the whole person/video when that regeneration is no
 - LatentSync 1.5 remains a **benchmark-only optional local adapter**. A short ordinary-material sample was acceptable to continue, while the 17.44s result failed publishability because visible lip-sync drift accumulated and the associated Voice take was not naturally paced. The current 6GB laptop uses an evaluation-only compatibility fallback near its hardware limit. LatentSync is not a commercial-safe default and is not fully admitted for R1.
 - KeySync remains deferred to a later compatible machine.
 
-### Duration capability policy
+### Capability-boundary policy
 
-Do not prematurely hard-code a 3–5s Talking limit. Capability is established empirically and provider/runtime-specific.
+Do not prematurely hard-code a Talking maximum such as 3–5s, 8s or 9s. Numeric examples are evidence points, not product requirements.
 
-The current LatentSync work package probes **9s first, then 8s only if 9s fails**. The highest passing duration is a **currently verified capability**, not a permanent global maximum and not a requirement that every scene use that duration.
+For a provider/runtime/material combination, locate the useful duration boundary with the fewest experiments:
+
+1. maintain a known-pass lower bound and known-fail upper bound;
+2. choose the next test near the midpoint of that interval, adjusted to a nearby natural speech boundary;
+3. keep other variables fixed;
+4. update the pass/fail bracket after explicit U-Talking review;
+5. repeat only while another test is likely to change routing, UX or market-fit decisions.
+
+Stop when the interval is sufficiently narrow for product use (roughly a couple of seconds is normally enough), results become sample-dependent/inconsistent, runtime noise prevents clean comparison, or further precision would not change the product decision.
 
 Separate two questions:
 
-1. **Visual Talking capacity** — reuse the same already-generated narration and vary only duration to locate cumulative lip-sync/visual failure.
-2. **Product capacity** — after a visual duration passes, generate a fresh Voice take at a natural phrase boundary and require both U-Voice and U-Talking to pass.
+1. **Visual Talking capacity** — reuse an existing narration and vary only duration to locate cumulative lip-sync/visual failure.
+2. **Product capacity** — after a useful visual range is identified, generate a fresh Voice take at a natural phrase boundary and require both U-Voice and U-Talking to pass.
 
-Do not continue automatically to 7s/6s or another Provider in the same package. Close the current package first and open a new bounded package if further descent is needed.
+The output is an **observed capability range under stated conditions**, not a universal model limit. Scene Planner/Router may still prefer shorter segments for editorial quality even when a longer duration passes.
 
 ### Runtime routing
 
@@ -174,6 +182,8 @@ Runtime provider flow:
 
 Retries count. Unknown price remains unknown. Remote media transfer must be explicit.
 
+Capability experiments should optimize **information gained per run**, not number of runs. Do not repeat similar tests merely because a prior prompt mentioned a specific duration.
+
 ## 12. Implementation model policy
 
 Quality first, then lowest capable cost:
@@ -181,7 +191,7 @@ Quality first, then lowest capable cost:
 `Luna → Terra → Sol`
 
 - **Luna**: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
-- **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations and the current duration-boundary debugging package.
+- **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations and capability-boundary debugging.
 - **Sol**: architecture/security/critical quality gate, or unresolved Terra failure with a concrete reproduction.
 
 Task importance alone never justifies Sol; lower token price never justifies architecture-changing work by Luna.
@@ -195,7 +205,7 @@ Provider accounting/idempotency, revision invalidation and real media/timeline b
 Maintain provider-neutral Voice jobs/QA. OmniVoice is the benchmark; select a commercial-safe production path later without changing Core contracts.
 
 ### Gate C — Talking
-The current package is a bounded LatentSync duration-ceiling probe: 9s → 8s only if needed, with Voice and visual Talking evaluated separately. Admission still requires ordinary-material automated evidence plus human publishability review.
+The current package is an adaptive LatentSync capability-boundary search between the known short passing sample and the 17.44s failed sample. Admission still requires ordinary-material automated evidence plus human publishability review.
 
 ### Gate D — Integrated creator flow
 `new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.
@@ -208,12 +218,12 @@ Two real new topics, 30–60 second exports, normal UI, recoverable failures, no
 Proceed autonomously only inside the one active bounded work package in `STATUS.md`. Stop and update package state when:
 
 - a requested U-Voice/U-Talking artifact is ready (`AWAITING_U_REVIEW`);
-- acceptance criteria pass (`PASS`);
-- the bounded experiment fails (`FAIL`);
-- a concrete runtime/external blocker prevents completion (`BLOCKED`);
-- the next step would change duration tier beyond the current package, Provider, paid service, architecture, product scope, or user-data boundary.
+- the capability boundary is sufficiently resolved for a product decision;
+- the bounded experiment reaches its declared fail/blocked/inconclusive state;
+- a concrete runtime/external blocker prevents completion;
+- the next step would change Provider, paid service, architecture, product scope, data boundary, or leave the declared search rule.
 
-A failed bounded experiment is a valid completion. Do not keep expanding work merely to obtain a passing result.
+A failed or inconclusive bounded experiment is a valid completion. Do not keep expanding work merely to obtain a passing result.
 
 ## 15. Documentation system
 
