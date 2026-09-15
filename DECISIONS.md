@@ -8,7 +8,7 @@ This file records only decisions that should survive individual tasks. Current s
 - Old PRD/plan/freeze/handoff/review files are historical evidence and must not compete with the active hierarchy. Git history is the default archive.
 - `STATUS.md` records only current truth, one active bounded package, its explicit state and next work. Per-run paths, timestamps, download/cache history and retired-provider experiment logs stay in Git history or local evaluation evidence.
 - `scripts/check_docs.py` and CI enforce the active-doc set and stale-reference rules.
-- Work packages must close as pass/fail/blocked or stop at an explicit human-review handoff; they must not remain indefinitely in an ambiguous in-progress state.
+- Work packages must close as pass/fail/blocked/inconclusive or stop at an explicit human-review handoff; they must not remain indefinitely in an ambiguous in-progress state.
 
 ## Voice provider strategy
 
@@ -26,9 +26,12 @@ This file records only decisions that should survive individual tasks. Current s
 - Rejected model-specific runners/adapters do not remain in the active Core provider surface. Core keeps only provider-neutral contracts, Jobs, QA, reference selection and provenance boundaries.
 - **VideoReTalking is rejected** after ordinary-material U-Talking review found severe mouth deformation, blur and local scale/warp artifacts; it has no Core adapter.
 - **LatentSync 1.5** remains an optional benchmark-only local adapter. Short ordinary-material output was acceptable to continue, while the 17.44s result failed publishability because visual lip-sync drift accumulated and the associated Voice take was not naturally paced.
-- Do not prematurely freeze LatentSync or the product to a 3–5s Talking maximum. First probe the intermediate duration ceiling with a bounded **9s → 8s** experiment. Treat the highest passing duration as a currently verified provider/runtime capability, not a permanent product maximum and not a requirement for every scene.
-- Separate visual Talking duration from Voice duration/prosody: reuse an existing narration when locating visual sync drift, then generate a fresh natural Voice take only after a visual duration passes.
-- Do not auto-descend beyond the explicitly scoped duration tier. If 8s fails, close the package before deciding whether to test 7s/6s, another provider or remote compute.
+- Do **not** freeze the product to a user-mentioned duration example. Talking duration capability must be measured from evidence.
+- Use a pass/fail bracket and adaptive midpoint testing to locate the useful duration boundary with the fewest runs. Adjust the midpoint only to a nearby natural speech boundary.
+- Stop when the remaining interval is precise enough to change product routing/UX/market decisions; do not chase a mathematical maximum when a couple of seconds of uncertainty is operationally irrelevant.
+- The result is an observed capability range for a specific provider/runtime/hardware/material combination, not a universal model limit.
+- Separate visual Talking duration from Voice duration/prosody: reuse an existing narration when locating visual sync drift, then generate a fresh natural Voice take only after the visual range is useful.
+- If nearby durations produce inconsistent judgments, treat sample/material variance as a first-class finding instead of forcing a false numeric threshold.
 - KeySync remains deferred to a later compatible machine; do not integrate broad avatar-generation models merely because they produce talking heads.
 
 ## Talking runtime routing on consumer hardware
@@ -44,9 +47,10 @@ This file records only decisions that should survive individual tasks. Current s
 
 - Development uses the cheapest model that can reliably complete the task: `Luna → Terra → Sol`.
 - Luna: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
-- Terra: cross-module media/timeline/provider/planner/router/job/migration work and compatibility-sensitive Voice/Talking debugging.
+- Terra: cross-module media/timeline/provider/planner/router/job/migration work and compatibility-sensitive Voice/Talking debugging/capability search.
 - Sol: architecture/security/critical quality gates or unresolved Terra failures with a concrete reproduction.
 - Task importance alone does not justify Sol; cost alone does not justify giving architecture-changing work to Luna.
+- Numeric examples in user conversation are not automatically engineering requirements; implementation agents must infer and preserve the underlying product objective.
 
 ## Existing architecture retained
 
