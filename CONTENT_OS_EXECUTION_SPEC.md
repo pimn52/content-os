@@ -30,7 +30,7 @@ Human judgment is required for creator voice likeness/naturalness and Talking li
 
 ## 3. Product invariants
 
-- **Local-first, not desktop-only and not local-inference-only.** Creator media/library/control remain local-first; heavy model inference may use an explicitly approved replaceable remote provider.
+- **Local-first Data + Hybrid Compute.** Creator media/library/profile/project/control remain local-first. Heavy inference may run locally or through an explicitly approved replaceable remote provider according to verified capability, privacy, latency and cost.
 - **BYOK / replaceable providers.** Core contracts do not depend on one model/vendor.
 - **Real user media first.** Use existing creator assets before generated media when quality is adequate.
 - **Continuous clips are playback assets.** Keyframes support understanding/search.
@@ -38,7 +38,7 @@ Human judgment is required for creator voice likeness/naturalness and Talking li
 - **Capture is a low-cost option.** Missing material can produce a shoot list before expensive generation.
 - **No hidden downgrade or cloud fallback.** Unavailable capability, remote data transfer and estimated/unknown cost must be visible.
 - **Consent and rights are explicit.** Voice/face generation only uses authorized references.
-- **Unknown cost is not zero.** Runtime calls use persistent budget/idempotency/usage accounting.
+- **Unknown cost is not zero. Unknown capability is not verified capability.** Runtime calls use persistent budget/idempotency/usage accounting, and routing may not promote documentation claims or another machine's results to local verified evidence.
 
 ## 4. Architecture to preserve
 
@@ -111,7 +111,7 @@ over systems that regenerate the whole person/video when that regeneration is no
 
 - MuseTalk 1.5 has been **rejected** by U-Talking on ordinary material and is not an admitted product provider.
 - VideoReTalking has been **rejected** by U-Talking on ordinary material: the real run showed severe mouth deformation, blur and local scale/warp artifacts. It is not an admitted product provider and has no Core adapter.
-- LatentSync 1.5 remains a **benchmark-only optional local adapter**. A short ordinary-material sample was acceptable to continue, while the 17.44s result failed publishability because visible lip-sync drift accumulated and the associated Voice take was not naturally paced. The current 6GB laptop uses an evaluation-only compatibility fallback near its hardware limit. LatentSync is not a commercial-safe default and is not fully admitted for R1.
+- LatentSync 1.5 remains a **benchmark-only optional local adapter**. Current fresh-Voice evidence on this 6GB development machine includes a 2.58s U-Talking pass and a 5.12s U-Talking fail with late cumulative misalignment. These are routing evidence for this configuration, not universal model limits.
 - KeySync remains deferred to a later compatible machine.
 
 ### Capability-boundary policy
@@ -126,31 +126,109 @@ For a provider/runtime/material combination, locate the useful duration boundary
 4. update the pass/fail bracket after explicit U-Talking review;
 5. repeat only while another test is likely to change routing, UX or market-fit decisions.
 
-Stop when the interval is sufficiently narrow for product use (roughly a couple of seconds is normally enough), results become sample-dependent/inconsistent, runtime noise prevents clean comparison, or further precision would not change the product decision.
+Stop when the interval is sufficiently narrow for product use, results become sample-dependent/inconsistent, runtime noise prevents clean comparison, or further precision would not change the product decision.
 
 Separate two questions:
 
 1. **Visual Talking capacity** — reuse an existing narration and vary only duration to locate cumulative lip-sync/visual failure.
-2. **Product capacity** — after a useful visual range is identified, generate a fresh Voice take at a natural phrase boundary and require both U-Voice and U-Talking to pass.
+2. **Product capacity** — generate fresh Voice at natural phrase boundaries and require both U-Voice and U-Talking to pass.
 
-The output is an **observed capability range under stated conditions**, not a universal model limit. Scene Planner/Router may still prefer shorter segments for editorial quality even when a longer duration passes.
+The output is an **observed capability range under stated conditions**, not a universal model limit.
+
+### Continuity policy
+
+A set of individually passing short Talking clips does **not** prove continuous-presenter capability. Multi-segment continuity requires its own evidence.
+
+Keep narrative intent independent from provider limits:
+
+> Narrative/Scene Planner states what the content needs; Execution Planner decides how to realize it with current capabilities.
+
+For example, a 9s creator explanation may be realized as one 9s Talking scene on a capable provider, or as several short Talking appearances separated by B-roll/typography on a constrained local provider. Do not rewrite the narrative merely because the current machine has a short generation ceiling.
+
+## 8. Capability-aware Compute Router
+
+R1 should evolve toward **Local-first Data + Hybrid Compute** without making remote compute mandatory.
+
+The routing decision is separate from the Hybrid Asset Router:
+
+- **Hybrid Asset Router** answers *what visual source/type should satisfy the scene?*
+- **Compute Router / Execution Planner** answers *which provider/runtime/configuration should execute the requested capability?*
+
+### Routing inputs
+
+A compute decision may consider:
+
+- capability type (`voice`, `talking`, future image/video generation);
+- requested duration and continuity requirement;
+- quality target;
+- privacy/data-transfer policy;
+- budget and known/unknown cost;
+- latency target;
+- current machine/runtime readiness;
+- verified provider/configuration evidence;
+- license/commercial-use constraints.
+
+### Provider capability profile
+
+Capabilities are scoped to a concrete configuration, not just a model name. A profile should be able to represent:
+
+- provider + model/version;
+- local vs remote execution;
+- machine/runtime fingerprint relevant to inference;
+- implemented/configured/available/verified state;
+- observed pass/fail duration or other operating range;
+- quality/continuity evidence level;
+- expected/observed latency and resource use;
+- cost information;
+- license/commercial status;
+- last verification time and provenance.
+
+A result on one machine or provider configuration does not silently become a global default.
+
+### Parameter precedence
+
+Production configuration must have one explicit precedence order:
+
+1. **per-job explicit override**;
+2. **saved user override for this provider + machine/profile**;
+3. **locally verified capability/profile values**;
+4. **provider-known conservative defaults**;
+5. **unknown**.
+
+Do not convert `unknown` into a fabricated optimized value.
+
+### Advanced Settings
+
+When a provider/machine combination lacks enough empirical evidence, expose an **Advanced Settings** entry rather than pretending the automatic router knows the optimum.
+
+Advanced Settings should:
+
+- be provider-specific but surfaced through a common UI pattern;
+- distinguish safe/common settings from expert/experimental settings;
+- show current source of each value (`verified`, `provider default`, `user override`, `unknown`);
+- warn when a value exceeds a verified local range or requires remote media transfer/cost;
+- allow reset to automatic/verified defaults;
+- save overrides at the narrowest appropriate scope (job, project, or provider+machine profile);
+- never bypass consent, budget, license, provenance or hard runtime-safety checks.
+
+Successful user runs may later become **local evidence** after QA/human acceptance; they do not automatically become global product defaults.
 
 ### Runtime routing
 
 Do not build the product around a high-end-GPU-only route.
 
-For compute-heavy Talking on low-spec PCs, an external/BYOK API may be the **default mature path** if it passes the same quality gate and the user explicitly accepts media transfer and cost. Local inference is optional when provider-specific readiness, privacy, quality and total runtime cost justify it.
+For compute-heavy Talking on low-spec PCs, an external/BYOK API may be the mature route if it passes the same quality gate and the user explicitly accepts media transfer and cost. Local inference remains available when provider-specific readiness, privacy, quality and runtime economics justify it.
 
-Do not hard-code one universal VRAM threshold. Runtime readiness is provider-specific and must distinguish implemented / configured / locally available / verified.
+Do not hard-code one universal VRAM threshold.
 
-## 8. Hybrid Asset Router
+## 9. Hybrid Asset Router
 
 Per scene prefer the lowest-cost adequate route.
 
 ### TALKING
 
 1. original suitable Talking content when the original words actually match;
-2. authorized lip-synced creator clip — local or remote Provider according to readiness/cost/privacy;
+2. authorized lip-synced creator clip — local or remote Provider according to Compute Router readiness/cost/privacy;
 3. authorized digital twin/avatar only as an explicit fallback;
 4. explicit gap/capture option.
 
@@ -164,15 +242,15 @@ Per scene prefer the lowest-cost adequate route.
 
 Reuse penalty is a ranking input, not a reason to discard strong real material when alternatives are poor.
 
-## 9. Account vs Market Intelligence
+## 10. Account vs Market Intelligence
 
 R1 may use/import the creator's own historical account/content data. Broad competitor/trend crawling and market prediction remain deferred. Future market signals must be evidence-backed and provider-neutral.
 
-## 10. Mobile / remote operation
+## 11. Mobile / remote operation
 
 R1 architecture supports browser/mobile upload, shoot-task capture, review/status from a phone and private LAN/Tailscale-style access while the local node is online. Remote Windows desktop is not the primary UX.
 
-## 11. Cost and capability discipline
+## 12. Cost and capability discipline
 
 Separate development-agent cost from product runtime/provider cost.
 
@@ -182,21 +260,21 @@ Runtime provider flow:
 
 Retries count. Unknown price remains unknown. Remote media transfer must be explicit.
 
-Capability experiments should optimize **information gained per run**, not number of runs. Do not repeat similar tests merely because a prior prompt mentioned a specific duration.
+Capability experiments should optimize **information gained per run**, not number of runs.
 
-## 12. Implementation model policy
+## 13. Implementation model policy
 
 Quality first, then lowest capable cost:
 
 `Luna → Terra → Sol`
 
 - **Luna**: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
-- **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations and capability-boundary debugging.
+- **Terra**: cross-module core logic, media/timeline, Provider integrations, capability profiles, Compute Router/Execution Planner, jobs/recovery, migrations and capability-boundary debugging.
 - **Sol**: architecture/security/critical quality gate, or unresolved Terra failure with a concrete reproduction.
 
 Task importance alone never justifies Sol; lower token price never justifies architecture-changing work by Luna.
 
-## 13. Current gates
+## 14. Current gates
 
 ### Gate A — Foundation integrity
 Provider accounting/idempotency, revision invalidation and real media/timeline boundaries remain green.
@@ -205,15 +283,15 @@ Provider accounting/idempotency, revision invalidation and real media/timeline b
 Maintain provider-neutral Voice jobs/QA. OmniVoice is the benchmark; select a commercial-safe production path later without changing Core contracts.
 
 ### Gate C — Talking
-The current package is an adaptive LatentSync capability-boundary search between the known short passing sample and the 17.44s failed sample. Admission still requires ordinary-material automated evidence plus human publishability review.
+Maintain evidence-backed provider/configuration capability profiles. Current local LatentSync evidence is short-segment only; continuity remains unproven.
 
 ### Gate D — Integrated creator flow
-`new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.
+`new topic → IP-aware copy → voice → Execution Planner/Compute Router → Talking/Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.
 
 ### Gate E — U-Product
 Two real new topics, 30–60 second exports, normal UI, recoverable failures, no manual per-scene audio cutting and no false capability claims.
 
-## 14. Stop conditions
+## 15. Stop conditions
 
 Proceed autonomously only inside the one active bounded work package in `STATUS.md`. Stop and update package state when:
 
@@ -225,6 +303,6 @@ Proceed autonomously only inside the one active bounded work package in `STATUS.
 
 A failed or inconclusive bounded experiment is a valid completion. Do not keep expanding work merely to obtain a passing result.
 
-## 15. Documentation system
+## 16. Documentation system
 
 Only six root documents are active controls: `START_HERE.md`, `CONTENT_OS_EXECUTION_SPEC.md`, `STATUS.md`, `DECISIONS.md`, `AGENTS.md`, `README.md`. Historical experiments belong to Git history or local evaluation evidence. Run `python scripts/check_docs.py` before handoff.
