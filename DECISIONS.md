@@ -6,8 +6,9 @@ This file records only decisions that should survive individual tasks. Current s
 
 - Root project control stays limited to: `START_HERE.md`, `CONTENT_OS_EXECUTION_SPEC.md`, `STATUS.md`, `DECISIONS.md`, `AGENTS.md`, `README.md`.
 - Old PRD/plan/freeze/handoff/review files are historical evidence and must not compete with the active hierarchy. Git history is the default archive.
-- `STATUS.md` records only current truth, active blocker/candidate and next work. Per-run paths, timestamps, download/cache history and retired-provider experiment logs stay in Git history or local evaluation evidence.
+- `STATUS.md` records only current truth, one active bounded package, its explicit state and next work. Per-run paths, timestamps, download/cache history and retired-provider experiment logs stay in Git history or local evaluation evidence.
 - `scripts/check_docs.py` and CI enforce the active-doc set and stale-reference rules.
+- Work packages must close as pass/fail/blocked or stop at an explicit human-review handoff; they must not remain indefinitely in an ambiguous in-progress state.
 
 ## Voice provider strategy
 
@@ -16,6 +17,7 @@ This file records only decisions that should survive individual tasks. Current s
 - **Chatterbox is rejected** for the current R1 path after real side-by-side U-Voice testing found clearly worse creator timbre similarity and naturalness than OmniVoice.
 - A commercial-safe local Voice provider is currently unselected. BYOK/cloud fallback remains interchangeable behind the same `VoiceProvider` boundary.
 - Generated voice must pass automatic QA plus explicit human likeness/naturalness review before it can count toward the product gate.
+- Automatic copy/timing QA does not establish timbre similarity, pacing or breathing quality; those remain explicit U-Voice concerns.
 
 ## Talking / lip-sync strategy
 
@@ -23,7 +25,11 @@ This file records only decisions that should survive individual tasks. Current s
 - **MuseTalk 1.5 is rejected** after ordinary-material U-Talking review found visible sync/performance quality below the product bar.
 - Rejected model-specific runners/adapters do not remain in the active Core provider surface. Core keeps only provider-neutral contracts, Jobs, QA, reference selection and provenance boundaries.
 - **VideoReTalking is rejected** after ordinary-material U-Talking review found severe mouth deformation, blur and local scale/warp artifacts; it has no Core adapter.
-- The pinned **LatentSync 1.5** benchmark passed the user's sample-level continue judgment. Keep its Core adapter optional and benchmark-only behind explicit runtime paths; do not treat it as a commercial-safe default or mature R1 admission until the integrated 30–60s gate passes. Defer KeySync to a later compatible machine and do not integrate broad avatar-generation models merely because they produce talking heads.
+- **LatentSync 1.5** remains an optional benchmark-only local adapter. Short ordinary-material output was acceptable to continue, while the 17.44s result failed publishability because visual lip-sync drift accumulated and the associated Voice take was not naturally paced.
+- Do not prematurely freeze LatentSync or the product to a 3–5s Talking maximum. First probe the intermediate duration ceiling with a bounded **9s → 8s** experiment. Treat the highest passing duration as a currently verified provider/runtime capability, not a permanent product maximum and not a requirement for every scene.
+- Separate visual Talking duration from Voice duration/prosody: reuse an existing narration when locating visual sync drift, then generate a fresh natural Voice take only after a visual duration passes.
+- Do not auto-descend beyond the explicitly scoped duration tier. If 8s fails, close the package before deciding whether to test 7s/6s, another provider or remote compute.
+- KeySync remains deferred to a later compatible machine; do not integrate broad avatar-generation models merely because they produce talking heads.
 
 ## Talking runtime routing on consumer hardware
 
@@ -38,7 +44,7 @@ This file records only decisions that should survive individual tasks. Current s
 
 - Development uses the cheapest model that can reliably complete the task: `Luna → Terra → Sol`.
 - Luna: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
-- Terra: cross-module media/timeline/provider/planner/router/job/migration work.
+- Terra: cross-module media/timeline/provider/planner/router/job/migration work and compatibility-sensitive Voice/Talking debugging.
 - Sol: architecture/security/critical quality gates or unresolved Terra failures with a concrete reproduction.
 - Task importance alone does not justify Sol; cost alone does not justify giving architecture-changing work to Luna.
 
