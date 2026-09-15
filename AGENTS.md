@@ -24,6 +24,7 @@ Imported narration, source-led recuts, old mouth motion, generic TTS or generic 
 - Voice/face cloning requires explicit rights/consent records.
 - Never log secrets.
 - Runtime provider calls use the existing durable idempotency/budget/usage boundary; unknown cost is not zero.
+- Unknown capability is not verified capability. Never label documentation claims, theoretical limits, or another machine's results as local evidence.
 - Fixture, assisted-test and runtime evidence remain distinct. Never promote fixture success to product-quality success.
 
 ## Voice / Talking provider policy
@@ -43,6 +44,50 @@ OmniVoice is approved for **local non-commercial technical evaluation / benchmar
 
 A commercial-safe local provider and a BYOK cloud fallback must remain possible without schema changes.
 
+## Capability-aware routing policy
+
+Treat these as separate layers:
+
+1. **Narrative / Scene intent** — what the content needs editorially.
+2. **Hybrid Asset Router** — which visual/content source should satisfy it.
+3. **Execution Planner / Compute Router** — which provider/runtime/configuration should execute that capability.
+
+Do not distort narrative structure merely to fit one provider's current limitation. Provider constraints belong in execution/routing.
+
+Capability evidence must be scoped to a concrete provider/model/runtime/machine configuration. When practical, record:
+
+- implemented/configured/available/verified state;
+- observed pass/fail operating range;
+- quality/continuity evidence;
+- relevant resource use and latency;
+- local/remote execution mode;
+- known/unknown cost;
+- license/commercial status;
+- verification provenance and time.
+
+## Advanced Settings / parameter overrides
+
+Advanced Settings is an override layer over the same routing system, not a parallel configuration stack.
+
+Parameter precedence is fixed:
+
+1. per-job explicit override;
+2. saved user override for the provider + machine/profile;
+3. locally verified capability/profile value;
+4. provider-known conservative default;
+5. unknown.
+
+Rules:
+
+- Do not invent an optimized value when evidence is missing.
+- Expose an advanced override when a provider/machine parameter materially affects quality/runtime and the system lacks sufficient evidence.
+- Keep provider-specific parameter names behind provider adapters/config schemas; avoid leaking one provider's knobs into universal domain contracts.
+- Where practical, surface parameter provenance/status: `verified`, `provider_default`, `user_override`, or `unknown`.
+- Allow reset to automatic/verified defaults.
+- User overrides may not bypass consent, budget, license, provenance, or hard runtime-safety checks.
+- A successful user-tuned run may be promoted to local evidence only after appropriate QA/human acceptance; never auto-promote it to a global default.
+- Prefer the narrowest persistence scope that matches intent: job → project → provider+machine profile.
+
 ## Model cost policy
 
 Use the cheapest model that can complete the task with the required quality.
@@ -57,7 +102,7 @@ Use for:
 - simple adapters with fixed interfaces;
 - mechanical refactors and local bug fixes.
 
-Do **not** let Luna independently redesign core schemas, execution semantics, provider accounting or media/timeline architecture.
+Do **not** let Luna independently redesign core schemas, execution semantics, provider accounting, capability routing or media/timeline architecture.
 
 ### Terra — core implementation
 
@@ -66,6 +111,7 @@ Use for:
 - media/timeline logic;
 - Voice/Talking provider integration;
 - planner/router/search semantics;
+- capability profiles and Compute Router / Execution Planner;
 - multi-file state changes;
 - jobs/retry/recovery/idempotency;
 - migrations and compatibility-sensitive implementation;
@@ -136,6 +182,7 @@ Rules:
 7. `STATUS.md` should contain one active package only. Historical detail belongs in Git history or local evaluation evidence.
 8. Numeric examples from the user are not automatically fixed requirements. Infer the underlying product question and prefer evidence-efficient experiments that answer it.
 9. Capability-boundary experiments should optimize **information gained per run**. Use bracketing/binary/adaptive search when appropriate; stop when further precision would not change product routing or market decisions.
+10. Architecture packages must also be bounded. Build the smallest useful capability-profile/routing slice, close it, then open a separate UI/advanced-settings or continuity package rather than mixing them indefinitely.
 
 ## Documentation maintenance
 
@@ -170,5 +217,13 @@ Voice/Talking acceptance additionally checks:
 - obvious sync failure detection;
 - explicit human U-Voice judgment for likeness/naturalness;
 - explicit human U-Talking judgment for visible sync/publishability.
+
+Routing/Advanced Settings behavior additionally checks:
+
+- precedence order is deterministic;
+- unknown values stay unknown rather than being silently guessed;
+- user overrides are scoped and reversible;
+- hard safety/consent/budget/license gates still win over overrides;
+- routing decisions expose enough reason/provenance to debug why a provider/configuration was chosen.
 
 After a work package passes, update `STATUS.md` and claim only the next task explicitly allowed there. Pause for explicit consent/identity, first paid use/budget change, irreversible data/scope change, or a human product-quality gate.
