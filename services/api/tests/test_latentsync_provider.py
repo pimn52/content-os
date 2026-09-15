@@ -79,6 +79,8 @@ def test_latentsync_stages_clip_and_invokes_official_cli_contract(tmp_path: Path
             if not output.is_absolute():
                 output = cwd / output
             output.write_bytes(b"generated video")
+        elif "-show_entries" in args:
+            return subprocess.CompletedProcess(args, 0, '{"format": {"duration": "1.000"}}', "")
         else:
             Path(args[-1]).write_bytes(b"staged reference")
         return subprocess.CompletedProcess(args, 0, "", "")
@@ -91,7 +93,7 @@ def test_latentsync_stages_clip_and_invokes_official_cli_contract(tmp_path: Path
 
     assert result.video_path == output.resolve()
     assert result.provider_version == "1.5"
-    assert len(calls) == 4
+    assert len(calls) == 5
     ffmpeg, cwd, timeout = calls[0]
     assert cwd == provider.repo_root
     assert timeout == 900.0
@@ -108,13 +110,43 @@ def test_latentsync_stages_clip_and_invokes_official_cli_contract(tmp_path: Path
     assert inference[inference.index("--inference_steps") + 1] == "20"
     assert inference[inference.index("--guidance_scale") + 1] == "1.5"
     assert inference[inference.index("--seed") + 1] == "1247"
-    normalize = calls[3][0]
+    raw_probe = calls[3][0]
+    assert raw_probe[0] == "ffprobe"
+    assert raw_probe[raw_probe.index("-show_entries") + 1] == "format=duration"
+    normalize = calls[4][0]
     assert "-filter_complex" in normalize
     assert "tpad=stop_mode=clone" in normalize[normalize.index("-filter_complex") + 1]
     metadata = provider.runtime_metadata
     assert metadata.processing_resolution_px == 256
     assert metadata.estimated_cost.amount == 0
     assert metadata.estimated_cost.provider == "latentsync"
+
+
+def test_latentsync_rejects_truncated_raw_output_before_duration_normalization(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def command_runner(argv, cwd, timeout):
+        args = list(argv)
+        calls.append(args)
+        if "--video_out_path" in args:
+            output = Path(args[args.index("--video_out_path") + 1])
+            if not output.is_absolute():
+                output = cwd / output
+            output.write_bytes(b"truncated generated video")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if "-show_entries" in args:
+            return subprocess.CompletedProcess(args, 0, '{"format": {"duration": "0.500"}}', "")
+        Path(args[-1]).write_bytes(b"staged input")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    provider = _provider(tmp_path, command_runner)
+    profile, narration, reference = _inputs(tmp_path)
+
+    with pytest.raises(TalkingProviderResponseError, match="shorter than the driving narration"):
+        provider.synthesize(profile, narration, reference, tmp_path / "generated" / "talking.mp4")
+
+    assert any("-show_entries" in call for call in calls)
+    assert not any("-filter_complex" in call for call in calls)
 
 
 def test_latentsync_rejects_non_mp4_output_and_missing_result(tmp_path: Path) -> None:

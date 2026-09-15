@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+import json
 import math
 from pathlib import Path
 import shutil
@@ -33,6 +34,7 @@ LATENTSYNC_PROVIDER = "latentsync"
 LATENTSYNC_MODEL = "LatentSync-1.5"
 LATENTSYNC_PROCESSING_RESOLUTION_PX = 256
 LATENTSYNC_STATED_MINIMUM_VRAM_GB = 6.5
+RAW_OUTPUT_DURATION_TOLERANCE_MS = 80
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,18 @@ def _positive_float(value: float, label: str) -> float:
     if not math.isfinite(result) or result <= 0:
         raise TalkingConfigurationError(f"LatentSync {label} must be finite and positive")
     return result
+
+
+def _ffprobe_command(ffmpeg_command: Sequence[str]) -> tuple[str, ...]:
+    """Prefer the companion FFprobe binary for a configured FFmpeg runtime."""
+    executable = ffmpeg_command[0]
+    path = Path(executable)
+    suffix = path.suffix.lower()
+    if path.name.lower() == "ffmpeg.exe":
+        return (str(path.with_name("ffprobe.exe")),)
+    if path.name.lower() == "ffmpeg":
+        return (str(path.with_name("ffprobe")),)
+    return ("ffprobe",)
 
 
 class LatentSyncProvider:
@@ -112,6 +126,7 @@ class LatentSyncProvider:
             unet_config_path or self.repo_root / "configs" / "unet" / "stage2.yaml"
         ).resolve()
         self.ffmpeg_command = _command_parts(ffmpeg_command)
+        self.ffprobe_command = _ffprobe_command(self.ffmpeg_command)
         if not self._executable_available(self.python_executable):
             raise TalkingConfigurationError("LatentSync Python runtime is unavailable")
         if not self.repo_root.is_dir():
@@ -204,6 +219,7 @@ class LatentSyncProvider:
             self._prepare_model_audio(narration_path, runtime_audio, narration.duration_ms)
             runtime_output = temporary_root / "generated.mp4"
             self._run_inference(staged, runtime_audio, runtime_output)
+            self._require_raw_output_covers_narration(runtime_output, narration.duration_ms)
             normalized_output = temporary_root / "normalized.mp4"
             self._normalize_output(runtime_output, narration_path, normalized_output, narration.duration_ms)
             if not normalized_output.is_file() or normalized_output.stat().st_size == 0:
@@ -335,6 +351,38 @@ class LatentSyncProvider:
             str(target),
         ]
         self._execute(argv, "output duration normalization")
+
+    def _require_raw_output_covers_narration(self, generated: Path, narration_duration_ms: int) -> None:
+        """Reject an upstream truncation before a final-frame pad can hide it."""
+        if not generated.is_file() or generated.stat().st_size == 0:
+            raise TalkingProviderResponseError("LatentSync did not produce a local video file")
+        argv = [
+            *self.ffprobe_command,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "json",
+            str(generated),
+        ]
+        try:
+            completed = self._command_runner(argv, self.repo_root, self.timeout_seconds)
+        except FileNotFoundError as exc:
+            raise TalkingConfigurationError("LatentSync FFprobe runtime executable is unavailable") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TalkingTimeout("LatentSync raw output probe timed out") from exc
+        except TimeoutError as exc:
+            raise TalkingTimeout("LatentSync raw output probe timed out") from exc
+        except OSError as exc:
+            raise TalkingConfigurationError("LatentSync raw output probe could not be started") from exc
+        if completed.returncode != 0:
+            raise TalkingProviderResponseError("LatentSync raw output could not be probed")
+        try:
+            probe = json.loads(completed.stdout)
+            seconds = probe["format"]["duration"]
+            duration_ms = round(float(seconds) * 1_000)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TalkingProviderResponseError("LatentSync raw output duration is invalid") from exc
+        if duration_ms + RAW_OUTPUT_DURATION_TOLERANCE_MS < narration_duration_ms:
+            raise TalkingProviderResponseError("LatentSync raw output is shorter than the driving narration")
 
     def _run_inference(self, video_path: Path, audio_path: Path, target: Path) -> None:
         def runtime_argument(path: Path) -> str:

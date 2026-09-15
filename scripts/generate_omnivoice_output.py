@@ -23,6 +23,7 @@ def main() -> int:
     parser.add_argument("--language", default="zh")
     parser.add_argument("--num-step", type=int, default=32)
     parser.add_argument("--speed", type=float, default=1.0)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--duration", type=float)
     parser.add_argument("--instruct")
     args = parser.parse_args()
@@ -39,7 +40,7 @@ def main() -> int:
         "--model", str(args.model.resolve()), "--text", args.text,
         "--ref_audio", str(args.reference_audio.resolve()), "--ref_text", args.reference_text,
         "--output", str(output), "--language", args.language,
-        "--num_step", str(args.num_step), "--speed", str(args.speed), "--device", "cpu",
+        "--num_step", str(args.num_step), "--speed", str(args.speed), "--device", args.device,
     ]
     if args.duration is not None:
         command.extend(("--duration", str(args.duration)))
