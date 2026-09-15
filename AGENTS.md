@@ -113,6 +113,27 @@ Completion report must include:
 - new dependency/license concerns;
 - next ready task.
 
+## Work-package lifecycle
+
+Every active package in `STATUS.md` must carry exactly one state:
+
+- `READY` — scoped and safe to start;
+- `RUNNING` — execution is actively in progress;
+- `AWAITING_U_REVIEW` — the required human-quality artifact is ready; **stop work** until the user reviews it;
+- `PASS` — acceptance criteria are satisfied and the package is closed;
+- `FAIL` — the bounded experiment/implementation did not satisfy acceptance criteria and is closed;
+- `BLOCKED` — a concrete external/runtime/user dependency prevents completion; preserve reproduction/evidence and stop.
+
+Rules:
+
+1. An agent may move `READY → RUNNING` when it starts the package.
+2. Before asking the user for subjective Voice/Talking judgment, update `STATUS.md` to `AWAITING_U_REVIEW`, list the exact artifact(s) to review, and stop. Do not keep tuning while waiting.
+3. After the user's review, convert the package to `PASS`, `FAIL`, or a new explicit bounded next package. Do not leave a completed experiment as `RUNNING`.
+4. `BLOCKED` must name the blocker and the smallest next action that could clear it. Do not use `BLOCKED` for ordinary uncertainty.
+5. Do not silently expand a package. If the next experiment changes duration tier, provider, paid service, architecture, or product scope, close the current package first and open a new one.
+6. A failed bounded experiment is a valid completion. Preserve evidence; do not loop indefinitely to manufacture a pass.
+7. `STATUS.md` should contain one active package only. Historical detail belongs in Git history or local evaluation evidence.
+
 ## Documentation maintenance
 
 Only these files are active project-control documents:
@@ -127,7 +148,7 @@ Only these files are active project-control documents:
 Rules:
 
 - Do not create a new top-level review/freeze/handoff/plan document for normal work.
-- Update `STATUS.md` after every completed work package.
+- Update `STATUS.md` after every completed work package or before a human-quality handoff.
 - Update `DECISIONS.md` only for durable choices.
 - Update the execution spec only when product scope/acceptance/order materially changes.
 - Historical evidence stays in Git history or `docs/history/`; it does not outrank active docs.
@@ -144,6 +165,7 @@ Voice/Talking acceptance additionally checks:
 - duration and silence sanity;
 - missing/duplicate sentence detection;
 - obvious sync failure detection;
-- explicit human U-Voice judgment for likeness/naturalness.
+- explicit human U-Voice judgment for likeness/naturalness;
+- explicit human U-Talking judgment for visible sync/publishability.
 
-After a work package passes, update `STATUS.md` and directly claim the next ready task. Pause only for explicit consent/identity, first paid use or budget change, irreversible data/scope change, or a human product-quality gate.
+After a work package passes, update `STATUS.md` and claim only the next task explicitly allowed there. Pause for explicit consent/identity, first paid use/budget change, irreversible data/scope change, or a human product-quality gate.
