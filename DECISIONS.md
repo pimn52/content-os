@@ -25,29 +25,44 @@ This file records only decisions that should survive individual tasks. Current s
 - **MuseTalk 1.5 is rejected** after ordinary-material U-Talking review found visible sync/performance quality below the product bar.
 - Rejected model-specific runners/adapters do not remain in the active Core provider surface. Core keeps only provider-neutral contracts, Jobs, QA, reference selection and provenance boundaries.
 - **VideoReTalking is rejected** after ordinary-material U-Talking review found severe mouth deformation, blur and local scale/warp artifacts; it has no Core adapter.
-- **LatentSync 1.5** remains an optional benchmark-only local adapter. Short ordinary-material output was acceptable to continue, while the 17.44s result failed publishability because visual lip-sync drift accumulated and the associated Voice take was not naturally paced.
+- **LatentSync 1.5** remains an optional benchmark-only local adapter. Fresh-Voice evidence on the current 6GB development machine includes a 2.58s pass and a 5.12s late-sync failure. These are configuration-specific routing evidence, not universal model limits.
 - Do **not** freeze the product to a user-mentioned duration example. Talking duration capability must be measured from evidence.
 - Use a pass/fail bracket and adaptive midpoint testing to locate the useful duration boundary with the fewest runs. Adjust the midpoint only to a nearby natural speech boundary.
-- Stop when the remaining interval is precise enough to change product routing/UX/market decisions; do not chase a mathematical maximum when a couple of seconds of uncertainty is operationally irrelevant.
-- The result is an observed capability range for a specific provider/runtime/hardware/material combination, not a universal model limit.
-- Separate visual Talking duration from Voice duration/prosody: reuse an existing narration when locating visual sync drift, then generate a fresh natural Voice take only after the visual range is useful.
-- If nearby durations produce inconsistent judgments, treat sample/material variance as a first-class finding instead of forcing a false numeric threshold.
+- Stop when the remaining interval is precise enough to change product routing/UX/market decisions; do not chase a mathematical maximum when a small residual uncertainty is operationally irrelevant.
+- Separate visual Talking duration from Voice duration/prosody and keep multi-segment continuity as a separate product-quality question.
+- Individually passing short Talking clips do not prove a continuous-presenter experience.
 - KeySync remains deferred to a later compatible machine; do not integrate broad avatar-generation models merely because they produce talking heads.
 
-## Talking runtime routing on consumer hardware
+## Local-first Data + Hybrid Compute
 
-- **Local-first does not mean local-inference-only.** Local-first governs creator data ownership, local media/library/control and replaceable providers; compute-heavy inference may run remotely when that produces a better product.
-- For low-spec PCs, the default mature Talking path may be an external/BYOK API once the user explicitly approves media transfer and provider cost.
-- Local Talking remains an optional route when the machine passes provider-specific readiness and the output passes the same product-quality gate.
-- Do not hard-code one universal VRAM threshold. Runtime readiness is provider-specific and must report implemented/configured/available/verified states.
-- A remote provider must still pass the same identity retention, lip-sync, original motion/gaze, visual-quality and publishability gates as a local provider.
-- Provider cost, data transfer, authorization and provenance must be visible; no hidden cloud fallback.
+- **Local-first does not mean local-inference-only.** Creator assets, IP/profile, project state and control remain local-first; heavy inference may execute locally or through an approved remote provider.
+- Hybrid Asset Router and Compute Router are separate concerns: the Asset Router chooses the visual/content route; the Compute Router chooses the provider/runtime/configuration used to execute it.
+- Narrative/Scene Planner expresses editorial intent independent of current model limits. Execution Planner adapts that intent to verified local/remote capability instead of contaminating narrative structure with one provider's constraints.
+- Low-spec machines may use external/BYOK compute when quality, runtime or hardware make local inference unsuitable. Remote media transfer, cost and privacy implications must be explicit; there is no hidden cloud fallback.
+- Local and remote providers must pass the same product-quality and provenance gates.
+
+## Capability profiles and parameter evidence
+
+- A capability belongs to a concrete **provider + model/version + runtime/machine configuration**, not merely to a model name.
+- Capability profiles may record readiness, observed operating range, continuity/quality evidence, resource use, latency, cost, license status and verification provenance/time.
+- Results from one machine/configuration do not silently become global defaults.
+- **Unknown capability stays unknown.** Provider documentation, another user's result or a theoretical requirement may inform a conservative default but cannot be labeled locally verified.
+- Successful user-tuned runs may become local evidence after QA/human acceptance; they do not automatically become global product defaults.
+
+## Advanced Settings / overrides
+
+- Production parameter precedence is: `per-job explicit override > saved provider+machine/user override > locally verified capability/profile value > provider-known conservative default > unknown`.
+- Advanced Settings is an override layer, not a separate configuration system.
+- When the system lacks sufficient empirical evidence, expose a transparent Advanced Settings path instead of pretending the automatic router knows the optimum.
+- Advanced Settings must show the source/status of important values where practical (`verified`, `provider default`, `user override`, `unknown`) and allow reset to automatic/verified defaults.
+- Advanced overrides may tune provider-specific quality/runtime parameters but cannot bypass consent, budget, license, provenance, or hard runtime-safety checks.
+- Overrides should be saved at the narrowest useful scope: one job, project, or provider+machine profile.
 
 ## Implementation model cost policy
 
 - Development uses the cheapest model that can reliably complete the task: `Luna → Terra → Sol`.
 - Luna: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
-- Terra: cross-module media/timeline/provider/planner/router/job/migration work and compatibility-sensitive Voice/Talking debugging/capability search.
+- Terra: cross-module media/timeline/provider/planner/router/job/migration work, capability profiles, Compute Router and compatibility-sensitive Voice/Talking debugging.
 - Sol: architecture/security/critical quality gates or unresolved Terra failures with a concrete reproduction.
 - Task importance alone does not justify Sol; cost alone does not justify giving architecture-changing work to Luna.
 - Numeric examples in user conversation are not automatically engineering requirements; implementation agents must infer and preserve the underlying product objective.
