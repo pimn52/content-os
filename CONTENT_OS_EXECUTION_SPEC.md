@@ -1,6 +1,6 @@
 # Content OS R1 — Execution Specification
 
-Updated: 2026-09-14 (Asia/Shanghai)
+Updated: 2026-09-15 (Asia/Shanghai)
 
 This is the **single authoritative product/execution contract** for R1. Read `START_HERE.md` for navigation and `STATUS.md` for current progress.
 
@@ -91,7 +91,7 @@ Therefore official OmniVoice weights must not be bundled or advertised as a comm
 
 ### Voice QA
 
-Generated narration cannot reach final render without recorded QA covering at least copy coverage, missing/duplicate content, duration/silence sanity, playability and provider/reference provenance. Naturalness and likeness remain an explicit U-Voice human gate.
+Generated narration cannot reach final render without recorded QA covering at least copy coverage, missing/duplicate content, duration/silence sanity, playability and provider/reference provenance. Naturalness, pacing, breathing and likeness remain an explicit U-Voice human gate.
 
 ## 7. Talking / lip-sync strategy
 
@@ -111,7 +111,21 @@ over systems that regenerate the whole person/video when that regeneration is no
 
 - MuseTalk 1.5 has been **rejected** by U-Talking on ordinary material and is not an admitted product provider.
 - VideoReTalking has been **rejected** by U-Talking on ordinary material: the real run showed severe mouth deformation, blur and local scale/warp artifacts. It is not an admitted product provider and has no Core adapter.
-- LatentSync 1.5 completed the bounded ordinary-material benchmark, and the normal-resolution sample received an acceptable user U-Talking judgment to continue. A minimal optional benchmark-only Core adapter now exists behind explicit runtime paths. Its pinned 1.5 README states a 6.5 GB inference requirement and 256px processing; the current 6 GB laptop GPU relies on an eval-only attention compatibility fallback. The adapter is not a commercial-safe default and LatentSync is not fully admitted for R1 until the integrated 30–60s product gate passes. Defer KeySync to a later compatible machine.
+- LatentSync 1.5 remains a **benchmark-only optional local adapter**. A short ordinary-material sample was acceptable to continue, while the 17.44s result failed publishability because visible lip-sync drift accumulated and the associated Voice take was not naturally paced. The current 6GB laptop uses an evaluation-only compatibility fallback near its hardware limit. LatentSync is not a commercial-safe default and is not fully admitted for R1.
+- KeySync remains deferred to a later compatible machine.
+
+### Duration capability policy
+
+Do not prematurely hard-code a 3–5s Talking limit. Capability is established empirically and provider/runtime-specific.
+
+The current LatentSync work package probes **9s first, then 8s only if 9s fails**. The highest passing duration is a **currently verified capability**, not a permanent global maximum and not a requirement that every scene use that duration.
+
+Separate two questions:
+
+1. **Visual Talking capacity** — reuse the same already-generated narration and vary only duration to locate cumulative lip-sync/visual failure.
+2. **Product capacity** — after a visual duration passes, generate a fresh Voice take at a natural phrase boundary and require both U-Voice and U-Talking to pass.
+
+Do not continue automatically to 7s/6s or another Provider in the same package. Close the current package first and open a new bounded package if further descent is needed.
 
 ### Runtime routing
 
@@ -167,7 +181,7 @@ Quality first, then lowest capable cost:
 `Luna → Terra → Sol`
 
 - **Luna**: isolated UI/CRUD/tests/docs/simple adapters/mechanical fixes.
-- **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations.
+- **Terra**: cross-module core logic, media/timeline, Provider integrations, planner/router, jobs/recovery, migrations and the current duration-boundary debugging package.
 - **Sol**: architecture/security/critical quality gate, or unresolved Terra failure with a concrete reproduction.
 
 Task importance alone never justifies Sol; lower token price never justifies architecture-changing work by Luna.
@@ -181,7 +195,7 @@ Provider accounting/idempotency, revision invalidation and real media/timeline b
 Maintain provider-neutral Voice jobs/QA. OmniVoice is the benchmark; select a commercial-safe production path later without changing Core contracts.
 
 ### Gate C — Talking
-Benchmark LatentSync 1.5 on ordinary material in a compatible CUDA environment after the VideoReTalking failure, then complete the U-Talking gate on the resulting evidence. The current sample is acceptable to continue, so the optional adapter may be exercised in Gate D. Admit a provider for the mature R1 path only after ordinary-material automated evidence plus U-Talking publishability review.
+The current package is a bounded LatentSync duration-ceiling probe: 9s → 8s only if needed, with Voice and visual Talking evaluated separately. Admission still requires ordinary-material automated evidence plus human publishability review.
 
 ### Gate D — Integrated creator flow
 `new topic → IP-aware copy → voice → Talking → Hybrid Router → MasterNarration/timeline → Remotion render → cost/status/retry`.
@@ -191,7 +205,15 @@ Two real new topics, 30–60 second exports, normal UI, recoverable failures, no
 
 ## 14. Stop conditions
 
-Proceed autonomously for reversible engineering work inside this contract. Pause only for identity/voice/face consent or subjective likeness judgment, first paid provider use/budget increase, external account authorization/publishing, irreversible user-data change, material product-scope change, or an unresolved blocker requiring user input.
+Proceed autonomously only inside the one active bounded work package in `STATUS.md`. Stop and update package state when:
+
+- a requested U-Voice/U-Talking artifact is ready (`AWAITING_U_REVIEW`);
+- acceptance criteria pass (`PASS`);
+- the bounded experiment fails (`FAIL`);
+- a concrete runtime/external blocker prevents completion (`BLOCKED`);
+- the next step would change duration tier beyond the current package, Provider, paid service, architecture, product scope, or user-data boundary.
+
+A failed bounded experiment is a valid completion. Do not keep expanding work merely to obtain a passing result.
 
 ## 15. Documentation system
 
