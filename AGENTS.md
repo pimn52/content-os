@@ -69,7 +69,8 @@ Use for:
 - multi-file state changes;
 - jobs/retry/recovery/idempotency;
 - migrations and compatibility-sensitive implementation;
-- complex debugging with a reproducible failure.
+- complex debugging with a reproducible failure;
+- bounded capability-search work where provider/runtime behavior and product-quality evidence must be separated.
 
 ### Sol — gate/review only
 
@@ -128,11 +129,13 @@ Rules:
 
 1. An agent may move `READY → RUNNING` when it starts the package.
 2. Before asking the user for subjective Voice/Talking judgment, update `STATUS.md` to `AWAITING_U_REVIEW`, list the exact artifact(s) to review, and stop. Do not keep tuning while waiting.
-3. After the user's review, convert the package to `PASS`, `FAIL`, or a new explicit bounded next package. Do not leave a completed experiment as `RUNNING`.
+3. After the user's review, convert the package to `PASS`, `FAIL`, `BLOCKED`, or continue the same package **only when its declared bounded search rule explicitly allows another informative experiment**.
 4. `BLOCKED` must name the blocker and the smallest next action that could clear it. Do not use `BLOCKED` for ordinary uncertainty.
-5. Do not silently expand a package. If the next experiment changes duration tier, provider, paid service, architecture, or product scope, close the current package first and open a new one.
+5. Do not silently expand a package. A provider change, paid service, architecture change, product-scope change, data-boundary change, or experiment outside the declared search rule requires closing the current package first.
 6. A failed bounded experiment is a valid completion. Preserve evidence; do not loop indefinitely to manufacture a pass.
 7. `STATUS.md` should contain one active package only. Historical detail belongs in Git history or local evaluation evidence.
+8. Numeric examples from the user are not automatically fixed requirements. Infer the underlying product question and prefer evidence-efficient experiments that answer it.
+9. Capability-boundary experiments should optimize **information gained per run**. Use bracketing/binary/adaptive search when appropriate; stop when further precision would not change product routing or market decisions.
 
 ## Documentation maintenance
 
