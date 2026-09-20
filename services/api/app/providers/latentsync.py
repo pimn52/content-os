@@ -22,6 +22,7 @@ from app.domain.models import AudioAsset, CostCategory, TalkingProfile, UsageCos
 
 from .talking import (
     TalkingConfigurationError,
+    TalkingExecutionOptions,
     TalkingInputError,
     TalkingProviderResponseError,
     TalkingReference,
@@ -35,6 +36,11 @@ LATENTSYNC_MODEL = "LatentSync-1.5"
 LATENTSYNC_PROCESSING_RESOLUTION_PX = 256
 LATENTSYNC_STATED_MINIMUM_VRAM_GB = 6.5
 RAW_OUTPUT_DURATION_TOLERANCE_MS = 80
+# This is adapter timing needed to give the model a small pre-speech visual
+# runway.  It is intentionally not a product setting: the only user-tunable
+# close-out control is the post-speech silence owned by LatentSync.
+TERMINAL_CLOSEOUT_LEADING_CONTEXT_MS = 175
+TRAILING_SILENCE_LOOKAHEAD_PARAMETER = "trailing_silence_lookahead_ms"
 
 
 @dataclass(frozen=True)
@@ -188,6 +194,7 @@ class LatentSyncProvider:
         narration: AudioAsset,
         reference: TalkingReference,
         output_path: str | Path,
+        options: TalkingExecutionOptions | None = None,
     ) -> TalkingSynthesisResult:
         if not isinstance(profile, TalkingProfile) or not profile.consent.confirmed:
             raise TalkingInputError("LatentSync requires an explicitly consented TalkingProfile")
@@ -204,24 +211,49 @@ class LatentSyncProvider:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.unlink(missing_ok=True)
 
+        closeout = self._terminal_closeout_context(options, narration.duration_ms)
         duration_ms = reference.end_ms - reference.start_ms
+        delivery_duration_ms = closeout.delivery_duration_ms if closeout.enabled else narration.duration_ms
+        driving_duration_ms = delivery_duration_ms + closeout.leading_context_ms + closeout.trailing_silence_lookahead_ms
+        model_duration_ms = self._model_duration_ms(driving_duration_ms)
+        if closeout.enabled and duration_ms < model_duration_ms:
+            raise TalkingInputError(
+                "LatentSync terminal closeout requires a continuous reference clip at least as long as its model input"
+            )
         with TemporaryDirectory(prefix="latentsync-talking-", dir=self.repo_root) as temporary:
             temporary_root = Path(temporary)
             staged = Path(temporary) / "reference.mp4"
             runtime_audio = temporary_root / "narration-model.wav"
-            model_duration_ms = self._model_duration_ms(narration.duration_ms)
             # A Core Clip may be much longer than the new take.  LatentSync
             # aligns video frames to the driving audio, so sending the whole
             # ordinary Clip here can make the local runner process an
             # unrelated tail or fail before inference.  The Clip remains the
             # source of truth; only this provider boundary stages the window.
             self._stage_reference(reference, staged, duration_ms, model_duration_ms)
-            self._prepare_model_audio(narration_path, runtime_audio, narration.duration_ms)
+            if closeout.enabled:
+                self._prepare_terminal_closeout_audio(
+                    narration_path,
+                    runtime_audio,
+                    delivery_duration_ms,
+                    closeout.leading_context_ms,
+                    model_duration_ms,
+                )
+            else:
+                self._prepare_model_audio(narration_path, runtime_audio, narration.duration_ms)
             runtime_output = temporary_root / "generated.mp4"
             self._run_inference(staged, runtime_audio, runtime_output)
-            self._require_raw_output_covers_narration(runtime_output, narration.duration_ms)
+            self._require_raw_output_covers_narration(
+                runtime_output,
+                model_duration_ms if closeout.enabled else narration.duration_ms,
+            )
             normalized_output = temporary_root / "normalized.mp4"
-            self._normalize_output(runtime_output, narration_path, normalized_output, narration.duration_ms)
+            self._normalize_output(
+                runtime_output,
+                narration_path,
+                normalized_output,
+                delivery_duration_ms,
+                leading_context_ms=closeout.leading_context_ms,
+            )
             if not normalized_output.is_file() or normalized_output.stat().st_size == 0:
                 raise TalkingProviderResponseError("LatentSync did not produce a local video file")
             shutil.copyfile(normalized_output, target)
@@ -288,6 +320,41 @@ class LatentSyncProvider:
         if not staged.is_file() or staged.stat().st_size == 0:
             raise TalkingProviderResponseError("LatentSync reference preparation produced no video")
 
+    @dataclass(frozen=True)
+    class _TerminalCloseoutContext:
+        enabled: bool
+        delivery_duration_ms: int = 0
+        leading_context_ms: int = 0
+        trailing_silence_lookahead_ms: int = 0
+
+    def _terminal_closeout_context(
+        self,
+        options: TalkingExecutionOptions | None,
+        narration_duration_ms: int,
+    ) -> _TerminalCloseoutContext:
+        """Validate the provider-owned temporal context at the adapter edge."""
+
+        if options is None or not options.terminal_face_closeout:
+            return self._TerminalCloseoutContext(enabled=False)
+        delivery_duration_ms = options.terminal_delivery_end_ms
+        if delivery_duration_ms is None or delivery_duration_ms > narration_duration_ms:
+            raise TalkingInputError("LatentSync terminal closeout requires a verified speech-end timestamp within the narration")
+        unknown = set(options.provider_parameters) - {TRAILING_SILENCE_LOOKAHEAD_PARAMETER}
+        if unknown:
+            raise TalkingInputError("LatentSync terminal closeout received an unsupported provider parameter")
+        value = options.provider_parameters.get(TRAILING_SILENCE_LOOKAHEAD_PARAMETER)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise TalkingInputError("LatentSync terminal closeout requires a finite trailing silence look-ahead")
+        milliseconds = int(value)
+        if float(value) != milliseconds or not 1 <= milliseconds <= 2_000:
+            raise TalkingInputError("LatentSync trailing silence look-ahead must be an integer from 1 to 2000 ms")
+        return self._TerminalCloseoutContext(
+            enabled=True,
+            delivery_duration_ms=delivery_duration_ms,
+            leading_context_ms=TERMINAL_CLOSEOUT_LEADING_CONTEXT_MS,
+            trailing_silence_lookahead_ms=milliseconds,
+        )
+
     def _prepare_model_audio(self, source: Path, target: Path, duration_ms: int) -> None:
         """Pad audio to LatentSync's 16-frame inference window boundary."""
         model_duration_ms = self._model_duration_ms(duration_ms)
@@ -316,10 +383,79 @@ class LatentSyncProvider:
         if not target.is_file() or target.stat().st_size == 0:
             raise TalkingProviderResponseError("LatentSync narration preparation produced no audio")
 
-    def _normalize_output(self, generated: Path, narration: Path, target: Path, duration_ms: int) -> None:
+    def _prepare_terminal_closeout_audio(
+        self,
+        source: Path,
+        target: Path,
+        narration_duration_ms: int,
+        leading_context_ms: int,
+        model_duration_ms: int,
+    ) -> None:
+        """Give LatentSync silent context, without adding it to the delivery.
+
+        The generated visual will later be trimmed back to exactly the spoken
+        region and remuxed with the original narration.  The extra silence is
+        model context only, never a black/frozen or silent tail in the asset.
+        """
+
+        pad_seconds = max(0.0, (model_duration_ms - leading_context_ms - narration_duration_ms) / 1_000)
+        argv = [
+            *self.ffmpeg_command,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-t",
+            f"{leading_context_ms / 1_000:.3f}",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-i",
+            str(source),
+            "-filter_complex",
+            (
+                "[0:a]aresample=16000,aformat=sample_rates=16000:channel_layouts=mono[lead];"
+                f"[1:a]atrim=duration={narration_duration_ms / 1_000:.3f},"
+                "aresample=16000,aformat=sample_rates=16000:channel_layouts=mono[narration];"
+                f"[lead][narration]concat=n=2:v=0:a=1,apad=pad_dur={pad_seconds:.3f}[a]"
+            ),
+            "-map",
+            "[a]",
+            "-t",
+            f"{model_duration_ms / 1_000:.3f}",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(target),
+        ]
+        self._execute(argv, "terminal closeout narration preparation")
+        if not target.is_file() or target.stat().st_size == 0:
+            raise TalkingProviderResponseError("LatentSync terminal closeout narration preparation produced no audio")
+
+    def _normalize_output(
+        self,
+        generated: Path,
+        narration: Path,
+        target: Path,
+        duration_ms: int,
+        *,
+        leading_context_ms: int = 0,
+    ) -> None:
         """Restore the exact narration duration and use the original audio."""
         if not generated.is_file() or generated.stat().st_size == 0:
             raise TalkingProviderResponseError("LatentSync did not produce a local video file")
+        filter_graph = (
+            f"[0:v]tpad=stop_mode=clone:stop_duration={duration_ms / 1_000:.3f}[v]"
+            if leading_context_ms == 0
+            else (
+                f"[0:v]trim=start={leading_context_ms / 1_000:.3f}:"
+                f"duration={duration_ms / 1_000:.3f},setpts=PTS-STARTPTS[v]"
+            )
+        )
         argv = [
             *self.ffmpeg_command,
             "-hide_banner",
@@ -331,7 +467,7 @@ class LatentSyncProvider:
             "-i",
             str(narration),
             "-filter_complex",
-            f"[0:v]tpad=stop_mode=clone:stop_duration={duration_ms / 1_000:.3f}[v]",
+            filter_graph,
             "-map",
             "[v]",
             "-map",

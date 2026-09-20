@@ -381,6 +381,88 @@ def test_master_narration_rejects_audio_without_actual_timing(tmp_path: Path) ->
         db.close()
 
 
+def test_master_talking_default_preserves_the_selected_face_visual_through_audio_end(tmp_path: Path) -> None:
+    db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=25, denominator=1))
+    source = tmp_path / "talking.mp4"
+    source.write_bytes(b"talking")
+    audio_source = tmp_path / "master.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="m" * 64,
+        duration_ms=5_120, sample_rate=24_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+        transcript_segments=[TranscriptSegment(start_ms=400, end_ms=4_920, text="Any final language or word")],
+        transcript_source="verified-asr:provider",
+    )
+    talking = Asset(
+        source_kind=SourceKind.AI_VIDEO, source_file=str(source), content_hash="t" * 64,
+        duration_ms=5_120, width=720, height=1_280, fps=RationalFps(numerator=25, denominator=1), has_audio=True,
+        authorization_reference="talking-consent", imported_at=NOW,
+        metadata={"talking_generation": {"provider": "test", "qa_state": "verified"}},
+    )
+    try:
+        AudioAssetRepository(db).create(audio)
+        AssetRepository(db).create(talking)
+        clip = ClipRepository(db).create(Clip(asset_id=talking.id, start_ms=0, end_ms=5_120, asset_duration_ms=5_120))
+        scene = scenes[0].model_copy(update={"voice_text": "Any final language or word", "duration_target_ms": 5_120})
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=talking.id, clip_id=clip.id,
+            match_score=1.0, why=["verified Talking"], recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TALKING, amount=Decimal("0"), currency="USD"),
+        )
+        assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
+        spec = assembler.assemble(
+            project, [scene], {scene.id: candidate}, master_narration_asset_id=audio.id, narration_required=True,
+        )
+
+        assert [item.visual.source_kind for item in spec.scenes] == [SourceKind.AI_VIDEO]
+        assert [(item.start_frame, item.duration_frames) for item in spec.scenes] == [(0, 128)]
+        assert [(item.narration_start_ms, item.narration_end_ms) for item in spec.scenes] == [(0, 5_120)]
+    finally:
+        db.close()
+
+
+def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_speech(tmp_path: Path) -> None:
+    db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=25, denominator=1))
+    source = tmp_path / "talking-terminal.mp4"
+    source.write_bytes(b"talking")
+    audio_source = tmp_path / "terminal-master.wav"
+    audio_source.write_bytes(b"voice")
+    audio = AudioAsset(
+        source_kind=SourceKind.USER_ASSET, source_file=str(audio_source), content_hash="n" * 64,
+        duration_ms=5_120, sample_rate=24_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
+        transcript_segments=[TranscriptSegment(start_ms=400, end_ms=4_920, text="Terminal copy in any language")],
+        transcript_source="verified-asr:provider",
+    )
+    talking = Asset(
+        source_kind=SourceKind.AI_VIDEO, source_file=str(source), content_hash="u" * 64,
+        duration_ms=5_120, width=720, height=1_280, fps=RationalFps(numerator=25, denominator=1), has_audio=True,
+        authorization_reference="talking-consent", imported_at=NOW,
+        metadata={"talking_generation": {"provider": "test", "qa_state": "verified"}},
+    )
+    try:
+        AudioAssetRepository(db).create(audio)
+        AssetRepository(db).create(talking)
+        clip = ClipRepository(db).create(Clip(asset_id=talking.id, start_ms=0, end_ms=5_120, asset_duration_ms=5_120))
+        scene = scenes[0].model_copy(update={"voice_text": "Terminal copy in any language", "duration_target_ms": 5_120})
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=talking.id, clip_id=clip.id,
+            match_score=1.0, why=["verified Talking"], recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TALKING, amount=Decimal("0"), currency="USD"),
+        )
+        spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db)).assemble(
+            project, [scene], {scene.id: candidate}, master_narration_asset_id=audio.id,
+            narration_required=True, terminal_talking_delivery=True,
+        )
+
+        assert spec.master_narration is not None
+        assert spec.master_narration.end_ms == 4_920
+        assert [item.visual.source_kind for item in spec.scenes] == [SourceKind.AI_VIDEO]
+        assert [(item.start_frame, item.duration_frames) for item in spec.scenes] == [(0, 123)]
+        assert [(item.narration_start_ms, item.narration_end_ms) for item in spec.scenes] == [(0, 4_920)]
+    finally:
+        db.close()
+
+
 def test_master_narration_matches_traditional_asr_text_without_rewriting_evidence(tmp_path: Path) -> None:
     db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
     audio_source = tmp_path / "traditional.wav"

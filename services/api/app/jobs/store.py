@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Collection, Iterator
+from typing import Collection, Iterator, Mapping
 from uuid import UUID
 
 from app.db.database import Database
@@ -40,6 +40,7 @@ class JobStore:
         *,
         max_attempts: int,
         allowed_types: Collection[JobType] | None = None,
+        resource_keys_by_type: Mapping[JobType, str] | None = None,
         now: datetime | None = None,
     ) -> Job | None:
         """Atomically claim one pending or expired-running job.
@@ -51,17 +52,20 @@ class JobStore:
         worker = _valid_worker(worker_id)
         maximum = _valid_max_attempts(max_attempts)
         allowed = _valid_allowed_types(allowed_types)
+        resource_keys = _valid_resource_keys(resource_keys_by_type)
         if allowed is not None and not allowed:
             return None
         timestamp, expiry = _lease_times(now, lease_duration)
         timestamp_text, expiry_text = _utc_timestamp(timestamp), _utc_timestamp(expiry)
         with self._write_transaction():
+            skipped: list[str] = []
             while True:
                 type_clause = "" if allowed is None else f" AND json_extract(payload, '$.type') IN ({','.join('?' for _ in allowed)})"
+                skipped_clause = "" if not skipped else f" AND id NOT IN ({','.join('?' for _ in skipped)})"
                 row = self.db.connection.execute(
                     f"""SELECT * FROM jobs
                        WHERE (status = ?
-                          OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)){type_clause}
+                          OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)){type_clause}{skipped_clause}
                        ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, created_at, id
                        LIMIT 1""",
                     (
@@ -69,6 +73,7 @@ class JobStore:
                         JobStatus.RUNNING.value,
                         timestamp_text,
                         *(item.value for item in allowed or ()),
+                        *skipped,
                         JobStatus.PENDING.value,
                     ),
                 ).fetchone()
@@ -77,6 +82,15 @@ class JobStore:
                 current = _model(row, Job)
                 if current.attempt >= maximum:
                     self._fail_exhausted(current, maximum, timestamp, timestamp_text)
+                    continue
+                resource_key = resource_keys.get(current.type)
+                if resource_key is not None and not self._claim_resource(
+                    resource_key, current.id, worker, timestamp_text, expiry_text,
+                ):
+                    # Resource contention is scheduling, not an execution
+                    # attempt. Try a later eligible CPU job in this same
+                    # transaction without changing this job's attempt count.
+                    skipped.append(str(current.id))
                     continue
                 claimed = current.model_copy(update={
                     "status": JobStatus.RUNNING,
@@ -97,6 +111,8 @@ class JobStore:
                     ),
                 )
                 if cursor.rowcount != 1:
+                    if resource_key is not None:
+                        self._release_resource(resource_key, current.id, worker)
                     # This should only be possible if this connection is used
                     # outside JobStore's transaction discipline.
                     return None
@@ -109,10 +125,14 @@ class JobStore:
         *,
         max_attempts: int,
         allowed_types: Collection[JobType] | None = None,
+        resource_keys_by_type: Mapping[JobType, str] | None = None,
         now: datetime | None = None,
     ) -> Job | None:
         """Compatibility-friendly name for a runner's next-job operation."""
-        return self.claim(worker_id, lease_duration, max_attempts=max_attempts, allowed_types=allowed_types, now=now)
+        return self.claim(
+            worker_id, lease_duration, max_attempts=max_attempts,
+            allowed_types=allowed_types, resource_keys_by_type=resource_keys_by_type, now=now,
+        )
 
     def heartbeat(
         self,
@@ -130,13 +150,30 @@ class JobStore:
             current = self._owned_running_job(job_id, worker, timestamp_text)
             if current is None:
                 return None
+            resource_rows = self.db.connection.execute(
+                """SELECT resource_key FROM local_resource_leases
+                   WHERE job_id = ? AND worker_id = ? AND lease_expires_at > ?""",
+                (str(job_id), worker, timestamp_text),
+            ).fetchall()
             renewed = current.model_copy(update={"updated_at": timestamp})
             cursor = self.db.connection.execute(
                 """UPDATE jobs SET updated_at = ?, lease_expires_at = ?, payload = ?
                    WHERE id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?""",
                 (timestamp_text, expiry_text, _job_payload(renewed), str(job_id), JobStatus.RUNNING.value, worker, timestamp_text),
             )
-            return renewed if cursor.rowcount == 1 else None
+            if cursor.rowcount != 1:
+                return None
+            if resource_rows:
+                resources = tuple(row["resource_key"] for row in resource_rows)
+                cursor = self.db.connection.execute(
+                    f"""UPDATE local_resource_leases SET lease_expires_at = ?
+                        WHERE job_id = ? AND worker_id = ? AND lease_expires_at > ?
+                          AND resource_key IN ({','.join('?' for _ in resources)})""",
+                    (expiry_text, str(job_id), worker, timestamp_text, *resources),
+                )
+                if cursor.rowcount != len(resources):
+                    raise RuntimeError("local resource lease heartbeat lost its ownership guard")
+            return renewed
 
     def renew_lease(self, job_id: UUID, worker_id: str, lease_duration: timedelta, *, now: datetime | None = None) -> Job | None:
         """Alias for :meth:`heartbeat` for runners that use lease terminology."""
@@ -167,7 +204,10 @@ class JobStore:
                     JobStatus.RUNNING.value, worker, timestamp_text,
                 ),
             )
-            return completed if cursor.rowcount == 1 else None
+            if cursor.rowcount != 1:
+                return None
+            self._release_resources_for_job(job_id, worker)
+            return completed
 
     def fail(
         self,
@@ -206,7 +246,10 @@ class JobStore:
                     JobStatus.RUNNING.value, worker, timestamp_text,
                 ),
             )
-            return transitioned if cursor.rowcount == 1 else None
+            if cursor.rowcount != 1:
+                return None
+            self._release_resources_for_job(job_id, worker)
+            return transitioned
 
     def fail_terminal(
         self,
@@ -247,7 +290,10 @@ class JobStore:
                     JobStatus.RUNNING.value, worker, timestamp_text,
                 ),
             )
-            return failed if cursor.rowcount == 1 else None
+            if cursor.rowcount != 1:
+                return None
+            self._release_resources_for_job(job_id, worker)
+            return failed
 
     def recover_expired(self, *, max_attempts: int, now: datetime | None = None) -> list[Job]:
         """Recover expired running jobs and terminalize exhausted pending jobs.
@@ -284,6 +330,7 @@ class JobStore:
                     ),
                 )
                 if cursor.rowcount == 1:
+                    self.db.connection.execute("DELETE FROM local_resource_leases WHERE job_id = ?", (str(current.id),))
                     recovered.append(pending)
             return recovered
 
@@ -306,6 +353,47 @@ class JobStore:
         ).fetchone()
         return None if row is None else _model(row, Job)
 
+    def _claim_resource(self, resource_key: str, job_id: UUID, worker: str, timestamp_text: str, expiry_text: str) -> bool:
+        """Claim a named local resource inside the same transaction as a job."""
+
+        row = self.db.connection.execute(
+            "SELECT job_id, worker_id, lease_expires_at FROM local_resource_leases WHERE resource_key = ?",
+            (resource_key,),
+        ).fetchone()
+        if row is None:
+            self.db.connection.execute(
+                "INSERT INTO local_resource_leases(resource_key, job_id, worker_id, lease_expires_at) VALUES (?, ?, ?, ?)",
+                (resource_key, str(job_id), worker, expiry_text),
+            )
+            return True
+        if row["job_id"] == str(job_id) and row["worker_id"] == worker:
+            self.db.connection.execute(
+                "UPDATE local_resource_leases SET lease_expires_at = ? WHERE resource_key = ?",
+                (expiry_text, resource_key),
+            )
+            return True
+        if row["lease_expires_at"] <= timestamp_text:
+            cursor = self.db.connection.execute(
+                """UPDATE local_resource_leases
+                   SET job_id = ?, worker_id = ?, lease_expires_at = ?
+                   WHERE resource_key = ? AND lease_expires_at <= ?""",
+                (str(job_id), worker, expiry_text, resource_key, timestamp_text),
+            )
+            return cursor.rowcount == 1
+        return False
+
+    def _release_resource(self, resource_key: str, job_id: UUID, worker: str) -> None:
+        self.db.connection.execute(
+            "DELETE FROM local_resource_leases WHERE resource_key = ? AND job_id = ? AND worker_id = ?",
+            (resource_key, str(job_id), worker),
+        )
+
+    def _release_resources_for_job(self, job_id: UUID, worker: str) -> None:
+        self.db.connection.execute(
+            "DELETE FROM local_resource_leases WHERE job_id = ? AND worker_id = ?",
+            (str(job_id), worker),
+        )
+
     def _fail_exhausted(self, current: Job, maximum: int, timestamp: datetime, timestamp_text: str) -> Job:
         """Terminalize an exhausted pending or expired-running job in this transaction."""
         failed = current.model_copy(update={
@@ -327,6 +415,7 @@ class JobStore:
         )
         if cursor.rowcount != 1:
             raise RuntimeError("exhausted job state transition lost its eligibility guard")
+        self.db.connection.execute("DELETE FROM local_resource_leases WHERE job_id = ?", (str(current.id),))
         return failed
 
 
@@ -369,6 +458,21 @@ def _valid_allowed_types(value: Collection[JobType] | None) -> tuple[JobType, ..
     if any(not isinstance(item, JobType) for item in values):
         raise ValueError("allowed_types must contain only JobType values")
     return tuple(dict.fromkeys(values))
+
+
+def _valid_resource_keys(value: Mapping[JobType, str] | None) -> dict[JobType, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("resource_keys_by_type must map JobType to a non-empty resource key")
+    normalized: dict[JobType, str] = {}
+    for job_type, resource_key in value.items():
+        if not isinstance(job_type, JobType):
+            raise ValueError("resource_keys_by_type must use JobType keys")
+        if not isinstance(resource_key, str) or not resource_key.strip() or len(resource_key) > 500:
+            raise ValueError("resource keys must be non-empty strings of at most 500 characters")
+        normalized[job_type] = resource_key.strip()
+    return normalized
 
 
 def _valid_error(code: str, message: str) -> tuple[str, str]:

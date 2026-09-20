@@ -145,6 +145,14 @@ Keep narrative intent independent from provider limits:
 
 For example, a 9s creator explanation may be realized as one 9s Talking scene on a capable provider, or as several short Talking appearances separated by B-roll/typography on a constrained local provider. Do not rewrite the narrative merely because the current machine has a short generation ceiling.
 
+### Terminal face-closeout policy
+
+When a narrative itself ends on a Talking segment, the product may request a **face-visible terminal closeout**: the delivered audio/video ends at the final persisted speech timestamp while the final visible frame remains the creator face. A provider may use extra non-delivered context to predict that ending, but B-roll, black, Typography, frozen clones and model-only silent audio must not hide or extend it.
+
+This is a provider-neutral capability, not a global parameter. For the current LatentSync 1.5 adapter, the user-facing setting is **结束静音前瞻（ms）** (`trailing_silence_lookahead_ms`): the amount of silent audio appended only to the model input after the final spoken sound. It gives the model time to move from the final phoneme toward a resting mouth; the silent context is then cropped out and the delivered asset retains only the original narration audio and duration.
+
+The setting belongs to that provider/model adapter, not to a generic Talking contract or a machine-speed control. `600ms` is the current conservative adapter baseline, informed by D6g; it can run on another compatible machine as a `provider_default`, while the D6g human-quality pass remains evidence only for its exact provider/model/runtime/machine/reference conditions. **Content OS owns the closeout-protection request**: an adapter may implement it with a native Provider control or with a Content-OS context-and-crop technique, even if the upstream Provider has never named the defect. Provider adapters expose their own controllable temporal-context settings; their effective value follows `job override > saved provider+machine override > locally verified profile > provider default > unknown`. An unadapted Provider is explicitly `unsupported` or `unknown` for this product protection—not assumed fixed, not passed the LatentSync parameter, and never covered with a visual workaround.
+
 ## 8. Capability-aware Compute Router
 
 R1 should evolve toward **Local-first Data + Hybrid Compute** without making remote compute mandatory.

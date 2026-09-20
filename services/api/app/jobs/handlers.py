@@ -11,6 +11,7 @@ from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Talkin
 from app.domain.models import Asset, AudioAsset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, UsageCost, VoiceGenerationJobPayload, VoiceQaJobPayload
 from app.media.audio_importer import AudioImportError, AudioImporter
 from app.media.importer import MediaImportError, MediaImporter
+from app.providers.talking import TalkingExecutionOptions
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.media.extraction import (
     AudioExtraction,
@@ -386,7 +387,21 @@ class TalkingGenerationJobHandler:
         )
         output = self._output_root / "talking" / f"{job.id}-attempt-{job.attempt}.mp4"
         try:
-            result = self._provider.synthesize(profile, narration, reference, output)
+            # Keep the ordinary four-argument provider call intact.  The
+            # optional execution contract is only needed when the editorial
+            # request explicitly asks the face to settle after speech ends;
+            # this lets already-admitted ordinary providers keep working.
+            if job.payload.terminal_face_closeout:
+                options = TalkingExecutionOptions(
+                    terminal_face_closeout=True,
+                    terminal_delivery_end_ms=job.payload.terminal_delivery_end_ms,
+                    provider_parameters=job.payload.execution_parameters,
+                    parameter_sources=job.payload.execution_parameter_sources,
+                    profile_reference=job.payload.execution_profile_reference,
+                )
+                result = self._provider.synthesize(profile, narration, reference, output, options)
+            else:
+                result = self._provider.synthesize(profile, narration, reference, output)
         except (TalkingRateLimitError, TalkingTimeout, TalkingConnectionError):
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_temporarily_unavailable")
             raise JobExecutionError("talking_temporarily_unavailable", "talking provider is temporarily unavailable", retryable=True) from None
@@ -407,6 +422,11 @@ class TalkingGenerationJobHandler:
                 "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
                 "talking_profile_id": str(profile.id), "reference_clip_id": str(reference.clip_id), "reference_subtitle_crop_bottom_ratio": reference.subtitle_crop_bottom_ratio, "narration_audio_id": str(narration.id),
                 "job_id": str(job.id), "attempt": job.attempt, "qa_state": "pending",
+                "terminal_face_closeout": job.payload.terminal_face_closeout,
+                "terminal_delivery_end_ms": job.payload.terminal_delivery_end_ms,
+                "execution_parameters": dict(job.payload.execution_parameters),
+                "execution_parameter_sources": dict(job.payload.execution_parameter_sources),
+                "execution_profile_reference": job.payload.execution_profile_reference,
             }
             with self._assets.db.transaction():
                 self._assets.update(video.model_copy(update={"metadata": metadata}))

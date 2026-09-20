@@ -18,8 +18,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
-from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
+from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -61,7 +61,7 @@ from app.provider_execution import (
 )
 from app.project_drafts import save_project_draft as persist_project_draft
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
-from app.routing import AssetRouter, RoutingConfigurationError, RoutingInputError
+from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, CapabilityReadiness, CommercialStatus, EvidenceProvenance, EvidenceStatus, ExecutionOverride, ExecutionSafetyContext, FeatureSupport, ResolutionSource, RoutingConfigurationError, RoutingInputError, find_provider_settings_schema, find_unique_provider_settings_schema, list_provider_settings_schemas, resolve_execution, resolve_feature_support, validate_schema_values
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
 from app.talking import select_talking_reference
@@ -482,6 +482,8 @@ class TalkingGenerationJobRequest(BaseModel):
     reference_clip_id: UUID
     narration_audio_id: UUID
     authorization_reference: str = Field(min_length=1, max_length=500)
+    terminal_face_closeout: bool = False
+    execution_machine_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class TalkingReferenceSelectionRequest(BaseModel):
@@ -522,6 +524,13 @@ class BudgetPolicyRequest(BaseModel):
     max_amount: Decimal | None = Field(default=None, ge=Decimal("0"), max_digits=12, decimal_places=4)
     max_calls: int | None = Field(default=None, ge=0, strict=True)
     allow_unknown_cost: bool = False
+
+
+class ProviderMachineSettingRequest(BaseModel):
+    """A local Advanced Settings value set; it contains no credentials."""
+
+    model_config = ConfigDict(extra="forbid")
+    values: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
 
 
 class BudgetSnapshotResponse(BaseModel):
@@ -787,6 +796,155 @@ def create_app(
             runtime_ready=required.issubset(ready_keys),
             capabilities=capabilities,
         )
+
+    @application.get("/execution-settings/schemas", tags=["execution-settings"])
+    def execution_settings_schemas() -> dict[str, object]:
+        """Return serializable provider-owned settings schemas without probing models."""
+
+        return {"schemas": [schema.as_dict() for schema in list_provider_settings_schemas()]}
+
+    def _seed_d6g_terminal_closeout_profile(
+        capability: str, provider: str, model: str, runtime: str, machine_id: str,
+    ) -> ProviderMachineCapabilityProfile | None:
+        """Return only the concrete, human-approved D6g local evidence record."""
+
+        if (capability, provider, model, runtime, machine_id) != (
+            "talking", "latentsync", "LatentSync-1.5", "local-compatibility", "asus-rtx3060-laptop-6gb",
+        ):
+            return None
+        verified_at = datetime(2026, 9, 19, tzinfo=timezone.utc)
+        return ProviderMachineCapabilityProfile(
+            capability=capability, mode="local", provider=provider, model=model, runtime=runtime, machine_id=machine_id,
+            readiness="verified", verified_parameters={"trailing_silence_lookahead_ms": 600},
+            feature_support={CapabilityFeature.TERMINAL_FACE_CLOSEOUT.value: FeatureSupport.VERIFIED.value},
+            quality_status="verified", continuity_status="unknown",
+            provenance_source="Gate D6g U-Talking accepted local evaluation",
+            evidence_reference="content-os-data/latentsync-duration-boundary-20260915/gate-d6g-600ms-lookahead-face-visible-closeout.mp4",
+            last_verified_at=verified_at, updated_at=verified_at,
+        )
+
+    def _execution_capability_profile(
+        schema: object, key: object, scope_key: str, db: Database,
+    ) -> tuple[CapabilityProfile, ProviderMachineCapabilityProfile | None]:
+        """Load one persisted evidence profile, seeding only exact approved local evidence."""
+
+        # ``schema`` and ``key`` stay local to the endpoint to keep the
+        # persisted domain record independent of provider adapter classes.
+        repository = ProviderMachineCapabilityProfileRepository(db)
+        record = repository.get_by_scope_key(scope_key)
+        if record is None:
+            record = _seed_d6g_terminal_closeout_profile(
+                key.capability.value, key.provider, key.model, key.runtime, key.machine_id,
+            )
+            if record is not None:
+                with db.transaction():
+                    repository.save(record)
+        if record is None:
+            return CapabilityProfile(
+                key=key, readiness=CapabilityReadiness.CONFIGURED,
+                commercial_status=CommercialStatus(schema.commercial_status),
+                provenance=EvidenceProvenance("local Advanced Settings configuration", "runtime-readiness"),
+            ), None
+        features = {
+            CapabilityFeature(feature): FeatureSupport(support)
+            for feature, support in record.feature_support.items()
+        }
+        return CapabilityProfile(
+            key=key, readiness=CapabilityReadiness(record.readiness),
+            verified_parameters=record.verified_parameters, feature_support=features,
+            quality_status=EvidenceStatus(record.quality_status), continuity_status=EvidenceStatus(record.continuity_status),
+            commercial_status=CommercialStatus(schema.commercial_status),
+            provenance=EvidenceProvenance(record.provenance_source, record.evidence_reference, record.last_verified_at),
+        ), record
+
+    def _execution_settings_view(
+        capability: str, provider: str, model: str, runtime: str, machine_id: str,
+        db: Database,
+    ) -> dict[str, object]:
+        schema = find_provider_settings_schema(capability, provider, model, runtime)
+        if schema is None:
+            raise HTTPException(status_code=404, detail="no admitted Advanced Settings schema for this provider configuration")
+        key = schema.profile_key(machine_id)
+        scope_key = ":".join((capability, "local", provider, model, runtime, machine_id))
+        stored = ProviderMachineSettingRepository(db).get_by_scope_key(scope_key)
+        override = None if stored is None else ExecutionOverride(
+            key, stored.values, ResolutionSource.USER_OVERRIDE, f"provider-machine-setting:{stored.id}"
+        )
+        profile, evidence_record = _execution_capability_profile(schema, key, scope_key, db)
+        resolution = resolve_execution(
+            profile,
+            parameter_keys=[parameter.key for parameter in schema.parameters],
+            saved_override=override,
+            provider_defaults=schema.defaults,
+            safety=ExecutionSafetyContext(
+                consent_authorized=True,
+                budget_authorized=True,
+                runtime_integrity_verified=True,
+                requires_provenance=True,
+            ),
+        )
+        return {
+            "schema": schema.as_dict(),
+            "machine_id": machine_id,
+            "saved_override": None if stored is None else stored.model_dump(mode="json"),
+            "capability_profile": None if evidence_record is None else evidence_record.model_dump(mode="json"),
+            "features": [
+                {
+                    "feature": feature.feature.value,
+                    "support": feature.support.value,
+                    "reason": feature.reason,
+                }
+                for declared in schema.features
+                for feature in (resolve_feature_support(profile, declared.feature, adapter_declared_support=declared.support),)
+            ],
+            "resolution": {
+                "routing_reason": resolution.routing_reason,
+                "parameters": [
+                    {"key": item.key, "value": item.value, "source": item.source.value, "reason": item.reason}
+                    for item in resolution.parameters
+                ],
+            },
+        }
+
+    @application.get("/execution-settings/{capability}/{provider}/{model}/{runtime}/{machine_id}", tags=["execution-settings"])
+    async def get_execution_settings(capability: str, provider: str, model: str, runtime: str, machine_id: str, request: Request) -> dict[str, object]:
+        return _execution_settings_view(capability, provider, model, runtime, machine_id, request.app.state.database)
+
+    @application.put("/execution-settings/{capability}/{provider}/{model}/{runtime}/{machine_id}", tags=["execution-settings"])
+    async def save_execution_settings(
+        capability: str, provider: str, model: str, runtime: str, machine_id: str,
+        payload: ProviderMachineSettingRequest, request: Request,
+    ) -> dict[str, object]:
+        schema = find_provider_settings_schema(capability, provider, model, runtime)
+        if schema is None:
+            raise HTTPException(status_code=404, detail="no admitted Advanced Settings schema for this provider configuration")
+        try:
+            values = validate_schema_values(schema, payload.values)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        db: Database = request.app.state.database
+        scope_key = ":".join((capability, "local", provider, model, runtime, machine_id))
+        existing = ProviderMachineSettingRepository(db).get_by_scope_key(scope_key)
+        setting = ProviderMachineSetting(
+            id=existing.id if existing else uuid4(), capability=capability, mode="local", provider=provider,
+            model=model, runtime=runtime, machine_id=machine_id, values=values, updated_at=datetime.now(timezone.utc),
+        )
+        with db.transaction():
+            ProviderMachineSettingRepository(db).save(setting)
+        return _execution_settings_view(capability, provider, model, runtime, machine_id, db)
+
+    @application.delete("/execution-settings/{capability}/{provider}/{model}/{runtime}/{machine_id}", status_code=204, tags=["execution-settings"])
+    async def reset_execution_settings(capability: str, provider: str, model: str, runtime: str, machine_id: str, request: Request) -> Response:
+        schema = find_provider_settings_schema(capability, provider, model, runtime)
+        if schema is None:
+            raise HTTPException(status_code=404, detail="no admitted Advanced Settings schema for this provider configuration")
+        db: Database = request.app.state.database
+        scope_key = ":".join((capability, "local", provider, model, runtime, machine_id))
+        existing = ProviderMachineSettingRepository(db).get_by_scope_key(scope_key)
+        if existing is not None:
+            with db.transaction():
+                ProviderMachineSettingRepository(db).delete(existing.id)
+        return Response(status_code=204)
 
     web_dist = Path(__file__).resolve().parents[3] / "apps" / "web" / "dist"
 
@@ -2048,6 +2206,89 @@ def create_app(
             raise HTTPException(status_code=404, detail="narration audio not found")
         if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
             raise HTTPException(status_code=422, detail="talking generation requires QA-verified generated narration")
+
+        terminal_delivery_end_ms: int | None = None
+        execution_parameters: dict[str, object] = {}
+        execution_parameter_sources: dict[str, str] = {}
+        execution_profile_reference: str | None = None
+        if payload.terminal_face_closeout:
+            if not narration.transcript_source or not narration.transcript_segments:
+                raise HTTPException(
+                    status_code=422,
+                    detail="terminal face closeout requires Voice QA persisted speech timing",
+                )
+            terminal_delivery_end_ms = max(segment.end_ms for segment in narration.transcript_segments)
+            if terminal_delivery_end_ms > narration.duration_ms:
+                raise HTTPException(
+                    status_code=422,
+                    detail="terminal face closeout speech timing exceeds the narration duration",
+                )
+            if payload.execution_machine_id is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="terminal face closeout requires the selected execution machine",
+                )
+            # A TalkingProfile identifies its provider, but not a vendor model
+            # or runtime.  Resolve only when that provider has exactly one
+            # admitted schema; a future ambiguous provider must add a product
+            # selection rather than silently picking an adapter configuration.
+            schema = find_unique_provider_settings_schema("talking", profile.provider)
+            if schema is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="the selected Talking provider is not yet adapted to Content OS terminal face-closeout protection",
+                )
+            feature_schema = next(
+                (item for item in schema.features if item.feature is CapabilityFeature.TERMINAL_FACE_CLOSEOUT),
+                None,
+            )
+            if feature_schema is None:
+                raise HTTPException(status_code=422, detail="the selected Talking provider has no Content OS terminal face-closeout adapter")
+            key = schema.profile_key(payload.execution_machine_id)
+            scope_key = ":".join((
+                key.capability.value, key.mode.value, key.provider, key.model, key.runtime, key.machine_id,
+            ))
+            stored = ProviderMachineSettingRepository(db).get_by_scope_key(scope_key)
+            saved_override = None if stored is None else ExecutionOverride(
+                key, stored.values, ResolutionSource.USER_OVERRIDE, f"provider-machine-setting:{stored.id}"
+            )
+            capability_profile, _ = _execution_capability_profile(schema, key, scope_key, db)
+            feature = resolve_feature_support(
+                capability_profile,
+                CapabilityFeature.TERMINAL_FACE_CLOSEOUT,
+                adapter_declared_support=feature_schema.support,
+            )
+            if feature.support in {FeatureSupport.UNKNOWN, FeatureSupport.UNSUPPORTED}:
+                raise HTTPException(
+                    status_code=422,
+                    detail="the selected Talking provider/machine cannot safely apply Content OS terminal face-closeout protection",
+                )
+            try:
+                resolution = resolve_execution(
+                    capability_profile,
+                    parameter_keys=list(feature_schema.parameter_keys),
+                    saved_override=saved_override,
+                    provider_defaults=schema.defaults,
+                    safety=ExecutionSafetyContext(
+                        consent_authorized=profile.consent.confirmed,
+                        # The worker's durable provider-call ledger remains the
+                        # authority for the eventual execution budget check.
+                        budget_authorized=True,
+                        runtime_integrity_verified=True,
+                        requires_provenance=True,
+                    ),
+                )
+                unresolved = [item.key for item in resolution.parameters if item.value is None]
+                if unresolved:
+                    raise ValueError("missing resolved terminal closeout parameter")
+                execution_parameters = validate_schema_values(
+                    schema,
+                    {item.key: item.value for item in resolution.parameters if item.value is not None},
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="terminal face closeout is not safely configured") from exc
+            execution_parameter_sources = {item.key: item.source.value for item in resolution.parameters}
+            execution_profile_reference = scope_key
         now = datetime.now(timezone.utc)
         talking_payload = TalkingGenerationJobPayload(
             project_id=project_id,
@@ -2055,6 +2296,11 @@ def create_app(
             reference_clip_id=payload.reference_clip_id,
             narration_audio_id=payload.narration_audio_id,
             authorization_reference=payload.authorization_reference,
+            terminal_face_closeout=payload.terminal_face_closeout,
+            terminal_delivery_end_ms=terminal_delivery_end_ms,
+            execution_parameters=execution_parameters,
+            execution_parameter_sources=execution_parameter_sources,
+            execution_profile_reference=execution_profile_reference,
         )
         job = Job(
             id=uuid4(), project_id=project_id, type=JobType.GENERATE_TALKING,

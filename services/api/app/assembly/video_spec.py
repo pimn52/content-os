@@ -28,6 +28,7 @@ from app.domain.models import (
     VideoVisual,
 )
 from app.voice_qa import comparison_tokens
+from app.talking.closeout import TalkingCloseoutPlanningError, plan_terminal_talking_delivery
 
 
 class VideoSpecAssemblyError(ValueError):
@@ -116,6 +117,7 @@ class VideoSpecAssembler:
         narration_asset_ids: Mapping[UUID, UUID] | None = None,
         master_narration_asset_id: UUID | None = None,
         narration_required: bool = False,
+        terminal_talking_delivery: bool = False,
     ) -> VideoSpec:
         if not isinstance(project, Project):
             raise InvalidCandidateSelection("assembly requires a Project contract")
@@ -131,6 +133,7 @@ class VideoSpecAssembler:
                 selections,
                 explicit,
                 master_audio_id,
+                terminal_talking_delivery=terminal_talking_delivery,
             )
         if narration_required:
             missing = next((scene.scene_id for scene in ordered if scene.id not in narration), None)
@@ -301,6 +304,8 @@ class VideoSpecAssembler:
         selections: Mapping[UUID, CandidateAsset],
         explicit: frozenset[UUID],
         master_audio_id: UUID,
+        *,
+        terminal_talking_delivery: bool,
     ) -> VideoSpec:
         """Assemble one continuous, timed narration track across many visuals.
 
@@ -321,18 +326,23 @@ class VideoSpecAssembler:
             raise NarrationTimelineError(
                 "master narration requires a persisted actual SRT/VTT or provider timing result before it can drive video scenes"
             )
+        master_end_ms = audio.duration_ms
+        if terminal_talking_delivery:
+            try:
+                master_end_ms = plan_terminal_talking_delivery(audio, project.fps).speech_end_ms
+            except TalkingCloseoutPlanningError as exc:
+                raise NarrationTimelineError("master narration cannot make an exact terminal Talking delivery") from exc
         try:
             master = MasterNarration(
                 audio_asset_id=audio.id,
                 start_ms=0,
-                end_ms=audio.duration_ms,
+                end_ms=master_end_ms,
                 transcript_source=audio.transcript_source,
                 transcript_segments=audio.transcript_segments,
             )
         except ValueError as exc:
             raise NarrationTimelineError("master narration has invalid persisted timestamp intervals") from exc
-
-        intervals = _master_narration_intervals(audio, scenes)
+        intervals = _master_narration_intervals(audio, scenes, end_ms=master.end_ms)
         video_scenes: list[VideoScene] = []
         selected_sources: list[SourceKind] = []
         for scene, narration_start_ms, narration_end_ms in intervals:
@@ -667,7 +677,12 @@ def _master_narration_id(
     return None
 
 
-def _master_narration_intervals(audio: AudioAsset, scenes: Sequence[ScenePlan]) -> list[tuple[ScenePlan, int, int]]:
+def _master_narration_intervals(
+    audio: AudioAsset,
+    scenes: Sequence[ScenePlan],
+    *,
+    end_ms: int | None = None,
+) -> list[tuple[ScenePlan, int, int]]:
     """Match each ordered scene copy to actual, sequential audio timestamps.
 
     This deliberately uses exact normalized text containment. If a supplied
@@ -692,10 +707,13 @@ def _master_narration_intervals(audio: AudioAsset, scenes: Sequence[ScenePlan]) 
         matches.append((scene, end_index))
         cursor = end_index + 1
 
+    timeline_end_ms = audio.duration_ms if end_ms is None else end_ms
+    if timeline_end_ms <= 0 or timeline_end_ms > audio.duration_ms:
+        raise NarrationTimelineError("master narration end must stay within the stored audio")
     intervals: list[tuple[ScenePlan, int, int]] = []
     interval_start = 0
     for index, (scene, end_index) in enumerate(matches):
-        interval_end = audio.duration_ms if index == len(matches) - 1 else segments[end_index].end_ms
+        interval_end = timeline_end_ms if index == len(matches) - 1 else segments[end_index].end_ms
         if interval_end <= interval_start:
             raise NarrationTimelineError(f"scene {scene.scene_id!r} has no positive master narration interval")
         intervals.append((scene, interval_start, interval_end))

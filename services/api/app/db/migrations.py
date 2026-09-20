@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 21
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -244,6 +244,29 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
                PRIMARY KEY(project_id, version)
            )""",
         "CREATE INDEX IF NOT EXISTS project_draft_revisions_project_idx ON project_draft_revisions(project_id, version)",
+    )),
+    (19, (
+        """CREATE TABLE IF NOT EXISTS provider_machine_settings (
+               id TEXT PRIMARY KEY NOT NULL,
+               scope_key TEXT NOT NULL UNIQUE,
+               payload TEXT NOT NULL
+           )""",
+    )),
+    (20, (
+        """CREATE TABLE IF NOT EXISTS provider_machine_capability_profiles (
+               id TEXT PRIMARY KEY NOT NULL,
+               scope_key TEXT NOT NULL UNIQUE,
+               payload TEXT NOT NULL
+        )""",
+    )),
+    (21, (
+        """CREATE TABLE IF NOT EXISTS local_resource_leases (
+               resource_key TEXT PRIMARY KEY NOT NULL,
+               job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+               worker_id TEXT NOT NULL,
+               lease_expires_at TEXT NOT NULL
+           )""",
+        "CREATE INDEX IF NOT EXISTS local_resource_leases_job_idx ON local_resource_leases(job_id, worker_id)",
     )),
 )
 

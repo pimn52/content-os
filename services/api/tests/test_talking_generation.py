@@ -3,18 +3,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from app.budget import ProviderCallLedger
-from app.db import AssetRepository, AudioAssetRepository, BudgetPolicyRepository, Database, IPProfileRepository, ProjectRepository, ProviderCallRepository, TalkingProfileRepository
-from app.domain.models import Asset, AudioAsset, BudgetPolicy, Clip, ConsentRecord, GazeDirection, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment
+from app.db import AssetRepository, AudioAssetRepository, BudgetPolicyRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, ProviderCallRepository, TalkingProfileRepository
+from app.domain.models import Asset, AudioAsset, BudgetPolicy, Clip, ConsentRecord, GazeDirection, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TranscriptSegment
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import TalkingGenerationJobHandler
 from app.main import create_app
 from app.media.ffprobe import ProbeMetadata
-from app.providers.talking import TalkingReference, TalkingSynthesisResult
+from app.providers.talking import TalkingExecutionOptions, TalkingReference, TalkingSynthesisResult
 from app.talking import select_talking_reference
 from app.talking_qa import TalkingHumanReview, TalkingQaReport, apply_talking_human_review, apply_talking_qa, verify_talking_output
 
@@ -58,6 +58,11 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
         payload = TalkingGenerationJobPayload(
             project_id=project.id, talking_profile_id=profile.id, reference_clip_id=reference_clip.id,
             narration_audio_id=narration.id, authorization_reference="talking-consent-1",
+            terminal_face_closeout=True,
+            terminal_delivery_end_ms=1_000,
+            execution_parameters={"provider_tail_context": 600},
+            execution_parameter_sources={"provider_tail_context": "local_verified"},
+            execution_profile_reference="talking:local:test-talking:test-model:test-runtime:test-machine",
         )
         now = datetime.now(timezone.utc)
         job = Job(project_id=project.id, type=JobType.GENERATE_TALKING, idempotency_key="talking-one", created_at=now, updated_at=now, payload=payload)
@@ -68,9 +73,13 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
             model = "test-model"
             is_local = True
 
-            def synthesize(self, received: TalkingProfile, received_narration: AudioAsset, reference: TalkingReference, output_path: Path) -> TalkingSynthesisResult:
+            def synthesize(self, received: TalkingProfile, received_narration: AudioAsset, reference: TalkingReference, output_path: Path, options: TalkingExecutionOptions) -> TalkingSynthesisResult:
                 assert received.id == profile.id and received_narration.id == narration.id
                 assert reference.clip_id == reference_clip.id and reference.source_path == reference_path
+                assert options.terminal_face_closeout is True
+                assert options.terminal_delivery_end_ms == 1_000
+                assert options.provider_parameters == {"provider_tail_context": 600}
+                assert options.parameter_sources == {"provider_tail_context": "local_verified"}
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_bytes(b"generated-video")
                 return TalkingSynthesisResult(output_path, provider_version="test-version")
@@ -96,6 +105,9 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
         assert video.metadata["talking_generation"]["provider"] == "test-talking"
         assert video.metadata["talking_generation"]["reference_clip_id"] == str(reference_clip.id)
         assert video.metadata["talking_generation"]["qa_state"] == "pending"
+        assert video.metadata["talking_generation"]["terminal_face_closeout"] is True
+        assert video.metadata["talking_generation"]["terminal_delivery_end_ms"] == 1_000
+        assert video.metadata["talking_generation"]["execution_parameters"] == {"provider_tail_context": 600}
         call = ProviderCallRepository(db).list_for_project(project.id)[0]
         assert call.operation == "talking" and call.status == "completed" and call.estimated_cost.amount == Decimal("0")
     finally:
@@ -152,9 +164,11 @@ def test_talking_job_api_is_typed_idempotent_and_requires_verified_narration(tmp
         AssetRepository(db).create(asset)
         from app.db import ClipRepository
         reference_clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=5_000, asset_duration_ms=5_000, talking_candidate=True, face_visibility=0.9, mouth_visibility=0.9))
-        profile = TalkingProfile(name="Creator talking", provider="test-talking", reference_clip_ids=[reference_clip.id], consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
+        profile = TalkingProfile(name="Creator talking", provider="latentsync", reference_clip_ids=[reference_clip.id], consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
         TalkingProfileRepository(db).create(profile)
-        verified = AudioAsset(source_file=str(tmp_path / "verified.wav"), content_hash="d" * 64, duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc), metadata={"voice_generation": {"provider": "test-voice", "qa_state": "verified"}})
+        unsupported_profile = profile.model_copy(update={"id": uuid4(), "provider": "not-admitted"})
+        TalkingProfileRepository(db).create(unsupported_profile)
+        verified = AudioAsset(source_file=str(tmp_path / "verified.wav"), content_hash="d" * 64, duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc), metadata={"voice_generation": {"provider": "test-voice", "qa_state": "verified"}}, transcript_segments=[TranscriptSegment(start_ms=0, end_ms=1_000, text="verified speech")], transcript_source="voice-qa:test-asr")
         pending = verified.model_copy(update={"id": uuid4(), "content_hash": "e" * 64, "metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "pending"}}})
         AudioAssetRepository(db).create(verified)
         AudioAssetRepository(db).create(pending)
@@ -169,6 +183,34 @@ def test_talking_job_api_is_typed_idempotent_and_requires_verified_narration(tmp
         assert repeated.status_code == 201 and repeated.json()["id"] == first.json()["id"]
         assert client.post(f"/projects/{project.id}/talking-jobs", json={**request, "authorization_reference": "different"}).status_code == 409
         assert client.post(f"/projects/{project.id}/talking-jobs", json={**request, "idempotency_key": "talking-pending", "narration_audio_id": str(pending.id)}).status_code == 422
+        terminal = client.post(f"/projects/{project.id}/talking-jobs", json={
+            **request,
+            "idempotency_key": "talking-terminal-closeout",
+            "terminal_face_closeout": True,
+            "execution_machine_id": "test-machine",
+        })
+        assert terminal.status_code == 201
+        rejected = client.post(f"/projects/{project.id}/talking-jobs", json={
+            **request,
+            "idempotency_key": "talking-terminal-unsupported",
+            "talking_profile_id": str(unsupported_profile.id),
+            "terminal_face_closeout": True,
+            "execution_machine_id": "test-machine",
+        })
+        assert rejected.status_code == 422
+        assert "not yet adapted to Content OS terminal face-closeout protection" in rejected.json()["detail"]
+
+    check_db = Database(path)
+    try:
+        stored = JobRepository(check_db).get(UUID(terminal.json()["id"]))
+        assert stored is not None and isinstance(stored.payload, TalkingGenerationJobPayload)
+        assert stored.payload.terminal_face_closeout is True
+        assert stored.payload.terminal_delivery_end_ms == 1_000
+        assert stored.payload.execution_parameters == {"trailing_silence_lookahead_ms": 600}
+        assert stored.payload.execution_parameter_sources == {"trailing_silence_lookahead_ms": "provider_default"}
+        assert stored.payload.execution_profile_reference == "talking:local:latentsync:LatentSync-1.5:local-compatibility:test-machine"
+    finally:
+        check_db.close()
 
 
 def test_talking_reference_selection_requires_observed_end_gaze_and_clean_source() -> None:

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, PublicationRecord, ShootTask, TalkingProfile, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, ShootTask, TalkingProfile, VoiceProfile
 
 from .database import Database
 
@@ -465,6 +465,38 @@ class BudgetPolicyRepository(_Repository[BudgetPolicy]):
             """INSERT INTO budget_policies(id, scope_key, payload) VALUES (?, ?, ?)
                ON CONFLICT(scope_key) DO UPDATE SET id=excluded.id, payload=excluded.payload""",
             (str(value.id), scope_key, _payload(value)),
+        )
+        return value
+
+
+class ProviderMachineSettingRepository(_Repository[ProviderMachineSetting]):
+    table, model = "provider_machine_settings", ProviderMachineSetting
+
+    def get_by_scope_key(self, scope_key: str) -> ProviderMachineSetting | None:
+        row = self.db.connection.execute("SELECT * FROM provider_machine_settings WHERE scope_key = ?", (scope_key,)).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def save(self, value: ProviderMachineSetting) -> ProviderMachineSetting:
+        self.db.connection.execute(
+            """INSERT INTO provider_machine_settings(id, scope_key, payload) VALUES (?, ?, ?)
+               ON CONFLICT(scope_key) DO UPDATE SET id=excluded.id, payload=excluded.payload""",
+            (str(value.id), value.scope_key, _payload(value)),
+        )
+        return value
+
+
+class ProviderMachineCapabilityProfileRepository(_Repository[ProviderMachineCapabilityProfile]):
+    table, model = "provider_machine_capability_profiles", ProviderMachineCapabilityProfile
+
+    def get_by_scope_key(self, scope_key: str) -> ProviderMachineCapabilityProfile | None:
+        row = self.db.connection.execute("SELECT * FROM provider_machine_capability_profiles WHERE scope_key = ?", (scope_key,)).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def save(self, value: ProviderMachineCapabilityProfile) -> ProviderMachineCapabilityProfile:
+        self.db.connection.execute(
+            """INSERT INTO provider_machine_capability_profiles(id, scope_key, payload) VALUES (?, ?, ?)
+               ON CONFLICT(scope_key) DO UPDATE SET id=excluded.id, payload=excluded.payload""",
+            (str(value.id), value.scope_key, _payload(value)),
         )
         return value
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from math import isfinite
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -536,6 +537,75 @@ class BudgetPolicy(ContractModel):
         return value
 
 
+class ProviderMachineSetting(ContractModel):
+    """One saved Advanced Settings override for an exact local execution key."""
+
+    id: UUID = Field(default_factory=uuid4)
+    capability: str = Field(min_length=1, max_length=100)
+    mode: Literal["local", "remote"]
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    values: dict[str, JsonValue] = Field(min_length=1, max_length=100)
+    updated_at: AwareDatetime
+
+    @field_validator("values")
+    @classmethod
+    def values_are_scalar(cls, values: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        for key, value in values.items():
+            if not key.strip() or not isinstance(value, (str, int, float, bool)) or isinstance(value, float) and not isfinite(value):
+                raise ValueError("provider-machine setting values must be finite JSON scalars")
+        return values
+
+    @property
+    def scope_key(self) -> str:
+        return ":".join((self.capability, self.mode, self.provider, self.model, self.runtime, self.machine_id))
+
+
+class ProviderMachineCapabilityProfile(ContractModel):
+    """Persisted evidence, distinct from a user-selected Advanced Setting."""
+
+    id: UUID = Field(default_factory=uuid4)
+    capability: str = Field(min_length=1, max_length=100)
+    mode: Literal["local", "remote"]
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    readiness: Literal["implemented", "configured", "available", "verified"]
+    verified_parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=100)
+    feature_support: dict[str, Literal["verified", "available", "unsupported", "unknown"]] = Field(default_factory=dict, max_length=100)
+    quality_status: Literal["verified", "observed", "unknown"] = "unknown"
+    continuity_status: Literal["verified", "observed", "unknown"] = "unknown"
+    provenance_source: str = Field(min_length=1, max_length=500)
+    evidence_reference: str | None = Field(default=None, min_length=1, max_length=1_000)
+    last_verified_at: AwareDatetime | None = None
+    updated_at: AwareDatetime
+
+    @field_validator("verified_parameters")
+    @classmethod
+    def verified_parameters_are_scalar(cls, values: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        for key, value in values.items():
+            if not key.strip() or not isinstance(value, (str, int, float, bool)) or isinstance(value, float) and not isfinite(value):
+                raise ValueError("capability profile parameters must be finite JSON scalars")
+        return values
+
+    @model_validator(mode="after")
+    def verified_profile_has_evidence(self) -> "ProviderMachineCapabilityProfile":
+        if self.readiness == "verified" and not self.evidence_reference:
+            raise ValueError("verified capability profile requires an evidence reference")
+        if self.readiness != "verified" and self.verified_parameters:
+            raise ValueError("verified parameters require a verified capability profile")
+        if self.readiness != "verified" and "verified" in self.feature_support.values():
+            raise ValueError("verified feature support requires a verified capability profile")
+        return self
+
+    @property
+    def scope_key(self) -> str:
+        return ":".join((self.capability, self.mode, self.provider, self.model, self.runtime, self.machine_id))
+
+
 class ProviderCallRecord(ContractModel):
     """The auditable boundary around a model/provider operation.
 
@@ -916,6 +986,36 @@ class TalkingGenerationJobPayload(ContractModel):
     reference_clip_id: UUID
     narration_audio_id: UUID
     authorization_reference: str = Field(min_length=1, max_length=500)
+    terminal_face_closeout: bool = False
+    terminal_delivery_end_ms: int | None = Field(default=None, ge=1)
+    execution_parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=100)
+    execution_parameter_sources: dict[str, str] = Field(default_factory=dict, max_length=100)
+    execution_profile_reference: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("execution_parameters")
+    @classmethod
+    def execution_parameters_are_scalar(cls, values: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        for key, value in values.items():
+            if not key.strip() or not isinstance(value, (str, int, float, bool)) or isinstance(value, float) and not isfinite(value):
+                raise ValueError("Talking execution parameters must be finite JSON scalars")
+        return values
+
+    @model_validator(mode="after")
+    def terminal_options_are_explicit(self) -> "TalkingGenerationJobPayload":
+        if not self.terminal_face_closeout and (
+            self.terminal_delivery_end_ms is not None
+            or self.execution_parameters
+            or self.execution_parameter_sources
+            or self.execution_profile_reference
+        ):
+            raise ValueError("Talking execution parameters require terminal face closeout intent")
+        if self.terminal_face_closeout and self.terminal_delivery_end_ms is None:
+            raise ValueError("Terminal face closeout requires a verified speech-end timestamp")
+        if set(self.execution_parameter_sources) - set(self.execution_parameters):
+            raise ValueError("Talking execution parameter sources must describe resolved parameters")
+        if self.terminal_face_closeout and set(self.execution_parameter_sources) != set(self.execution_parameters):
+            raise ValueError("Terminal face closeout requires provenance for every resolved parameter")
+        return self
 
 
 class Job(ContractModel):
