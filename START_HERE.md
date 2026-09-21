@@ -1,69 +1,83 @@
 # Content OS — Start Here
 
-这是项目唯一的人类/实施 Agent 入口。**不要从旧 PRD、审查报告或历史冻结文件开始。**
+This is the single navigation entry for humans and implementation agents.
 
-## 1. 阅读顺序
+## 1. Understand the whole product first
 
-1. [`STATUS.md`](STATUS.md) — 现在做到哪里、真实阻塞、下一项 ready 任务。
-2. [`CONTENT_OS_EXECUTION_SPEC.md`](CONTENT_OS_EXECUTION_SPEC.md) — 当前产品承诺、R1 范围、验收和执行顺序。
-3. [`AGENTS.md`](AGENTS.md) — 工程约束、实施模型成本分层、文档维护规则。
-4. [`DECISIONS.md`](DECISIONS.md) — 只有需要理解长期不可轻易反转的取舍时再读。
-5. [`README.md`](README.md) — 面向使用者/贡献者的产品概览与启动方式。
+Read in this order:
 
-模块开发时再读取对应代码、schema、测试；不要把整个历史文档树塞进上下文。
+1. [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) — whole-product map, R1 scope and acceptance gate.
+2. [docs/product/README.md](docs/product/README.md) — product module index; open only the module relevant to the task.
+3. [docs/architecture/SYSTEM_ARCHITECTURE.md](docs/architecture/SYSTEM_ARCHITECTURE.md) — stable technical layers and first-class object boundaries.
+4. [STATUS.md](STATUS.md) — current facts, the one active work package, blockers and short queue.
+5. [AGENTS.md](AGENTS.md) — implementation rules, model-cost policy and work-package lifecycle.
+6. [DECISIONS.md](DECISIONS.md) — durable choices only, when rationale is needed.
+7. [README.md](README.md) — developer setup and repository quick start.
 
-## 2. 当前产品主线
+Do not start from old reviews, experiment logs or historical plans.
 
-长期方向：
+## 2. Product map
 
-> **Know what to create → Create it as you → Learn what works**
+    Creator / IP / Intelligence
+                |
+          Project / ScenePlan
+                |
+         Media / Asset System
+                |
+       Hybrid Asset Router
+                |
+     Execution / Compute Router
+           /           \
+        Voice        Talking
+           \           /
+         Master Narration
+          + TalkingRun
+                |
+             VideoSpec
+                |
+              Render
+                |
+      Publication / Feedback
 
-R1 当前先攻克 `Create it as you`：
+Detailed current behavior belongs in the product module specs, not in this navigation file.
 
-> 已授权创作者输入新主题后，系统生成可修改的新文案，合成本人的新声音，生成至少一个说出新台词的本人 Talking/口型片段，再结合真实 B-roll、排版、字幕输出 30–60 秒新视频。
+## 3. Current product modules
 
-旧片裁切、导入现成旁白、旧原声或通用数字人只能作为明确标注的辅助/降级路径，不能冒充上述核心验收通过。
+- [Creator, IP and Intelligence](docs/product/CREATOR_INTELLIGENCE.md)
+- [Media, Asset Intelligence and Hybrid Routing](docs/product/MEDIA_ASSET_SYSTEM.md)
+- [Creator Voice and Talking](docs/product/VOICE_TALKING.md)
+- [Execution Planner and Hybrid Compute](docs/product/EXECUTION_COMPUTE.md)
+- [Timeline, Render, Review and Learning](docs/product/TIMELINE_RENDER_LEARNING.md)
 
-## 3. 当前 Provider 策略
+## 4. Documentation ownership
 
-### Voice
+| Document | Owns | Must not become |
+|---|---|---|
+| Execution Spec | product whole, R1 contract, module map | implementation diary |
+| Product module specs | current product functions and boundaries | experiment log |
+| System Architecture | stable technical layers/objects | current task list |
+| STATUS | current truth + one active package + short queue | history archive |
+| DECISIONS | durable decisions and rationale | duplicate product spec |
+| AGENTS | implementation/process/model policy | product PRD |
+| README | setup/contributor entry | governance source |
 
-- `VoiceProvider` 永远可替换。
-- **OmniVoice** 是当前本地声音克隆技术 benchmark；代码为 Apache-2.0，但官方预训练权重当前为 CC-BY-NC，因此不能作为未来商业版默认权重。
-- **Chatterbox 已经真实测试并因本人音色相似度/自然度不足被淘汰**，不再作为当前候选。
-- 商业可用本地 Voice Provider 目前**未选定**；后续候选必须分别通过真实质量、代码/权重许可证和运行成本 Gate。
-- Cloud/BYOK Voice Provider 保持可插拔，用于无合适本地能力或质量不足的机器。
+**Completed is not archived.** When a completed implementation changes the product, update the relevant current product/module spec. The step-by-step implementation history remains in Git/evaluation evidence.
 
-### Talking / Lip-sync
+docs/history/ is reserved only for a whole superseded document that still has historical reading value.
 
-- `TalkingHeadProvider` 永远可替换。
-- **MuseTalk 1.5 已被产品质量 Gate 淘汰**，不属于当前受支持 Provider。
-- **VideoReTalking 已被产品质量 Gate 淘汰**，不属于当前受支持 Provider。
-- **LatentSync 1.5** 已完成普通素材 benchmark，并在人工样片判断可接受后接入一个可选、benchmark-only 的 Core adapter；完整 30–60 秒产品链路仍待验证。
-- KeySync 延后到其它兼容机器，不在当前本机继续安装；不要同时安装大量 Avatar 模型。
-- Local-first **不等于所有模型必须本地推理**。对于重型 Talking/lip-sync，低配电脑可以优先使用用户明确授权、可计费、可替换的外部/BYOK API；本地推理仅在硬件、隐私、质量与运行成本合适时启用。
+## 5. Task handoff
 
-模型名称不是产品架构。Content OS 保存 Profile、参考来源、授权、质量证据、成本和 Provider metadata，允许替换底层实现。
+For implementation work:
 
-## 4. 实施模型成本原则
+1. read this file;
+2. read the whole-product spec;
+3. read STATUS;
+4. read only the relevant product module and architecture section;
+5. read AGENTS for execution rules;
+6. inspect the relevant code/tests.
 
-保证质量前提下使用最低成本的可胜任模型：
+Do not load every old work package into context.
 
-`Luna → Terra → Sol`
+Before handoff, run:
 
-- **Luna**：边界清晰的 UI、CRUD、测试、文档、简单 adapter、机械修复。
-- **Terra**：媒体链路、Provider 集成、跨文件状态、Planner/Router、Job/恢复、Voice/Talking 实现。
-- **Sol**：架构冲突、安全审查、关键质量 Gate，或 Terra 有具体最小复现后仍无法解决的问题。
-
-不能因为任务重要就默认用 Sol；也不能为了便宜让 Luna 独立改变核心协议。
-
-## 5. 每个任务结束后的固定动作
-
-1. 跑与改动相符的测试/构建；
-2. 更新 `STATUS.md` 的**当前事实 / 当前工作包 / 下一项 ready 任务**；
-3. 只有产生长期取舍时才更新 `DECISIONS.md`；
-4. 只有产品承诺、范围或验收发生变化时才改 `CONTENT_OS_EXECUTION_SPEC.md`；
-5. 不为一次审查、一次失败或一次阶段交接新建顶层 Markdown；
-6. 通过 `python scripts/check_docs.py` 后再交付。
-
-历史状态、旧方案、单次实验日志和审查证据以 Git history 或本地 evaluation evidence 为准，不参与当前优先级解析。
+    python scripts/check_docs.py
