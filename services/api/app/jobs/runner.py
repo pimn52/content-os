@@ -131,6 +131,7 @@ class JobRunner:
         max_attempts: int,
         heartbeat_interval: timedelta | None = None,
         heartbeat_store_factory: HeartbeatStoreFactory | None = None,
+        resource_keys_by_type: Mapping[JobType, str] | None = None,
     ) -> None:
         if not isinstance(store, JobStore):
             raise TypeError("store must be a JobStore")
@@ -156,6 +157,7 @@ class JobRunner:
         self._max_attempts = max_attempts
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat_store_factory = heartbeat_store_factory or self._default_heartbeat_store_factory(store)
+        self._resource_keys_by_type = {} if resource_keys_by_type is None else dict(resource_keys_by_type)
 
     @property
     def handler_types(self) -> frozenset[JobType]:
@@ -179,6 +181,7 @@ class JobRunner:
             self._lease_duration,
             max_attempts=self._max_attempts,
             allowed_types=allowed_types,
+            resource_keys_by_type=self._resource_keys_by_type,
         )
         if job is None:
             return None

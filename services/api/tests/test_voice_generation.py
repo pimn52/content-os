@@ -17,7 +17,8 @@ from app.jobs.handlers import VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.main import create_app
 from app.providers.voice import VoiceSynthesisResult
 from app.providers.asr import TranscriptionResult, TranscriptionSegment
-from app.voice_qa import apply_voice_qa, verify_generated_voice
+from app.voice_qa import apply_voice_qa, comparison_tokens, verify_generated_voice
+from app.voice_recovery import VoiceRecoveryRoute, recommend_voice_recovery
 
 
 def _project_and_profile(db: Database, root: Path) -> tuple[Project, VoiceProfile]:
@@ -227,6 +228,29 @@ def test_voice_qa_accepts_traditional_asr_glyphs_but_not_new_words(tmp_path: Pat
     assert not report.verified and report.duplicate_token_count == 3
 
 
+def test_voice_qa_normalizes_only_technical_identifier_punctuation(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="t" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    assert comparison_tokens("H.265") == comparison_tokens("H265") == ("h265",)
+    # Sentence punctuation remains a boundary; this is not broad punctuation
+    # deletion or an ASR-friendly relaxation for ordinary copy.
+    assert comparison_tokens("first. second") == ("first", "second")
+
+    report = verify_generated_voice(
+        audio,
+        "H.265 码率",
+        TranscriptionResult("H265 马力", (TranscriptionSegment(0, 1_000, "H265 马力"),)),
+    )
+    assert report.missing_token_count == 0
+    assert report.substitution_token_count == 2
+    assert not report.verified and "copy_substitution_tokens" in report.checks
+
+
 def test_voice_qa_keeps_small_asr_substitutions_explicit_and_bounded(tmp_path: Path) -> None:
     source = tmp_path / "generated.wav"
     source.write_bytes(b"playable")
@@ -265,3 +289,80 @@ def test_voice_qa_rejects_unrecognized_leading_audio_gap(tmp_path: Path) -> None
     assert not report.verified
     assert report.leading_silence_ms == 600
     assert "leading_silence_or_unrecognized_audio" in report.checks
+
+
+def test_voice_recovery_never_treats_copy_loss_as_a_silence_trim(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="r" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    copy_and_silence = verify_generated_voice(
+        audio,
+        "你好世界",
+        TranscriptionResult("你好", (TranscriptionSegment(650, 1_500, "你好"),)),
+    )
+    recommendation = recommend_voice_recovery(copy_and_silence)
+    assert recommendation.route is VoiceRecoveryRoute.REGENERATE_SENTENCE_TAKES
+    assert recommendation.requires_new_voice_generation
+    assert not recommendation.requires_derived_audio
+    assert recommendation.requires_fresh_voice_qa
+
+    updated = apply_voice_qa(audio, copy_and_silence, TranscriptionResult("你好", (TranscriptionSegment(650, 1_500, "你好"),)), provider="qa-asr", model="qa-model")
+    assert updated.metadata["voice_generation"]["qa_state"] == "failed"
+    assert updated.metadata["voice_generation"]["recovery"] == recommendation.metadata()
+
+
+def test_voice_recovery_allows_only_pure_leading_silence_to_request_normalization(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="n" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    silence_only = verify_generated_voice(
+        audio,
+        "你好世界",
+        TranscriptionResult("你好世界", (TranscriptionSegment(650, 1_500, "你好世界"),)),
+    )
+    recommendation = recommend_voice_recovery(silence_only)
+    assert recommendation.route is VoiceRecoveryRoute.NORMALIZE_LEADING_SILENCE
+    assert not recommendation.requires_new_voice_generation
+    assert recommendation.requires_derived_audio
+    assert recommendation.requires_fresh_voice_qa
+
+
+def test_voice_recovery_is_visible_from_the_existing_audio_asset_surface(tmp_path: Path) -> None:
+    path = tmp_path / "voice-recovery-api.sqlite"
+    db = Database(path)
+    try:
+        source = tmp_path / "generated.wav"
+        source.write_bytes(b"playable")
+        audio = AudioAsset(
+            source_file=str(source), content_hash="v" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+            authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+            metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+        )
+        report = verify_generated_voice(
+            audio,
+            "你好世界",
+            TranscriptionResult("你好世界", (TranscriptionSegment(650, 1_500, "你好世界"),)),
+        )
+        AudioAssetRepository(db).create(apply_voice_qa(
+            audio, report,
+            TranscriptionResult("你好世界", (TranscriptionSegment(650, 1_500, "你好世界"),)),
+            provider="qa-asr", model="qa-model",
+        ))
+        audio_id = audio.id
+    finally:
+        db.close()
+
+    with TestClient(create_app(path)) as client:
+        response = client.get(f"/audio-assets/{audio_id}")
+        assert response.status_code == 200
+        recovery = response.json()["metadata"]["voice_generation"]["recovery"]
+        assert recovery["route"] == VoiceRecoveryRoute.NORMALIZE_LEADING_SILENCE.value
+        assert recovery["source_audio_preserved"] is True

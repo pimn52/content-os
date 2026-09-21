@@ -22,6 +22,7 @@ from app.routing import (
     ResolutionSource,
     resolve_execution,
     resolve_feature_support,
+    resolve_verified_operating_limit,
 )
 
 
@@ -178,3 +179,20 @@ def test_terminal_face_closeout_is_content_os_adapter_protection_with_machine_sc
     assert resolve_feature_support(
         other_machine, CapabilityFeature.TERMINAL_FACE_CLOSEOUT,
     ).support is FeatureSupport.UNKNOWN
+
+
+def test_verified_operating_limit_is_scoped_and_never_inferred() -> None:
+    verified = _profile()
+    limit = resolve_verified_operating_limit(
+        verified, metric="fresh_voice_talking_duration", unit="seconds",
+    )
+    assert limit.value == 2.58 and limit.source is ResolutionSource.LOCAL_VERIFIED
+
+    unknown = CapabilityProfile(
+        key=_key(machine_id="other-machine"), readiness=CapabilityReadiness.CONFIGURED,
+        provenance=EvidenceProvenance("other machine", "runtime-readiness"),
+    )
+    result = resolve_verified_operating_limit(
+        unknown, metric="fresh_voice_talking_duration", unit="seconds",
+    )
+    assert result.value is None and result.source is ResolutionSource.UNKNOWN

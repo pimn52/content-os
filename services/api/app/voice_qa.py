@@ -12,6 +12,7 @@ from opencc import OpenCC
 
 from app.domain.models import AudioAsset, TranscriptSegment
 from app.providers.asr import TranscriptionResult
+from app.voice_recovery import recommend_voice_recovery
 
 
 _TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
@@ -155,6 +156,10 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
     updated_generation = dict(generation)
     updated_generation["qa"] = report.metadata(provider=provider.strip(), model=model.strip())
     updated_generation["qa_state"] = "verified" if report.verified else "failed"
+    # This does not alter the generated file or make a failed take eligible
+    # for assembly. It tells the product which bounded recovery class is safe
+    # to offer while retaining the original QA evidence.
+    updated_generation["recovery"] = recommend_voice_recovery(report).metadata()
     metadata["voice_generation"] = updated_generation
     return audio.model_copy(update={
         "metadata": metadata,
@@ -179,6 +184,12 @@ def comparison_tokens(value: str) -> tuple[str, ...]:
     # requested copy contains a space but ASR returns a single word, e.g.
     # ``Content OS`` versus ``ContentOS``.
     normalized = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", normalized)
+    # ASR commonly removes punctuation inside a technical identifier, e.g.
+    # ``H.265`` becomes ``H265``.  Treat only punctuation separating an ASCII
+    # letter/digit from a following digit as part of that identifier.  This
+    # deliberately leaves ordinary prose punctuation and CJK wording intact;
+    # it is not a general semantic or homophone relaxation.
+    normalized = re.sub(r"(?<=[a-z0-9])[._-](?=[0-9])", "", normalized, flags=re.IGNORECASE)
     return tuple(item.casefold() for item in _TOKEN.findall(normalized))
 
 

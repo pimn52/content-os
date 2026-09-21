@@ -65,13 +65,25 @@ class JobStore:
                 row = self.db.connection.execute(
                     f"""SELECT * FROM jobs
                        WHERE (status = ?
-                          OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)){type_clause}{skipped_clause}
+                          OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))
+                         AND (
+                           json_extract(payload, '$.payload.slice_series_id') IS NULL
+                           OR NOT EXISTS (
+                             SELECT 1 FROM jobs AS preceding
+                             WHERE json_extract(preceding.payload, '$.payload.slice_series_id')
+                                   = json_extract(jobs.payload, '$.payload.slice_series_id')
+                               AND CAST(json_extract(preceding.payload, '$.payload.slice_series_index') AS INTEGER)
+                                   < CAST(json_extract(jobs.payload, '$.payload.slice_series_index') AS INTEGER)
+                               AND preceding.status <> ?
+                           )
+                         ){type_clause}{skipped_clause}
                        ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, created_at, id
                        LIMIT 1""",
                     (
                         JobStatus.PENDING.value,
                         JobStatus.RUNNING.value,
                         timestamp_text,
+                        JobStatus.COMPLETED.value,
                         *(item.value for item in allowed or ()),
                         *skipped,
                         JobStatus.PENDING.value,

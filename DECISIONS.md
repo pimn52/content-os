@@ -18,6 +18,7 @@ This file records only decisions that should survive individual tasks. Current s
 - A commercial-safe local Voice provider is currently unselected. BYOK/cloud fallback remains interchangeable behind the same `VoiceProvider` boundary.
 - Generated voice must pass automatic QA plus explicit human likeness/naturalness review before it can count toward the product gate.
 - Automatic copy/timing QA does not establish timbre similarity, pacing or breathing quality; those remain explicit U-Voice concerns.
+- A failed generated-Voice take is never silently repaired into a verified master. Content OS records a provider-neutral recovery recommendation beside its immutable QA evidence: a trim/derived-audio retry is eligible only for a **sole** leading-silence failure and must receive fresh independent QA; missing, duplicate or excessive substituted copy requires fresh bounded sentence takes, each independently QA-verified before continuous assembly and master-level QA. Corrupt/no-timing/long-silence results require provider diagnosis. The original failed asset remains preserved and ineligible for render.
 
 ## Talking / lip-sync strategy
 
@@ -32,6 +33,7 @@ This file records only decisions that should survive individual tasks. Current s
 - Stop when the remaining interval is precise enough to change product routing/UX/market decisions; do not chase a mathematical maximum when a small residual uncertainty is operationally irrelevant.
 - Separate visual Talking duration from Voice duration/prosody and keep multi-segment continuity as a separate product-quality question.
 - Individually passing short Talking clips do not prove a continuous-presenter experience.
+- A multi-short Talking series must map its complete master-narration timeline to one authorized, source-forward continuous reference Clip **before** Provider execution. Each child receives its own persisted source window at the matching master offset; any Provider frame-alignment runway is input-only and may not alter delivered audio/video cut points. If the selected Clip cannot cover the entire mapped run, dispatch fails rather than restarting at frame zero, looping, or choosing unrelated material.
 - KeySync remains deferred to a later compatible machine; do not integrate broad avatar-generation models merely because they produce talking heads.
 
 ## Local-first Data + Hybrid Compute

@@ -22,6 +22,7 @@ def test_worker_defaults_and_type_selection(monkeypatch):
     config = parse_config(["--once", "--job-type", "analyze_asset"])
     assert config.once is True
     assert config.job_types == (JobType.ANALYZE_ASSET,)
+    assert config.gpu_resource_key.startswith("gpu:")
     assert config.db_path == Path("content-os-data/content-os.sqlite3")
     assert config.ffmpeg == resolve_local_executable("ffmpeg")
     assert config.ffprobe == resolve_local_executable("ffprobe")
@@ -101,10 +102,12 @@ def test_talking_worker_builds_explicit_latentsync_provider(tmp_path: Path, monk
     try:
         config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
         runner = build_runner(config, db)
-        provider = runner._handlers[JobType.GENERATE_TALKING]._provider
+        handler = runner._handlers[JobType.GENERATE_TALKING]
+        provider = handler._provider
         assert provider.__class__.__name__ == "LatentSyncProvider"
         assert provider.provider_name == "latentsync"
         assert provider.ffmpeg_command == (str(provider_ffmpeg),)
+        assert handler._ffmpeg_command == config.ffmpeg
         assert provider.runtime_metadata.estimated_cost.amount == 0
     finally:
         db.close()
@@ -126,8 +129,17 @@ def test_voice_worker_builds_explicit_omnivoice_provider(tmp_path: Path, monkeyp
         provider = runner._handlers[JobType.GENERATE_VOICE]._provider
         assert provider.__class__.__name__ == "OmniVoiceProvider"
         assert provider.provider_name == "omnivoice"
+        assert runner._resource_keys_by_type == {JobType.GENERATE_VOICE: config.gpu_resource_key}
     finally:
         db.close()
+
+
+def test_gpu_resource_key_can_be_overridden_for_one_local_machine(tmp_path: Path):
+    config = parse_config([
+        "--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "generate_talking",
+        "--gpu-resource-key", "gpu:asus-rtx3060-laptop-6gb",
+    ])
+    assert config.gpu_resource_key == "gpu:asus-rtx3060-laptop-6gb"
 
 
 def test_once_uses_fake_runner_and_closes_database(tmp_path: Path, monkeypatch):

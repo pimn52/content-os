@@ -991,6 +991,15 @@ class TalkingGenerationJobPayload(ContractModel):
     execution_parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=100)
     execution_parameter_sources: dict[str, str] = Field(default_factory=dict, max_length=100)
     execution_profile_reference: str | None = Field(default=None, min_length=1, max_length=500)
+    slice_start_segment_index: int | None = Field(default=None, ge=0)
+    slice_end_segment_index: int | None = Field(default=None, ge=1)
+    slice_max_duration_ms: int | None = Field(default=None, ge=1)
+    slice_limit_source: str | None = Field(default=None, min_length=1, max_length=100)
+    reference_window_start_ms: int | None = Field(default=None, ge=0)
+    reference_window_end_ms: int | None = Field(default=None, ge=1)
+    slice_series_id: UUID | None = None
+    slice_series_index: int | None = Field(default=None, ge=0)
+    slice_series_size: int | None = Field(default=None, ge=1)
 
     @field_validator("execution_parameters")
     @classmethod
@@ -1015,7 +1024,52 @@ class TalkingGenerationJobPayload(ContractModel):
             raise ValueError("Talking execution parameter sources must describe resolved parameters")
         if self.terminal_face_closeout and set(self.execution_parameter_sources) != set(self.execution_parameters):
             raise ValueError("Terminal face closeout requires provenance for every resolved parameter")
+        slice_values = (self.slice_start_segment_index, self.slice_end_segment_index, self.slice_max_duration_ms, self.slice_limit_source)
+        if any(value is not None for value in slice_values) and any(value is None for value in slice_values):
+            raise ValueError("Talking slice requires indices, resolved maximum duration and provenance")
+        if self.slice_start_segment_index is not None and self.slice_end_segment_index is not None and self.slice_end_segment_index <= self.slice_start_segment_index:
+            raise ValueError("Talking slice end index must follow start index")
+        if self.slice_start_segment_index is not None and self.terminal_face_closeout:
+            raise ValueError("Talking slice and terminal face closeout require separate execution planning")
+        reference_window = (self.reference_window_start_ms, self.reference_window_end_ms)
+        if any(value is not None for value in reference_window) and any(value is None for value in reference_window):
+            raise ValueError("Talking reference window requires both start and end timestamps")
+        if self.reference_window_start_ms is not None and self.reference_window_end_ms is not None and self.reference_window_end_ms <= self.reference_window_start_ms:
+            raise ValueError("Talking reference window end must follow start")
+        series_values = (self.slice_series_id, self.slice_series_index, self.slice_series_size)
+        if any(value is not None for value in series_values) and any(value is None for value in series_values):
+            raise ValueError("Talking slice series requires identifier, index and size")
+        if self.slice_series_id is not None:
+            if self.slice_start_segment_index is None:
+                raise ValueError("Talking slice series requires a resolved Talking slice")
+            if self.slice_series_index is not None and self.slice_series_size is not None and self.slice_series_index >= self.slice_series_size:
+                raise ValueError("Talking slice series index must be below its size")
         return self
+
+
+class TalkingSliceSeries(ContractModel):
+    """Atomic parent record for an ordered set of short Talking jobs."""
+
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    request_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    narration_audio_id: UUID
+    child_job_ids: list[UUID] = Field(min_length=1, max_length=10_000)
+    created_at: AwareDatetime
+
+
+class TalkingSliceSeriesContinuityReview(ContractModel):
+    """Immutable human decision over the exact ordered series evidence."""
+
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    series_id: UUID
+    approved: bool
+    evidence_reference: str = Field(min_length=1, max_length=2_000)
+    findings: list[str] = Field(default_factory=list, max_length=100)
+    child_job_ids: list[UUID] = Field(min_length=1, max_length=10_000)
+    reviewed_at: AwareDatetime
 
 
 class Job(ContractModel):

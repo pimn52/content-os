@@ -273,6 +273,31 @@ class ResolvedFeature:
     reason: str
 
 
+@dataclass(frozen=True)
+class ResolvedOperatingLimit:
+    """A safe automatic ceiling derived only from local verified evidence."""
+
+    metric: str
+    unit: str
+    value: float | None
+    source: ResolutionSource
+    reason: str
+
+
+def resolve_verified_operating_limit(profile: CapabilityProfile, *, metric: str, unit: str) -> ResolvedOperatingLimit:
+    """Return an exact local pass bound, otherwise preserve uncertainty."""
+
+    if not isinstance(profile, CapabilityProfile):
+        raise ExecutionRoutingError("profile must be a CapabilityProfile")
+    metric = _required(metric, "operating metric")
+    unit = _required(unit, "operating unit")
+    if profile.readiness is CapabilityReadiness.VERIFIED:
+        for bound in profile.operating_bounds:
+            if bound.metric == metric and bound.unit == unit and bound.status is EvidenceStatus.VERIFIED and bound.observed_pass_at is not None:
+                return ResolvedOperatingLimit(metric, unit, bound.observed_pass_at, ResolutionSource.LOCAL_VERIFIED, "locally verified provider+machine operating pass bound")
+    return ResolvedOperatingLimit(metric, unit, None, ResolutionSource.UNKNOWN, "no locally verified provider+machine operating pass bound")
+
+
 def resolve_feature_support(
     profile: CapabilityProfile,
     feature: CapabilityFeature,

@@ -20,6 +20,14 @@ def make_job(key: str = "job-key") -> Job:
     return Job(type=JobType.ANALYZE_ASSET, idempotency_key=key, created_at=NOW, updated_at=NOW)
 
 
+GPU_KEY = "gpu:test-machine"
+GPU_TYPES = {JobType.GENERATE_VOICE: GPU_KEY, JobType.GENERATE_TALKING: GPU_KEY}
+
+
+def make_gpu_job(key: str, *, created_at: datetime = NOW) -> Job:
+    return Job(type=JobType.GENERATE_VOICE, idempotency_key=key, created_at=created_at, updated_at=created_at)
+
+
 def test_concurrent_enqueue_returns_one_persisted_job(tmp_path: Path) -> None:
     path = tmp_path / "jobs.sqlite"
     workers = 8
@@ -156,6 +164,58 @@ def test_heartbeat_extends_ownership(tmp_path: Path) -> None:
     assert heartbeat.updated_at == NOW + timedelta(seconds=9)
     assert store.claim("worker-two", timedelta(seconds=10), max_attempts=MAX_ATTEMPTS, now=NOW + timedelta(seconds=11)) is None
     db.close()
+
+
+def test_gpu_resource_lease_skips_locked_inference_without_spending_attempt_and_allows_cpu_work(tmp_path: Path) -> None:
+    db = Database(tmp_path / "jobs.sqlite")
+    store = JobStore(db)
+    first = store.enqueue(make_gpu_job("gpu-first"))
+    second = store.enqueue(make_gpu_job("gpu-second", created_at=NOW + timedelta(seconds=1)))
+    cpu = store.enqueue(make_job("cpu-later").model_copy(update={"created_at": NOW + timedelta(seconds=2), "updated_at": NOW + timedelta(seconds=2)}))
+
+    claimed = store.claim("gpu-owner", timedelta(minutes=1), max_attempts=MAX_ATTEMPTS, resource_keys_by_type=GPU_TYPES, now=NOW)
+    assert claimed is not None and claimed.id == first.id
+    lease = db.connection.execute("SELECT job_id, worker_id FROM local_resource_leases WHERE resource_key = ?", (GPU_KEY,)).fetchone()
+    assert tuple(lease) == (str(first.id), "gpu-owner")
+
+    # The second GPU job is pending but resource-blocked. The worker can still
+    # claim a later CPU job, and contention does not turn into a failed retry.
+    next_job = store.claim("mixed-worker", timedelta(minutes=1), max_attempts=MAX_ATTEMPTS, resource_keys_by_type=GPU_TYPES, now=NOW + timedelta(seconds=1))
+    assert next_job is not None and next_job.id == cpu.id
+    assert store.get(second.id).attempt == 0  # type: ignore[union-attr]
+    assert store.complete(cpu.id, "mixed-worker", now=NOW + timedelta(seconds=2)) is not None
+
+    assert store.complete(first.id, "gpu-owner", now=NOW + timedelta(seconds=2)) is not None
+    assert db.connection.execute("SELECT 1 FROM local_resource_leases WHERE resource_key = ?", (GPU_KEY,)).fetchone() is None
+    released = store.claim("mixed-worker", timedelta(minutes=1), max_attempts=MAX_ATTEMPTS, resource_keys_by_type=GPU_TYPES, now=NOW + timedelta(seconds=3))
+    assert released is not None and released.id == second.id and released.attempt == 1
+    db.close()
+
+
+def test_gpu_resource_lease_heartbeats_and_expired_owner_can_be_reclaimed(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.sqlite"
+    db = Database(path)
+    store = JobStore(db)
+    job = store.enqueue(make_gpu_job("gpu-heartbeat"))
+    assert store.claim("gpu-owner", timedelta(seconds=10), max_attempts=MAX_ATTEMPTS, resource_keys_by_type=GPU_TYPES, now=NOW) is not None
+
+    assert store.heartbeat(job.id, "gpu-owner", timedelta(seconds=10), now=NOW + timedelta(seconds=9)) is not None
+    lease = db.connection.execute("SELECT lease_expires_at FROM local_resource_leases WHERE resource_key = ?", (GPU_KEY,)).fetchone()
+    assert lease is not None and lease["lease_expires_at"] > "2026-09-07T12:00:10"
+    assert store.claim("other-worker", timedelta(seconds=10), max_attempts=MAX_ATTEMPTS, resource_keys_by_type=GPU_TYPES, now=NOW + timedelta(seconds=11)) is None
+    db.close()
+
+    reopened = Database(path)
+    try:
+        reclaimed = JobStore(reopened).claim(
+            "recovery-worker", timedelta(minutes=1), max_attempts=MAX_ATTEMPTS,
+            resource_keys_by_type=GPU_TYPES, now=NOW + timedelta(seconds=20),
+        )
+        assert reclaimed is not None and reclaimed.id == job.id and reclaimed.attempt == 2
+        lease = reopened.connection.execute("SELECT job_id, worker_id FROM local_resource_leases WHERE resource_key = ?", (GPU_KEY,)).fetchone()
+        assert tuple(lease) == (str(job.id), "recovery-worker")
+    finally:
+        reopened.close()
 
 
 def test_wrong_worker_cannot_complete_or_fail_another_workers_job(tmp_path: Path) -> None:

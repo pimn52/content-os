@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, ShootTask, TalkingProfile, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, ShootTask, TalkingProfile, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, VoiceProfile
 
 from .database import Database
 
@@ -689,3 +689,52 @@ class JobRepository(_Repository[Job]):
         if cursor.rowcount != 1:
             raise KeyError(value.id)
         return value
+
+
+class TalkingSliceSeriesRepository(_Repository[TalkingSliceSeries]):
+    table, model = "talking_slice_series", TalkingSliceSeries
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> TalkingSliceSeries | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM talking_slice_series WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def list_for_project(self, project_id: UUID) -> list[TalkingSliceSeries]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM talking_slice_series WHERE project_id = ? ORDER BY id",
+            (str(project_id),),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+    def create(self, value: TalkingSliceSeries) -> TalkingSliceSeries:
+        self.db.connection.execute(
+            """INSERT INTO talking_slice_series(id, project_id, idempotency_key, payload)
+               VALUES (?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING""",
+            (str(value.id), str(value.project_id), value.idempotency_key, _payload(value)),
+        )
+        persisted = self.get_by_idempotency_key(value.idempotency_key)
+        if persisted is None:
+            raise sqlite3.IntegrityError("Talking slice series insert did not persist")
+        return persisted
+
+
+class TalkingSliceSeriesContinuityReviewRepository(_Repository[TalkingSliceSeriesContinuityReview]):
+    table, model = "talking_slice_series_continuity_reviews", TalkingSliceSeriesContinuityReview
+
+    def get_by_series_id(self, series_id: UUID) -> TalkingSliceSeriesContinuityReview | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM talking_slice_series_continuity_reviews WHERE series_id = ?", (str(series_id),)
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: TalkingSliceSeriesContinuityReview) -> TalkingSliceSeriesContinuityReview:
+        self.db.connection.execute(
+            """INSERT INTO talking_slice_series_continuity_reviews(id, series_id, project_id, payload)
+               VALUES (?, ?, ?, ?) ON CONFLICT(series_id) DO NOTHING""",
+            (str(value.id), str(value.series_id), str(value.project_id), _payload(value)),
+        )
+        persisted = self.get_by_series_id(value.series_id)
+        if persisted is None:
+            raise sqlite3.IntegrityError("Talking slice series review insert did not persist")
+        return persisted

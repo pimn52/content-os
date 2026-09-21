@@ -52,6 +52,7 @@ class WorkerConfig:
     max_attempts: int
     once: bool
     job_types: tuple[JobType, ...]
+    gpu_resource_key: str
     ffmpeg: str
     ffprobe: str
 
@@ -67,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_VOICE, JobType.VERIFY_VOICE, JobType.GENERATE_TALKING, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
+    parser.add_argument("--gpu-resource-key", default=None, help="Serialize local Voice/Talking inference sharing this GPU (default gpu:<hostname>)")
     parser.add_argument("--ffmpeg", default=resolve_local_executable("ffmpeg"))
     parser.add_argument("--ffprobe", default=resolve_local_executable("ffprobe"))
     return parser
@@ -88,9 +90,12 @@ def parse_config(argv: Sequence[str] | None = None) -> WorkerConfig:
     if args.max_attempts < 1 or args.max_attempts > 100:
         parser.error("max-attempts must be 1..100")
     selected = tuple(JobType(value) for value in args.job_types) if args.job_types else (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO)
+    gpu_resource_key = args.gpu_resource_key or os.environ.get("CONTENT_OS_GPU_RESOURCE_KEY") or f"gpu:{socket.gethostname()}"
+    if not isinstance(gpu_resource_key, str) or not gpu_resource_key.strip() or len(gpu_resource_key.strip()) > 500:
+        parser.error("gpu-resource-key must be a non-empty string of at most 500 characters")
     return WorkerConfig(
         db_path, data_root, worker_id, args.lease_seconds, args.heartbeat_seconds,
-        args.poll_seconds, args.max_attempts, args.once, selected, args.ffmpeg, args.ffprobe,
+        args.poll_seconds, args.max_attempts, args.once, selected, gpu_resource_key.strip(), args.ffmpeg, args.ffprobe,
     )
 
 
@@ -218,8 +223,16 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             provider,
             config.data_root / "generated",
             ProviderCallLedger(db),
+            ffmpeg_command=config.ffmpeg,
         )
-    return JobRunner(store, handlers, worker_id=config.worker_id, lease_duration=timedelta(seconds=config.lease_seconds), heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts)
+    gpu_job_types = {JobType.GENERATE_VOICE, JobType.GENERATE_TALKING}
+    resource_keys = {job_type: config.gpu_resource_key for job_type in config.job_types if job_type in gpu_job_types}
+    return JobRunner(
+        store, handlers, worker_id=config.worker_id,
+        lease_duration=timedelta(seconds=config.lease_seconds),
+        heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts,
+        resource_keys_by_type=resource_keys,
+    )
 
 
 def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvider:

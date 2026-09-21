@@ -63,6 +63,10 @@ class ProviderSettingsSchema:
     commercial_status: str
     parameters: tuple[ParameterSchema, ...]
     features: tuple[FeatureSchema, ...] = ()
+    # Adapter-declared input runway, not an Advanced Setting.  It preserves
+    # enough source frames for a provider's frame grid while keeping delivery
+    # boundaries owned by the narration series.
+    reference_frame_alignment_context_ms: int | None = None
 
     def profile_key(self, machine_id: str) -> ExecutionProfileKey:
         return ExecutionProfileKey(self.capability, self.mode, self.provider, self.model, self.runtime, machine_id)
@@ -104,6 +108,7 @@ LOCAL_BENCHMARK_SCHEMAS: tuple[ProviderSettingsSchema, ...] = (
             "这是 Content OS 对“声音已结束、嘴巴仍像在说话”问题的收口保护。当前 LatentSync 适配器通过模型输入静音上下文实现；上游 Provider 无需知道或声明该问题。是否自然收口仍需本机质量证据与人工审核。",
             ("trailing_silence_lookahead_ms",),
         ),),
+        reference_frame_alignment_context_ms=640,
     ),
     ProviderSettingsSchema(
         capability=CapabilityType.VOICE,

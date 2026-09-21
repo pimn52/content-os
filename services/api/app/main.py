@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import secrets
 import sqlite3
+import hashlib
+import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -18,8 +20,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
-from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
+from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
@@ -61,10 +63,10 @@ from app.provider_execution import (
 )
 from app.project_drafts import save_project_draft as persist_project_draft
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
-from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, CapabilityReadiness, CommercialStatus, EvidenceProvenance, EvidenceStatus, ExecutionOverride, ExecutionSafetyContext, FeatureSupport, ResolutionSource, RoutingConfigurationError, RoutingInputError, find_provider_settings_schema, find_unique_provider_settings_schema, list_provider_settings_schemas, resolve_execution, resolve_feature_support, validate_schema_values
+from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, CapabilityReadiness, CommercialStatus, EvidenceProvenance, EvidenceStatus, ExecutionOverride, ExecutionSafetyContext, FeatureSupport, OperatingBound, ResolutionSource, RoutingConfigurationError, RoutingInputError, find_provider_settings_schema, find_unique_provider_settings_schema, list_provider_settings_schemas, resolve_execution, resolve_feature_support, resolve_verified_operating_limit, validate_schema_values
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
-from app.talking import select_talking_reference
+from app.talking import TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
 
 
 class JobEnqueueRequest(BaseModel):
@@ -89,6 +91,55 @@ class JobResponse(BaseModel):
     render_id: UUID | None = None
     download_url: str | None = None
     preview_url: str | None = None
+
+
+class TalkingSliceSeriesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    narration_audio_id: UUID
+    jobs: list[JobResponse]
+    continuity_boundaries_ms: list[tuple[int, int]]
+
+
+class TalkingSliceSeriesChildReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    series_index: int
+    job_id: UUID
+    job_status: JobStatus | None
+    output_asset_id: UUID | None
+    automated_qa_state: str | None
+    human_review_state: str | None
+    blockers: list[str]
+
+
+class TalkingSliceSeriesReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    readiness: str
+    ready_for_human_continuity_review: bool
+    children: list[TalkingSliceSeriesChildReviewResponse]
+    blockers: list[str]
+    continuity_review_state: str
+    continuity_review_evidence_reference: str | None
+    continuity_review_findings: list[str]
+
+
+class TalkingSliceSeriesContinuityReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approved: bool
+    evidence_reference: str = Field(min_length=1, max_length=2_000)
+    findings: list[str] = Field(default_factory=list, max_length=100)
+
+
+class TalkingSliceSeriesContinuityReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    series_id: UUID
+    approved: bool
+    evidence_reference: str
+    findings: list[str]
+    child_job_ids: list[UUID]
+    reviewed_at: datetime
 
 
 class ClipSearchRequest(BaseModel):
@@ -484,6 +535,30 @@ class TalkingGenerationJobRequest(BaseModel):
     authorization_reference: str = Field(min_length=1, max_length=500)
     terminal_face_closeout: bool = False
     execution_machine_id: str | None = Field(default=None, min_length=1, max_length=200)
+    slice_start_segment_index: int | None = Field(default=None, ge=0)
+    slice_end_segment_index: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def slice_indices_are_paired(self) -> "TalkingGenerationJobRequest":
+        if (self.slice_start_segment_index is None) != (self.slice_end_segment_index is None):
+            raise ValueError("Talking slice requires both transcript indices")
+        if self.slice_start_segment_index is not None and self.slice_end_segment_index <= self.slice_start_segment_index:
+            raise ValueError("Talking slice end index must follow start index")
+        if self.slice_start_segment_index is not None and self.terminal_face_closeout:
+            raise ValueError("Talking slice and terminal face closeout require separate execution planning")
+        return self
+
+
+class TalkingSliceSeriesJobRequest(BaseModel):
+    """One idempotent request to dispatch every safe short slice in a master."""
+
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    talking_profile_id: UUID
+    reference_clip_id: UUID
+    narration_audio_id: UUID
+    authorization_reference: str = Field(min_length=1, max_length=500)
+    execution_machine_id: str = Field(min_length=1, max_length=200)
 
 
 class TalkingReferenceSelectionRequest(BaseModel):
@@ -852,6 +927,7 @@ def create_app(
         return CapabilityProfile(
             key=key, readiness=CapabilityReadiness(record.readiness),
             verified_parameters=record.verified_parameters, feature_support=features,
+            operating_bounds=(OperatingBound("fresh_voice_talking_duration", "ms", observed_pass_at=4_460, observed_fail_at=5_120, status=EvidenceStatus.VERIFIED),) if (key.capability.value, key.provider, key.model, key.runtime, key.machine_id) == ("talking", "latentsync", "LatentSync-1.5", "local-compatibility", "asus-rtx3060-laptop-6gb") else (),
             quality_status=EvidenceStatus(record.quality_status), continuity_status=EvidenceStatus(record.continuity_status),
             commercial_status=CommercialStatus(schema.commercial_status),
             provenance=EvidenceProvenance(record.provenance_source, record.evidence_reference, record.last_verified_at),
@@ -2207,6 +2283,31 @@ def create_app(
         if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
             raise HTTPException(status_code=422, detail="talking generation requires QA-verified generated narration")
 
+        slice_max_duration_ms: int | None = None
+        slice_limit_source: str | None = None
+        if payload.slice_start_segment_index is not None:
+            if payload.execution_machine_id is None:
+                raise HTTPException(status_code=422, detail="Talking slice requires the selected execution machine")
+            schema = find_unique_provider_settings_schema("talking", profile.provider)
+            if schema is None:
+                raise HTTPException(status_code=422, detail="the selected Talking provider has no unambiguous capability profile")
+            key = schema.profile_key(payload.execution_machine_id)
+            scope_key = ":".join((key.capability.value, key.mode.value, key.provider, key.model, key.runtime, key.machine_id))
+            capability_profile, _ = _execution_capability_profile(schema, key, scope_key, db)
+            limit = resolve_verified_operating_limit(capability_profile, metric="fresh_voice_talking_duration", unit="ms")
+            if limit.value is None or int(limit.value) != limit.value:
+                raise HTTPException(status_code=422, detail="the selected Talking provider/machine has no verified short-Talking duration bound")
+            try:
+                plan_talking_audio_slice(
+                    narration, start_segment_index=payload.slice_start_segment_index,
+                    end_segment_index=payload.slice_end_segment_index or 0,
+                    max_duration_ms=int(limit.value),
+                )
+            except TalkingSlicePlanningError as exc:
+                raise HTTPException(status_code=422, detail="Talking slice cannot be safely planned") from exc
+            slice_max_duration_ms = int(limit.value)
+            slice_limit_source = limit.source.value
+
         terminal_delivery_end_ms: int | None = None
         execution_parameters: dict[str, object] = {}
         execution_parameter_sources: dict[str, str] = {}
@@ -2301,6 +2402,10 @@ def create_app(
             execution_parameters=execution_parameters,
             execution_parameter_sources=execution_parameter_sources,
             execution_profile_reference=execution_profile_reference,
+            slice_start_segment_index=payload.slice_start_segment_index,
+            slice_end_segment_index=payload.slice_end_segment_index,
+            slice_max_duration_ms=slice_max_duration_ms,
+            slice_limit_source=slice_limit_source,
         )
         job = Job(
             id=uuid4(), project_id=project_id, type=JobType.GENERATE_TALKING,
@@ -2314,6 +2419,322 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
+
+    @application.post(
+        "/projects/{project_id}/talking-slice-series-jobs",
+        response_model=TalkingSliceSeriesResponse,
+        status_code=201,
+        tags=["voice"],
+    )
+    async def enqueue_talking_slice_series(
+        project_id: UUID, payload: TalkingSliceSeriesJobRequest, request: Request,
+    ) -> dict[str, Any]:
+        """Atomically persist an ordered, evidence-bounded short-Talking series."""
+
+        db: Database = request.app.state.database
+        series_repository = TalkingSliceSeriesRepository(db)
+        request_fingerprint = hashlib.sha256(json.dumps(
+            {"project_id": str(project_id), "request": payload.model_dump(mode="json")},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+
+        def response_for(series: TalkingSliceSeries) -> dict[str, Any]:
+            children = [JobRepository(db).get(job_id) for job_id in series.child_job_ids]
+            if any(job is None for job in children):
+                raise HTTPException(status_code=409, detail="Talking slice series is incomplete and requires recovery")
+            master = AudioAssetRepository(db).get(series.narration_audio_id)
+            if master is None:
+                raise HTTPException(status_code=409, detail="Talking slice series master narration is unavailable")
+            return {
+                "id": series.id,
+                "narration_audio_id": series.narration_audio_id,
+                "jobs": [_job_response(db, job) for job in children if job is not None],
+                "continuity_boundaries_ms": [
+                    (
+                        master.transcript_segments[children[index].payload.slice_end_segment_index - 1].end_ms,
+                        master.transcript_segments[children[index + 1].payload.slice_start_segment_index].start_ms,
+                    )
+                    for index in range(len(children) - 1)
+                    if isinstance(children[index].payload, TalkingGenerationJobPayload)
+                    and isinstance(children[index + 1].payload, TalkingGenerationJobPayload)
+                ],
+            }
+
+        existing = series_repository.get_by_idempotency_key(payload.idempotency_key)
+        if existing is not None:
+            if existing.request_fingerprint != request_fingerprint:
+                raise HTTPException(status_code=409, detail="idempotency key is already used for a different Talking slice series")
+            return response_for(existing)
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        profile = TalkingProfileRepository(db).get(payload.talking_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="talking profile not found")
+        if not profile.consent.confirmed:
+            raise HTTPException(status_code=422, detail="talking profile requires explicit consent")
+        reference_clip = ClipRepository(db).get(payload.reference_clip_id)
+        if payload.reference_clip_id not in profile.reference_clip_ids or reference_clip is None:
+            raise HTTPException(status_code=422, detail="selected talking reference is unavailable or not consented")
+        narration = AudioAssetRepository(db).get(payload.narration_audio_id)
+        generation = None if narration is None else narration.metadata.get("voice_generation")
+        if narration is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+            raise HTTPException(status_code=422, detail="Talking slice series requires QA-verified generated narration")
+        schema = find_unique_provider_settings_schema("talking", profile.provider)
+        if schema is None:
+            raise HTTPException(status_code=422, detail="the selected Talking provider has no unambiguous capability profile")
+        key = schema.profile_key(payload.execution_machine_id)
+        scope_key = ":".join((key.capability.value, key.mode.value, key.provider, key.model, key.runtime, key.machine_id))
+        capability_profile, _ = _execution_capability_profile(schema, key, scope_key, db)
+        limit = resolve_verified_operating_limit(capability_profile, metric="fresh_voice_talking_duration", unit="ms")
+        if limit.value is None or int(limit.value) != limit.value:
+            raise HTTPException(status_code=422, detail="the selected Talking provider/machine has no verified short-Talking duration bound")
+        try:
+            plan = plan_talking_audio_slice_series(narration, max_duration_ms=int(limit.value))
+            reference_context_ms = schema.reference_frame_alignment_context_ms
+            if reference_context_ms is None:
+                raise TalkingSlicePlanningError("Talking provider has no declared reference frame-alignment context")
+            reference_windows = plan_source_forward_reference_windows(
+                reference_clip,
+                plan,
+                frame_alignment_context_ms=reference_context_ms,
+            )
+        except TalkingSlicePlanningError as exc:
+            raise HTTPException(status_code=422, detail="Talking slice series cannot be safely planned") from exc
+
+        now = datetime.now(timezone.utc)
+        child_ids = [uuid4() for _ in plan.slices]
+        series = TalkingSliceSeries(
+            project_id=project_id,
+            idempotency_key=payload.idempotency_key,
+            request_fingerprint=request_fingerprint,
+            narration_audio_id=narration.id,
+            child_job_ids=child_ids,
+            created_at=now,
+        )
+        jobs = [
+            Job(
+                id=child_ids[index],
+                project_id=project_id,
+                type=JobType.GENERATE_TALKING,
+                idempotency_key=f"talking-slice-series:{series.id}:{index}",
+                created_at=now,
+                updated_at=now,
+                payload=TalkingGenerationJobPayload(
+                    project_id=project_id,
+                    talking_profile_id=profile.id,
+                    reference_clip_id=payload.reference_clip_id,
+                    narration_audio_id=narration.id,
+                    authorization_reference=payload.authorization_reference,
+                    slice_start_segment_index=slice_plan.start_segment_index,
+                    slice_end_segment_index=slice_plan.end_segment_index,
+                    slice_max_duration_ms=int(limit.value),
+                    slice_limit_source=limit.source.value,
+                    reference_window_start_ms=reference_window.start_ms,
+                    reference_window_end_ms=reference_window.end_ms,
+                    slice_series_id=series.id,
+                    slice_series_index=index,
+                    slice_series_size=len(plan.slices),
+                ),
+            )
+            for index, (slice_plan, reference_window) in enumerate(zip(plan.slices, reference_windows, strict=True))
+        ]
+        with db.transaction(immediate=True):
+            persisted_series = series_repository.create(series)
+            if persisted_series.id != series.id:
+                if persisted_series.request_fingerprint != request_fingerprint:
+                    raise HTTPException(status_code=409, detail="idempotency key is already used for a different Talking slice series")
+                return response_for(persisted_series)
+            for job in jobs:
+                persisted = JobRepository(db).create(job)
+                if persisted.id != job.id or persisted.payload != job.payload:
+                    raise HTTPException(status_code=409, detail="Talking slice child idempotency conflict")
+        return response_for(series)
+
+    @application.get(
+        "/projects/{project_id}/talking-slice-series/{series_id}",
+        response_model=TalkingSliceSeriesReviewResponse,
+        tags=["voice"],
+    )
+    async def get_talking_slice_series_review(
+        project_id: UUID, series_id: UUID, request: Request,
+    ) -> dict[str, Any]:
+        """Read the prerequisites for a human continuity review; do not approve it."""
+
+        db: Database = request.app.state.database
+        series = TalkingSliceSeriesRepository(db).get(series_id)
+        if series is None or series.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Talking slice series not found")
+        review = assess_talking_slice_series(
+            series,
+            [JobRepository(db).get(job_id) for job_id in series.child_job_ids],
+            AssetRepository(db).list(),
+        )
+        continuity = TalkingSliceSeriesContinuityReviewRepository(db).get_by_series_id(series.id)
+        return {
+            "id": review.series_id,
+            "readiness": review.readiness,
+            "ready_for_human_continuity_review": review.ready_for_human_continuity_review,
+            "children": [
+                {
+                    "series_index": child.series_index,
+                    "job_id": child.job_id,
+                    "job_status": child.job_status,
+                    "output_asset_id": child.output_asset_id,
+                    "automated_qa_state": child.automated_qa_state,
+                    "human_review_state": child.human_review_state,
+                    "blockers": list(child.blockers),
+                }
+                for child in review.children
+            ],
+            "blockers": list(review.blockers),
+            "continuity_review_state": (
+                "not_submitted" if continuity is None else "approved" if continuity.approved else "rejected"
+            ),
+            "continuity_review_evidence_reference": None if continuity is None else continuity.evidence_reference,
+            "continuity_review_findings": [] if continuity is None else list(continuity.findings),
+        }
+
+    @application.get(
+        "/projects/{project_id}/talking-slice-series",
+        response_model=list[TalkingSliceSeriesReviewResponse],
+        tags=["voice"],
+    )
+    async def list_talking_slice_series_reviews(project_id: UUID, request: Request) -> list[dict[str, Any]]:
+        """List project-local series evidence; this endpoint has no execution side effects."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        jobs = JobRepository(db)
+        assets = AssetRepository(db).list()
+        continuity_reviews = TalkingSliceSeriesContinuityReviewRepository(db)
+        values: list[dict[str, Any]] = []
+        for series in TalkingSliceSeriesRepository(db).list_for_project(project_id):
+            review = assess_talking_slice_series(series, [jobs.get(job_id) for job_id in series.child_job_ids], assets)
+            continuity = continuity_reviews.get_by_series_id(series.id)
+            values.append({
+                "id": review.series_id,
+                "readiness": review.readiness,
+                "ready_for_human_continuity_review": review.ready_for_human_continuity_review,
+                "children": [
+                    {
+                        "series_index": child.series_index,
+                        "job_id": child.job_id,
+                        "job_status": child.job_status,
+                        "output_asset_id": child.output_asset_id,
+                        "automated_qa_state": child.automated_qa_state,
+                        "human_review_state": child.human_review_state,
+                        "blockers": list(child.blockers),
+                    }
+                    for child in review.children
+                ],
+                "blockers": list(review.blockers),
+                "continuity_review_state": (
+                    "not_submitted" if continuity is None else "approved" if continuity.approved else "rejected"
+                ),
+                "continuity_review_evidence_reference": None if continuity is None else continuity.evidence_reference,
+                "continuity_review_findings": [] if continuity is None else list(continuity.findings),
+            })
+        return values
+
+    @application.post(
+        "/projects/{project_id}/talking-slice-series/{series_id}/continuity-review",
+        response_model=TalkingSliceSeriesContinuityReviewResponse,
+        status_code=201,
+        tags=["voice"],
+    )
+    async def submit_talking_slice_series_continuity_review(
+        project_id: UUID,
+        series_id: UUID,
+        payload: TalkingSliceSeriesContinuityReviewRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Persist one immutable human continuity decision after all prerequisites."""
+
+        db: Database = request.app.state.database
+        series = TalkingSliceSeriesRepository(db).get(series_id)
+        if series is None or series.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Talking slice series not found")
+        reviews = TalkingSliceSeriesContinuityReviewRepository(db)
+
+        def response_for(review: TalkingSliceSeriesContinuityReview) -> dict[str, Any]:
+            return {
+                "id": review.id,
+                "series_id": review.series_id,
+                "approved": review.approved,
+                "evidence_reference": review.evidence_reference,
+                "findings": list(review.findings),
+                "child_job_ids": list(review.child_job_ids),
+                "reviewed_at": review.reviewed_at,
+            }
+
+        existing = reviews.get_by_series_id(series.id)
+        if existing is not None:
+            if (
+                existing.project_id != project_id
+                or existing.approved != payload.approved
+                or existing.evidence_reference != payload.evidence_reference
+                or existing.findings != payload.findings
+                or existing.child_job_ids != series.child_job_ids
+            ):
+                raise HTTPException(status_code=409, detail="Talking slice series continuity review is immutable")
+            return response_for(existing)
+        readiness = assess_talking_slice_series(
+            series,
+            [JobRepository(db).get(job_id) for job_id in series.child_job_ids],
+            AssetRepository(db).list(),
+        )
+        if not readiness.ready_for_human_continuity_review:
+            raise HTTPException(
+                status_code=422,
+                detail="Talking slice series is not ready for human continuity review",
+            )
+        review = TalkingSliceSeriesContinuityReview(
+            project_id=project_id,
+            series_id=series.id,
+            approved=payload.approved,
+            evidence_reference=payload.evidence_reference,
+            findings=payload.findings,
+            child_job_ids=series.child_job_ids,
+            reviewed_at=datetime.now(timezone.utc),
+        )
+        with db.transaction(immediate=True):
+            persisted = reviews.create(review)
+            if persisted.id != review.id:
+                if (
+                    persisted.approved != payload.approved
+                    or persisted.evidence_reference != payload.evidence_reference
+                    or persisted.findings != payload.findings
+                    or persisted.child_job_ids != series.child_job_ids
+                ):
+                    raise HTTPException(status_code=409, detail="Talking slice series continuity review is immutable")
+        return response_for(persisted)
+
+    @application.get(
+        "/projects/{project_id}/talking-slice-series/{series_id}/continuity-review",
+        response_model=TalkingSliceSeriesContinuityReviewResponse,
+        tags=["voice"],
+    )
+    async def get_talking_slice_series_continuity_review(
+        project_id: UUID, series_id: UUID, request: Request,
+    ) -> dict[str, Any]:
+        """Read the immutable human decision without re-evaluating it."""
+
+        db: Database = request.app.state.database
+        review = TalkingSliceSeriesContinuityReviewRepository(db).get_by_series_id(series_id)
+        if review is None or review.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Talking slice series continuity review not found")
+        return {
+            "id": review.id,
+            "series_id": review.series_id,
+            "approved": review.approved,
+            "evidence_reference": review.evidence_reference,
+            "findings": list(review.findings),
+            "child_job_ids": list(review.child_job_ids),
+            "reviewed_at": review.reviewed_at,
+        }
 
     @application.post("/clips/search", response_model=list[ClipSearchHitResponse])
     async def search_clips(payload: ClipSearchRequest, request: Request) -> list[ClipSearchHitResponse]:

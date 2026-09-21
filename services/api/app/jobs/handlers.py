@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from decimal import Decimal
+import tempfile
 from typing import Literal, Protocol, Sequence
 from uuid import UUID
 
@@ -99,6 +100,7 @@ from app.providers.talking import (
     TalkingTimeout,
 )
 from app.voice_qa import VoiceQaError, apply_voice_qa, verify_generated_voice
+from app.talking.slices import TalkingSliceExtractionError, TalkingSlicePlanningError, extract_talking_audio_slice, plan_talking_audio_slice
 from app.search import EmbeddingCountMismatch, EmbeddingIndexError, IndexError
 
 from .runner import JobExecutionError
@@ -335,6 +337,8 @@ class TalkingGenerationJobHandler:
         provider: TalkingHeadProvider,
         output_root: str | Path,
         ledger: ProviderCallLedger | None = None,
+        *,
+        ffmpeg_command: str | Path = "ffmpeg",
     ) -> None:
         self._profiles = profiles
         self._audios = audios
@@ -344,6 +348,7 @@ class TalkingGenerationJobHandler:
         self._provider = provider
         self._output_root = Path(output_root).resolve()
         self._ledger = ledger
+        self._ffmpeg_command = str(ffmpeg_command)
 
     def __call__(self, job: Job) -> None:
         if job.status is not JobStatus.RUNNING:
@@ -365,10 +370,32 @@ class TalkingGenerationJobHandler:
         reference_asset = None if reference_clip is None else self._assets.get(reference_clip.asset_id)
         if reference_clip is None or reference_asset is None:
             raise JobExecutionError("talking_reference_missing", "selected Talking reference is unavailable", retryable=False)
+        importer_data_root = getattr(self._importer, "data_root", None)
+        reference_path = (
+            Path(reference_asset.source_file)
+            if importer_data_root is None
+            else _resolve_local_asset_source_path(reference_asset.source_file, importer_data_root)
+        )
+        reference_start_ms = (
+            reference_clip.start_ms
+            if job.payload.reference_window_start_ms is None
+            else job.payload.reference_window_start_ms
+        )
+        reference_end_ms = (
+            reference_clip.end_ms
+            if job.payload.reference_window_end_ms is None
+            else job.payload.reference_window_end_ms
+        )
+        if reference_start_ms < reference_clip.start_ms or reference_end_ms > reference_clip.end_ms:
+            raise JobExecutionError(
+                "talking_reference_window_invalid",
+                "planned Talking reference window exceeds its authorized continuous source Clip",
+                retryable=False,
+            )
         try:
             reference = TalkingReference(
-                clip_id=reference_clip.id, source_path=Path(reference_asset.source_file),
-                start_ms=reference_clip.start_ms, end_ms=reference_clip.end_ms,
+                clip_id=reference_clip.id, source_path=reference_path,
+                start_ms=reference_start_ms, end_ms=reference_end_ms,
                 subtitle_crop_bottom_ratio=0.18 if reference_clip.talking_reference_assessment is not None and reference_clip.talking_reference_assessment.burned_in_subtitles is True else 0,
             )
         except TalkingInputError:
@@ -379,10 +406,39 @@ class TalkingGenerationJobHandler:
             raise JobExecutionError("talking_provider_invalid", "talking provider does not expose safe runtime identity", retryable=False)
         if profile.provider != provider_name.strip():
             raise JobExecutionError("talking_profile_provider_mismatch", "talking profile does not belong to the configured provider", retryable=False)
+        # Core persists media paths portably beneath ``content-os-data``.  A
+        # Worker may run from ``services/api`` (or another directory), so make
+        # the provider-facing narration path concrete at the same data-root
+        # boundary used for the selected reference.  Keep the stored AudioAsset
+        # untouched; this copy is only the local execution input.
+        importer_data_root = getattr(self._importer, "data_root", None)
+        narration_source = (
+            Path(narration.source_file)
+            if importer_data_root is None
+            else _resolve_local_asset_source_path(narration.source_file, importer_data_root)
+        )
+        provider_narration = narration.model_copy(update={"source_file": str(narration_source)})
+        slice_plan = None
+        temporary_slice: tempfile.TemporaryDirectory[str] | None = None
+        if job.payload.slice_start_segment_index is not None:
+            try:
+                slice_plan = plan_talking_audio_slice(provider_narration, start_segment_index=job.payload.slice_start_segment_index, end_segment_index=job.payload.slice_end_segment_index or 0, max_duration_ms=job.payload.slice_max_duration_ms or 0)
+                self._output_root.mkdir(parents=True, exist_ok=True)
+                temporary_slice = tempfile.TemporaryDirectory(prefix="content-os-talking-slice-", dir=str(self._output_root))
+                provider_narration = extract_talking_audio_slice(
+                    provider_narration,
+                    slice_plan,
+                    Path(temporary_slice.name) / "narration.wav",
+                    ffmpeg_command=self._ffmpeg_command,
+                )
+            except (TalkingSlicePlanningError, TalkingSliceExtractionError):
+                if temporary_slice is not None:
+                    temporary_slice.cleanup()
+                raise JobExecutionError("talking_narration_slice_invalid", "Talking narration slice cannot be safely prepared", retryable=False) from None
         call = _reserve_job_provider_call(
             self._ledger, job, operation="talking", category=CostCategory.TALKING,
             provider=provider_name.strip(), model=model.strip(),
-            input_source=f"talking-profile:{profile.id}:narration:{narration.id}",
+            input_source=f"talking-profile:{profile.id}:narration:{narration.id}" + ("/slice:" + str(slice_plan.start_ms) + "-" + str(slice_plan.end_ms) if slice_plan is not None else ""),
             known_local_cost=bool(getattr(self._provider, "is_local", False)),
         )
         output = self._output_root / "talking" / f"{job.id}-attempt-{job.attempt}.mp4"
@@ -399,9 +455,9 @@ class TalkingGenerationJobHandler:
                     parameter_sources=job.payload.execution_parameter_sources,
                     profile_reference=job.payload.execution_profile_reference,
                 )
-                result = self._provider.synthesize(profile, narration, reference, output, options)
+                result = self._provider.synthesize(profile, provider_narration, reference, output, options)
             else:
-                result = self._provider.synthesize(profile, narration, reference, output)
+                result = self._provider.synthesize(profile, provider_narration, reference, output)
         except (TalkingRateLimitError, TalkingTimeout, TalkingConnectionError):
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_temporarily_unavailable")
             raise JobExecutionError("talking_temporarily_unavailable", "talking provider is temporarily unavailable", retryable=True) from None
@@ -411,6 +467,9 @@ class TalkingGenerationJobHandler:
         except Exception:
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="talking_provider_failed")
             raise JobExecutionError("talking_provider_failed", "talking provider failed unexpectedly", retryable=True) from None
+        finally:
+            if temporary_slice is not None:
+                temporary_slice.cleanup()
         try:
             video = self._importer.import_path(
                 result.video_path,
@@ -428,6 +487,25 @@ class TalkingGenerationJobHandler:
                 "execution_parameter_sources": dict(job.payload.execution_parameter_sources),
                 "execution_profile_reference": job.payload.execution_profile_reference,
             }
+            if slice_plan is not None:
+                metadata["talking_generation"].update({
+                    "master_narration_audio_id": str(narration.id),
+                    "master_slice_start_ms": slice_plan.start_ms,
+                    "master_slice_end_ms": slice_plan.end_ms,
+                    "slice_limit_source": job.payload.slice_limit_source,
+                })
+            if job.payload.reference_window_start_ms is not None:
+                metadata["talking_generation"].update({
+                    "reference_window_start_ms": reference.start_ms,
+                    "reference_window_end_ms": reference.end_ms,
+                    "reference_window_delivery_end_ms": slice_plan.end_ms if slice_plan is not None else None,
+                })
+            if job.payload.slice_series_id is not None:
+                metadata["talking_generation"].update({
+                    "slice_series_id": str(job.payload.slice_series_id),
+                    "slice_series_index": job.payload.slice_series_index,
+                    "slice_series_size": job.payload.slice_series_size,
+                })
             with self._assets.db.transaction():
                 self._assets.update(video.model_copy(update={"metadata": metadata}))
         except (MediaImportError, FileNotFoundError, OSError, ValueError):
@@ -816,3 +894,21 @@ def _resolve_asset_job(
     if asset is None:
         raise JobExecutionError("asset_missing", "targeted asset is missing", retryable=False)
     return asset
+
+
+def _resolve_local_asset_source_path(source_file: str, data_root: str | Path) -> Path:
+    """Resolve Core's portable local asset paths at the worker boundary.
+
+    Imported assets are intentionally persisted as paths rooted at the local
+    data directory so a checkout can move. A worker may run below services/api
+    instead of the workspace root, therefore resolving that value directly
+    against the process cwd is unsafe.
+    """
+
+    path = Path(source_file)
+    if path.is_absolute():
+        return path
+    root = Path(data_root).resolve()
+    if path.parts and path.parts[0].casefold() == root.name.casefold():
+        return root.parent / path
+    return root / path

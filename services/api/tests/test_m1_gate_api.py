@@ -26,7 +26,7 @@ def test_m1_gate_page_and_project_creation_are_local(tmp_path: Path) -> None:
             assert marker in page.text
         workspace = client.get("/workspace")
         assert workspace.status_code == 200
-        for marker in ("IP 资料（默认档案）", "保存 IP 资料", "新主题 → 草稿", "素材用途确认", "/ip-profile", "/assets/${id}/usage"):
+        for marker in ("IP 资料（默认档案）", "保存 IP 资料", "新主题 → 草稿", "素材用途确认", "Talking 分段连续性", "读取 Talking 系列", "/talking-slice-series", "/ip-profile", "/assets/${id}/usage"):
             assert marker in workspace.text
         response = client.post("/projects", json={"title": "真实素材测试", "topic": "主题", "creator_name": "我"})
         assert response.status_code == 201
