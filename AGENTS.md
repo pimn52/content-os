@@ -1,229 +1,138 @@
-# AGENTS.md — Content OS implementation contract
+# AGENTS.md — Content OS Implementation Contract
 
-Read [`START_HERE.md`](START_HERE.md) first. It defines the document hierarchy.
+Read START_HERE.md first.
 
-## Product invariant
+This file owns implementation behavior only. Product scope belongs in the product specification/module docs; current work belongs in STATUS.
 
-Content OS is a Local-first / BYOK personal content engine, not a generic AI video generator.
+## 1. Engineering invariants
 
-R1 must prove:
+- Preserve provider-neutral Core contracts.
+- Keep the R1 modular monolith: FastAPI + SQLite + local Job/Worker + provider adapters + Remotion/FFmpeg.
+- Do not hide missing capability, cost, license, consent, provenance or runtime failures.
+- Unknown capability is not verified capability.
+- Fixture, assisted-test and runtime evidence remain distinct.
+- Media paths persisted as portable paths must resolve through the configured data-root boundary, not process CWD.
+- Runtime provider calls use durable idempotency/budget/usage accounting.
+- Every behavior change gets the smallest meaningful test.
 
-> new topic → editable new copy → authorized creator voice → at least one new creator Talking/lip-sync segment → real B-roll/typography/subtitles → 30–60s export.
+## 2. Implementation model cost policy
 
-Imported narration, source-led recuts, old mouth motion, generic TTS or generic avatars may exist as labeled fallback paths, but do not satisfy this gate.
+Use the cheapest model that can reliably complete the bounded task:
 
-## Engineering invariants
+Luna → Terra → Sol
 
-- Local-first; user media first; continuous clips are first-class assets.
-- Upload once: derive audio/transcript/keyframes/metadata automatically where supported.
-- Provider-neutral core. Never hard-wire a vendor/model into domain contracts.
-- Minimum end-to-end path must not require a high-end GPU.
-- No Redis/Celery/n8n/Kubernetes/microservices in R1 unless the execution spec is explicitly changed.
-- No broad Market Brain/web scraping in R1.
-- YouTube account path remains read-only until explicitly changed.
-- Voice/face cloning requires explicit rights/consent records.
-- Never log secrets.
-- Runtime provider calls use the existing durable idempotency/budget/usage boundary; unknown cost is not zero.
-- Unknown capability is not verified capability. Never label documentation claims, theoretical limits, or another machine's results as local evidence.
-- Fixture, assisted-test and runtime evidence remain distinct. Never promote fixture success to product-quality success.
+### Luna
 
-## Voice / Talking provider policy
+Use for isolated UI/CRUD, focused tests, docs, mechanical refactors and simple adapters with stable interfaces.
 
-Voice and Talking are replaceable provider layers.
+Do not let Luna independently redesign schemas, execution semantics, provider accounting, capability routing or media/timeline architecture.
 
-### OmniVoice
+### Terra
 
-OmniVoice is approved for **local non-commercial technical evaluation / benchmark** in Content OS.
+Use for cross-module media/timeline/provider/planner/router/job/migration work, capability profiles, application orchestration and compatibility-sensitive Voice/Talking debugging.
 
-- Source code license: Apache-2.0.
-- Official pretrained weights: currently CC-BY-NC because of upstream training-data constraints.
-- Therefore: do not bundle those weights in a commercial release, do not present them as a commercial-safe default, and do not let Core depend on OmniVoice-specific state.
-- Install only as an optional extra/provider worker, never as a mandatory base dependency.
-- Reuse existing ASR/reference transcript when available instead of re-running Whisper unnecessarily.
-- Generated speech must pass QA before render: copy coverage, duration/silence sanity, playable audio, and retry/fallback behavior.
+### Sol
 
-A commercial-safe local provider and a BYOK cloud fallback must remain possible without schema changes.
+Use for unresolved architecture conflicts, security/privacy/release review, critical quality-gate design, or a Terra task that still fails after materially different attempts with a minimal reproduction.
 
-## Capability-aware routing policy
+Task importance alone does not justify Sol.
 
-Treat these as separate layers:
+## 3. Escalation
 
-1. **Narrative / Scene intent** — what the content needs editorially.
-2. **Hybrid Asset Router** — which visual/content source should satisfy it.
-3. **Execution Planner / Compute Router** — which provider/runtime/configuration should execute that capability.
-
-Do not distort narrative structure merely to fit one provider's current limitation. Provider constraints belong in execution/routing.
-
-Capability evidence must be scoped to a concrete provider/model/runtime/machine configuration. When practical, record:
-
-- implemented/configured/available/verified state;
-- observed pass/fail operating range;
-- quality/continuity evidence;
-- relevant resource use and latency;
-- local/remote execution mode;
-- known/unknown cost;
-- license/commercial status;
-- verification provenance and time.
-
-## Advanced Settings / parameter overrides
-
-Advanced Settings is an override layer over the same routing system, not a parallel configuration stack.
-
-Parameter precedence is fixed:
-
-1. per-job explicit override;
-2. saved user override for the provider + machine/profile;
-3. locally verified capability/profile value;
-4. provider-known conservative default;
-5. unknown.
-
-Rules:
-
-- Do not invent an optimized value when evidence is missing.
-- Expose an advanced override when a provider/machine parameter materially affects quality/runtime and the system lacks sufficient evidence.
-- Keep provider-specific parameter names behind provider adapters/config schemas; avoid leaking one provider's knobs into universal domain contracts.
-- Where practical, surface parameter provenance/status: `verified`, `provider_default`, `user_override`, or `unknown`.
-- Allow reset to automatic/verified defaults.
-- User overrides may not bypass consent, budget, license, provenance, or hard runtime-safety checks.
-- A successful user-tuned run may be promoted to local evidence only after appropriate QA/human acceptance; never auto-promote it to a global default.
-- Prefer the narrowest persistence scope that matches intent: job → project → provider+machine profile.
-
-## Model cost policy
-
-Use the cheapest model that can complete the task with the required quality.
-
-### Luna — default worker
-
-Use for:
-
-- isolated UI/CRUD;
-- tests and fixtures;
-- docs and repository hygiene;
-- simple adapters with fixed interfaces;
-- mechanical refactors and local bug fixes.
-
-Do **not** let Luna independently redesign core schemas, execution semantics, provider accounting, capability routing or media/timeline architecture.
-
-### Terra — core implementation
-
-Use for:
-
-- media/timeline logic;
-- Voice/Talking provider integration;
-- planner/router/search semantics;
-- capability profiles and Compute Router / Execution Planner;
-- multi-file state changes;
-- jobs/retry/recovery/idempotency;
-- migrations and compatibility-sensitive implementation;
-- complex debugging with a reproducible failure;
-- bounded capability-search work where provider/runtime behavior and product-quality evidence must be separated.
-
-### Sol — gate/review only
-
-Use only for:
-
-- architecture conflicts with no obvious local resolution;
-- security/privacy/release reviews;
-- final Talking/voice quality gate design;
-- a Terra task that still fails after materially different attempts and has a minimal reproduction.
-
-Task importance alone is not a reason to use Sol.
-
-## Escalation rule
-
-`Luna → Terra → Sol`
-
-Escalate when either:
+Escalate when:
 
 1. the task is inherently outside the lower tier's allowed scope; or
-2. the lower tier has a concrete, reproducible failure after a materially different repair attempt.
+2. the lower tier has a concrete reproducible failure after a materially different repair attempt.
 
-Never spend a higher tier merely to avoid writing a precise task boundary.
+Do not escalate merely because a task is tedious.
 
-## Task contract
+## 4. Task contract
 
-Every implementation task must specify:
+Every active implementation package must state:
 
 - Objective
 - Allowed files/modules
-- Interfaces that must stay stable
+- Stable interfaces
 - Acceptance criteria
 - Tests/build commands
 - Non-goals
+- Exit states
 
-Completion report must include:
+A completion report must state:
 
 - changed files;
 - tests/builds run;
-- acceptance criteria status;
+- acceptance status;
 - known limitations;
-- new dependency/license concerns;
+- dependency/license changes;
 - next ready task.
 
-## Work-package lifecycle
+## 5. Work-package lifecycle
 
-Every active package in `STATUS.md` must carry exactly one state:
+Exactly one active package belongs in STATUS:
 
-- `READY` — scoped and safe to start;
-- `RUNNING` — execution is actively in progress;
-- `AWAITING_U_REVIEW` — the required human-quality artifact is ready; **stop work** until the user reviews it;
-- `PASS` — acceptance criteria are satisfied and the package is closed;
-- `FAIL` — the bounded experiment/implementation did not satisfy acceptance criteria and is closed;
-- `BLOCKED` — a concrete external/runtime/user dependency prevents completion; preserve reproduction/evidence and stop.
-
-Rules:
-
-1. An agent may move `READY → RUNNING` when it starts the package.
-2. Before asking the user for subjective Voice/Talking judgment, update `STATUS.md` to `AWAITING_U_REVIEW`, list the exact artifact(s) to review, and stop. Do not keep tuning while waiting.
-3. After the user's review, convert the package to `PASS`, `FAIL`, `BLOCKED`, or continue the same package **only when its declared bounded search rule explicitly allows another informative experiment**.
-4. `BLOCKED` must name the blocker and the smallest next action that could clear it. Do not use `BLOCKED` for ordinary uncertainty.
-5. Do not silently expand a package. A provider change, paid service, architecture change, product-scope change, data-boundary change, or experiment outside the declared search rule requires closing the current package first.
-6. A failed bounded experiment is a valid completion. Preserve evidence; do not loop indefinitely to manufacture a pass.
-7. `STATUS.md` should contain one active package only. Historical detail belongs in Git history or local evaluation evidence.
-8. Numeric examples from the user are not automatically fixed requirements. Infer the underlying product question and prefer evidence-efficient experiments that answer it.
-9. Capability-boundary experiments should optimize **information gained per run**. Use bracketing/binary/adaptive search when appropriate; stop when further precision would not change product routing or market decisions.
-10. Architecture packages must also be bounded. Build the smallest useful capability-profile/routing slice, close it, then open a separate UI/advanced-settings or continuity package rather than mixing them indefinitely.
-
-## Documentation maintenance
-
-Only these files are active project-control documents:
-
-- `START_HERE.md` — navigation only;
-- `CONTENT_OS_EXECUTION_SPEC.md` — current scope and acceptance contract;
-- `STATUS.md` — current facts, active package, blockers, next ready task;
-- `DECISIONS.md` — durable decisions only;
-- `AGENTS.md` — implementation/model policy;
-- `README.md` — user/contributor overview and run instructions.
+- READY
+- RUNNING
+- AWAITING_U_REVIEW
+- PASS
+- FAIL
+- BLOCKED
 
 Rules:
 
-- Do not create a new top-level review/freeze/handoff/plan document for normal work.
-- Update `STATUS.md` after every completed work package or before a human-quality handoff.
-- Update `DECISIONS.md` only for durable choices.
-- Update the execution spec only when product scope/acceptance/order materially changes.
-- Historical evidence stays in Git history or `docs/history/`; it does not outrank active docs.
-- Run `python scripts/check_docs.py` before handoff.
+1. Before subjective Voice/Talking/Product review, update STATUS to AWAITING_U_REVIEW, list exact artifacts and stop.
+2. A failed bounded experiment is a valid completion; preserve evidence and stop.
+3. Do not silently expand scope. Provider changes, paid calls, architecture changes, product-scope changes or experiments outside the declared rule require a new package.
+4. Numeric examples in conversation are hypotheses/constraints, not automatic fixed requirements.
+5. Capability experiments optimize information gained per run and stop when more precision would not change product decisions.
+6. Architecture work should build the smallest useful seam, close it, then open a separate package.
 
-## Testing
+## 6. Productization discipline
 
-Every behavior change needs the smallest meaningful verification. Media tests must validate real timestamps/files where practical, not only mocked return values.
+Do not confuse experiment success with product capability.
 
-Voice/Talking acceptance additionally checks:
+A capability is productized only when normal product contracts can create/select it, QA/provenance is persisted, downstream normal flows can consume it, and failure/recovery is explicit.
 
-- full copy coverage;
-- playable output;
-- duration and silence sanity;
-- missing/duplicate sentence detection;
-- obvious sync failure detection;
-- explicit human U-Voice judgment for likeness/naturalness;
-- explicit human U-Talking judgment for visible sync/publishability.
+Prefer product-level objects over leaking execution internals upward. For example:
 
-Routing/Advanced Settings behavior additionally checks:
+- MasterNarration, not a list of Voice provider calls;
+- TalkingRun, not a list of Talking slice jobs.
 
-- precedence order is deterministic;
-- unknown values stay unknown rather than being silently guessed;
-- user overrides are scoped and reversible;
-- hard safety/consent/budget/license gates still win over overrides;
-- routing decisions expose enough reason/provenance to debug why a provider/configuration was chosen.
+As orchestration grows, move workflow logic from FastAPI route handlers into narrow application services. Do not respond by introducing microservices.
 
-After a work package passes, update `STATUS.md` and claim only the next task explicitly allowed there. Pause for explicit consent/identity, first paid use/budget change, irreversible data/scope change, or a human product-quality gate.
+## 7. Documentation governance
+
+Current docs have distinct ownership:
+
+- CONTENT_OS_EXECUTION_SPEC.md — whole-product map and R1 gate;
+- docs/product/*.md — current product-module specifications;
+- docs/architecture/SYSTEM_ARCHITECTURE.md — stable technical map;
+- STATUS.md — current facts + one active package + short queue;
+- DECISIONS.md — durable decisions only;
+- AGENTS.md — implementation policy;
+- README.md — setup/contributor entry.
+
+Completed is not archived. If completed work changes product behavior, update the appropriate module spec. Do not keep the implementation story there.
+
+docs/history/ is only for an entire superseded document with historical reading value. Per-run evidence stays in Git history or local evaluation evidence.
+
+Never create parallel root PRDs/reviews/freezes/handoffs for ordinary work.
+
+Run:
+
+    python scripts/check_docs.py
+
+before handoff.
+
+## 8. Testing and evidence
+
+Media work should validate real timestamps/files where practical, not only mocked return values.
+
+Voice/Talking/Product gates preserve the distinction between:
+
+- automated technical QA;
+- human likeness/naturalness/continuity/publishability review.
+
+Routing/settings tests additionally cover deterministic precedence, explicit unknown values, override scoping/reset, hard safety gates and decision provenance.
+
+After a package passes, update STATUS and start only the next explicitly queued package.
