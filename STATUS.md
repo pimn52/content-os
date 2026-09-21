@@ -114,4 +114,4 @@ Use the already approved E21 series/evidence when exercising the assembly/admiss
 
 STATUS contains only current truth, one active package, blockers and a short queue.
 
-Completed work packages do not remain here. Their current product behavior belongs in the module specs; implementation history remains in Git/evaluation evidence.
+Past package history does not remain here. Current product behavior belongs in the module specs; implementation history remains in Git/evaluation evidence.
