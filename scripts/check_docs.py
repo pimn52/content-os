@@ -117,7 +117,7 @@ def main() -> int:
     status_path = ROOT / "STATUS.md"
     if status_path.is_file():
         status = status_path.read_text(encoding="utf-8")
-        if "Completed work package" in status:
+        if re.search(r"^## Completed work package", status, flags=re.MULTILINE):
             errors.append("STATUS.md must not retain completed work-package history")
         if status.count("## Active work package") != 1:
             errors.append("STATUS.md must contain exactly one active work package")
