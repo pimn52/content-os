@@ -166,6 +166,14 @@ or unsupported result must reject before ProviderCall reservation and before
 the provider receives copy or reference media. A full application receipt,
 automated Voice QA and U-Voice remain separate downstream evidence.
 
+## D020 — Provider-neutral does not mean provider-shopping
+
+Provider abstraction is a long-term replacement and routing boundary. It is not a requirement to integrate or benchmark many providers before one route can ship.
+
+For the immediate R1 Voice proof, concentrate implementation and product-quality work on the already integrated OmniVoice route until one bounded performance-rendering experiment either reaches the U-Voice quality bar or establishes a concrete provider-acoustic limitation. Only then should one alternate expressive-cloning provider be benchmarked against the same evidence.
+
+This decision does not convert benchmark-only model weights into a commercial-safe dependency; license admission remains separate from product-quality admission.
+
 ## Current provider admission state
 
 Provider-specific current state is maintained in docs/product/VOICE_TALKING.md, not duplicated here.
