@@ -275,14 +275,19 @@ Provider-specific lookahead parameters remain inside the provider settings schem
   SSML matrix](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/personal-voice-how-to-use)
   is documentation evidence only.
 
+## R1 provider focus
+
+For the immediate R1 proof, Voice follows an **OmniVoice-first / one-provider-first** strategy.
+
+Provider-neutral architecture remains mandatory, but it is a replacement boundary rather than a reason to keep shopping providers before one route is product-usable. The installed OmniVoice path already has the strongest local integration and real creator evidence in this repository, so R1 should first exhaust a bounded, evidence-driven attempt to make it production-usable through Content OS-owned performance planning, reference-window selection and composition.
+
+Open another provider benchmark only when a bounded OmniVoice performance experiment shows that the remaining quality gap is provider-acoustic capability rather than product orchestration, reference selection or composition. If that happens, benchmark one alternate route against the same copy/performance evidence; do not start a provider tournament.
+
+This focus does not change the licensing fact: OmniVoice official pretrained weights remain non-commercial evaluation material, so R1 production usability is not a commercial-release decision.
+
 ## Product gaps
 
-1. Authorize a provider/capture boundary before a performance-plan application
-   experiment. Current OmniVoice is not a delivery-capable route. Google Instant
-   Custom Voice is the most specific documented partial candidate for
-   pace/pause, but it remains remote, allow-list-gated and does not document
-   exact emphasis/rhythm application; the compiler itself is not a quality
-   claim.
+1. Close the local OmniVoice performance-rendering gap: convert the existing semantic Narration Performance Plan into bounded semantic units, deliberate pause/continuity composition and better authorized reference-window selection, then judge the actual audio by U-Voice. Do not assume the semantic plan is already acoustically applied.
 2. Establish a reliable fresh 30–60s Master Narration route with an explicitly
    selected local execution profile or approved provider. The 43.04s composed
    CUDA candidate passed automated QA but is formally U-Voice-rejected for
