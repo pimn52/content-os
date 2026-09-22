@@ -472,7 +472,23 @@ def test_master_narration_matches_traditional_asr_text_without_rewriting_evidenc
         duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="creator-voice", imported_at=NOW,
         transcript_segments=[TranscriptSegment(start_ms=100, end_ms=800, text="第一，先寫出一句能被記住的結論")],
         transcript_source="independent-asr:local",
-        metadata={"voice_generation": {"provider": "local", "qa_state": "verified"}},
+            metadata={"voice_generation": {
+                "provider": "local",
+                "qa_state": "verified",
+                "human_review_state": "approved",
+                "human_review": {
+                    "approved": True,
+                    "evidence_reference": "u-voice:traditional-asr-test",
+                    "findings": ["Delivery is approved for the assembly fixture."],
+                    "likeness": "pass",
+                    "naturalness": "pass",
+                    "emphasis": "pass",
+                    "pace": "pass",
+                    "pauses": "pass",
+                    "rhythm": "pass",
+                    "reviewed_at": NOW.isoformat(),
+                },
+            }},
     )
     AudioAssetRepository(db).create(audio)
     try:

@@ -24,7 +24,7 @@ The primary durable object is the creator/brand workspace, not an isolated video
 
     New topic or sourced opportunity
             ↓
-    IP-aware editable copy
+    IP-aware editable copy + narration performance intent
             ↓
     ScenePlan / editorial intent
             ↓
@@ -72,7 +72,7 @@ Spec: docs/product/MEDIA_ASSET_SYSTEM.md
 
 ### 4.3 Voice / Talking
 
-Owns new creator speech, Master Narration admission, creator-visible generated Talking, continuous TalkingRun semantics and human likeness/publishability gates.
+Owns new creator speech, reviewable rhetorical delivery suggestions, editable narration performance intent, Master Narration admission, creator-visible generated Talking, continuous TalkingRun semantics and human likeness/publishability gates.
 
 Spec: docs/product/VOICE_TALKING.md
 
@@ -118,7 +118,11 @@ Provider child calls, short Talking slices, alignment runways and resource lease
 
 ### Voice
 
-Automated evidence must cover copy/timing/silence/playability/provenance. Human review covers likeness, naturalness, pacing and breathing.
+Automated evidence must cover copy/timing/silence/playability/provenance. One
+asset-specific U-Voice record after automated QA must cover likeness,
+naturalness, emphasis, pace, pauses and rhetorical rhythm. Pending or rejected
+generated Voice cannot drive Talking or final assembly; this human judgment
+does not substitute for a provider capability/application receipt.
 
 ### Talking
 

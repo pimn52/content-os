@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, apply_migrations
+from app.db import AssetRepository, ClipRepository, CURRENT_SCHEMA_VERSION, Database, IPProfileRepository, JobRepository, ProjectRepository, apply_migrations
 from app.domain.models import Asset, Clip, IPProfile, Job, JobType, Project, RationalFps
 
 
@@ -57,11 +57,11 @@ def test_crud_round_trip_and_reopen(tmp_path: Path):
     db.close()
     reopened = Database(path)
     assert reopened.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == list(range(1, 24))
+    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert IPProfileRepository(reopened).get(profile.id) == updated_profile
     assert JobRepository(reopened).list() == [updated_job]
     apply_migrations(reopened.connection)
-    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == list(range(1, 24))
+    assert [row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert ClipRepository(reopened).delete(clip.id)
     assert JobRepository(reopened).delete(job.id)
     assert ProjectRepository(reopened).delete(project.id)

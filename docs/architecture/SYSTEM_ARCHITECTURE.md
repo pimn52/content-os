@@ -43,7 +43,8 @@ It answers:
 
 ### Narrative / Project
 
-Owns Project, Draft, script revisions and ScenePlan.
+Owns Project, Draft, script revisions, editable narration performance intent,
+its deterministic delivery-plan compilation, and ScenePlan.
 
 It answers:
 
@@ -77,7 +78,9 @@ Current implementation includes capability profiles, deterministic parameter pre
 
 ### Voice
 
-Produces new creator speech and independent QA evidence.
+Produces new creator speech, independent QA evidence and the asset-specific
+U-Voice record. A technically verified generated asset remains ineligible for
+Talking/assembly until that record is approved.
 
 Long-form generation may be implemented as bounded provider calls + verified composition. The final product object is the verified Master Narration, not the provider call.
 
@@ -105,6 +108,9 @@ Owns Remotion/FFmpeg output, human quality gates, explicit publication records, 
 Workspace / IP Profile
         │
 Project / Draft
+        ├─────────────── NarrationPerformanceSuggestions (ephemeral, reviewable assistant input)
+        │                    └─ explicit user edit/save → NarrationPerformancePlan (exact-copy-bound editorial intent)
+        │                                                   └─ NarrationDeliveryPlan (derived, pre-execution structure)
         │
 ScenePlan
         │
@@ -122,6 +128,12 @@ Render
         │
 Publication / Feedback
 ```
+
+`NarrationPerformanceSuggestions` is deliberately not a persisted product
+object. It exposes transparent rhetorical patterns for the current copy and
+becomes execution-relevant only after the creator explicitly saves an edited
+`NarrationPerformancePlan`. It therefore remains outside provider capability,
+adapter receipt and audio-quality evidence.
 
 ### Execution-only objects
 
@@ -219,7 +231,8 @@ Automated:
 - copy/timing/silence/playability/provenance.
 
 Human:
-- likeness, naturalness, pacing, breathing.
+- likeness, naturalness, emphasis, pace, pauses and rhetorical rhythm;
+- one durable review record for the exact generated asset, after automated QA.
 
 ### Talking
 

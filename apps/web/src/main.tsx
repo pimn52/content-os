@@ -28,7 +28,11 @@ type Candidate = { scene_plan_id: UUID; source_kind: string; asset_id: UUID | nu
 type ShootListInstruction = { scene_plan_id: UUID; scene_id: string; what_to_shoot: string; framing: string; duration_ms: number; requires_speaking: boolean; speaking_note: string; fallback: string };
 type Route = { scene_plan_id: UUID; candidates: Candidate[]; shoot_list?: ShootListInstruction[] };
 type VideoSpec = { project_id: UUID; master_narration?: { audio_asset_id: UUID; start_ms: number; end_ms: number; transcript_source: string; transcript_segments: Array<{ start_ms: number; end_ms: number; text: string }> } | null; scenes: Array<{ scene_id: string; start_frame: number; duration_frames: number; visual: { source_kind: string; asset_id?: UUID; clip_id?: UUID; clip_start_ms?: number; clip_end_ms?: number; source_duration_ms?: number }; narration_asset_id?: UUID | null; narration_start_ms?: number | null; narration_end_ms?: number | null; caption: string | null; captions?: Array<{ start_ms: number; end_ms: number; text: string }> }> };
-type Draft = { project_id: UUID; version: number; script_revision: number; script: string | null; topic: string | null; scenes: ScenePlan[]; routes: Route[]; confirmed: Candidate[]; video_spec: VideoSpec | null; ip_profile_version: number | null; evidence_refs: string[]; invalidation_reasons: string[] };
+type NarrationPerformanceCue = { kind: string; start_char: number; end_char: number; emphasis?: string | null; pace?: string | null; pause?: string | null; rhythm?: string | null; note?: string | null };
+type NarrationPerformancePlan = { copy_fingerprint: string; delivery_goal: string; overall_pace: string; cues: NarrationPerformanceCue[]; source: string; evidence_refs: string[] };
+type NarrationPerformanceSuggestion = { cue: NarrationPerformanceCue; pattern: string; rationale: string };
+type NarrationPerformanceSuggestions = { copy_fingerprint: string; suggested_plan: NarrationPerformancePlan; suggestions: NarrationPerformanceSuggestion[] };
+type Draft = { project_id: UUID; version: number; script_revision: number; script: string | null; topic: string | null; scenes: ScenePlan[]; routes: Route[]; confirmed: Candidate[]; video_spec: VideoSpec | null; narration_performance_plan: NarrationPerformancePlan | null; ip_profile_version: number | null; evidence_refs: string[]; invalidation_reasons: string[] };
 type ScenePlanResponse = { project_id: UUID; scenes: ScenePlan[]; script: string; generated_script: boolean; draft: Draft | null };
 type Opportunity = { id: UUID; source_type: string; source_ref: string; title: string; observed_at: string; fit_reason: string; angle: string; uncertainty: string | null; evidence_refs: string[]; status: string };
 type AccountConnection = { id: UUID; provider: string; account_external_id: string; display_name: string | null; read_only: boolean; connected_at: string; last_synced_at: string | null };
@@ -48,6 +52,15 @@ type ExecutionSettingsView = { schema: ProviderSettingsSchema; machine_id: strin
 
 const labels: Record<string, string> = { ready: "可用", provider_not_configured: "Provider 未配置", not_developed: "尚未开发", unavailable: "本机不可用" };
 const sourceLabels: Record<string, string> = { manual: "人工", historical_content: "历史内容", account_signal: "账号信号" };
+const narrationPerformanceLabels: Record<string, string> = {
+  emphasis: "概念突出", pace: "局部语速", pause: "换气 / 思考停顿", rhythm: "节奏角色",
+  light: "轻度突出", clear: "清晰突出", strong: "显著突出",
+  measured: "从容", conversational: "自然交谈", driven: "局部推进",
+  brief: "短停", beat: "观点停顿", long: "长停",
+  setup: "铺垫", build: "推进", turn: "转折", land: "落点",
+  user: "用户", assisted: "辅助建议", imported: "导入",
+  opening: "开场", landing: "落点", parallel_claim: "平行论断", enumeration: "列举", claim_boundary: "观点边界",
+};
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
@@ -93,6 +106,25 @@ function isVoiceQaCandidate(audio: AudioAsset): boolean {
   const generation = voiceGenerationFor(audio);
   return Boolean(generation && (generation.qa_state === "pending" || generation.qa_state === "failed"));
 }
+function performanceLabel(value: string | null | undefined): string {
+  return value ? narrationPerformanceLabels[value] ?? value : "未知";
+}
+function performanceCueValue(cue: NarrationPerformanceCue): string {
+  return performanceLabel(cue.emphasis ?? cue.pace ?? cue.pause ?? cue.rhythm);
+}
+function performanceCueAnchor(copy: string, cue: NarrationPerformanceCue): string {
+  if (cue.kind === "pause") return `字符 ${cue.start_char} 后的停顿边界`;
+  return copy.slice(cue.start_char, cue.end_char) || `字符 ${cue.start_char}–${cue.end_char}`;
+}
+function editablePerformancePlan(plan: NarrationPerformancePlan): string {
+  return JSON.stringify({
+    delivery_goal: plan.delivery_goal,
+    overall_pace: plan.overall_pace,
+    cues: plan.cues,
+    source: plan.source,
+    evidence_refs: plan.evidence_refs,
+  }, null, 2);
+}
 function downloadBlob(filename: string, content: BlobPart, type: string): void {
   const url = URL.createObjectURL(new Blob([content], { type }));
   const link = document.createElement("a");
@@ -136,6 +168,8 @@ function App() {
   const [publications, setPublications] = useState<Publication[]>([]);
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [suggestions, setSuggestions] = useState<NextSuggestion[]>([]);
+  const [narrationPerformanceSuggestions, setNarrationPerformanceSuggestions] = useState<NarrationPerformanceSuggestions | null>(null);
+  const [narrationPerformanceEditor, setNarrationPerformanceEditor] = useState("");
   const [message, setMessage] = useState<{ text: string; error?: boolean }>({ text: "正在加载本地工作区…" });
   const [busy, setBusy] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
@@ -270,7 +304,8 @@ function App() {
   useEffect(() => {
     latestProjectId.current = selectedProjectId;
     setRenderUrl(null); setRenderId(null);
-    if (!selectedProjectId) { setDraft(null); setRoutes([]); setSelections({}); setCostEstimate(null); setNarrationAssetIds({}); setMasterNarrationAssetId(null); setVideoSpec(null); setRenderUrl(null); setRenderId(null); setPublications([]); setFeedback([]); setSuggestions([]); return; }
+    if (!selectedProjectId) { setDraft(null); setRoutes([]); setSelections({}); setCostEstimate(null); setNarrationAssetIds({}); setMasterNarrationAssetId(null); setVideoSpec(null); setRenderUrl(null); setRenderId(null); setPublications([]); setFeedback([]); setSuggestions([]); setNarrationPerformanceSuggestions(null); setNarrationPerformanceEditor(""); return; }
+    setNarrationPerformanceSuggestions(null); setNarrationPerformanceEditor("");
     localStorage.setItem("content-os-active-project", selectedProjectId);
     void refreshProject(selectedProjectId).catch((error) => setMessage({ text: error instanceof Error ? error.message : "项目记录加载失败", error: true }));
   }, [selectedProjectId]);
@@ -737,7 +772,7 @@ function App() {
 
   async function saveDraftText() {
     if (!selectedProject || !draft) return; setBusy(true);
-    try { invalidateProjectRender(selectedProject.id); setVideoSpec(null); await persistDraft(draft.scenes, [], null, [], draft.script ?? null, draft.topic ?? selectedProject.topic); setMessage({ text: "脚本/场景文案已保存，旧候选与渲染已失效，请重新生成 ScenePlan 并选片" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "稿件保存失败", error: true }); } finally { setBusy(false); }
+    try { invalidateProjectRender(selectedProject.id); setVideoSpec(null); await persistDraft(draft.scenes, [], null, [], draft.script ?? null, draft.topic ?? selectedProject.topic); setNarrationPerformanceSuggestions(null); setNarrationPerformanceEditor(""); setMessage({ text: "脚本/场景文案已保存，旧候选与渲染已失效，请重新生成后续结果" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "稿件保存失败", error: true }); } finally { setBusy(false); }
   }
 
   function invalidateDraftPlan() {
@@ -745,8 +780,44 @@ function App() {
   }
 
   function updateDraftScript(script: string) {
-    setDraft((current) => current ? { ...current, script: script || null } : current);
+    setDraft((current) => current ? { ...current, script: script || null, narration_performance_plan: null } : current);
+    setNarrationPerformanceSuggestions(null); setNarrationPerformanceEditor("");
     invalidateDraftPlan();
+  }
+
+  async function suggestNarrationPerformance() {
+    if (!selectedProject || !draft?.script?.trim()) { setMessage({ text: "请先保存一份非空脚本，再生成演讲表现建议", error: true }); return; }
+    setBusy(true);
+    try {
+      const value = await api<NarrationPerformanceSuggestions>(`/projects/${selectedProject.id}/narration-performance-suggestions`);
+      setNarrationPerformanceSuggestions(value); setNarrationPerformanceEditor(editablePerformancePlan(value.suggested_plan));
+      setMessage({ text: "已生成可审阅的概念突出、换气/思考停顿、语速和节奏建议；尚未保存，也没有调用 Voice Provider" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "演讲表现建议生成失败", error: true }); } finally { setBusy(false); }
+  }
+
+  async function saveNarrationPerformancePlan() {
+    if (!selectedProject || !draft?.script?.trim()) return;
+    setBusy(true);
+    try {
+      const parsed: unknown = JSON.parse(narrationPerformanceEditor);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("演讲表现计划必须是 JSON 对象");
+      const plan = await api<NarrationPerformancePlan>(`/projects/${selectedProject.id}/narration-performance-plan`, {
+        method: "PUT", body: JSON.stringify(parsed),
+      });
+      setDraft((current) => current ? { ...current, narration_performance_plan: plan } : current);
+      setMessage({ text: "已显式保存这份可编辑表现计划；它仍未生成音频，也不代表 Provider 已应用" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "演讲表现计划保存失败", error: true }); } finally { setBusy(false); }
+  }
+
+  async function clearNarrationPerformancePlan() {
+    if (!selectedProject) return;
+    setBusy(true);
+    try {
+      await api<void>(`/projects/${selectedProject.id}/narration-performance-plan`, { method: "DELETE" });
+      setDraft((current) => current ? { ...current, narration_performance_plan: null } : current);
+      setNarrationPerformanceSuggestions(null); setNarrationPerformanceEditor("");
+      setMessage({ text: "已清除当前草稿的表现计划；历史草稿版本仍保留审计记录" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "表现计划清除失败", error: true }); } finally { setBusy(false); }
   }
 
   function updateSceneVoiceText(sceneId: UUID, voiceText: string) {
@@ -846,6 +917,18 @@ function App() {
         {selectedProject && <div className="production"><div className="row-between"><div><h3>{selectedProject.title}</h3><p className="muted">{selectedProject.topic} · 草稿 v{draft?.version ?? 0} · 文案 r{draft?.script_revision ?? 0}</p></div><div className="actions"><button disabled={busy} className="button" onClick={() => void planProject()}>生成文案 + ScenePlan</button><button disabled={busy || !draft?.scenes.length} className="button" onClick={() => void routeProject()}>查找候选</button><button disabled={busy || !routes.length} className="button" onClick={() => void assembleSourceLedProject()}>按原声 + ASR 组装</button><button disabled={busy || !routes.length} className="button" onClick={() => void assembleProject()}>主旁白时间线组装</button><button disabled={busy || !videoSpec} className="button primary" onClick={() => void renderProject()}>本地渲染</button></div></div>
         {routes.length > 0 && <div className="cost-actions"><button disabled={busy} className="button" onClick={() => void reduceCostProject()}>按低成本替代方案</button><small className="muted">只比较当前候选；未知价格不会被当作便宜，应用后仍需审核匹配度。</small></div>}
         {draft && <div className="draft-editor"><label>脚本 / 旁白稿（可选）<textarea value={draft.script ?? ""} onChange={(event) => updateDraftScript(event.target.value)} placeholder="可以先写要表达的观点；留空时由模型生成可编辑文案。" /></label><button disabled={busy} className="button" onClick={() => void saveDraftText()}>保存稿件</button><small className="muted">服务端会记录稿件与 IP 证据版本；编辑脚本、场景文案或 IP 后，旧计划、候选和渲染都会失效，不能被旧标签页重新提交。</small>{draft.invalidation_reasons.length > 0 && <small className="error">已失效：{draft.invalidation_reasons.join("、")}；请重新生成后续结果。</small>}</div>}
+        {draft && <section className="draft-editor" aria-label="演讲表现建议">
+          <div className="row-between"><div><span className="kicker">OPTIONAL / RHETORICAL DELIVERY</span><h3>概念落点、换气与节奏建议</h3></div><div className="actions"><button disabled={busy || !draft.script?.trim()} className="button" onClick={() => void suggestNarrationPerformance()}>生成可审阅建议</button><button disabled={busy || !draft.narration_performance_plan} className="button" onClick={() => void clearNarrationPerformancePlan()}>清除已保存计划</button></div></div>
+          <small className="muted">建议只基于已保存的当前脚本，识别平行/对照论断、重要观点或转折边界、句子角色和列举结构。换气/思考停顿只是语义边界候选：不改文案、不调用 Provider，也不代表已经生成或优化音频。</small>
+          {draft.narration_performance_plan && <small className="ok">当前已保存：{draft.narration_performance_plan.cues.length} 条表现提示 · {performanceLabel(draft.narration_performance_plan.source)} · 仍需支持该能力的 Provider、Voice QA 与 U-Voice。</small>}
+          {narrationPerformanceSuggestions && <div className="asset-list">
+            <h4>本次建议（未保存）</h4>
+            {narrationPerformanceSuggestions.suggestions.map((entry, index) => <div className="asset-row" key={`${entry.cue.kind}-${entry.cue.start_char}-${entry.cue.end_char}-${index}`}><div><strong>{performanceCueAnchor(draft.script ?? "", entry.cue)} · {performanceLabel(entry.cue.kind)}：{performanceCueValue(entry.cue)}</strong><small>{entry.rationale}</small>{entry.cue.note && <small className="muted">{entry.cue.note}</small>}</div><span className="badge">{performanceLabel(entry.pattern)}</span></div>)}
+            <label>可编辑计划（保存前请审阅）<textarea value={narrationPerformanceEditor} onChange={(event) => setNarrationPerformanceEditor(event.target.value)} rows={16} spellCheck={false} /></label>
+            <div className="actions"><button disabled={busy || !narrationPerformanceEditor.trim()} className="button primary" onClick={() => void saveNarrationPerformancePlan()}>显式保存编辑后的计划</button></div>
+            <small className="muted">保存会校验当前脚本的字符锚点；脚本一旦改动，旧计划会被清除，不能静默迁移到新文案。</small>
+          </div>}
+        </section>}
         {draft?.scenes.length ? <div className="draft-editor"><label>完整本人新旁白（主时间线）<select value={masterNarrationAssetId ?? ""} onChange={(event) => { setMasterNarrationAssetId(event.target.value || null); setNarrationAssetIds({}); setVideoSpec(null); invalidateProjectRender(); }}><option value="">选择一条完整、已授权的旁白</option>{audioAssets.map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s · {audio.transcript_source ? "已对齐" : "缺时间轴"}</option>)}</select></label><small className="muted">只选一次完整录音：系统按真实 SRT/VTT 或后续生成 Provider 的对齐时间戳自动分配场景、字幕和镜头；不会要求你手工拆音频，也不会把无时间轴录音伪装成已对齐。</small></div> : null}
         {selectedProject && <div className="columns compact job-panel"><form onSubmit={(event) => void enqueueVoiceGeneration(event)}><h3>生成本人新声音（可选本地 benchmark）</h3><label>Voice Profile<select name="voice_profile_id" required disabled={!voiceProfiles.length}><option value="">选择已授权 Voice Profile</option>{voiceProfiles.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider}</option>)}</select></label><label>新旁白文案<textarea name="text" required placeholder="输入本项目要说的新内容" /></label><Field label="授权记录引用" name="authorization_reference" placeholder="u1-20260913-biyingjie-tim-internal" /><Field label="语言（可选）" name="language" placeholder="zh" /><button disabled={busy || !voiceProfiles.length} className="button">提交 Voice Job</button><small className="muted">仅在 readiness 显示可用且 Worker 已配置时执行；生成结果仍必须经过真实 ASR、文案覆盖、静音和可播放 QA。</small>{voiceJob && <small className={voiceJob.status === "failed" ? "error" : "muted"}>最近 Voice Job：{voiceJob.status}{voiceJob.error_code ? ` · ${voiceJob.error_code}` : ""}</small>}</form><form onSubmit={(event) => void enqueueVoiceQa(event)}><h3>独立 Voice QA（本地真实 ASR）</h3><label>待 QA 的新旁白<select name="narration_audio_id" required disabled={!audioAssets.some(isVoiceQaCandidate)} onChange={(event) => { const audio = audioAssets.find((item) => item.id === event.target.value); const generation = audio ? voiceGenerationFor(audio) : null; setVoiceQaText(typeof generation?.target_text === "string" ? generation.target_text : ""); }}><option value="">选择待 QA 录音</option>{audioAssets.filter(isVoiceQaCandidate).map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label><label>生成时的目标文案<textarea name="target_text" required value={voiceQaText} onChange={(event) => setVoiceQaText(event.target.value)} placeholder="选择录音后自动带出；仅用于核对，不作为 ASR 结果" /></label><button disabled={busy || !audioAssets.some(isVoiceQaCandidate)} className="button">提交 Voice QA Job</button><small className="muted">必须用独立 ASR 读取生成文件；目标文案不能替代观察到的转写。{voiceQaJob && ` 最近 Voice QA：${voiceQaJob.status}${voiceQaJob.error_code ? ` · ${voiceQaJob.error_code}` : ""}`}</small></form><form onSubmit={(event) => void enqueueTalkingGeneration(event)}><h3>生成本人 Talking / 口型片段</h3><label>Talking Profile<select name="talking_profile_id" required disabled={!talkingProfiles.length}><option value="">选择已授权 Talking Profile</option>{talkingProfiles.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider}</option>)}</select></label><label>参考 Clip<select name="reference_clip_id" required disabled={!clips.length}><option value="">选择已观察评估的普通素材 Clip</option>{clips.filter((clip) => Boolean(clip.transcript && clip.end_ms - clip.start_ms >= 3000 && (clip.talking_candidate === true || clip.talking_reference_assessment))).map((clip) => <option key={clip.id} value={clip.id}>{clip.id} · {Math.round((clip.end_ms - clip.start_ms) / 1000)}s</option>)}</select></label><label>已通过 QA 的新旁白<select name="narration_audio_id" required disabled={!audioAssets.some((audio) => { const generation = voiceGenerationFor(audio); return generation?.qa_state === "verified"; })}><option value="">选择 Voice QA verified 录音</option>{audioAssets.filter((audio) => voiceGenerationFor(audio)?.qa_state === "verified").map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label><label className="checkbox-line"><input name="terminal_face_closeout" type="checkbox" defaultChecked /> 这是口播结束的 Talking 片段：让人脸在声音结束时自然收口</label><label>执行本机标识<input name="execution_machine_id" defaultValue={settingsMachineId} required /></label><small className="muted">这是 Content OS 的口播收口保护：针对“声音已结束、嘴巴仍像在说话”兜底。适配器会用安全的方式提供模型静音上下文并裁回原口播终点；未适配的 Provider 会明确提示，绝不靠黑屏、静帧或文字遮挡。当前 LatentSync 的 600ms 是它的适配器调参，完成后仍需口型 U-Talking 审核。</small><Field label="授权记录引用" name="authorization_reference" placeholder="u1-20260913-biyingjie-tim-internal" /><button disabled={busy || !talkingProfiles.length || !clips.some((clip) => Boolean(clip.transcript && clip.end_ms - clip.start_ms >= 3000 && (clip.talking_candidate === true || clip.talking_reference_assessment))) || !audioAssets.some((audio) => voiceGenerationFor(audio)?.qa_state === "verified")} className="button">提交 Talking Job</button><small className="muted">只接受 Voice QA verified 的新旁白；视觉身份、自然度、口型和结尾神态仍需 U-Talking 人审。</small>{talkingJob && <small className={talkingJob.status === "failed" ? "error" : "muted"}>最近 Talking Job：{talkingJob.status}{talkingJob.error_code ? ` · ${talkingJob.error_code}` : ""}</small>}</form></div>}
           {draft?.scenes.length ? <div className="scene-list">{draft.scenes.map((scene) => <article className="scene" key={scene.id}><div className="row-between"><div><span className="scene-number">{String(scene.order + 1).padStart(2, "0")}</span><strong>{scene.purpose}</strong><label className="scene-script">场景文案<textarea value={scene.voice_text} onChange={(event) => updateSceneVoiceText(scene.id, event.target.value)} rows={3} /></label></div><span className="badge">{scene.duration_target_ms}ms</span></div><div className="candidates">{(routes.find((route) => route.scene_plan_id === scene.id)?.candidates ?? []).map((candidate, index) => <button key={`${candidate.scene_plan_id}-${candidate.asset_id ?? candidate.source_kind}-${index}`} className={`candidate ${selections[scene.id] === candidate ? "selected" : ""}`} onClick={() => selectCandidate(candidate)}><span><b>{index + 1}. {candidate.source_kind}</b><small>{candidate.why.join(" · ")}</small></span><span className="candidate-score">{Math.round(candidate.match_score * 100)}%</span></button>)}{!routes.find((route) => route.scene_plan_id === scene.id) && <p className="muted">点击“查找候选”开始。</p>}</div></article>)}</div> : <div className="empty-state"><strong>从主题开始</strong><p>输入主题后生成 ScenePlan；系统会读取当前 IP、选题证据和素材摘要。</p></div>}

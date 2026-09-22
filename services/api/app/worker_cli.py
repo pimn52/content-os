@@ -57,6 +57,27 @@ class WorkerConfig:
     ffprobe: str
 
 
+def _resolve_omnivoice_reference_path(source_file: str, data_root: str | Path) -> Path:
+    """Resolve imported media, including one legacy bare-file form.
+
+    Current imports retain paths below ``assets/originals``.  A small number
+    of older local records retained only the content-addressed filename.
+    Treat that form as the standard originals location when the direct
+    data-root relative path is absent; do not search arbitrary directories or
+    mutate the persisted asset while a job is running.
+    """
+
+    path = Path(source_file)
+    if path.is_absolute():
+        return path
+    root = Path(data_root).resolve()
+    direct = root.parent / path if path.parts and path.parts[0].casefold() == root.name.casefold() else root / path
+    if direct.is_file() or len(path.parts) != 1:
+        return direct
+    legacy_original = root / "assets" / "originals" / path.name
+    return legacy_original if legacy_original.is_file() else direct
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="content-os-worker", description="Run local Content OS jobs.")
     parser.add_argument("--db", dest="db_path", default=None, help="SQLite path (default CONTENT_OS_DB_PATH or content-os-data/content-os.sqlite3)")
@@ -316,7 +337,8 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         if clip is None:
             raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
         asset = assets.get(clip.asset_id)
-        if asset is None or not Path(asset.source_file).is_file():
+        source_path = None if asset is None else _resolve_omnivoice_reference_path(asset.source_file, config.data_root)
+        if source_path is None or not source_path.is_file():
             raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
         reference_start_ms, reference_end_ms, reference_text = reference_window(clip)
         resolved_language = provider_language(language or getattr(profile, "language", None))
@@ -326,7 +348,7 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
             try:
                 extraction = subprocess.run(
                     [
-                        str(ffmpeg), "-y", "-ss", f"{reference_start_ms / 1000:.3f}", "-i", asset.source_file,
+                        str(ffmpeg), "-y", "-ss", f"{reference_start_ms / 1000:.3f}", "-i", str(source_path),
                         "-t", f"{(reference_end_ms - reference_start_ms) / 1000:.3f}", "-vn", "-ac", "1", "-ar", "24000",
                         "-c:a", "pcm_s16le", str(reference_audio),
                     ],

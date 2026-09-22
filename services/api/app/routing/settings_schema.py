@@ -121,6 +121,12 @@ LOCAL_BENCHMARK_SCHEMAS: tuple[ProviderSettingsSchema, ...] = (
             ParameterSchema("num_step", "推理步数", "number", 32, 1, 100, "更多步数增加生成时间；官方预训练权重仅作非商业 benchmark。"),
             ParameterSchema("speed", "语速", "number", 1.0, 0.5, 2, "仅改变 Provider 生成参数；生成结果仍必须通过 Voice QA 与人审。"),
         ),
+        features=(FeatureSchema(
+            CapabilityFeature.NARRATION_PERFORMANCE_INTENT,
+            FeatureSupport.UNKNOWN,
+            FeatureImplementationOwner.NONE,
+            "当前 OmniVoice 适配器没有把 Content OS 的重音、语速、停顿和节奏意图安全映射到本地运行时。speed 只是 Provider 参数；它不能替代该产品能力，也不构成可控演说表现证据。",
+        ),),
     ),
 )
 

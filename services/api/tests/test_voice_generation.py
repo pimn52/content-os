@@ -11,13 +11,13 @@ import pytest
 from app.assembly.video_spec import GeneratedNarrationQaPending, _require_generated_voice_qa
 from app.budget import ProviderCallLedger
 from app.db import AudioAssetRepository, BudgetPolicyRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository, ProviderCallRepository, VoiceProfileRepository
-from app.domain.models import AudioAsset, BudgetPolicy, Clip, ConsentRecord, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
+from app.domain.models import AudioAsset, BudgetPolicy, Clip, ConsentRecord, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReviewOutcome
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.main import create_app
 from app.providers.voice import VoiceSynthesisResult
 from app.providers.asr import TranscriptionResult, TranscriptionSegment
-from app.voice_qa import apply_voice_qa, comparison_tokens, verify_generated_voice
+from app.voice_qa import VoiceQaError, apply_voice_human_review, apply_voice_qa, comparison_tokens, verify_generated_voice, voice_human_review_status
 from app.voice_recovery import VoiceRecoveryRoute, recommend_voice_recovery
 
 
@@ -36,6 +36,21 @@ def _project_and_profile(db: Database, root: Path) -> tuple[Project, VoiceProfil
     )
     VoiceProfileRepository(db).create(profile)
     return project, profile
+
+
+def _approved_u_voice_review() -> VoiceHumanReview:
+    return VoiceHumanReview(
+        approved=True,
+        evidence_reference="u-voice:test-approved",
+        findings=["Creator likeness, naturalness and delivery are publishable."],
+        likeness=VoiceReviewOutcome.PASS,
+        naturalness=VoiceReviewOutcome.PASS,
+        emphasis=VoiceReviewOutcome.PASS,
+        pace=VoiceReviewOutcome.PASS,
+        pauses=VoiceReviewOutcome.PASS,
+        rhythm=VoiceReviewOutcome.PASS,
+        reviewed_at=datetime.now(timezone.utc),
+    )
 
 
 def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> None:
@@ -81,7 +96,7 @@ def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> 
         assert audio.metadata["voice_generation"] == {
             "provider": "test-voice", "model": "test-model", "provider_version": "test-version",
             "voice_profile_id": str(profile.id), "job_id": str(job.id), "attempt": 1,
-            "target_text": payload.text, "qa_state": "pending",
+            "project_id": str(project.id), "target_text": payload.text, "qa_state": "pending",
         }
         call = ProviderCallRepository(db).list_for_project(project.id)[0]
         assert call.operation == "tts" and call.status == "completed"
@@ -152,6 +167,7 @@ def test_voice_qa_job_uses_real_asr_and_persists_verified_evidence(tmp_path: Pat
         assert updated is not None
         generation = updated.metadata["voice_generation"]
         assert generation["qa_state"] == "verified"
+        assert generation["human_review_state"] == "pending"
         assert generation["qa"]["copy_coverage"] == 1.0
         assert updated.transcript_source == "faster-whisper:qa-model"
         call = ProviderCallRepository(db).list_for_project(project.id)[0]
@@ -190,7 +206,146 @@ def test_generated_voice_is_blocked_from_assembly_until_qa_is_verified() -> None
     )
     with pytest.raises(GeneratedNarrationQaPending):
         _require_generated_voice_qa(audio)
-    _require_generated_voice_qa(audio.model_copy(update={"metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "verified"}}}))
+    technical = audio.model_copy(update={"metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "verified"}}})
+    with pytest.raises(GeneratedNarrationQaPending, match="U-Voice"):
+        _require_generated_voice_qa(technical)
+    approved = apply_voice_human_review(technical, _approved_u_voice_review())
+    assert voice_human_review_status(approved) == "approved"
+    _require_generated_voice_qa(approved)
+
+
+def test_voice_human_review_api_persists_all_dimensions_and_cannot_be_overwritten(tmp_path: Path) -> None:
+    path = tmp_path / "voice-human-review.sqlite"
+    db = Database(path)
+    try:
+        project, _ = _project_and_profile(db, tmp_path)
+        job = Job(
+            project_id=project.id,
+            type=JobType.GENERATE_VOICE,
+            idempotency_key="voice-human-review-source",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        JobStore(db).enqueue(job)
+        source = tmp_path / "reviewed.wav"
+        source.write_bytes(b"playable")
+        audio = AudioAsset(
+            source_file=str(source), content_hash="h" * 64, duration_ms=1_000, sample_rate=24_000, channels=1,
+            authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+            metadata={"voice_generation": {"provider": "test-voice", "job_id": str(job.id), "qa_state": "verified", "human_review_state": "pending"}},
+        )
+        AudioAssetRepository(db).create(audio)
+    finally:
+        db.close()
+
+    approved = {
+        "approved": True,
+        "evidence_reference": "u-voice:reviewed-asset",
+        "findings": ["The planned delivery is natural and publishable."],
+        "likeness": "pass",
+        "naturalness": "pass",
+        "emphasis": "pass",
+        "pace": "pass",
+        "pauses": "pass",
+        "rhythm": "pass",
+    }
+    with TestClient(create_app(path)) as client:
+        inconsistent = client.post(
+            f"/projects/{project.id}/voice-assets/{audio.id}/human-review",
+            json={**approved, "pace": "needs_revision"},
+        )
+        assert inconsistent.status_code == 422
+        response = client.post(f"/projects/{project.id}/voice-assets/{audio.id}/human-review", json=approved)
+        assert response.status_code == 200
+        review = response.json()["metadata"]["voice_generation"]["human_review"]
+        assert response.json()["metadata"]["voice_generation"]["human_review_state"] == "approved"
+        assert review["emphasis"] == "pass" and review["rhythm"] == "pass"
+        assert review["reviewed_at"]
+        repeated = client.post(f"/projects/{project.id}/voice-assets/{audio.id}/human-review", json=approved)
+        assert repeated.status_code == 422
+
+
+def test_voice_human_rejection_remains_ineligible_for_assembly() -> None:
+    audio = AudioAsset(
+        source_file="rejected.wav", content_hash="j" * 64, duration_ms=1_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "verified", "human_review_state": "pending"}},
+    )
+    rejected = apply_voice_human_review(
+        audio,
+        VoiceHumanReview(
+            approved=False,
+            evidence_reference="u-voice:test-needs-revision",
+            findings=["The hook lacks the intended emphasis and rhythmic turn."],
+            likeness=VoiceReviewOutcome.PASS,
+            naturalness=VoiceReviewOutcome.PASS,
+            emphasis=VoiceReviewOutcome.NEEDS_REVISION,
+            pace=VoiceReviewOutcome.PASS,
+            pauses=VoiceReviewOutcome.PASS,
+            rhythm=VoiceReviewOutcome.NEEDS_REVISION,
+            reviewed_at=datetime.now(timezone.utc),
+        ),
+    )
+    assert voice_human_review_status(rejected) == "rejected"
+    with pytest.raises(GeneratedNarrationQaPending, match="U-Voice"):
+        _require_generated_voice_qa(rejected)
+    with pytest.raises(VoiceQaError, match="already recorded"):
+        apply_voice_human_review(rejected, _approved_u_voice_review())
+
+
+def test_voice_human_review_api_resolves_a_legacy_composed_master_from_source_takes(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-composed-master.sqlite"
+    db = Database(path)
+    try:
+        project, _ = _project_and_profile(db, tmp_path)
+        takes: list[AudioAsset] = []
+        for index in range(2):
+            job = Job(
+                project_id=project.id,
+                type=JobType.GENERATE_VOICE,
+                idempotency_key=f"legacy-source-{index}",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            JobStore(db).enqueue(job)
+            take = AudioAsset(
+                source_file=str(tmp_path / f"take-{index}.wav"), content_hash=(str(index + 1) * 64),
+                duration_ms=1_000, sample_rate=24_000, channels=1,
+                authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+                metadata={"voice_generation": {"provider": "test-voice", "job_id": str(job.id), "qa_state": "verified"}},
+            )
+            AudioAssetRepository(db).create(take)
+            takes.append(take)
+        master = AudioAsset(
+            source_file=str(tmp_path / "legacy-master.wav"), content_hash="m" * 64,
+            duration_ms=2_000, sample_rate=24_000, channels=1,
+            authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+            metadata={"voice_generation": {
+                "provider": "composed_voice_takes",
+                "qa_state": "verified",
+                "human_review_state": "pending",
+                "composition": {"source_take_audio_ids": [str(take.id) for take in takes]},
+            }},
+        )
+        AudioAssetRepository(db).create(master)
+    finally:
+        db.close()
+
+    request = {
+        "approved": True,
+        "evidence_reference": "u-voice:legacy-master",
+        "findings": ["The composed master is approved after direct review."],
+        "likeness": "pass",
+        "naturalness": "pass",
+        "emphasis": "pass",
+        "pace": "pass",
+        "pauses": "pass",
+        "rhythm": "pass",
+    }
+    with TestClient(create_app(path)) as client:
+        response = client.post(f"/projects/{project.id}/voice-assets/{master.id}/human-review", json=request)
+        assert response.status_code == 200
+        assert response.json()["metadata"]["voice_generation"]["human_review_state"] == "approved"
 
 
 def test_voice_qa_requires_real_timing_and_records_copy_and_silence_evidence(tmp_path: Path) -> None:

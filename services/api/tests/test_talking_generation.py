@@ -53,7 +53,23 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
         narration = AudioAsset(
             source_file="content-os-data/assets/audio-originals/verified.wav", content_hash="a" * 64, duration_ms=1_000, sample_rate=24_000, channels=1,
             authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
-            metadata={"voice_generation": {"provider": "test-voice", "qa_state": "verified"}},
+            metadata={"voice_generation": {
+                "provider": "test-voice",
+                "qa_state": "verified",
+                "human_review_state": "approved",
+                "human_review": {
+                    "approved": True,
+                    "evidence_reference": "u-voice:talking-handler-fixture",
+                    "findings": ["Narration is approved for Talking fixture execution."],
+                    "likeness": "pass",
+                    "naturalness": "pass",
+                    "emphasis": "pass",
+                    "pace": "pass",
+                    "pauses": "pass",
+                    "rhythm": "pass",
+                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }},
         )
         AudioAssetRepository(db).create(narration)
         with db.transaction():
@@ -215,7 +231,23 @@ def test_talking_job_api_is_typed_idempotent_and_requires_verified_narration(tmp
         TalkingProfileRepository(db).create(profile)
         unsupported_profile = profile.model_copy(update={"id": uuid4(), "provider": "not-admitted"})
         TalkingProfileRepository(db).create(unsupported_profile)
-        verified = AudioAsset(source_file=str(tmp_path / "verified.wav"), content_hash="d" * 64, duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc), metadata={"voice_generation": {"provider": "test-voice", "qa_state": "verified"}}, transcript_segments=[TranscriptSegment(start_ms=0, end_ms=1_000, text="verified speech")], transcript_source="voice-qa:test-asr")
+        verified = AudioAsset(source_file=str(tmp_path / "verified.wav"), content_hash="d" * 64, duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc), metadata={"voice_generation": {
+            "provider": "test-voice",
+            "qa_state": "verified",
+            "human_review_state": "approved",
+            "human_review": {
+                "approved": True,
+                "evidence_reference": "u-voice:talking-api-fixture",
+                "findings": ["Narration is approved for Talking API fixture execution."],
+                "likeness": "pass",
+                "naturalness": "pass",
+                "emphasis": "pass",
+                "pace": "pass",
+                "pauses": "pass",
+                "rhythm": "pass",
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }}, transcript_segments=[TranscriptSegment(start_ms=0, end_ms=1_000, text="verified speech")], transcript_source="voice-qa:test-asr")
         pending = verified.model_copy(update={"id": uuid4(), "content_hash": "e" * 64, "metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "pending"}}})
         series_narration = verified.model_copy(update={
             "id": uuid4(),

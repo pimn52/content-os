@@ -1,6 +1,6 @@
 # Content OS — Current Status
 
-Updated: 2026-09-21
+Updated: 2026-09-22
 
 ## Current truth
 
@@ -8,106 +8,148 @@ Updated: 2026-09-21
 - Creator/IP state, local media/library, continuous Clips, ScenePlan/Hybrid Asset Router, Jobs/recovery, cost/accounting, MasterNarration/VideoSpec and local render foundations exist.
 - Capability profiles, deterministic parameter resolution, Advanced Settings and local GPU resource leasing are implemented foundations of Local-first Data + Hybrid Compute. Automatic cross-provider Local↔Remote selection is not yet complete.
 - Current benchmark providers remain non-commercial evaluation paths where their model-weight licenses require it; no benchmark result is a commercial-readiness claim.
-- Current local Talking evidence has materially improved:
-  - fresh-Voice single-segment evidence includes 4.46s PASS / 5.12s FAIL for the reviewed LatentSync configuration;
-  - the E21 source-forward series produced a 17.28s joined result from five short jobs, and the user approved the exact joined artifact as natural, continuous and publishable;
-  - this proves the reviewed execution strategy, not a universal provider/source/machine guarantee.
-- The two important Talking corrections are now durable product rules:
-  - terminal face closeout is a Content OS capability request, with provider-specific implementation;
-  - multi-short Talking must map all child jobs onto one authorized source-forward continuous performance run before dispatch.
-- The successful E21 result is not yet fully productized: its child-series topology is still closer to execution evidence than to a normal first-class product visual consumed by Asset Router/VideoSpec.
-- Current Core also keeps sliced Talking and terminal closeout separate; the product rule still needs to allow terminal closeout on the final slice of a TalkingRun while keeping intermediate slices continuous.
-- The largest remaining R1 capability risk is fresh long-form Master Narration reliability. Prior local OmniVoice long-form/sentence recovery attempts did not establish a repeatable 30–60s Voice route.
+- E21 now exercises the normal local TalkingRun admission path: it produced a
+  17.24s product Asset/Clip with the verified MasterNarration as final audio,
+  retained child provenance and an immutable continuity decision. This is
+  provider/source/machine-scoped execution evidence, not a universal claim.
+- Sliced Talking preserves the product boundary: every child maps to one
+  authorized source-forward continuous performance run; only a final slice may
+  request a provider-specific terminal closeout.
+- The largest remaining R1 risk is repeatable fresh 30–60s Master Narration.
+  No local provider+runtime+machine profile has verified controllable
+  emphasis, pace, pauses and rhetorical rhythm.
+- The 43.04s composed MasterNarration candidate
+  `449868d9-9b57-4f5a-9be8-5490f46fed82` passed technical Voice QA but has a
+  durable U-Voice rejection (`u-voice:user-review-20260921-performance-control`):
+  likeness passed; naturalness, emphasis, pace, pauses and rhythm need
+  revision. It is a specific asset-quality result, not provider capability or
+  a global learned preference.
+- Narration Performance Plan is a provider-neutral, exact-copy-bound Draft
+  object with editable emphasis/pace/pause/rhythm cues, immutable Voice-job
+  snapshots and explicit adapter application receipts. Its delivery-plan
+  compiler creates no timings, audio or provider parameters.
+- The rhetorical delivery assistant returns deterministic, exact-copy-bound
+  review suggestions for parallel claims, assertion boundaries, sentence roles
+  and enumerations. Suggestions are ephemeral until explicitly edited/saved;
+  they make no provider call or acoustic-quality claim.
+- Gate V12 passed in an isolated local workspace: a creator can review
+  anchored suggestions, explicitly save an editable plan, and safely clear
+  both the candidate and saved plan by changing copy. No Voice provider call
+  occurs in that flow.
+- Gate V13 passed: the rhetorical assistant now uses Chinese, evidence-bounded
+  review language for concept landing, claim/turn boundaries, local list
+  movement and closing cadence. It still supplies semantic candidates only,
+  with no acoustic formula or provider application claim.
+- Gate V14 passed: a Voice adapter can preflight full, partial or unsupported
+  performance-plan coverage. Partial/unsupported coverage now fails before a
+  ProviderCall reservation or synthesis, preserving the existing full-plan
+  provider path and preventing a pace/pause-only route from masquerading as a
+  full delivery implementation.
+- Gate V15 local baseline closed FAIL. The exact 2.12s local OmniVoice take
+  `688d9eec-697d-4849-8b76-3a9bedd9907f` passed automated Voice QA but has a
+  durable U-Voice rejection (`u-voice:user-review-20260922-local-baseline`):
+  pace itself passed, but likeness, naturalness, emphasis, pauses and rhythm
+  need revision. Its end has no obvious break. This is one source/profile/
+  runtime result, not evidence that the four available source videos are
+  insufficient.
+- The narrow V10 route review found no documented full-plan route. Google Chirp
+  3 Instant Custom Voice is a Chinese-capable, consented, remote/BYOK **partial**
+  candidate for pace/pause only; it is allow-list-gated and priced per input
+  character. Azure Personal Voice documentation likewise excludes word-level
+  emphasis. Neither is admitted or locally verified.
+- The installed OmniVoice benchmark exposes only global provider controls; it
+  has no safe verified range-scoped mapping for the full performance plan.
+  Its capability remains `unknown`, and its model-weight license remains
+  non-commercial evaluation only.
 - Documentation governance has been reset around a stable hierarchy: whole-product spec → module specs → architecture → current STATUS → durable decisions → implementation policy.
 
-## Active work package — Gate E22: reviewed TalkingRun productization
+## Active work package — Gate V15: local existing-source Voice baseline
 
-**State: READY**
+**State: FAIL**
 **Primary implementation model: Terra**
 
 ### Objective
 
-Convert the already validated multi-short Talking execution path into one normal product-level TalkingRun that downstream Content OS can consume as a first-class generated Asset/Clip.
+Use the existing authorized local creator reference, with no new recording and
+no cloud transfer, to prove the normal local Voice worker can make one new
+short baseline take. The result is a route-readiness and quality-check step
+before any 30–60s MasterNarration attempt.
 
-Do not run another provider benchmark merely to prove what E21 already proved.
+### Allowed modules
 
-### Required product behavior
-
-1. Introduce a provider-neutral TalkingRun product/read model representing:
-   - project;
-   - MasterNarration asset and master-relative interval;
-   - authorized continuous reference Clip/run;
-   - provider/execution provenance;
-   - ordered child job/output evidence;
-   - assembled visual asset;
-   - automated QA state;
-   - immutable human continuity/publishability decision.
-2. Add a bounded TalkingRun assembly path:
-   - child outputs contribute the visual stream;
-   - the verified MasterNarration interval is the authoritative final audio;
-   - child audio joins do not become product semantics.
-3. Allow a series final slice only to request terminal face closeout when the selected adapter supports it.
-   - intermediate slices remain continuation slices;
-   - no per-slice artificial stop/start behavior;
-   - no visual concealment/frozen-tail workaround.
-4. Admit a TalkingRun as a normal generated Asset/Clip only after required child QA and approved series continuity review.
-5. Make Hybrid Asset Router / VideoSpec able to consume that admitted TalkingRun without understanding its child-job topology.
-6. Expose enough workspace/API state to identify the resulting TalkingRun, its source/evidence and whether it is admitted for production.
-7. Move new orchestration out of main.py when practical; prefer a narrow application service rather than adding another large route block.
-
-### Existing evidence to reuse
-
-Use the already approved E21 series/evidence when exercising the assembly/admission path locally. A new LatentSync inference run is not required for this package unless a concrete implementation defect makes the existing evidence unusable.
+- local OmniVoice worker/reference-path boundary, its focused tests and
+  evaluation evidence; active Voice module/control documents only.
 
 ### Stable interfaces
 
-- consent/authorization;
-- provider-neutral Voice/Talking contracts;
-- MasterNarration meaning;
-- capability/profile resolution;
-- provider-call ledger/idempotency;
-- automated QA vs human review separation;
-- existing ordinary non-series Talking behavior.
+- existing NarrationPerformancePlan / NarrationDeliveryPlan contracts;
+- V14 full/partial/unsupported preflight boundary and Voice job API;
+- Draft copy invalidation, provider-neutral Voice jobs and U-Voice evidence;
+- durable provider-call ledger/budget, consent and no-secret persistence.
 
 ### Acceptance criteria
 
-- TalkingRun is not represented merely as a list of child jobs.
-- Assembled output uses one authoritative MasterNarration interval for final audio.
-- Source-forward child ordering/provenance is preserved.
-- Only the final series slice can compose terminal closeout intent.
-- Rejected/unreviewed/incomplete series cannot become a production Asset/Clip.
-- Admitted TalkingRun can be selected/assembled through normal Asset/VideoSpec contracts.
-- Focused domain/repository/application/API/assembly tests pass.
-- Production Web build runs if UI changes.
-- python scripts/check_docs.py passes.
+- The existing consented VoiceProfile reference resolves beneath the local data
+  root and the explicitly configured local worker starts without an inference
+  request.
+- One new short take has complete-copy Voice QA and is presented for an
+  explicit U-Voice judgment; stop at that human review.
+- Record the route as local OmniVoice benchmark evidence only. It makes no
+  claim of 30–60s reliability or verified emphasis, pace, pause or rhythm
+  control.
 
 ### Non-goals
 
-- no new Talking model/provider;
-- no paid API;
-- no new duration-bound search;
-- no optical-flow/frame-interpolation seam repair;
-- no full remote Compute Router;
-- no broad UI redesign;
-- no attempt to solve long-form Voice in this package;
-- no claim that E22 alone passes R1.
+- no remote media transfer, account/allow-list setup, credential storage or
+  paid use;
+- no automatic reduction of a full performance plan to a provider subset;
+- no 30–60s MasterNarration, R1 complete-flow or repeatability claim.
+
+### Review artifact
+
+- `AudioAsset 688d9eec-697d-4849-8b76-3a9bedd9907f` — new local OmniVoice
+  benchmark take for `选题先做判断，文案再搭结构。`; `Voice QA job
+  ed054d11-9150-452e-8458-1073df697e33` verified complete copy coverage,
+  playability, zero missing/duplicate tokens, 0ms leading silence and 120ms
+  longest silence. U-Voice record
+  `u-voice:user-review-20260922-local-baseline` is `needs_revision` for
+  likeness, naturalness, emphasis, pauses and rhythm; pace is `pass`. It has
+  no Narration Performance Plan and is ineligible for Talking or final
+  assembly.
 
 ### Exit states
 
-- PASS — TalkingRun is a first-class product asset and the E21 evidence can exercise the normal admission/assembly path.
-- FAIL — the bounded design cannot satisfy the product boundary without breaking preserved Core semantics.
-- BLOCKED — a concrete missing artifact/dependency prevents completion; name the smallest clearing action.
+- PASS — one local baseline take is QA-complete and receives an explicit
+  U-Voice judgment; the next separate package may then decide whether a longer
+  local reliability experiment is warranted.
+- FAIL — the local reference/worker/take cannot clear the bounded quality
+  check; preserve evidence and close it.
+- AWAITING_U_REVIEW — the exact short take and its QA evidence are ready for
+  the user; stop until the user judges it.
 
-## Short queue after E22
+## Short queue after V15
 
-1. Voice Master reliability package — establish one repeatable fresh 30–60s MasterNarration route using provider-bounded natural takes + composition, or make the need for another local/remote Voice provider explicit.
-2. R1 end-to-end product gate — new topic → new Voice → TalkingRun → real B-roll/typography/subtitles → 30–60s render → one U-Product review.
+1. Reference-aware local Voice experiment — a separate bounded package may
+   inventory and compare the existing authorized source-video candidates before
+   any new local retake. It must not treat V15 as evidence that all four are
+   inadequate or that an unverified performance plan works.
+2. R1 end-to-end product gate — new topic → new Voice → TalkingRun → real
+   B-roll/typography/subtitles → 30–60s render → one U-Product review.
 3. Repeatability gate — repeat on a second topic before claiming R1 core flow.
 
 ## Current blockers
 
 - No repeatable fresh long-form MasterNarration path has passed the product gate yet.
-- TalkingRun productization is the current bridge between successful E21 evidence and the normal render flow.
+- No local provider+runtime+machine profile has verified controllable emphasis,
+  pace, pauses or rhythm. The current semantic plan must remain distinct from
+  provider application until evidence exists.
+- The local OmniVoice benchmark remains non-commercial evaluation only and has
+  no verified full performance-plan mapping. The active baseline is testing
+  local reference/worker execution and audio quality, not delivery readiness.
+- Any remote/BYOK route remains blocked until separately authorized with its
+  consent/reference transfer, allow-list access and declared budget.
+- The 43.04s candidate is formally U-Voice-rejected and cannot be retried in
+  place.
 - No current GitHub Actions status is available for the latest master; local test/build claims must remain tied to their recorded implementation evidence.
 
 ## Documentation rule

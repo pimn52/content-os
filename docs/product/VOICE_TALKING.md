@@ -19,6 +19,7 @@ From new copy, Content OS should be able to produce:
 
 ```text
 new copy
+→ editable narration performance intent
 → Voice execution
 → generated take(s)
 → independent Voice QA
@@ -28,6 +29,11 @@ new copy
 ```
 
 Long narration does not have to be generated in one provider call. A provider may be more reliable with bounded natural sentence/phrase takes. Content OS may compose only independently verified takes and must QA the resulting master again.
+
+The composition boundary persists the ordered source-take IDs and provisional
+timing on a QA-pending candidate. Its final timing and eligibility are replaced
+only by fresh independent master-level Voice QA; the candidate is not eligible
+for VideoSpec, Talking or render while pending.
 
 ### Voice QA
 
@@ -39,7 +45,138 @@ At minimum:
 - playable audio;
 - provider/reference provenance.
 
-Human U-Voice remains responsible for likeness, naturalness, pacing and breathing.
+### U-Voice review
+
+Human U-Voice is a first-class, asset-specific quality gate after automated
+Voice QA. It records an evidence reference, concrete findings, and one
+explicit `pass` / `needs_revision` judgment for all six dimensions:
+
+- creator likeness;
+- naturalness;
+- emphasis;
+- pace;
+- pauses; and
+- rhetorical rhythm.
+
+An approval is valid only when all six are `pass`. A rejection is immutable
+for that exact audio asset; the next attempt must be a new take rather than a
+silent overwrite of feedback. Both pending and rejected generated Voice are
+ineligible for Talking and final VideoSpec assembly. This records subjective
+product judgment without pretending it is provider capability evidence or an
+automatic acoustic score.
+
+### Narration performance intent
+
+Copy tells the system **what** to say. A Narration Performance Plan tells it
+how the speech should land: its delivery goal, overall pace, and editable cues
+for emphasis, pace, pauses and rhetorical rhythm.
+
+This is a provider-neutral editorial layer. It uses semantic values such as
+`measured` pace, a `beat` pause, or a `land` rhythm cue; it is not SSML, a
+vendor `speed` parameter, punctuation rewriting, or audio time-stretching.
+
+- Every cue is anchored to a Unicode character range or boundary in the exact
+  current editable copy. Content OS does not guess how character anchors move
+  after a copy edit: the current plan is cleared, while the prior draft
+  revision keeps it for audit.
+- A plan records who supplied it (`user`, `assisted` or `imported`) and any
+  evidence references. An assisted plan is editable input, not proof that a
+  speech will perform well.
+- A Voice job can explicitly snapshot only the matching current Draft plan.
+  The snapshot makes delivery direction reproducible even if the Draft changes
+  later.
+- An adapter must explicitly advertise support and return an application
+  receipt before a plan is passed to it. `adapter_applied_pending_quality_review`
+  means only that the adapter reports applying the semantic plan; it still
+  needs normal Voice QA and U-Voice review. Unknown or unsupported adapters
+  fail the plan-bearing job explicitly instead of silently dropping cues.
+- A provider may preflight a plan as full, partial or unsupported. A partial
+  result is **not** an application receipt. Until Content OS has an explicit,
+  creator-visible subset mode, partial or unsupported coverage fails before
+  ProviderCall reservation and before the provider receives any copy or voice
+  reference. The system never silently removes unsupported cues to make a
+  route pass.
+
+The current OmniVoice benchmark adapter has no verified mapping for this
+semantic plan. Its numeric `speed` setting remains a provider-local Advanced
+Setting, not a substitute for performance intent or evidence of rhetorical
+control.
+
+Google Chirp 3 Instant Custom Voice remains a future remote/BYOK **partial**
+candidate only: its documented global speaking rate and pause tags cannot
+honestly stand in for full concept emphasis, local pace or rhetorical rhythm.
+It remains unconfigured and unadmitted until its consent/reference-transfer,
+allow-list, credential and budget requirements are explicitly authorized and
+then locally tested.
+
+### Rhetorical delivery suggestions
+
+Content OS can return an ephemeral assisted plan for the current Draft copy.
+It recognizes only transparent editorial structure: sentence role,
+contrast/parallel claims, assertion boundaries and repeated enumerations. The
+suggestion explains its structural reason and may recommend, for example,
+concept landing in a parallel claim, a `beat` after an important point, or a
+locally driven list within otherwise conversational pacing.
+
+This is a review surface, not an automatic rewrite or acoustic optimizer:
+
+- it is exact-copy-bound and deterministic for the same persisted Draft;
+- it is neither saved to the Draft nor included in a Voice job until a user
+  explicitly edits/saves the suggested plan through the normal plan contract;
+- it makes no provider call and supplies no provider parameters, milliseconds,
+  inserted silence, punctuation edits or audio claim; and
+- it does not learn a global preference from an individual U-Voice judgment.
+
+The patterns are intentionally general but limited. A suggestion says that a
+copy structure is a useful review opportunity; it never claims that the cue is
+the uniquely correct performance or that an available Voice provider can apply
+it.
+
+### Evidence-bounded editorial basis
+
+The assistant's cues are editorial candidates, not a text-to-acoustics model.
+Prosody research connects information structure and focus, while also finding
+that the mapping from meaning to acoustic realization is many-to-many and
+language-dependent. That supports a creator reviewing a semantic “concept
+landing” in a parallel or contrastive claim; it does **not** support deriving a
+unique word stress, pitch, loudness or duration from the copy. See
+[Cole, *Prosody and Information Structure*](https://doi.org/10.1146/annurev-linguistics-011724-121524),
+[Yan & Calhoun on Mandarin focus](https://doi.org/10.3389/fpsyg.2019.01985)
+and [Ip & Cutler's cross-language focus study](https://www.isca-archive.org/speechprosody_2016/ip16_speechprosody.html).
+
+Perceived rate combines articulation rate with pause placement and duration;
+it is not one preferred WPM. Breathing and silence also interact with discourse
+boundaries and listener processing, but neither result supplies a universal
+pause length or proves that more pauses are better. Therefore Content OS keeps
+overall pace, local list pace and semantic pause boundaries separate, and calls
+a pause a reviewable “breathing/thinking boundary” rather than a physiological
+or timing promise. See [Grosjean & Lane](https://doi.org/10.1037/0096-1523.2.4.538),
+[Hird & Kirsner](https://doi.org/10.1006/brln.2001.2613), and
+[MacGregor, Corley & Donaldson](https://doi.org/10.1016/j.neuropsychologia.2010.09.024).
+
+Mainstream delivery teaching reaches compatible practical advice—vocal variety,
+strategic pauses, repetition and parallelism—without providing a universal
+formula. It is useful for review vocabulary rather than product-quality proof:
+[O'Hair et al., *A Pocket Guide to Public Speaking*](https://store.macmillanlearning.com/US/product/A-Pocket-Guide-to-Public-Speaking/p/1319102786),
+[Lucas & Stob, *The Art of Public Speaking*](https://www.mheducation.com/highered/product/The-Art-of-Public-Speaking-Lucas.html),
+and [Anderson, *TED Talks*](https://www.ted.com/read/ted-talks-the-official-ted-guide-to-public-speaking).
+
+These sources do not verify the current machine, Voice provider or generated
+audio. Suggestion, adapter application receipt, automated Voice QA and U-Voice
+remain distinct evidence layers.
+
+### Delivery-plan compiler
+
+Before any Voice call, Content OS can deterministically compile the current
+plan into ordered delivery segments. Each segment retains the exact source
+characters, inherited/overridden pace, applicable emphasis and rhythm role,
+and a semantic opening/inter-segment/closing pause where requested.
+
+The compiler is deliberately not a speech synthesizer: it creates no
+milliseconds, provider parameters, punctuation changes, silence, or audio.
+It exists so a future capable adapter and a human-directed workflow consume the
+same editorial structure. A compiled plan is not an adapter application
+receipt, QA pass, or U-Voice approval.
 
 ## Talking system
 
@@ -86,6 +223,12 @@ A TalkingRun represents:
 
 Provider slices and child jobs remain execution details.
 
+The implemented admission path stores a provider-neutral TalkingRun record and
+creates one generated Asset plus one whole-duration Clip only after every child
+has automated QA, individual U-Talking approval and an immutable approved
+continuity review. Hybrid Asset Router, VideoSpec and the renderer consume the
+admitted Asset/Clip without traversing child jobs.
+
 ### Audio authority
 
 For a composed TalkingRun, the verified Master Narration is the authoritative final audio track. Child Talking outputs primarily contribute the generated visual track. This avoids turning codec boundaries or child-audio joins into product semantics.
@@ -113,10 +256,36 @@ Provider-specific lookahead parameters remain inside the provider settings schem
 - A 17.28s source-forward multi-short LatentSync series has received human approval as natural, continuous and publishable for the exact reviewed configuration/reference/take.
 - That evidence proves the execution strategy for the reviewed case; it does not prove every source clip/provider/machine will behave the same.
 - Current long-form OmniVoice reliability is still a product risk. Long Master Narration must not be assumed reliable from short-sample success.
+- Chatterbox has prior short local QA evidence but was rejected as a Voice route
+  by U-Voice for creator similarity and naturalness; it is intentionally not a
+  Core adapter or R1 default.
+- No delivery-capable Voice provider is admitted. The narrow documentation
+  review found Google Chirp 3 Instant Custom Voice as a possible **partial**
+  remote/BYOK experiment: its documentation lists Chinese (`cmn-CN`), required
+  consent/reference audio, pace control and experimental pause control, but not
+  range-scoped emphasis or rhetorical-rhythm control. It is allow-list gated
+  and the published price is per input character, so it needs explicit access,
+  transfer and budget approval before any use. [Google capability and consent
+  requirements](https://docs.cloud.google.com/text-to-speech/docs/chirp3-instant-custom-voice)
+  and [published pricing](https://cloud.google.com/text-to-speech/pricing)
+  are provider documentation—not local capability evidence.
+- Azure Personal Voice is likewise not a documented full-plan route: its
+  current SSML matrix supports rate and break for the listed personal-voice
+  base models, but marks word-level emphasis unsupported. [Azure Personal Voice
+  SSML matrix](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/personal-voice-how-to-use)
+  is documentation evidence only.
 
 ## Product gaps
 
-1. Productize reviewed slice-series output as a first-class TalkingRun Asset/Clip.
-2. Apply terminal closeout correctly to the final series slice without forcing intermediate closeouts.
-3. Establish a reliable Master Narration route for new 30–60s content.
-4. Later add a commercial-safe and/or approved remote provider route without changing Core product semantics.
+1. Authorize a provider/capture boundary before a performance-plan application
+   experiment. Current OmniVoice is not a delivery-capable route. Google Instant
+   Custom Voice is the most specific documented partial candidate for
+   pace/pause, but it remains remote, allow-list-gated and does not document
+   exact emphasis/rhythm application; the compiler itself is not a quality
+   claim.
+2. Establish a reliable fresh 30–60s Master Narration route with an explicitly
+   selected local execution profile or approved provider. The 43.04s composed
+   CUDA candidate passed automated QA but is formally U-Voice-rejected for
+   naturalness, emphasis, pace, pauses and rhythm; it is not a reliability
+   claim and cannot be re-approved in place.
+3. Later add a commercial-safe and/or approved remote provider route without changing Core product semantics.

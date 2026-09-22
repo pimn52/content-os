@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from app.backup import BackupError, create_backup, restore_backup, verify_backup
-from app.db import AssetRepository, Database
+from app.db import AssetRepository, CURRENT_SCHEMA_VERSION, Database
 from app.domain.models import Asset, RationalFps
 
 
@@ -27,7 +27,7 @@ def test_backup_verify_and_restore_relocate_local_asset(tmp_path: Path) -> None:
 
     archive = tmp_path / "backup.zip"
     created = create_backup(data_root, database, archive)
-    assert created["schema_version"] == 18
+    assert created["schema_version"] == CURRENT_SCHEMA_VERSION
     assert verify_backup(archive)["verified"] is True
 
     restored_root = tmp_path / "restored"

@@ -220,11 +220,16 @@ class RemotionRenderer:
         ):
             raise UnauthorizedVisualError("VideoSpec visual does not match the authorized stored Clip")
         if asset.source_kind is SourceKind.AI_VIDEO:
-            generation = asset.metadata.get("talking_generation")
-            if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
-                raise UnauthorizedVisualError("generated Talking visual requires verified automated QA")
-            if generation.get("human_review_state") == "rejected":
-                raise UnauthorizedVisualError("generated Talking visual was rejected by U-Talking and cannot be rendered")
+            run = asset.metadata.get("talking_run")
+            if isinstance(run, dict):
+                if run.get("admission_state") != "admitted" or run.get("automated_qa_state") != "verified" or run.get("continuity_review_state") != "approved":
+                    raise UnauthorizedVisualError("TalkingRun visual is not admitted for production rendering")
+            else:
+                generation = asset.metadata.get("talking_generation")
+                if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+                    raise UnauthorizedVisualError("generated Talking visual requires verified automated QA")
+                if generation.get("human_review_state") == "rejected":
+                    raise UnauthorizedVisualError("generated Talking visual was rejected by U-Talking and cannot be rendered")
         source = _local_existing_file(asset)
         # Remotion trimBefore/trimAfter are measured in composition frames,
         # not the source file's native frame rate.

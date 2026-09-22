@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, ShootTask, TalkingProfile, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, ShootTask, TalkingProfile, TalkingRun, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, VoiceProfile
 
 from .database import Database
 
@@ -129,6 +129,7 @@ class ProjectDraftRepository(_Repository[ProjectDraft]):
             version=value.version,
             script_revision=value.script_revision,
             script=value.script,
+            narration_performance_plan=value.narration_performance_plan,
             topic=value.topic,
             ip_profile_version=value.ip_profile_version,
             evidence_refs=value.evidence_refs,
@@ -737,4 +738,27 @@ class TalkingSliceSeriesContinuityReviewRepository(_Repository[TalkingSliceSerie
         persisted = self.get_by_series_id(value.series_id)
         if persisted is None:
             raise sqlite3.IntegrityError("Talking slice series review insert did not persist")
+        return persisted
+
+
+class TalkingRunRepository(_Repository[TalkingRun]):
+    table, model = "talking_runs", TalkingRun
+
+    def get_by_series_id(self, series_id: UUID) -> TalkingRun | None:
+        row = self.db.connection.execute("SELECT * FROM talking_runs WHERE series_id = ?", (str(series_id),)).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def list_for_project(self, project_id: UUID) -> list[TalkingRun]:
+        rows = self.db.connection.execute("SELECT * FROM talking_runs WHERE project_id = ? ORDER BY id", (str(project_id),)).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+    def create(self, value: TalkingRun) -> TalkingRun:
+        self.db.connection.execute(
+            """INSERT INTO talking_runs(id, project_id, series_id, assembled_asset_id, payload)
+               VALUES (?, ?, ?, ?, ?) ON CONFLICT(series_id) DO NOTHING""",
+            (str(value.id), str(value.project_id), str(value.series_id), str(value.assembled_asset_id), _payload(value)),
+        )
+        persisted = self.get_by_series_id(value.series_id)
+        if persisted is None:
+            raise sqlite3.IntegrityError("TalkingRun insert did not persist")
         return persisted

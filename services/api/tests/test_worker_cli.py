@@ -13,7 +13,7 @@ from app.providers.asr import ASRConfigurationError
 from app.providers.talking import TalkingConfigurationError
 from app.providers.vision import VisionConfigurationError
 from app.runtime import resolve_local_executable
-from app.worker_cli import build_runner, parse_config, run
+from app.worker_cli import _resolve_omnivoice_reference_path, build_runner, parse_config, run
 
 
 def test_worker_defaults_and_type_selection(monkeypatch):
@@ -132,6 +132,22 @@ def test_voice_worker_builds_explicit_omnivoice_provider(tmp_path: Path, monkeyp
         assert runner._resource_keys_by_type == {JobType.GENERATE_VOICE: config.gpu_resource_key}
     finally:
         db.close()
+
+
+def test_omnivoice_worker_resolves_legacy_bare_reference_media_from_local_originals(tmp_path: Path, monkeypatch):
+    """A pre-portable record may retain only its content-addressed filename."""
+    runtime = tmp_path / "python.exe"
+    runtime.write_bytes(b"runtime")
+    model = tmp_path / "omnivoice-snapshot"
+    model.mkdir()
+    data_root = tmp_path / "data"
+    original = data_root / "assets" / "originals" / ("a" * 64 + ".media")
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"reference")
+    assert runtime.is_file() and model.is_dir()  # Deliberately no provider inference.
+    assert _resolve_omnivoice_reference_path("a" * 64 + ".media", data_root) == original
+    assert _resolve_omnivoice_reference_path("assets/originals/" + "a" * 64 + ".media", data_root) == original
+    assert _resolve_omnivoice_reference_path("data/assets/originals/" + "a" * 64 + ".media", data_root) == original
 
 
 def test_gpu_resource_key_can_be_overridden_for_one_local_machine(tmp_path: Path):

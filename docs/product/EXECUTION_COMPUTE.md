@@ -80,6 +80,17 @@ It should:
 - preserve hard consent, budget, license, provenance and runtime-integrity gates;
 - never auto-promote a successful user tweak into a global default.
 
+Narration performance intent is **not** an Advanced Setting. It is an
+exact-copy-bound editorial plan for emphasis, pace, pauses and rhythm. A
+provider schema must separately expose whether it can apply that plan; an
+unknown feature stays unknown even when the provider has a numeric `speed`
+parameter. Only an explicit adapter application receipt, followed by Voice QA
+and U-Voice review, can establish a performance result.
+
+Its derived Delivery Plan is likewise pre-execution structure, not a request
+to create a duration, silence or provider-specific control. Execution may only
+use it through an admitted adapter with explicit feature support.
+
 ## Provider selection maturity
 
 Current product code has a real capability-profile/configuration resolver and Advanced Settings surface.

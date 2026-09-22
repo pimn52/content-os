@@ -292,6 +292,56 @@ class AudioAsset(ContractModel):
     transcript_source: str | None = Field(default=None, max_length=500, description="Traceable source reference for the current transcript.")
 
 
+class VoiceReviewOutcome(StrEnum):
+    """One explicit human judgment for a creator-Voice quality dimension."""
+
+    PASS = "pass"
+    NEEDS_REVISION = "needs_revision"
+
+
+class VoiceHumanReview(ContractModel):
+    """A durable U-Voice judgment after independent automated Voice QA.
+
+    Copy, timing and file checks cannot establish creator likeness or whether
+    the delivery actually carries the intended emphasis and rhythm.  Keep
+    those subjective judgments explicit, dimensioned and tied to one exact
+    asset rather than treating an ordinary provider success as quality proof.
+    """
+
+    approved: bool
+    evidence_reference: str = Field(min_length=1, max_length=500)
+    findings: list[str] = Field(min_length=1, max_length=100)
+    likeness: VoiceReviewOutcome
+    naturalness: VoiceReviewOutcome
+    emphasis: VoiceReviewOutcome
+    pace: VoiceReviewOutcome
+    pauses: VoiceReviewOutcome
+    rhythm: VoiceReviewOutcome
+    reviewed_at: AwareDatetime
+
+    @field_validator("findings")
+    @classmethod
+    def concrete_findings(cls, values: list[str]) -> list[str]:
+        if any(not isinstance(item, str) or not item.strip() for item in values):
+            raise ValueError("Voice human review findings must be non-empty")
+        return values
+
+    @model_validator(mode="after")
+    def approval_matches_dimension_judgments(self) -> "VoiceHumanReview":
+        outcomes = (
+            self.likeness,
+            self.naturalness,
+            self.emphasis,
+            self.pace,
+            self.pauses,
+            self.rhythm,
+        )
+        all_pass = all(outcome is VoiceReviewOutcome.PASS for outcome in outcomes)
+        if self.approved != all_pass:
+            raise ValueError("Voice human review approval must match all six dimension judgments")
+        return self
+
+
 class Clip(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     asset_id: UUID
@@ -872,11 +922,243 @@ class VideoSpec(ContractModel):
         return self
 
 
+class NarrationPace(StrEnum):
+    """Editorial pace direction, deliberately not a provider speed value."""
+
+    MEASURED = "measured"
+    CONVERSATIONAL = "conversational"
+    DRIVEN = "driven"
+
+
+class NarrationEmphasis(StrEnum):
+    """Relative prominence for a spoken range of copy."""
+
+    LIGHT = "light"
+    CLEAR = "clear"
+    STRONG = "strong"
+
+
+class NarrationPause(StrEnum):
+    """Semantic pause length, never a provider-specific millisecond control."""
+
+    BRIEF = "brief"
+    BEAT = "beat"
+    LONG = "long"
+
+
+class NarrationRhythm(StrEnum):
+    """The rhetorical job a range plays in the delivery."""
+
+    SETUP = "setup"
+    BUILD = "build"
+    TURN = "turn"
+    LAND = "land"
+
+
+class NarrationPerformanceCueKind(StrEnum):
+    EMPHASIS = "emphasis"
+    PACE = "pace"
+    PAUSE = "pause"
+    RHYTHM = "rhythm"
+
+
+class NarrationPerformancePlanSource(StrEnum):
+    """Who supplied the editable delivery direction."""
+
+    USER = "user"
+    ASSISTED = "assisted"
+    IMPORTED = "imported"
+
+
+class NarrationPerformanceCue(ContractModel):
+    """One semantic delivery instruction anchored to character positions.
+
+    Character positions are Python/Unicode character offsets in the exact
+    current copy. They avoid forcing English-word tokenization onto Chinese
+    scripts while keeping a deterministic, auditable anchor for every cue.
+    """
+
+    kind: NarrationPerformanceCueKind
+    start_char: int = Field(ge=0, le=100_000, strict=True)
+    end_char: int = Field(ge=0, le=100_000, strict=True)
+    emphasis: NarrationEmphasis | None = None
+    pace: NarrationPace | None = None
+    pause: NarrationPause | None = None
+    rhythm: NarrationRhythm | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def is_one_semantic_instruction(self) -> "NarrationPerformanceCue":
+        expected = {
+            NarrationPerformanceCueKind.EMPHASIS: "emphasis",
+            NarrationPerformanceCueKind.PACE: "pace",
+            NarrationPerformanceCueKind.PAUSE: "pause",
+            NarrationPerformanceCueKind.RHYTHM: "rhythm",
+        }[self.kind]
+        provided = [
+            name for name in ("emphasis", "pace", "pause", "rhythm")
+            if getattr(self, name) is not None
+        ]
+        if provided != [expected]:
+            raise ValueError("Narration performance cue must supply exactly its matching semantic value")
+        if self.kind is NarrationPerformanceCueKind.PAUSE:
+            if self.start_char != self.end_char:
+                raise ValueError("Narration pause cue must use one zero-width copy boundary")
+        elif self.end_char <= self.start_char:
+            raise ValueError("Narration performance cue range must be non-empty")
+        return self
+
+
+class NarrationPerformancePlan(ContractModel):
+    """Editable, provider-neutral delivery direction for exact narration copy.
+
+    This is narrative intent, not SSML or an execution configuration. A Voice
+    adapter may later report that it applied an immutable copy of this plan,
+    but the plan alone never claims an acoustic result.
+    """
+
+    copy_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    delivery_goal: str = Field(min_length=1, max_length=1_000)
+    overall_pace: NarrationPace = NarrationPace.CONVERSATIONAL
+    cues: list[NarrationPerformanceCue] = Field(min_length=1, max_length=1_000)
+    source: NarrationPerformancePlanSource = NarrationPerformancePlanSource.USER
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def evidence_refs_are_distinct(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() for value in values):
+            raise ValueError("Narration performance evidence references must not be blank")
+        if len(set(values)) != len(values):
+            raise ValueError("Narration performance evidence references must be distinct")
+        return values
+
+    @model_validator(mode="after")
+    def cues_are_unambiguous(self) -> "NarrationPerformancePlan":
+        seen: set[tuple[NarrationPerformanceCueKind, int, int]] = set()
+        ranges_by_kind: dict[NarrationPerformanceCueKind, list[tuple[int, int]]] = {
+            NarrationPerformanceCueKind.EMPHASIS: [],
+            NarrationPerformanceCueKind.PACE: [],
+            NarrationPerformanceCueKind.RHYTHM: [],
+        }
+        pause_boundaries: set[int] = set()
+        for cue in self.cues:
+            identity = (cue.kind, cue.start_char, cue.end_char)
+            if identity in seen:
+                raise ValueError("Narration performance plan has duplicate cue anchors")
+            seen.add(identity)
+            ranges = ranges_by_kind.get(cue.kind)
+            if ranges is not None:
+                if any(cue.start_char < end and start < cue.end_char for start, end in ranges):
+                    raise ValueError(f"Narration {cue.kind.value} cues may not overlap")
+                ranges.append((cue.start_char, cue.end_char))
+            if cue.kind is NarrationPerformanceCueKind.PAUSE:
+                if cue.start_char in pause_boundaries:
+                    raise ValueError("Narration performance plan has duplicate pause boundaries")
+                pause_boundaries.add(cue.start_char)
+        return self
+
+
+class NarrationPerformanceSuggestionPattern(StrEnum):
+    """Rhetorical structure detected by the local editorial assistant."""
+
+    OPENING = "opening"
+    BUILD = "build"
+    TURN = "turn"
+    LANDING = "landing"
+    PARALLEL_CLAIM = "parallel_claim"
+    ENUMERATION = "enumeration"
+    CLAIM_BOUNDARY = "claim_boundary"
+
+
+class NarrationPerformanceSuggestion(ContractModel):
+    """One editable suggestion with its structural—not acoustic—reason."""
+
+    cue: NarrationPerformanceCue
+    pattern: NarrationPerformanceSuggestionPattern
+    rationale: str = Field(min_length=1, max_length=1_000)
+
+
+class NarrationPerformanceSuggestions(ContractModel):
+    """Ephemeral assisted plan plus auditable rationale for each cue.
+
+    This object is intentionally separate from a Draft.  A caller must still
+    explicitly save/edit ``suggested_plan`` through the normal plan endpoint.
+    """
+
+    copy_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    suggested_plan: NarrationPerformancePlan
+    suggestions: list[NarrationPerformanceSuggestion] = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def suggestion_set_matches_its_assisted_plan(self) -> "NarrationPerformanceSuggestions":
+        if self.suggested_plan.copy_fingerprint != self.copy_fingerprint:
+            raise ValueError("Narration performance suggestions must match their exact copy")
+        if self.suggested_plan.source is not NarrationPerformancePlanSource.ASSISTED:
+            raise ValueError("Narration performance suggestions must remain assisted editable input")
+        if [item.cue for item in self.suggestions] != self.suggested_plan.cues:
+            raise ValueError("Narration performance suggestions must exactly describe the suggested plan cues")
+        return self
+
+
+class NarrationDeliverySegment(ContractModel):
+    """One exact-copy interval with inherited editorial delivery direction.
+
+    ``text`` intentionally retains source whitespace. It is a structural
+    compiler output, not normalized synthesis text; a future adapter must make
+    its own explicit policy for whitespace-only intervals.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    index: int = Field(ge=0, strict=True)
+    start_char: int = Field(ge=0, le=100_000, strict=True)
+    end_char: int = Field(ge=1, le=100_000, strict=True)
+    text: str = Field(min_length=1, max_length=100_000)
+    is_spoken: bool
+    pace: NarrationPace
+    emphasis: NarrationEmphasis | None = None
+    rhythm: NarrationRhythm | None = None
+    pause_after: NarrationPause | None = None
+    cue_notes: list[str] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def represents_one_non_empty_copy_interval(self) -> "NarrationDeliverySegment":
+        if self.end_char <= self.start_char:
+            raise ValueError("Narration delivery segment range must be non-empty")
+        if len(self.text) != self.end_char - self.start_char:
+            raise ValueError("Narration delivery segment text must preserve its character interval")
+        if self.is_spoken != bool(self.text.strip()):
+            raise ValueError("Narration delivery segment spoken state must match its exact text")
+        return self
+
+
+class NarrationDeliveryPlan(ContractModel):
+    """Deterministic speaker/take structure derived before any Voice call."""
+
+    copy_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    performance_plan_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    opening_pause: NarrationPause | None = None
+    segments: list[NarrationDeliverySegment] = Field(min_length=1, max_length=2_001)
+    closing_pause: NarrationPause | None = None
+
+    @model_validator(mode="after")
+    def segments_are_contiguous(self) -> "NarrationDeliveryPlan":
+        if [item.index for item in self.segments] != list(range(len(self.segments))):
+            raise ValueError("Narration delivery segments must have contiguous order")
+        if self.segments[0].start_char != 0:
+            raise ValueError("Narration delivery plan must begin with the first copy character")
+        if any(right.start_char != left.end_char for left, right in zip(self.segments, self.segments[1:])):
+            raise ValueError("Narration delivery segments must be character-contiguous")
+        return self
+
+
 class ProjectDraft(ContractModel):
     project_id: UUID
     version: int = Field(default=0, ge=0, strict=True)
     script_revision: int = Field(default=0, ge=0, strict=True)
     script: str | None = Field(default=None, max_length=100_000)
+    narration_performance_plan: NarrationPerformancePlan | None = None
     topic: str | None = Field(default=None, max_length=5_000)
     scenes: list[ScenePlan] = Field(default_factory=list, max_length=1_000)
     routes: list[DraftRoute] = Field(default_factory=list, max_length=1_000)
@@ -896,6 +1178,7 @@ class ProjectDraftRevision(ContractModel):
     version: int = Field(gt=0, strict=True)
     script_revision: int = Field(ge=0, strict=True)
     script: str | None = Field(default=None, max_length=100_000)
+    narration_performance_plan: NarrationPerformancePlan | None = None
     topic: str | None = Field(default=None, max_length=5_000)
     ip_profile_version: int | None = Field(default=None, gt=0)
     evidence_refs: list[str] = Field(default_factory=list, max_length=1_000)
@@ -968,6 +1251,7 @@ class VoiceGenerationJobPayload(ContractModel):
     text: str = Field(min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
+    narration_performance_plan: NarrationPerformancePlan | None = None
 
 
 class VoiceQaJobPayload(ContractModel):
@@ -1029,7 +1313,7 @@ class TalkingGenerationJobPayload(ContractModel):
             raise ValueError("Talking slice requires indices, resolved maximum duration and provenance")
         if self.slice_start_segment_index is not None and self.slice_end_segment_index is not None and self.slice_end_segment_index <= self.slice_start_segment_index:
             raise ValueError("Talking slice end index must follow start index")
-        if self.slice_start_segment_index is not None and self.terminal_face_closeout:
+        if self.slice_start_segment_index is not None and self.terminal_face_closeout and self.slice_series_id is None:
             raise ValueError("Talking slice and terminal face closeout require separate execution planning")
         reference_window = (self.reference_window_start_ms, self.reference_window_end_ms)
         if any(value is not None for value in reference_window) and any(value is None for value in reference_window):
@@ -1044,6 +1328,8 @@ class TalkingGenerationJobPayload(ContractModel):
                 raise ValueError("Talking slice series requires a resolved Talking slice")
             if self.slice_series_index is not None and self.slice_series_size is not None and self.slice_series_index >= self.slice_series_size:
                 raise ValueError("Talking slice series index must be below its size")
+            if self.terminal_face_closeout and self.slice_series_index != self.slice_series_size - 1:
+                raise ValueError("only the final Talking slice series child may request terminal face closeout")
         return self
 
 
@@ -1070,6 +1356,59 @@ class TalkingSliceSeriesContinuityReview(ContractModel):
     findings: list[str] = Field(default_factory=list, max_length=100)
     child_job_ids: list[UUID] = Field(min_length=1, max_length=10_000)
     reviewed_at: AwareDatetime
+
+
+class TalkingRunChildEvidence(ContractModel):
+    """One ordered provider child retained as execution evidence only."""
+
+    series_index: int = Field(ge=0)
+    job_id: UUID
+    output_asset_id: UUID
+    master_start_ms: NonNegativeMs
+    master_end_ms: PositiveFrames
+    reference_window_start_ms: NonNegativeMs
+    reference_window_end_ms: PositiveFrames
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    provider_version: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def intervals_are_valid(self) -> "TalkingRunChildEvidence":
+        if self.master_end_ms <= self.master_start_ms:
+            raise ValueError("TalkingRun child master interval must be valid")
+        if self.reference_window_end_ms <= self.reference_window_start_ms:
+            raise ValueError("TalkingRun child reference interval must be valid")
+        return self
+
+
+class TalkingRun(ContractModel):
+    """Admitted product-level creator Talking result, independent of child topology."""
+
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    series_id: UUID
+    master_narration_audio_id: UUID
+    master_start_ms: NonNegativeMs
+    master_end_ms: PositiveFrames
+    authorized_reference_clip_id: UUID
+    child_evidence: list[TalkingRunChildEvidence] = Field(min_length=1, max_length=10_000)
+    continuity_review_id: UUID
+    assembled_asset_id: UUID
+    assembled_clip_id: UUID
+    automated_qa_state: Literal["verified"]
+    admission_state: Literal["admitted"]
+    created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def admitted_run_is_contiguous(self) -> "TalkingRun":
+        ordered = sorted(self.child_evidence, key=lambda child: child.series_index)
+        if [child.series_index for child in ordered] != list(range(len(ordered))):
+            raise ValueError("TalkingRun children must have contiguous order")
+        if ordered[0].master_start_ms != self.master_start_ms or ordered[-1].master_end_ms != self.master_end_ms:
+            raise ValueError("TalkingRun interval must match its ordered child evidence")
+        if any(left.master_end_ms > right.master_start_ms for left, right in zip(ordered, ordered[1:])):
+            raise ValueError("TalkingRun child master intervals may not overlap")
+        return self
 
 
 class Job(ContractModel):

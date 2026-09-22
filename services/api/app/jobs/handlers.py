@@ -79,6 +79,8 @@ from app.providers.vision import (
     VisionTimeout,
 )
 from app.providers.voice import (
+    NarrationPerformanceCoverage,
+    NarrationPerformancePreflight,
     VoiceAuthenticationError,
     VoiceConfigurationError,
     VoiceConnectionError,
@@ -88,6 +90,7 @@ from app.providers.voice import (
     VoiceRateLimitError,
     VoiceTimeout,
 )
+from app.routing import FeatureSupport
 from app.providers.talking import (
     TalkingAuthenticationError,
     TalkingConfigurationError,
@@ -99,7 +102,7 @@ from app.providers.talking import (
     TalkingRateLimitError,
     TalkingTimeout,
 )
-from app.voice_qa import VoiceQaError, apply_voice_qa, verify_generated_voice
+from app.voice_qa import VoiceQaError, apply_voice_qa, verify_generated_voice, voice_human_review_status
 from app.talking.slices import TalkingSliceExtractionError, TalkingSlicePlanningError, extract_talking_audio_slice, plan_talking_audio_slice
 from app.search import EmbeddingCountMismatch, EmbeddingIndexError, IndexError
 
@@ -203,6 +206,58 @@ class VoiceGenerationJobHandler:
             raise JobExecutionError("voice_provider_invalid", "voice provider does not expose safe runtime identity", retryable=False)
         if profile.provider != provider_name.strip():
             raise JobExecutionError("voice_profile_provider_mismatch", "voice profile does not belong to the configured provider", retryable=False)
+        performance_plan = job.payload.narration_performance_plan
+        performance_support = FeatureSupport.UNKNOWN
+        synthesize_with_performance = None
+        if performance_plan is not None:
+            declared_support = getattr(self._provider, "performance_intent_support", FeatureSupport.UNKNOWN)
+            try:
+                performance_support = declared_support if isinstance(declared_support, FeatureSupport) else FeatureSupport(declared_support)
+            except (TypeError, ValueError):
+                performance_support = FeatureSupport.UNKNOWN
+            synthesize_with_performance = getattr(self._provider, "synthesize_with_performance", None)
+            if performance_support not in {FeatureSupport.AVAILABLE, FeatureSupport.VERIFIED} or not callable(synthesize_with_performance):
+                raise JobExecutionError(
+                    "voice_performance_intent_unavailable",
+                    "the selected Voice provider cannot safely apply the requested narration performance intent",
+                    retryable=False,
+                )
+            preflight = getattr(self._provider, "preflight_narration_performance", None)
+            if callable(preflight):
+                try:
+                    applicability = preflight(
+                        profile,
+                        job.payload.text,
+                        language=job.payload.language or profile.language,
+                        performance_plan=performance_plan,
+                    )
+                except Exception:
+                    raise JobExecutionError(
+                        "voice_performance_intent_preflight_failed",
+                        "the selected Voice provider could not safely verify narration performance intent applicability",
+                        retryable=False,
+                    ) from None
+                if not isinstance(applicability, NarrationPerformancePreflight):
+                    raise JobExecutionError(
+                        "voice_performance_intent_preflight_invalid",
+                        "the selected Voice provider returned an invalid narration performance applicability result",
+                        retryable=False,
+                    )
+                reason_codes = ", ".join(applicability.reasons)
+                if applicability.coverage is NarrationPerformanceCoverage.PARTIAL:
+                    raise JobExecutionError(
+                        "voice_performance_intent_partial",
+                        "the selected Voice provider supports only part of the requested narration performance intent"
+                        f" (reason codes: {reason_codes})",
+                        retryable=False,
+                    )
+                if applicability.coverage is NarrationPerformanceCoverage.UNSUPPORTED:
+                    raise JobExecutionError(
+                        "voice_performance_intent_unavailable",
+                        "the selected Voice provider cannot safely apply the requested narration performance intent"
+                        f" (reason codes: {reason_codes})",
+                        retryable=False,
+                    )
         call = _reserve_job_provider_call(
             self._ledger, job, operation="tts", category=CostCategory.VOICE,
             provider=provider_name.strip(), model=model.strip(), input_source=f"voice-profile:{profile.id}",
@@ -210,7 +265,19 @@ class VoiceGenerationJobHandler:
         )
         output = self._output_root / "voice" / f"{job.id}-attempt-{job.attempt}.wav"
         try:
-            result = self._provider.synthesize(profile, job.payload.text, output, language=job.payload.language or profile.language)
+            if performance_plan is None:
+                result = self._provider.synthesize(profile, job.payload.text, output, language=job.payload.language or profile.language)
+            else:
+                # The optional extension is guarded above. Keeping this call
+                # distinct prevents ordinary providers from silently dropping
+                # semantic delivery direction through a permissive kwargs path.
+                result = synthesize_with_performance(  # type: ignore[misc]
+                    profile,
+                    job.payload.text,
+                    output,
+                    language=job.payload.language or profile.language,
+                    performance_plan=performance_plan,
+                )
         except (VoiceRateLimitError, VoiceTimeout, VoiceConnectionError):
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_temporarily_unavailable")
             raise JobExecutionError("voice_temporarily_unavailable", "voice provider is temporarily unavailable", retryable=True) from None
@@ -223,14 +290,28 @@ class VoiceGenerationJobHandler:
             # provider text, then let the local Job retry policy decide.
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_provider_failed")
             raise JobExecutionError("voice_provider_failed", "voice provider failed unexpectedly", retryable=True) from None
+        if performance_plan is not None and not result.performance_intent_applied:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_performance_intent_not_applied")
+            raise JobExecutionError(
+                "voice_performance_intent_not_applied",
+                "the selected Voice provider did not confirm narration performance intent application",
+                retryable=False,
+            )
         try:
             audio = self._importer.import_path(result.audio_path, job.payload.authorization_reference, language=job.payload.language or profile.language)
             metadata = dict(audio.metadata)
-            metadata["voice_generation"] = {
+            voice_generation: dict[str, object] = {
                 "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
                 "voice_profile_id": str(profile.id), "job_id": str(job.id), "attempt": job.attempt,
-                "target_text": job.payload.text, "qa_state": "pending",
+                "project_id": str(job.project_id), "target_text": job.payload.text, "qa_state": "pending",
             }
+            if performance_plan is not None:
+                voice_generation["narration_performance"] = {
+                    "plan": performance_plan.model_dump(mode="json"),
+                    "application_state": "adapter_applied_pending_quality_review",
+                    "adapter_support": performance_support.value,
+                }
+            metadata["voice_generation"] = voice_generation
             with self._audios.db.transaction():
                 self._audios.update(audio.model_copy(update={"metadata": metadata}))
         except (AudioImportError, FileNotFoundError, OSError, ValueError):
@@ -364,6 +445,12 @@ class TalkingGenerationJobHandler:
         generation = None if narration is None else narration.metadata.get("voice_generation")
         if narration is None or not isinstance(generation, dict) or generation.get("qa_state") != "verified":
             raise JobExecutionError("talking_narration_not_verified", "Talking generation requires a QA-verified generated narration asset", retryable=False)
+        if voice_human_review_status(narration) != "approved":
+            raise JobExecutionError(
+                "talking_narration_u_voice_pending",
+                "Talking generation requires an approved U-Voice likeness, naturalness and delivery review",
+                retryable=False,
+            )
         if job.payload.reference_clip_id not in profile.reference_clip_ids:
             raise JobExecutionError("talking_reference_not_authorized", "selected Talking reference is not part of the consented profile", retryable=False)
         reference_clip = self._clips.get(job.payload.reference_clip_id)

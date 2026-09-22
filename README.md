@@ -75,6 +75,11 @@ Local provider runtimes are opt-in. They do not auto-download weights and they d
 
 ### OmniVoice benchmark Voice
 
+The values below are path-shaped examples, not a verified machine profile.
+Choose device and provider parameters only through an explicit job override,
+saved provider+machine profile, or locally verified capability evidence. In
+particular, do not infer that `cuda` is usable merely because it appears below.
+
     $env:CONTENT_OS_VOICE_PROVIDER = "omnivoice"
     $env:CONTENT_OS_OMNIVOICE_PYTHON = "C:\path\to\python.exe"
     $env:CONTENT_OS_OMNIVOICE_MODEL = "C:\path\to\model-snapshot"

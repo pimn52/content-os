@@ -69,3 +69,24 @@ def test_terminal_closeout_uses_a_provider_baseline_without_promoting_cross_mach
         reset = client.get(PATH)
         reset_parameters = {item["key"]: item for item in reset.json()["resolution"]["parameters"]}
         assert reset_parameters["trailing_silence_lookahead_ms"]["source"] == "provider_default"
+
+
+def test_omnivoice_declares_narration_performance_intent_unknown_instead_of_a_speed_claim(tmp_path) -> None:
+    path = "/execution-settings/voice/omnivoice/official-pretrained/local-cuda/test-machine"
+    with TestClient(create_app(tmp_path / "voice-performance-feature.sqlite3")) as client:
+        schema = client.get("/execution-settings/schemas")
+        omnivoice = next(item for item in schema.json()["schemas"] if item["provider"] == "omnivoice")
+        assert omnivoice["features"] == [{
+            "feature": "narration_performance_intent",
+            "support": "unknown",
+            "implementation_owner": "none",
+            "help_text": "当前 OmniVoice 适配器没有把 Content OS 的重音、语速、停顿和节奏意图安全映射到本地运行时。speed 只是 Provider 参数；它不能替代该产品能力，也不构成可控演说表现证据。",
+            "parameter_keys": [],
+        }]
+        view = client.get(path)
+        assert view.status_code == 200
+        assert view.json()["features"] == [{
+            "feature": "narration_performance_intent",
+            "support": "unknown",
+            "reason": "no Content OS adapter implementation or local capability evidence",
+        }]

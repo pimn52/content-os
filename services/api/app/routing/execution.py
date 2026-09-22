@@ -56,6 +56,7 @@ class CapabilityFeature(StrEnum):
     """Provider-neutral optional behavior a capability may expose."""
 
     TERMINAL_FACE_CLOSEOUT = "terminal_face_closeout"
+    NARRATION_PERFORMANCE_INTENT = "narration_performance_intent"
 
 
 class FeatureSupport(StrEnum):
@@ -77,6 +78,7 @@ class FeatureImplementationOwner(StrEnum):
 
     CONTENT_OS_ADAPTER = "content_os_adapter"
     PROVIDER_NATIVE = "provider_native"
+    NONE = "none"
 
 
 class ResolutionSource(StrEnum):

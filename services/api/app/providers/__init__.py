@@ -27,7 +27,7 @@ from .scene_planner import (
 )
 from .voice import (
     OmniVoiceProvider, VoiceAuthenticationError, VoiceConfigurationError,
-    VoiceConnectionError, VoiceError, VoiceInputError, VoiceProvider,
+    PerformanceAwareVoiceProvider, VoiceConnectionError, VoiceError, VoiceInputError, VoiceProvider,
     VoiceProviderResponseError, VoiceRateLimitError, VoiceSynthesisResult, VoiceTimeout,
 )
 from .talking import (

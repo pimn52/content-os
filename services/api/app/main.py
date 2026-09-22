@@ -20,11 +20,12 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
-from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceProfile, VoiceQaJobPayload
+from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingRunRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReviewOutcome
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
+from app.master_narration import MasterNarrationComposer, MasterNarrationCompositionError
 from app.media import AudioAssetNotFound, AudioImportError, AudioImporter, AudioTranscriptPersistence, ClipTranscriptPersistence, FFProbeAdapter, ImageImportError, ImageImporter, MediaImportError, MediaImporter, NoClipsForAsset, ProbeError, SubtitleParseError, parse_subtitle_file
 from app.workspace import workspace_page
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
@@ -62,11 +63,14 @@ from app.provider_execution import (
     runtime_provider_identity,
 )
 from app.project_drafts import save_project_draft as persist_project_draft
+from app.narration_performance import NarrationPerformancePlanError, build_narration_performance_plan, compile_narration_delivery_plan, suggest_narration_performance, validate_narration_performance_plan
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, CapabilityReadiness, CommercialStatus, EvidenceProvenance, EvidenceStatus, ExecutionOverride, ExecutionSafetyContext, FeatureSupport, OperatingBound, ResolutionSource, RoutingConfigurationError, RoutingInputError, find_provider_settings_schema, find_unique_provider_settings_schema, list_provider_settings_schemas, resolve_execution, resolve_feature_support, resolve_verified_operating_limit, validate_schema_values
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
-from app.talking import TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
+from app.talking import TalkingRunAssembler, TalkingRunAssemblyError, TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
+from app.voice_takes import VoiceTakeComposer
+from app.voice_qa import VoiceQaError, apply_voice_human_review, voice_human_review_status
 
 
 class JobEnqueueRequest(BaseModel):
@@ -140,6 +144,24 @@ class TalkingSliceSeriesContinuityReviewResponse(BaseModel):
     findings: list[str]
     child_job_ids: list[UUID]
     reviewed_at: datetime
+
+
+class TalkingRunResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    project_id: UUID
+    series_id: UUID
+    master_narration_audio_id: UUID
+    master_start_ms: int
+    master_end_ms: int
+    authorized_reference_clip_id: UUID
+    child_evidence: list[TalkingRunChildEvidence]
+    continuity_review_id: UUID
+    assembled_asset_id: UUID
+    assembled_clip_id: UUID
+    automated_qa_state: Literal["verified"]
+    admission_state: Literal["admitted"]
+    created_at: datetime
 
 
 class ClipSearchRequest(BaseModel):
@@ -513,6 +535,18 @@ class VoiceGenerationJobRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
+    use_draft_performance_plan: bool = False
+
+
+class NarrationPerformancePlanRequest(BaseModel):
+    """Editable delivery direction, deliberately separate from Voice knobs."""
+
+    model_config = ConfigDict(extra="forbid")
+    delivery_goal: str = Field(min_length=1, max_length=1_000)
+    overall_pace: NarrationPace = NarrationPace.CONVERSATIONAL
+    cues: list[NarrationPerformanceCue] = Field(min_length=1, max_length=1_000)
+    source: NarrationPerformancePlanSource = NarrationPerformancePlanSource.USER
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
 
 
 class VoiceQaJobRequest(BaseModel):
@@ -522,6 +556,42 @@ class VoiceQaJobRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     narration_audio_id: UUID
     target_text: str = Field(min_length=1, max_length=100_000)
+
+
+class VoiceHumanReviewRequest(BaseModel):
+    """One U-Voice outcome; server time owns the final review timestamp."""
+
+    model_config = ConfigDict(extra="forbid")
+    approved: bool
+    evidence_reference: str = Field(min_length=1, max_length=500)
+    findings: list[str] = Field(min_length=1, max_length=100)
+    likeness: VoiceReviewOutcome
+    naturalness: VoiceReviewOutcome
+    emphasis: VoiceReviewOutcome
+    pace: VoiceReviewOutcome
+    pauses: VoiceReviewOutcome
+    rhythm: VoiceReviewOutcome
+
+    def review(self, *, reviewed_at: datetime) -> VoiceHumanReview:
+        return VoiceHumanReview(
+            approved=self.approved,
+            evidence_reference=self.evidence_reference,
+            findings=self.findings,
+            likeness=self.likeness,
+            naturalness=self.naturalness,
+            emphasis=self.emphasis,
+            pace=self.pace,
+            pauses=self.pauses,
+            rhythm=self.rhythm,
+            reviewed_at=reviewed_at,
+        )
+
+
+class MasterNarrationCompositionRequest(BaseModel):
+    """Ordered source takes; their existing Voice QA remains the first gate."""
+
+    model_config = ConfigDict(extra="forbid")
+    take_audio_ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
 class TalkingGenerationJobRequest(BaseModel):
@@ -559,6 +629,7 @@ class TalkingSliceSeriesJobRequest(BaseModel):
     narration_audio_id: UUID
     authorization_reference: str = Field(min_length=1, max_length=500)
     execution_machine_id: str = Field(min_length=1, max_length=200)
+    terminal_face_closeout: bool = False
 
 
 class TalkingReferenceSelectionRequest(BaseModel):
@@ -1165,6 +1236,140 @@ def create_app(
                 evidence_refs=evidence_refs,
             )
         return draft
+
+    @application.get(
+        "/projects/{project_id}/narration-performance-plan",
+        response_model=NarrationPerformancePlan,
+        tags=["voice"],
+    )
+    async def get_narration_performance_plan(project_id: UUID, request: Request) -> NarrationPerformancePlan:
+        """Return only the plan bound to the current persisted editable copy."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        draft = ProjectDraftRepository(db).get(project_id)
+        if draft is None or draft.narration_performance_plan is None:
+            raise HTTPException(status_code=404, detail="current draft has no narration performance plan")
+        return draft.narration_performance_plan
+
+    @application.get(
+        "/projects/{project_id}/narration-performance-suggestions",
+        response_model=NarrationPerformanceSuggestions,
+        tags=["voice"],
+    )
+    async def get_narration_performance_suggestions(
+        project_id: UUID,
+        request: Request,
+    ) -> NarrationPerformanceSuggestions:
+        """Suggest editable rhetorical cues for the current copy without saving or executing them."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        draft = ProjectDraftRepository(db).get(project_id)
+        if draft is None or not draft.script:
+            raise HTTPException(status_code=422, detail="narration performance suggestions require a persisted editable script")
+        try:
+            return suggest_narration_performance(draft.script)
+        except NarrationPerformancePlanError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.get(
+        "/projects/{project_id}/narration-performance-plan/delivery-plan",
+        response_model=NarrationDeliveryPlan,
+        tags=["voice"],
+    )
+    async def get_narration_delivery_plan(project_id: UUID, request: Request) -> NarrationDeliveryPlan:
+        """Compile current delivery direction without queueing a Voice job."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        draft = ProjectDraftRepository(db).get(project_id)
+        if draft is None or not draft.script or draft.narration_performance_plan is None:
+            raise HTTPException(status_code=404, detail="current draft has no narration performance plan")
+        try:
+            return compile_narration_delivery_plan(draft.narration_performance_plan, draft.script)
+        except NarrationPerformancePlanError as exc:
+            raise HTTPException(status_code=409, detail="current narration performance plan cannot compile") from exc
+
+    @application.put(
+        "/projects/{project_id}/narration-performance-plan",
+        response_model=NarrationPerformancePlan,
+        tags=["voice"],
+    )
+    async def save_narration_performance_plan(
+        project_id: UUID,
+        payload: NarrationPerformancePlanRequest,
+        request: Request,
+    ) -> NarrationPerformancePlan:
+        """Replace delivery direction for exact current copy; never retarget cues."""
+
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        draft = ProjectDraftRepository(db).get(project_id)
+        if draft is None or not draft.script:
+            raise HTTPException(status_code=422, detail="narration performance intent requires a persisted editable script")
+        try:
+            plan = build_narration_performance_plan(
+                draft.script,
+                delivery_goal=payload.delivery_goal,
+                overall_pace=payload.overall_pace,
+                cues=payload.cues,
+                source=payload.source,
+                evidence_refs=payload.evidence_refs,
+            )
+        except NarrationPerformancePlanError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        with db.transaction():
+            updated = persist_project_draft(
+                db,
+                project,
+                script=draft.script,
+                topic=draft.topic,
+                scenes=draft.scenes,
+                routes=draft.routes,
+                confirmed=draft.confirmed,
+                video_spec=draft.video_spec,
+                evidence_refs=draft.evidence_refs,
+                narration_performance_plan=plan,
+            )
+        assert updated.narration_performance_plan is not None
+        return updated.narration_performance_plan
+
+    @application.delete(
+        "/projects/{project_id}/narration-performance-plan",
+        status_code=204,
+        tags=["voice"],
+    )
+    async def clear_narration_performance_plan(project_id: UUID, request: Request) -> Response:
+        """Clear the current editable plan while prior draft revisions retain it."""
+
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        draft = ProjectDraftRepository(db).get(project_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="project has no persisted draft")
+        if draft.narration_performance_plan is not None:
+            with db.transaction():
+                persist_project_draft(
+                    db,
+                    project,
+                    script=draft.script,
+                    topic=draft.topic,
+                    scenes=draft.scenes,
+                    routes=draft.routes,
+                    confirmed=draft.confirmed,
+                    video_spec=draft.video_spec,
+                    evidence_refs=draft.evidence_refs,
+                    narration_performance_plan=None,
+                )
+        return Response(status_code=204)
 
     @application.get("/projects/{project_id}/cost-estimate", response_model=CostEstimate, tags=["runtime"])
     async def get_project_cost_estimate(project_id: UUID, request: Request) -> CostEstimate:
@@ -2201,6 +2406,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="voice profile not found")
         if not profile.consent.confirmed:
             raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
+        performance_plan = None
+        if payload.use_draft_performance_plan:
+            draft = ProjectDraftRepository(db).get(project_id)
+            if draft is None or draft.narration_performance_plan is None:
+                raise HTTPException(status_code=422, detail="requested Voice performance plan is unavailable from the current draft")
+            try:
+                performance_plan = validate_narration_performance_plan(draft.narration_performance_plan, payload.text)
+            except NarrationPerformancePlanError as exc:
+                raise HTTPException(status_code=422, detail="requested Voice text does not match the current narration performance plan") from exc
         now = datetime.now(timezone.utc)
         voice_payload = VoiceGenerationJobPayload(
             project_id=project_id,
@@ -2208,6 +2422,7 @@ def create_app(
             text=payload.text,
             authorization_reference=payload.authorization_reference,
             language=payload.language,
+            narration_performance_plan=performance_plan,
         )
         job = Job(
             id=uuid4(), project_id=project_id, type=JobType.GENERATE_VOICE,
@@ -2261,6 +2476,61 @@ def create_app(
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 
+    @application.post(
+        "/projects/{project_id}/voice-assets/{audio_id}/human-review",
+        response_model=AudioAsset,
+        tags=["voice"],
+    )
+    async def record_voice_human_review(
+        project_id: UUID, audio_id: UUID, payload: VoiceHumanReviewRequest, request: Request,
+    ) -> AudioAsset:
+        """Persist one irreversible U-Voice decision for an exact QA-verified asset."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        audios = AudioAssetRepository(db)
+        audio = audios.get(audio_id)
+        if audio is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if not _voice_audio_belongs_to_project(db, audio, project_id):
+            raise HTTPException(status_code=422, detail="narration audio does not belong to the requested project")
+        try:
+            updated = apply_voice_human_review(
+                audio,
+                payload.review(reviewed_at=datetime.now(timezone.utc)),
+            )
+        except (ValueError, VoiceQaError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        with db.transaction():
+            audios.update(updated)
+        return updated
+
+    @application.post(
+        "/projects/{project_id}/master-narration-candidates",
+        response_model=AudioAsset,
+        status_code=201,
+        tags=["voice"],
+    )
+    async def compose_master_narration(
+        project_id: UUID, payload: MasterNarrationCompositionRequest, request: Request,
+    ) -> AudioAsset:
+        """Compose verified source takes into a new candidate awaiting master-level Voice QA."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        importer = AudioImporter(db, request.app.state.data_root, FFProbeAdapter(resolve_local_executable("ffprobe")))
+        service = MasterNarrationComposer(
+            audios=AudioAssetRepository(db), jobs=JobRepository(db), importer=importer,
+            composer=VoiceTakeComposer(resolve_local_executable("ffmpeg")),
+            output_root=request.app.state.data_root / "generated" / "master-narration",
+        )
+        try:
+            return service.compose(project_id, payload.take_audio_ids)
+        except MasterNarrationCompositionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @application.post("/projects/{project_id}/talking-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
     async def enqueue_talking_generation(project_id: UUID, payload: TalkingGenerationJobRequest, request: Request) -> dict[str, Any]:
         """Persist one consented TalkingProvider request for a local worker."""
@@ -2282,6 +2552,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="narration audio not found")
         if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
             raise HTTPException(status_code=422, detail="talking generation requires QA-verified generated narration")
+        if voice_human_review_status(narration) != "approved":
+            raise HTTPException(
+                status_code=422,
+                detail="talking generation requires an approved U-Voice likeness, naturalness and delivery review",
+            )
 
         slice_max_duration_ms: int | None = None
         slice_limit_source: str | None = None
@@ -2503,6 +2778,40 @@ def create_app(
         except TalkingSlicePlanningError as exc:
             raise HTTPException(status_code=422, detail="Talking slice series cannot be safely planned") from exc
 
+        terminal_parameters: dict[str, object] = {}
+        terminal_parameter_sources: dict[str, str] = {}
+        terminal_profile_reference: str | None = None
+        if payload.terminal_face_closeout:
+            feature_schema = next(
+                (item for item in schema.features if item.feature is CapabilityFeature.TERMINAL_FACE_CLOSEOUT), None,
+            )
+            if feature_schema is None:
+                raise HTTPException(status_code=422, detail="the selected Talking provider has no Content OS terminal face-closeout adapter")
+            saved = ProviderMachineSettingRepository(db).get_by_scope_key(scope_key)
+            saved_override = None if saved is None else ExecutionOverride(
+                key, saved.values, ResolutionSource.USER_OVERRIDE, f"provider-machine-setting:{saved.id}",
+            )
+            feature = resolve_feature_support(
+                capability_profile, CapabilityFeature.TERMINAL_FACE_CLOSEOUT,
+                adapter_declared_support=feature_schema.support,
+            )
+            if feature.support in {FeatureSupport.UNKNOWN, FeatureSupport.UNSUPPORTED}:
+                raise HTTPException(status_code=422, detail="the selected Talking provider/machine cannot safely apply Content OS terminal face-closeout protection")
+            try:
+                resolution = resolve_execution(
+                    capability_profile, parameter_keys=list(feature_schema.parameter_keys), saved_override=saved_override,
+                    provider_defaults=schema.defaults,
+                    safety=ExecutionSafetyContext(consent_authorized=profile.consent.confirmed, budget_authorized=True,
+                        runtime_integrity_verified=True, requires_provenance=True),
+                )
+                if any(item.value is None for item in resolution.parameters):
+                    raise ValueError("terminal closeout parameters are unresolved")
+                terminal_parameters = validate_schema_values(schema, {item.key: item.value for item in resolution.parameters if item.value is not None})
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="terminal face closeout is not safely configured") from exc
+            terminal_parameter_sources = {item.key: item.source.value for item in resolution.parameters}
+            terminal_profile_reference = scope_key
+
         now = datetime.now(timezone.utc)
         child_ids = [uuid4() for _ in plan.slices]
         series = TalkingSliceSeries(
@@ -2527,6 +2836,11 @@ def create_app(
                     reference_clip_id=payload.reference_clip_id,
                     narration_audio_id=narration.id,
                     authorization_reference=payload.authorization_reference,
+                    terminal_face_closeout=payload.terminal_face_closeout and index == len(plan.slices) - 1,
+                    terminal_delivery_end_ms=(slice_plan.end_ms - slice_plan.start_ms) if payload.terminal_face_closeout and index == len(plan.slices) - 1 else None,
+                    execution_parameters=terminal_parameters if payload.terminal_face_closeout and index == len(plan.slices) - 1 else {},
+                    execution_parameter_sources=terminal_parameter_sources if payload.terminal_face_closeout and index == len(plan.slices) - 1 else {},
+                    execution_profile_reference=terminal_profile_reference if payload.terminal_face_closeout and index == len(plan.slices) - 1 else None,
                     slice_start_segment_index=slice_plan.start_segment_index,
                     slice_end_segment_index=slice_plan.end_segment_index,
                     slice_max_duration_ms=int(limit.value),
@@ -2735,6 +3049,46 @@ def create_app(
             "child_job_ids": list(review.child_job_ids),
             "reviewed_at": review.reviewed_at,
         }
+
+    @application.post(
+        "/projects/{project_id}/talking-slice-series/{series_id}/talking-run",
+        response_model=TalkingRunResponse,
+        status_code=201,
+        tags=["voice"],
+    )
+    async def admit_talking_run(project_id: UUID, series_id: UUID, request: Request) -> TalkingRun:
+        """Assemble a reviewed source-forward series into one normal product Asset/Clip."""
+
+        db: Database = request.app.state.database
+        series = TalkingSliceSeriesRepository(db).get(series_id)
+        if series is None or series.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Talking slice series not found")
+        existing = TalkingRunRepository(db).get_by_series_id(series.id)
+        if existing is not None:
+            return existing
+        importer = MediaImporter(db, request.app.state.data_root, FFProbeAdapter(resolve_local_executable("ffprobe")))
+        assembler = TalkingRunAssembler(
+            assets=AssetRepository(db), audios=AudioAssetRepository(db), clips=ClipRepository(db),
+            jobs=JobRepository(db), reviews=TalkingSliceSeriesContinuityReviewRepository(db),
+            runs=TalkingRunRepository(db), importer=importer,
+            output_root=request.app.state.data_root / "generated" / "talking-runs",
+            ffmpeg_command=resolve_local_executable("ffmpeg"),
+        )
+        try:
+            return assembler.assemble(series)
+        except (TalkingRunAssemblyError, MediaImportError, FileNotFoundError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.get(
+        "/projects/{project_id}/talking-runs",
+        response_model=list[TalkingRunResponse],
+        tags=["voice"],
+    )
+    async def list_talking_runs(project_id: UUID, request: Request) -> list[TalkingRun]:
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return TalkingRunRepository(db).list_for_project(project_id)
 
     @application.post("/clips/search", response_model=list[ClipSearchHitResponse])
     async def search_clips(payload: ClipSearchRequest, request: Request) -> list[ClipSearchHitResponse]:
@@ -3063,6 +3417,54 @@ def create_app(
         return FileResponse(source)
 
     return application
+
+
+def _voice_audio_belongs_to_project(
+    db: Database,
+    audio: AudioAsset,
+    project_id: UUID,
+    *,
+    _seen_audio_ids: frozenset[UUID] = frozenset(),
+) -> bool:
+    """Resolve generated-Voice provenance without trusting an arbitrary audio ID.
+
+    Ordinary takes bind through their generation job.  Composed masters keep a
+    project snapshot and, for older candidates, can still derive membership
+    from every persisted source take.  Imported narration deliberately has no
+    route through this U-Voice review endpoint.
+    """
+
+    if audio.id in _seen_audio_ids:
+        return False
+    seen = _seen_audio_ids | {audio.id}
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict):
+        return False
+    job_id = generation.get("job_id")
+    if isinstance(job_id, str):
+        try:
+            job = JobRepository(db).get(UUID(job_id))
+        except ValueError:
+            job = None
+        return job is not None and job.type is JobType.GENERATE_VOICE and job.project_id == project_id
+    declared_project_id = generation.get("project_id")
+    if declared_project_id == str(project_id) and generation.get("provider") == "composed_voice_takes":
+        return True
+    composition = generation.get("composition")
+    source_ids = composition.get("source_take_audio_ids") if isinstance(composition, dict) else None
+    if not isinstance(source_ids, list) or not source_ids:
+        return False
+    audios = AudioAssetRepository(db)
+    for raw_id in source_ids:
+        if not isinstance(raw_id, str):
+            return False
+        try:
+            source = audios.get(UUID(raw_id))
+        except ValueError:
+            return False
+        if source is None or not _voice_audio_belongs_to_project(db, source, project_id, _seen_audio_ids=seen):
+            return False
+    return True
 
 
 def _job_response(db: Database, job: Job) -> dict[str, Any]:

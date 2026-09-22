@@ -27,7 +27,7 @@ from app.domain.models import (
     VideoSpec,
     VideoVisual,
 )
-from app.voice_qa import comparison_tokens
+from app.voice_qa import comparison_tokens, voice_human_review_status
 from app.talking.closeout import TalkingCloseoutPlanningError, plan_terminal_talking_delivery
 
 
@@ -515,6 +515,13 @@ class VideoSpecAssembler:
         ):
             raise AssetIdentityMismatch(f"selected Asset and Clip do not match for scene {scene.scene_id!r}")
         if asset.source_kind is SourceKind.AI_VIDEO:
+            run = asset.metadata.get("talking_run")
+            if isinstance(run, dict):
+                if run.get("admission_state") != "admitted" or run.get("automated_qa_state") != "verified" or run.get("continuity_review_state") != "approved":
+                    raise InvalidCandidateSelection(
+                        f"scene {scene.scene_id!r} TalkingRun is not admitted for production assembly"
+                    )
+                return asset, clip
             generation = asset.metadata.get("talking_generation")
             if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
                 raise InvalidCandidateSelection(
@@ -536,11 +543,11 @@ class VideoSpecAssembler:
 
 
 def _require_generated_voice_qa(audio: AudioAsset) -> None:
-    """Keep generated narration out of final assembly until QA is evidenced.
+    """Keep generated narration out of final assembly until both gates pass.
 
-    Imported/recorded narration predates this provider boundary and remains an
-    explicit fallback. Only assets explicitly marked as generated voice are
-    subject to this guard.
+    Imported/recorded narration remains an explicit fallback.  Only assets
+    explicitly marked as generated Voice are subject to this guard, and their
+    independent technical QA plus U-Voice decision remain distinct.
     """
 
     generation = audio.metadata.get("voice_generation")
@@ -549,6 +556,10 @@ def _require_generated_voice_qa(audio: AudioAsset) -> None:
     if generation.get("qa_state") != "verified":
         raise GeneratedNarrationQaPending(
             "generated voice narration requires verified copy, duration, silence and playability QA before final assembly"
+        )
+    if voice_human_review_status(audio) != "approved":
+        raise GeneratedNarrationQaPending(
+            "generated voice narration requires an approved U-Voice likeness, naturalness and delivery review before final assembly"
         )
 
 

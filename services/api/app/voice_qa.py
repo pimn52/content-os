@@ -10,7 +10,7 @@ from typing import Sequence
 
 from opencc import OpenCC
 
-from app.domain.models import AudioAsset, TranscriptSegment
+from app.domain.models import AudioAsset, TranscriptSegment, VoiceHumanReview
 from app.providers.asr import TranscriptionResult
 from app.voice_recovery import recommend_voice_recovery
 
@@ -156,6 +156,11 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
     updated_generation = dict(generation)
     updated_generation["qa"] = report.metadata(provider=provider.strip(), model=model.strip())
     updated_generation["qa_state"] = "verified" if report.verified else "failed"
+    if report.verified:
+        # U-Voice remains a separate quality decision.  Mark it explicitly so
+        # a technically valid asset cannot look publication-ready merely
+        # because its ASR/copy checks passed.
+        updated_generation["human_review_state"] = "pending"
     # This does not alter the generated file or make a failed take eligible
     # for assembly. It tells the product which bounded recovery class is safe
     # to offer while retaining the original QA evidence.
@@ -170,6 +175,52 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
         ],
         "transcript_source": f"{provider.strip()}:{model.strip()}",
     })
+
+
+def voice_human_review_status(audio: AudioAsset) -> str:
+    """Return the durable U-Voice state without treating loose metadata as proof.
+
+    Legacy assets may predate this gate.  They are deliberately ``pending``
+    rather than implicitly approved; malformed or contradictory metadata is
+    likewise not an approval.
+    """
+
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+        return "unavailable"
+    declared = generation.get("human_review_state")
+    payload = generation.get("human_review")
+    if declared not in {"approved", "rejected"} or not isinstance(payload, dict):
+        return "pending"
+    try:
+        review = VoiceHumanReview.model_validate(payload)
+    except ValueError:
+        return "pending"
+    expected = "approved" if review.approved else "rejected"
+    return expected if declared == expected else "pending"
+
+
+def apply_voice_human_review(audio: AudioAsset, review: VoiceHumanReview) -> AudioAsset:
+    """Persist one immutable U-Voice decision after automated Voice QA.
+
+    A later workflow must create a new audio asset rather than overwriting a
+    rejected review on the exact same file.  That keeps user feedback and the
+    reviewable artifact bound together.
+    """
+
+    if not isinstance(audio, AudioAsset) or not isinstance(review, VoiceHumanReview):
+        raise VoiceQaError("Voice human review requires typed narration and review evidence")
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+        raise VoiceQaError("Voice human review requires verified automated Voice QA")
+    if generation.get("human_review_state") in {"approved", "rejected"}:
+        raise VoiceQaError("Voice human review is already recorded for this exact audio asset")
+    metadata = dict(audio.metadata)
+    updated_generation = dict(generation)
+    updated_generation["human_review_state"] = "approved" if review.approved else "rejected"
+    updated_generation["human_review"] = review.model_dump(mode="json")
+    metadata["voice_generation"] = updated_generation
+    return audio.model_copy(update={"metadata": metadata})
 
 
 def comparison_tokens(value: str) -> tuple[str, ...]:

@@ -14,7 +14,11 @@ from typing import Iterable, Sequence
 
 from app.db import IPProfileRepository, ProjectDraftRepository
 from app.db.database import Database
-from app.domain.models import CandidateAsset, DraftRoute, Project, ProjectDraft, ScenePlan, VideoSpec
+from app.domain.models import CandidateAsset, DraftRoute, NarrationPerformancePlan, Project, ProjectDraft, ScenePlan, VideoSpec
+from app.narration_performance import validate_narration_performance_plan
+
+
+_PERFORMANCE_PLAN_UNSET = object()
 
 
 def save_project_draft(
@@ -29,6 +33,7 @@ def save_project_draft(
     video_spec: VideoSpec | None,
     evidence_refs: Iterable[str] = (),
     accept_scene_plan_with_new_script: bool = False,
+    narration_performance_plan: NarrationPerformancePlan | None | object = _PERFORMANCE_PLAN_UNSET,
     now: datetime | None = None,
 ) -> ProjectDraft:
     """Persist one draft update and discard artifacts derived from old inputs.
@@ -57,6 +62,20 @@ def save_project_draft(
     scene_copy_changed = previous is None or _scene_copy_fingerprint(previous.scenes) != _scene_copy_fingerprint(stored_scenes)
     ip_profile_changed = previous is not None and previous.ip_profile_version != profile_version
     upstream_changed = script_changed or topic_changed or scene_copy_changed or ip_profile_changed
+
+    if narration_performance_plan is _PERFORMANCE_PLAN_UNSET:
+        # A normal copy edit never guesses how old character anchors should
+        # move. A plan remains only when the exact editable copy did not
+        # change; historical revisions retain the prior plan for audit.
+        performance_plan = None if script_changed else (previous.narration_performance_plan if previous else None)
+    elif narration_performance_plan is None:
+        performance_plan = None
+    elif isinstance(narration_performance_plan, NarrationPerformancePlan):
+        performance_plan = narration_performance_plan
+    else:
+        raise TypeError("narration_performance_plan must be a NarrationPerformancePlan, None, or omitted")
+    if performance_plan is not None:
+        validate_narration_performance_plan(performance_plan, script or "")
 
     reasons: list[str] = []
     if script_changed:
@@ -102,6 +121,7 @@ def save_project_draft(
         version=1 if previous is None else previous.version + 1,
         script_revision=script_revision,
         script=script,
+        narration_performance_plan=performance_plan,
         topic=topic,
         scenes=stored_scenes,
         routes=stored_routes,

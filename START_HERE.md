@@ -16,6 +16,10 @@ Read in this order:
 
 Do not start from old reviews, experiment logs or historical plans.
 
+When STATUS names a concrete evidence question, retrieve only the named Git
+revision or retained evaluation record needed to answer it. Do not promote an
+old fixture, rejected artifact or unrelated runtime result into current truth.
+
 ## 2. Product map
 
     Creator / IP / Intelligence
