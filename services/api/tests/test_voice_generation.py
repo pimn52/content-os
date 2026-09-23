@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
+import wave
 
 from fastapi.testclient import TestClient
 import pytest
@@ -444,6 +445,28 @@ def test_voice_qa_rejects_unrecognized_leading_audio_gap(tmp_path: Path) -> None
     assert not report.verified
     assert report.leading_silence_ms == 600
     assert "leading_silence_or_unrecognized_audio" in report.checks
+
+
+def test_voice_qa_measures_pcm_onset_instead_of_late_asr_timestamp(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    with wave.open(str(source), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(24_000)
+        output.writeframes(b"\0\0" * 2_400 + b"\xff\x1f" * 45_600)
+    audio = AudioAsset(
+        source_file=str(source), content_hash="o" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    report = verify_generated_voice(
+        audio,
+        "你好世界",
+        TranscriptionResult("你好世界", (TranscriptionSegment(650, 1_600, "你好世界"),)),
+    )
+    assert report.verified
+    assert report.leading_silence_ms == 100
+    assert report.leading_silence_source == "pcm_waveform"
 
 
 def test_voice_recovery_never_treats_copy_loss_as_a_silence_trim(tmp_path: Path) -> None:

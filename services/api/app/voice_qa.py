@@ -6,7 +6,9 @@ from difflib import SequenceMatcher
 import math
 from pathlib import Path
 import re
+import struct
 from typing import Sequence
+import wave
 
 from opencc import OpenCC
 
@@ -34,6 +36,7 @@ class VoiceQaReport:
     duplicate_token_count: int
     substitution_token_count: int
     leading_silence_ms: int
+    leading_silence_source: str
     longest_silence_ms: int
     transcript_segment_count: int
     checks: tuple[str, ...]
@@ -49,6 +52,7 @@ class VoiceQaReport:
             "duplicate_token_count": self.duplicate_token_count,
             "substitution_token_count": self.substitution_token_count,
             "leading_silence_ms": self.leading_silence_ms,
+            "leading_silence_source": self.leading_silence_source,
             "longest_silence_ms": self.longest_silence_ms,
             "transcript_segment_count": self.transcript_segment_count,
             "checks": list(self.checks),
@@ -94,7 +98,7 @@ def verify_generated_voice(
     missing, duplicate, substitutions = _alignment_counts(target, observed)
     coverage = 0.0 if not target else max(0.0, min(1.0, (len(target) - missing) / len(target)))
     segments = _segments(transcription.segments, audio.duration_ms)
-    leading_silence = segments[0].start_ms if segments else audio.duration_ms
+    leading_silence, leading_silence_source = _leading_silence(audio, segments)
     longest_silence = _longest_silence(segments, audio.duration_ms)
     checks: list[str] = []
     if not playable:
@@ -136,6 +140,7 @@ def verify_generated_voice(
         duplicate_token_count=duplicate,
         substitution_token_count=substitutions,
         leading_silence_ms=leading_silence,
+        leading_silence_source=leading_silence_source,
         longest_silence_ms=longest_silence,
         transcript_segment_count=len(segments),
         checks=tuple(checks),
@@ -288,3 +293,51 @@ def _longest_silence(segments: Sequence[TranscriptSegment], duration_ms: int) ->
     gaps = [segments[0].start_ms, duration_ms - segments[-1].end_ms]
     gaps.extend(max(0, later.start_ms - earlier.end_ms) for earlier, later in zip(segments, segments[1:]))
     return max(gaps)
+
+
+def _leading_silence(audio: AudioAsset, segments: Sequence[TranscriptSegment]) -> tuple[int, str]:
+    """Measure PCM WAV onset instead of treating an ASR timestamp as silence.
+
+    ASR timing can begin late even when it recognized complete copy. For a
+    readable PCM WAV, use a conservative -45dB, three-frame (30ms) onset.
+    Other formats retain the prior ASR-timestamp evidence rather than guessing
+    from a decoder that is not available at this boundary.
+    """
+    fallback = segments[0].start_ms if segments else audio.duration_ms
+    path = Path(audio.source_file)
+    if path.suffix.casefold() != ".wav":
+        return fallback, "asr_timestamp_fallback"
+    try:
+        with wave.open(str(path), "rb") as source:
+            if source.getcomptype() != "NONE" or source.getsampwidth() != 2 or source.getframerate() <= 0:
+                return fallback, "asr_timestamp_fallback"
+            frame_rate = source.getframerate()
+            channels = source.getnchannels()
+            frames_per_window = max(1, frame_rate // 100)
+            minimum_rms = 32767 * 10 ** (-45 / 20)
+            run_start_ms: int | None = None
+            consecutive = 0
+            elapsed_frames = 0
+            while True:
+                raw = source.readframes(frames_per_window)
+                if not raw:
+                    break
+                sample_count = len(raw) // 2
+                if sample_count == 0:
+                    break
+                samples = struct.unpack(f"<{sample_count}h", raw[:sample_count * 2])
+                rms = math.sqrt(sum(sample * sample for sample in samples) / sample_count)
+                window_ms = elapsed_frames * 1000 // frame_rate
+                elapsed_frames += len(raw) // (2 * channels)
+                if rms >= minimum_rms:
+                    if consecutive == 0:
+                        run_start_ms = window_ms
+                    consecutive += 1
+                    if consecutive >= 3 and run_start_ms is not None:
+                        return run_start_ms, "pcm_waveform"
+                else:
+                    consecutive = 0
+                    run_start_ms = None
+    except (OSError, EOFError, struct.error, wave.Error):
+        return fallback, "asr_timestamp_fallback"
+    return audio.duration_ms, "pcm_waveform"

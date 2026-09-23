@@ -11,15 +11,15 @@ Updated: 2026-09-23
 - The main R1 risk is creator Voice performance: new speech must preserve copy and creator identity while delivering understandable emphasis, pauses and rhetorical rhythm.
 - Narration Performance Plan, NarrationPerformanceUnit, VoiceGenerationSpan, reference-window selection and VoicePerformanceComposer now exist as execution foundations. Performance Unit is editorial semantics; GenerationSpan is the provider-call boundary.
 - V15 closed U-Voice FAIL: the short local OmniVoice baseline passed automated copy/playability QA but still sounded insufficiently like the creator and like script reading.
-- V16 did **not** reach a performance-quality verdict. A baseline passed Voice QA, but B GenerationSpan 0 (`先别急着写文案。选题有没有判断，决定观众会不会继续听。`) produced three 6.48s takes and all three failed independent copy QA. No complete B/C candidate or U-Voice review exists.
-- Therefore V16 is closed as **BLOCKED: OmniVoice copy-integrity**, not `LOCAL_PERFORMANCE_FAIL`.
-- The current evidence does not yet distinguish true model omission from QA false-negative, reference-window effects, or a short/under-allocated GenerationSpan. Those causes require different fixes and must be attributed before performance work resumes.
+- V16 did **not** reach a performance-quality verdict. A baseline passed Voice QA, but B GenerationSpan 0 (`先别急着写文案。选题有没有判断，决定观众会不会继续听。`) produced three 6.48s takes that the former Voice QA blocked. No complete B/C candidate or U-Voice review exists.
+- V17 closes `QA_ATTRIBUTION_PASS`: all three B takes contained the complete requested copy. The apparent copy-integrity block was a QA false-negative caused by treating a late ASR segment timestamp as physical leading silence; PCM waveform onset is 110ms for each take, below the 500ms limit.
+- The three takes have distinct hashes, so they were not identical retry replays. The selected B reference window was a valid persisted 240–6240ms authorized interval with an exact transcript match to its adjacent source segments. The historical A baseline used the then-default first 240–2240ms segment instead; its exact runtime speed/step parameters were not persisted, but the reference difference is not implicated in the now-cleared QA blocker.
 - R1 remains **OmniVoice-first / one-provider-first**. Do not open another Voice provider merely because this bounded integrity issue occurred.
 - OmniVoice official pretrained weights remain non-commercial evaluation material; R1 product usability and future commercial provider admission are separate decisions.
 
 ## Active work package — Gate V17: OmniVoice generation-integrity attribution
 
-**State: READY**  
+**State: PASS**
 **Primary implementation model: Terra**
 
 ### Objective
@@ -89,6 +89,31 @@ Do not change `num_step`, guidance/temperature, speed, duration, post-processing
 - `BLOCKED` — required retained evidence is missing or cannot be interpreted; name the smallest clearing action.
 
 No U-Voice review occurs in V17 unless a complete performance candidate somehow already exists; this package is about copy integrity only.
+
+### V17 result — `QA_ATTRIBUTION_PASS`
+
+- Phase A found no missing, duplicate or substitution tokens in any B take
+  (copy coverage 1.0). Their WAV hashes are distinct:
+  `e7aea22e…`, `1c705fcb…`, and `3252bf3f…`; all are 6480ms.
+- The previous ASR segment starts were 659ms, 1119ms and 559ms, which caused
+  the former 500ms leading-silence gate to fail. Direct PCM-WAV measurement
+  found a sustained speech onset at 110ms in all three. The comparable A
+  baseline measured 100ms onset and was already QA-passing. This attributes
+  the block to ASR timestamp use in QA, not real silence, omitted copy,
+  duration allocation or a model copy failure.
+- B's `best_window` index 0 reconstructs to authorized Clip
+  `e3547414…`, 240–6240ms, transcript `大家好 今天我想跟大家講一講 我去年暑假來到了希臘`; the two stored source
+  transcript segments exactly cover that interval. A's pre-GenerationSpan
+  worker used the first 240–2240ms segment. The prior worker did not persist
+  reference/settings receipts, so exact historical speed/step values remain
+  unknown rather than guessed.
+- Voice QA now measures readable PCM-WAV onset directly and records whether it
+  used waveform or ASR fallback evidence. Regression coverage verifies that a
+  late ASR timestamp cannot reject early PCM speech.
+- Existing audio only was re-QA'd: `74ec540b…`, `933b730f…` and `0d75b13a…`
+  completed and verified the original three B WAVs without changing their
+  files/hashes. No Phase B inference was run, no Provider changed, and no
+  U-Voice review occurred.
 
 ### Non-goals
 
