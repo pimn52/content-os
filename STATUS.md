@@ -4,196 +4,62 @@ Updated: 2026-09-23
 
 ## Current truth
 
-- Content OS remains an internal Alpha. R1 has not yet passed a complete repeatable new-topic → creator Voice → creator Talking → hybrid 30–60s export flow.
-- Creator/IP state, local media/library, ScenePlan/Hybrid Asset Router, Jobs/recovery, cost/accounting, MasterNarration/VideoSpec, TalkingRun admission and local render foundations exist.
-- Local-first Data + Hybrid Compute foundations exist. Cross-provider automatic Local↔Remote selection is not required to finish the immediate R1 proof.
-- Talking is no longer the main unknown. The reviewed source-forward multi-short route has produced an admitted 17.24s TalkingRun using the verified MasterNarration as final audio.
-- The main R1 risk is creator Voice performance: new speech must preserve copy and creator identity while delivering understandable emphasis, pauses and rhetorical rhythm.
-- Narration Performance Plan, NarrationPerformanceUnit, VoiceGenerationSpan, reference-window selection and VoicePerformanceComposer now exist as execution foundations. Performance Unit is editorial semantics; GenerationSpan is the provider-call boundary.
-- V15 closed U-Voice FAIL: the short local OmniVoice baseline passed automated copy/playability QA but still sounded insufficiently like the creator and like script reading.
-- V16 did **not** reach a performance-quality verdict. A baseline passed Voice QA, but B GenerationSpan 0 (`先别急着写文案。选题有没有判断，决定观众会不会继续听。`) produced three 6.48s takes that the former Voice QA blocked. No complete B/C candidate or U-Voice review exists.
-- V17 closes `QA_ATTRIBUTION_PASS`: all three B takes contained the complete requested copy. The apparent copy-integrity block was a QA false-negative caused by treating a late ASR segment timestamp as physical leading silence; PCM waveform onset is 110ms for each take, below the 500ms limit.
-- The three takes have distinct hashes, so they were not identical retry replays. The selected B reference window was a valid persisted 240–6240ms authorized interval with an exact transcript match to its adjacent source segments. The historical A baseline used the then-default first 240–2240ms segment instead; its exact runtime speed/step parameters were not persisted, but the reference difference is not implicated in the now-cleared QA blocker.
-- V18 has complete A/B/C technical candidates and has completed its user-authorized, read-only pause attribution; no terminal performance verdict has been made. The first review finding is that pause treatment is the primary publishability problem across A/B/C and currently obscures their meaningful differences in likeness, rhythm and emphasis. B/C's relative likeness improvement over A remains useful evidence and must not be discarded as a failure.
-- R1 remains **OmniVoice-first / one-provider-first**. Do not open another Voice provider merely because this bounded integrity issue occurred.
-- OmniVoice official pretrained weights remain non-commercial evaluation material; R1 product usability and future commercial provider admission are separate decisions.
+- Content OS remains an internal Alpha. R1 has not passed the repeatable new-topic → creator Voice → creator Talking → hybrid 30–60s export gate.
+- Local-first media, project, routing, jobs, cost, narration, TalkingRun and rendering foundations exist. An admitted 17.24s source-forward TalkingRun exists, but creator Voice performance is the immediate R1 risk.
+- R1 remains OmniVoice-first. Official OmniVoice pretrained weights are non-commercial evaluation material; commercial release admission is separate.
+- `NarrationPerformancePlan` is editorial intent; `NarrationPerformanceUnit` is a semantic unit; `VoiceGenerationSpan` is a provider-call boundary. Current OmniVoice execution has no verified mapping from plan cues to in-take word focus, phrasing or rhythm.
+- V17 cleared the apparent B Span copy-integrity failure as a Voice-QA ASR-timestamp false negative; all three retained takes covered the copy. The PCM-onset repair and evidence are in Git `a3ed505` and local QA jobs.
+- V18 produced technically QA-verified A/B/C candidates, but the user withheld an overall U-Voice verdict. Read-only pause attribution is preserved in Git `7c029f6` and the AudioAsset/Job records.
+- V19A repaired the Composer's additive seam silence. Its limited human review found that overall pause hierarchy and final-sentence delivery still need revision. B/C's creator-likeness gains and C's promising individual sentences remain valid evidence; no `LOCAL_PERFORMANCE_FAIL` or publishability pass is recorded.
 
-## Active work package — Gate V18: OmniVoice Performance A/B/C completion
+## Active work package — Gate V19A: Pause-first structural composition
 
-**State: PASS (`PAUSE_ATTRIBUTION_COMPLETE`; no terminal U-Voice quality verdict)**
+**State: PASS (`SEAM_ADDITIVITY_FIXED`; limited U-Voice review: `NEEDS_REVISION`)**
+
 **Primary implementation model: Terra**
 
-### Objective
+### Objective and scope
 
-The read-only pause-attribution phase is complete. Preserve its evidence and
-await user direction on any separately scoped repair; do not create audio or
-reach a final U-Voice verdict in this package.
+Derive exact-copy structural boundaries and keep Composer silence at a total seam budget. Recompose the existing B/C verified child takes only. Preserve the copy, plan, Span boundaries, authorized references and previous audio/QA evidence. Stable interfaces: `NarrationPerformancePlan`, `NarrationPerformanceUnit`, `VoiceGenerationSpan`, AudioAsset and Voice QA. Allowed files: narration/voice performance implementation, focused tests, this status and the Voice/Talking product spec.
 
-### Allowed modules / stable interfaces
+Non-goals: new OmniVoice inference, Provider or reference change, in-take trimming, time-stretch, synthetic breath, 30–60s narration, Talking, paid/remote work, and claims of word-level focus or rhythm control.
 
-- `services/api/app/voice_performance.py`, Voice QA/import/composition services,
-  durable Job/AudioAsset repositories and `STATUS.md` only as required for the
-  experiment evidence.
-- Keep `NarrationPerformanceUnit` as editorial semantics and
-  `VoiceGenerationSpan` as the provider-call boundary. Do not alter Core Voice
-  contracts, provider choice, the V16 test copy, Performance Plan, Span
-  boundaries, OmniVoice parameters or B's uniform authorized reference.
+### Technical result and review assets
 
-### Execution
+The boundary map distinguishes terminal sentence close, continuing clause, forward-binding lead-in (`但是，` / `最后，`) and no-break positions. Composer accepts only a terminal seam and fills only the difference between the local profile's 420ms total `BEAT` budget and measured native PCM edge silence. It does not use PCM as copy evidence.
 
-1. Reuse A asset `aa0c666f-f976-44f5-97bc-ba154e9f6b83`; confirm its exact
-   V16 copy and existing verified Voice QA remain valid. Do not generate A.
-2. Reuse B Span 0 from the first V17 re-QA pass:
-   `7b9fd8d1-4ca5-45cb-9290-9e9f422c72f7`. Retain all old failed QA jobs and
-   V17 attribution evidence; do not select a take by listening quality.
-3. Generate only missing B Span(s), with the established Span boundary,
-   unchanged OmniVoice settings and B's single authorized 240–6240ms reference
-   window. Independently Voice-QA each child take.
-4. Compose B in exact-copy order with `VoicePerformanceComposer`; apply only
-   plan-owned pauses, no synthetic breath or time-stretch. Import a new B
-   MasterNarration candidate and fresh-QA the complete master.
-5. Complete C using exactly B's copy, Performance Plan and Span boundaries.
-   Its sole core variable is authorized reference selection per
-   GenerationSpan—not per Unit. Independently QA children, compose and fresh-
-   QA the C master.
-6. **Pause-attribution phase (user-authorized):** inspect only the retained
-   A/B/C masters and child-take provenance. Use ASR/copy alignment to locate
-   expected textual boundaries, and PCM/waveform only to measure silence at
-   those aligned locations. Attribute each material pause as in-take,
-   composition-boundary, or indeterminate; assess its *relative* syntactic
-   hierarchy (sentence close > comma/forward-binding transition) without
-   inventing a universal millisecond target.
+All listed candidates use the exact V16 copy and passed full-copy Voice QA. A is unchanged. B/C use their retained V18 child takes; no new Voice inference was run.
 
-### Acceptance / exit
+| Candidate | AudioAsset | Local WAV | Duration | Fresh QA |
+|---|---|---|---:|---|
+| A baseline | `aa0c666f-f976-44f5-97bc-ba154e9f6b83` | `content-os-data/assets/audio-originals/e23e0fedba3b7096868182189e669e1d4814e88f401625f288f43eda95715aa1.wav` | 12320ms | Verified existing QA |
+| B pause-first | `8c85917b-0074-4013-98e2-72fe28428374` | `content-os-data/assets/audio-originals/a5f171390258bd614ac8cab38ebff9a763b9ec0f4632689d9f7fe0f83a0d0ba5.wav` | 12600ms | `7b980e03-3ee3-4f0c-b57a-e27c266eb2e3`, verified |
+| C pause-first | `b31ee4eb-6c26-48a7-904c-2ccffe75f29e` | `content-os-data/assets/audio-originals/360f96540855f832dd9f3e1a7a48fa472bc87c1fe49d2ae88eaa344617236e26.wav` | 14160ms | `96289b95-96fc-49cb-9091-a2e308a71282`, verified |
 
-- `AWAITING_U_REVIEW` — A, B and C are complete, independently and
-  master-level Voice-QA-verified AudioAssets. List exact assets/files and stop
-  for one U-Voice comparison: likeness, naturalness, content emphasis, pause
-  placement, rhetorical rhythm, splice/continuity and publishability.
-- `PASS` / `FAIL` — only the completed U-Voice review may determine
-  `LOCAL_PERFORMANCE_PASS`, `REFERENCE_AWARE_PASS` or
-  `LOCAL_PERFORMANCE_FAIL`; preserve the exact candidates and findings, and do
-  not tune, regenerate, switch provider or open a follow-on package without
-  explicit new scope.
-- `BLOCKED` — an ordinary normal-flow QA, composition, import or provenance
-  anomaly prevents one candidate; preserve evidence and stop. Do not open V19.
-- `PAUSE_ATTRIBUTION_COMPLETE` — existing-asset evidence identifies the
-  controllable layer for the material pause findings, or explicitly records
-  that it cannot do so. Stop before proposing or generating a repair.
+B/C's designed seam after `继续听。` now measures 420ms rather than 720ms/710ms. The change does not alter any silence within a Provider take. Focused narration/Voice tests: 34 passed; documentation and diff checks passed at the original V19A handoff.
 
-### V18 technical candidates and U-Voice result
+### Limited U-Voice finding
 
-All three candidates have the identical V16 test copy and a verified fresh
-Voice-QA record (copy coverage 1.0; no missing, duplicate or substitution
-tokens). No tuning, regeneration or Talking work may begin until this U-Voice
-review is complete.
+The user reports that A/C make `选题有没有判断，` feel more separated from `决定…` than the preceding full stop after `写文案。`. B makes the unpunctuated `选题` feel detached. C's sentence-to-sentence spacing remains too long, although `但是，结构决定这句话能不能被听懂` and `最后，让结论落下` sound comparatively good in isolation. All three need `最后，` to lead into the final claim, with `结论` prominent and `落下` given a controlled closing tail. No overall A/B/C quality ranking or terminal U-Voice decision has been made.
 
-- **A — baseline:** AudioAsset `aa0c666f-f976-44f5-97bc-ba154e9f6b83`,
-  `content-os-data/assets/audio-originals/e23e0fedba3b7096868182189e669e1d4814e88f401625f288f43eda95715aa1.wav`, 12320ms.
-- **B — plan-driven / uniform reference:** AudioAsset
-  `a4a9c9a5-6df4-47f2-94f2-aa185cb99a4b`,
-  `content-os-data/assets/audio-originals/3b0ce5427fe9408a40804c1212efba3ef8563d85a07bfe9f2adf90860fa59b84.wav`, 12900ms.
-  It reuses the first V17 re-QA passing Span 0, generates only missing Span 1,
-  and composes with plan-owned 420ms boundary pause.
-- **C — per-GenerationSpan reference:** AudioAsset
-  `abcaf04e-6b04-41c8-9a08-b2ca6d697437`,
-  `content-os-data/assets/audio-originals/7eb036b0184580756881ba71919b61b02ea5dc50f73832eb2cdadffe9f3045fb.wav`, 14450ms.
-  It uses B's exact copy, plan and two-Span boundary; only authorized reference
-  selection differs per Span (240–6240ms, then 6240–12240ms).
+The waveform/ASR attribution constrains the remedy: A has no internal physical silence ≥100ms; B Span 0 has none after `选题`; C has a 210ms in-take gap near the comma after `判断`, plus 950ms/560ms gaps in Span 1. The C sentence seam is still 420ms. Perceived separation also depends on syllable duration, pitch contour, energy and the following phrase's onset; a silence-only rule cannot guarantee sentence > comma > unpunctuated word-group hierarchy. Exact text placement from diagnostic word timestamps remains approximate; PCM only establishes physical silence.
 
-Required U-Voice comparison: creator likeness, naturalness, content emphasis,
-pause placement, rhetorical rhythm, mechanical splice/continuity and
-publishability. Only that review may determine `LOCAL_PERFORMANCE_PASS`,
-`REFERENCE_AWARE_PASS` or `LOCAL_PERFORMANCE_FAIL`.
+### Acceptance and exit
 
-**U-Voice feedback is being attributed — no terminal verdict.** The technical
-QA pass does not establish publishability. The review has found:
-
-- **A:** the landings in “会不会继续听”、“这句话能不能被听懂” and “让结论落下”
-  were too flat; the delivery did not make the intended point audible.
-- **B:** remained flat and added pauses without a clear hierarchy. The pause
-  after “选题” was longer than the preceding full-stop boundary, and the pause
-  after “最后” made it unclear whether that transition belonged to the prior or
-  following clause.
-- **C:** used pauses that were too long for outward-facing short-form speech
-  and sounded discontinuous, like unrehearsed thinking rather than an edited,
-  publishable delivery.
-
-The current review priority is pause hierarchy, not a final A/B/C ranking:
-punctuation establishes the default syntax boundary (full stop stronger than
-comma); a generated pause must clarify that hierarchy, never compete with it.
-For this copy, “选题 / 判断 / 听”, “结构 / 听懂” and “结论落下” are the semantic
-landings; transition and summary words such as “但是” and “最后” introduce the
-following point rather than replace it. Once pause treatment no longer masks
-the delivery, U-Voice can assess the remaining rhythm and emphasis/semantic
-landing differences and rank publishability. For short-form production,
-publishability—clear, rehearsed, efficiently paced delivery—outranks imitation
-of everyday disfluency.
-
-### Pause-attribution result — `PAUSE_ATTRIBUTION_COMPLETE`
-
-Scope was the seven retained A/B/C master and child WAVs only. A local
-word-timestamp ASR pass located approximate spoken boundaries; PCM at -45dB
-in 10ms windows measured physical silence only. Neither PCM nor the diagnostic
-alignment was used to re-decide copy correctness, and no asset or QA record was
-changed.
-
-- **A:** no internal physical silence of 100ms or more was found. Its perceived
-  pause/flatness issue is therefore timing or prosodic landing, not a removable
-  long PCM silence.
-- **B:** the designed sentence-end seam after “继续听。” contains 720ms of
-  physical silence: 190ms trailing silence in Span 0 + the composer's 420ms +
-  110ms leading silence in Span 1. B Span 0 has no internal physical silence
-  of 100ms or more, so the reported “选题” break is not a Composer join. B
-  Span 1 has a 380ms in-take silence whose approximate ASR boundary overlaps
-  “最后 → 让”; it is provider-take behavior, not composition behavior.
-- **C:** the same designed seam is 710ms (190ms trailing + 420ms composed +
-  100ms leading). C Span 0 contains a 210ms in-take silence before its final
-  clause. C Span 1 contains 950ms and 560ms in-take silences; the latter is
-  before its final “最后，让结论落下” sentence, while the former occurs in the
-  opening lead-in region. These cannot be repaired by the Composer.
-
-Therefore the Composer's additive seam silence is a concrete, controllable
-pause-hierarchy defect, but it is not the only cause. Current OmniVoice
-execution has no verified control for internal provider-take pauses, word-level
-focus, sentence landing or rhythm; silence trimming alone would not repair A
-or the material B/C findings.
-
-### Tests
-
-- focused Voice performance, Voice QA, generation and master-narration tests;
-- `python scripts/check_docs.py` and `git diff --check` before handoff.
-
-### Non-goals
-
-- no fourth version, retry sweep or parameter tuning;
-- no new Voice Provider/model, paid/remote call, 30–60s narration, Talking or
-  creator recording;
-- no `instruct` experiment or Performance Plan redesign;
-- no second U-Voice revision cycle for these assets;
-- waveform/PCM onset may establish physical leading silence only; ASR/copy
-  alignment remains required for spoken-copy integrity.
+V19A passes only its scoped structural-boundary and additive-seam repair. The limited human review is `NEEDS_REVISION`; these candidates are not approved for Talking or publication. Historical failed QA and the original A/B/C files remain intact. No next package is active.
 
 ## Next-package boundary
 
-V18 is closed after its user-authorized, read-only pause attribution. It does
-not claim a U-Voice quality pass or fail. The user has explicitly authorized a
-separate, bounded V19A repair focused only on deterministic composition seams;
-its result must not be used to claim control of in-take provider prosody.
+The next bounded proposal should use the user's prosodic grouping: `先别急着写文案。` / `选题有没有判断，决定观众会不会继续听。` / `但是，结构决定这句话能不能被听懂。` / `最后，让结论落下。`. Boundary strength is perceptual, not a global silence threshold. Preserve C's good sentence delivery while assessing safe removal of verified excess silence at sentence joins; treat `最后` as a connected lead-in, `结论` as the principal focus and `落下` as a modest final cadence. An in-take edit or new inference requires a separate bounded package, fresh full-copy QA and U-Voice review. Do not infer word-level OmniVoice control from the semantic plan.
+
+Only after creator Voice receives U-Voice approval may the first R1 end-to-end product gate start; repeat on a second topic before claiming R1.
 
 ## Current blockers
 
-- No local Voice route has yet passed U-Voice for both creator identity and
-  publishable content-aware delivery; V18's human review remains open.
-- Composer seam silence and provider-take pause behavior are now separately
-  attributed; no approved execution route yet controls the latter.
-- OmniVoice official pretrained weights remain a non-commercial evaluation
-  constraint for future commercial release.
-- No current GitHub Actions status is available for the latest master; local
-  test/build evidence remains tied to recorded implementation runs.
+- No local Voice route has passed U-Voice for both creator identity and publishable content-aware delivery. V18/V19A have no terminal overall Voice verdict.
+- V19A's seam repair cannot correct generated in-take phrasing or focus; an evidence-bounded product route for that capability remains to be established.
+- OmniVoice official pretrained weights remain a non-commercial evaluation constraint for future commercial release.
 
 ## Documentation rule
 
-STATUS contains only current truth, one active package, blockers and a short queue.
-
-Past package history does not remain here. Current product behavior belongs in the module specs; implementation history remains in Git/evaluation evidence.
+STATUS contains only current truth, one active package, blockers and a short queue. Historical implementation evidence remains in Git or local evaluation records; current product behavior belongs in the module specs.

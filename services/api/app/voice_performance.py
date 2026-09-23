@@ -9,13 +9,16 @@ control.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
+import struct
 import subprocess
 from typing import Sequence
 from uuid import UUID
+import wave
 
 from app.domain.models import Asset, AudioAsset, Clip, NarrationDeliverySegment, NarrationPause, NarrationPerformancePlan, TranscriptSegment
-from app.narration_performance import compile_narration_delivery_plan, validate_narration_performance_plan
+from app.narration_performance import NarrationBoundaryKind, NarrationBoundaryMap, compile_narration_delivery_plan, validate_narration_performance_plan
 
 
 class VoicePerformancePlanningError(ValueError):
@@ -105,15 +108,34 @@ class VoicePerformanceComposer:
     def __init__(self, ffmpeg_command: str | Path = "ffmpeg", *, timeout_seconds: float = 120.0) -> None:
         self.ffmpeg_command, self.timeout_seconds = str(ffmpeg_command), timeout_seconds
 
-    def compose(self, takes: Sequence[AudioAsset], spans: Sequence[VoiceGenerationSpan], output_path: str | Path) -> VoicePerformanceComposition:
+    def compose(
+        self,
+        takes: Sequence[AudioAsset],
+        spans: Sequence[VoiceGenerationSpan],
+        output_path: str | Path,
+        *,
+        boundary_map: NarrationBoundaryMap | None = None,
+    ) -> VoicePerformanceComposition:
         if len(takes) != len(spans) or not takes:
             raise VoicePerformancePlanningError("Performance composition requires one verified take per generation span")
-        pauses = tuple(pause_duration_ms(span.pause_after) for span in spans)
+        pauses: list[int] = []
+        for index, span in enumerate(spans):
+            if index == len(spans) - 1:
+                pauses.append(0)
+                continue
+            if boundary_map is None:
+                pauses.append(pause_duration_ms(span.pause_after))
+                continue
+            if boundary_map.kind_at(span.end_char) is not NarrationBoundaryKind.TERMINAL:
+                raise VoicePerformancePlanningError("Performance composition seam must be a terminal syntax boundary")
+            native_silence = _trailing_pcm_silence_ms(takes[index]) + _leading_pcm_silence_ms(takes[index + 1])
+            pauses.append(max(0, pause_duration_ms(span.pause_after) - native_silence))
+        pauses_tuple = tuple(pauses)
         output = Path(output_path).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         command = [self.ffmpeg_command, "-y"]
         input_count = 0
-        for take, pause_ms in zip(takes, pauses):
+        for take, pause_ms in zip(takes, pauses_tuple):
             generation = take.metadata.get("voice_generation")
             if not Path(take.source_file).is_file() or not isinstance(generation, dict) or generation.get("qa_state") != "verified":
                 raise VoicePerformancePlanningError("Performance composition requires local QA-verified takes")
@@ -132,11 +154,11 @@ class VoicePerformanceComposer:
             raise VoicePerformancePlanningError("Local performance composition did not produce playable audio")
         offset = 0
         segments: list[TranscriptSegment] = []
-        for take, pause_ms in zip(takes, pauses):
+        for take, pause_ms in zip(takes, pauses_tuple):
             for segment in take.transcript_segments:
                 segments.append(TranscriptSegment(start_ms=offset + segment.start_ms, end_ms=offset + segment.end_ms, text=segment.text))
             offset += take.duration_ms + pause_ms
-        return VoicePerformanceComposition(output, offset, tuple(segments), pauses)
+        return VoicePerformanceComposition(output, offset, tuple(segments), pauses_tuple)
 
 
 def plan_voice_performance_units(copy: str, plan: NarrationPerformancePlan) -> VoicePerformanceRenderPlan:
@@ -235,6 +257,47 @@ def select_voice_reference_windows(
 def pause_duration_ms(pause: NarrationPause | None) -> int:
     """Actual local composition settings, distinct from a semantic pause cue."""
     return {None: 0, NarrationPause.BRIEF: 180, NarrationPause.BEAT: 420, NarrationPause.LONG: 700}[pause]
+
+
+def _edge_pcm_silence_ms(audio: AudioAsset, *, leading: bool) -> int:
+    """Measure only physical PCM silence at a verified take edge.
+
+    This does not assign text to samples; ASR/copy alignment remains the
+    evidence for spoken-copy correctness.
+    """
+
+    path = Path(audio.source_file)
+    if path.suffix.casefold() != ".wav":
+        raise VoicePerformancePlanningError("Total-pause composition requires readable PCM WAV takes")
+    try:
+        with wave.open(str(path), "rb") as source:
+            if source.getcomptype() != "NONE" or source.getsampwidth() != 2 or source.getframerate() <= 0:
+                raise VoicePerformancePlanningError("Total-pause composition requires readable PCM WAV takes")
+            rate, channels = source.getframerate(), source.getnchannels()
+            raw = source.readframes(source.getnframes())
+    except (OSError, EOFError, struct.error, wave.Error) as exc:
+        raise VoicePerformancePlanningError("Total-pause composition could not read PCM WAV take") from exc
+    frame_count = len(raw) // (2 * channels)
+    window = max(1, rate // 100)
+    threshold = 32767 * 10 ** (-45 / 20)
+    starts = range(0, frame_count, window) if leading else range(max(0, frame_count - window), -1, -window)
+    quiet_frames = 0
+    for start in starts:
+        count = min(window, frame_count - start)
+        samples = struct.unpack_from(f"<{count * channels}h", raw, start * channels * 2)
+        rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+        if rms >= threshold:
+            break
+        quiet_frames += count
+    return quiet_frames * 1000 // rate
+
+
+def _leading_pcm_silence_ms(audio: AudioAsset) -> int:
+    return _edge_pcm_silence_ms(audio, leading=True)
+
+
+def _trailing_pcm_silence_ms(audio: AudioAsset) -> int:
+    return _edge_pcm_silence_ms(audio, leading=False)
 
 
 def _sentence_end(text: str) -> bool:

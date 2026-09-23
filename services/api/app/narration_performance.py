@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
+from enum import StrEnum
 
 from app.domain.models import (
     NarrationDeliveryPlan,
@@ -36,7 +38,59 @@ _SENTENCE_BOUNDARY = re.compile(r"[。！？!?；;]+")
 _PARALLEL_NEGATIVE_CLAUSE = re.compile(r"(?:没有|缺少|缺乏|不是)(?P<concept>[^，。；、！？!?]{1,24})")
 _ENUMERATION_MARKER = re.compile(r"哪些|什么|第一|第二|第三|首先|其次|最后|一是|二是|三是|一方面|另一方面")
 _TURN_MARKERS = ("但是", "然而", "不过", "反而", "却", "而不是")
+_FORWARD_BINDING_MARKERS = (*_TURN_MARKERS, "最后")
 _ASSERTION_MARKERS = ("关键", "核心", "本质", "结论", "应该", "必须", "意味着", "没有", "缺少", "缺乏", "需要")
+
+
+class NarrationBoundaryKind(StrEnum):
+    """Exact-copy syntax role for a possible composition boundary."""
+
+    TERMINAL = "terminal"
+    CONTINUING = "continuing"
+    FORWARD_BINDING = "forward_binding"
+    NO_BREAK = "no_break"
+
+
+@dataclass(frozen=True)
+class NarrationDeliveryBoundary:
+    char_index: int
+    kind: NarrationBoundaryKind
+    rationale: str
+
+
+@dataclass(frozen=True)
+class NarrationBoundaryMap:
+    """Derived syntax map; it is neither a provider parameter nor timing."""
+
+    copy_fingerprint: str
+    boundaries: tuple[NarrationDeliveryBoundary, ...]
+
+    def kind_at(self, char_index: int) -> NarrationBoundaryKind:
+        for boundary in self.boundaries:
+            if boundary.char_index == char_index:
+                return boundary.kind
+        return NarrationBoundaryKind.NO_BREAK
+
+
+def derive_narration_boundary_map(copy: str) -> NarrationBoundaryMap:
+    """Classify punctuation and lead-ins without inventing acoustic durations."""
+
+    fingerprint = narration_copy_fingerprint(copy)
+    values: dict[int, NarrationDeliveryBoundary] = {}
+    for index, char in enumerate(copy, start=1):
+        if char in "。！？!?；;":
+            values[index] = NarrationDeliveryBoundary(index, NarrationBoundaryKind.TERMINAL, "sentence close")
+        elif char in "，、,:：":
+            values[index] = NarrationDeliveryBoundary(index, NarrationBoundaryKind.CONTINUING, "continuing clause")
+    for marker in _FORWARD_BINDING_MARKERS:
+        offset = 0
+        while (found := copy.find(marker, offset)) != -1:
+            end = found + len(marker)
+            if end < len(copy) and copy[end] in "，、,:：":
+                values[end] = NarrationDeliveryBoundary(end, NarrationBoundaryKind.FORWARD_BINDING, f"{marker} binds forward")
+                values[end + 1] = NarrationDeliveryBoundary(end + 1, NarrationBoundaryKind.FORWARD_BINDING, f"{marker} binds forward")
+            offset = end
+    return NarrationBoundaryMap(fingerprint, tuple(values[index] for index in sorted(values)))
 
 
 def suggest_narration_performance(copy: str) -> NarrationPerformanceSuggestions:
@@ -435,9 +489,13 @@ def _validate_cue_anchor(cue: NarrationPerformanceCue, copy: str, copy_length: i
 
 
 __all__ = [
+    "NarrationBoundaryKind",
+    "NarrationBoundaryMap",
+    "NarrationDeliveryBoundary",
     "NarrationPerformancePlanError",
     "build_narration_performance_plan",
     "compile_narration_delivery_plan",
+    "derive_narration_boundary_map",
     "narration_copy_fingerprint",
     "narration_performance_plan_fingerprint",
     "suggest_narration_performance",

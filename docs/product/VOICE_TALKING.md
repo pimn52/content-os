@@ -190,6 +190,22 @@ It exists so a future capable adapter and a human-directed workflow consume the
 same editorial structure. A compiled plan is not an adapter application
 receipt, QA pass, or U-Voice approval.
 
+### Structural pause boundaries
+
+In addition to editorial cues, Voice execution derives an exact-copy structural
+boundary map. A terminal sentence close, continuing clause, forward-binding
+lead-in and ordinary no-break position are distinct. A transition or summary
+lead-in such as “但是，” or “最后，” binds to the following claim; it is not an
+eligible synthetic-pause or composition-seam position.
+
+When independently verified Span takes are composed, a semantic pause is a
+local profile's **total seam budget**, not automatic extra silence. The
+Composer measures existing PCM edge silence and supplies only the deficit at an
+eligible terminal boundary; it never uses PCM to decide which words were
+spoken. This controls composition seams only. It does not claim to repair
+provider-take-internal pauses, word focus, sentence landing or rhetorical
+rhythm, all of which still require an adapter application receipt and U-Voice.
+
 ## Talking system
 
 ### Product intent
