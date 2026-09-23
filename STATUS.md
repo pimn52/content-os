@@ -4,60 +4,59 @@ Updated: 2026-09-23
 
 ## Current truth
 
-- Content OS remains an internal Alpha. R1 has not passed the repeatable new-topic → creator Voice → creator Talking → hybrid 30–60s export gate.
-- Local-first media, project, routing, jobs, cost, narration, TalkingRun and rendering foundations exist. An admitted 17.24s source-forward TalkingRun exists, but creator Voice performance is the immediate R1 risk.
+- Content OS remains an internal Alpha. R1 has not passed the repeatable new-topic → creator Voice → creator Talking → hybrid 30–60s export gate. Creator Voice performance is the immediate R1 risk.
+- Local-first media, project, routing, jobs, cost, narration, TalkingRun and rendering foundations exist. An admitted 17.24s source-forward TalkingRun exists.
 - R1 remains OmniVoice-first. Official OmniVoice pretrained weights are non-commercial evaluation material; commercial release admission is separate.
-- `NarrationPerformancePlan` is editorial intent; `NarrationPerformanceUnit` is a semantic unit; `VoiceGenerationSpan` is a provider-call boundary. Current OmniVoice execution has no verified mapping from plan cues to in-take word focus, phrasing or rhythm.
-- V17 cleared the apparent B Span copy-integrity failure as a Voice-QA ASR-timestamp false negative; all three retained takes covered the copy. The PCM-onset repair and evidence are in Git `a3ed505` and local QA jobs.
-- V18 produced technically QA-verified A/B/C candidates, but the user withheld an overall U-Voice verdict. Read-only pause attribution is preserved in Git `7c029f6` and the AudioAsset/Job records.
-- V19A repaired the Composer's additive seam silence. Its limited human review found that overall pause hierarchy and final-sentence delivery still need revision. B/C's creator-likeness gains and C's promising individual sentences remain valid evidence; no `LOCAL_PERFORMANCE_FAIL` or publishability pass is recorded.
+- `NarrationPerformancePlan` is editorial intent; `NarrationPerformanceUnit` is semantic; `VoiceGenerationSpan` is a provider-call boundary. Current OmniVoice execution has no verified mapping from plan cues to in-take word focus, phrasing or rhythm.
+- V17 cleared B copy QA attribution (Git `a3ed505`); V18 produced technical A/B/C without an overall U-Voice verdict (Git `7c029f6`); V19A repaired Composer seam silence (Git `1fe6f5f`). V19B–E made one C-derived candidate each, preserving original media, manifests and independent QA evidence.
+- User U-Voice accepted V19E's pause/rhythm as “基本可以” and explicitly authorized moving to emphasis/tail. **V19E: PASS for this bounded pause-repair objective only.** V19E AudioAsset `041ca938-6d0c-4346-8b2c-c1652d326b40` (9.77s) has independent full-copy Voice QA job `89b3d9e5-e6c7-4573-b492-498657d9c321` verified. This is not an overall U-Voice approval, creator-likeness verdict or release admission.
+- Local V19E word alignment: `判断` ≈3.14–3.96s, following `决定` ≈3.96–4.46s; their whole-range RMS is about -23.4 versus -16.2dBFS, with a weak extended `断` tail. `结构` and `结论` are already relatively prominent in level. `落下` ≈9.24–9.66s fades quickly. Word timings and acoustic measures are diagnostic estimates, not proof of perceived emphasis.
 
-## Active work package — Gate V19A: Pause-first structural composition
+## Active work package — Gate V20A: content-focus and landing pilot
 
-**State: PASS (`SEAM_ADDITIVITY_FIXED`; limited U-Voice review: `NEEDS_REVISION`)**
+**State: AWAITING_U_REVIEW**
 
 **Primary implementation model: Terra**
 
-### Objective and scope
+### Objective
 
-Derive exact-copy structural boundaries and keep Composer silence at a total seam budget. Recompose the existing B/C verified child takes only. Preserve the copy, plan, Span boundaries, authorized references and previous audio/QA evidence. Stable interfaces: `NarrationPerformancePlan`, `NarrationPerformanceUnit`, `VoiceGenerationSpan`, AudioAsset and Voice QA. Allowed files: narration/voice performance implementation, focused tests, this status and the Voice/Talking product spec.
+Produce exactly one V19E-derived technical candidate that tests whether controlled local focus balancing can make `判断` lead into `决定` without an accent jump, while giving `结论 / 落下` a clearer but publishable landing. Preserve the accepted punctuation rhythm. Stop for U-Voice after fresh QA; do not claim word-level semantic performance capability from DSP alone.
 
-Non-goals: new OmniVoice inference, Provider or reference change, in-take trimming, time-stretch, synthetic breath, 30–60s narration, Talking, paid/remote work, and claims of word-level focus or rhythm control.
+### Allowed files / stable interfaces
 
-### Technical result and review assets
+- Allowed: one evaluation-only PCM/prosody edit script and real-WAV tests, existing AudioAsset import and Voice QA jobs, `STATUS.md`.
+- Stable: exact copy, V19E and prior source media/evidence, authorized creator voice lineage, AudioAsset/Voice QA contracts, current plan's punctuation/rhythm cues. Add user-directed exact-copy cues for `结论` emphasis and locally measured `落下` pace; retain other cues.
 
-The boundary map distinguishes terminal sentence close, continuing clause, forward-binding lead-in (`但是，` / `最后，`) and no-break positions. Composer accepts only a terminal seam and fills only the difference between the local profile's 420ms total `BEAT` budget and measured native PCM edge silence. It does not use PCM as copy evidence.
+### Bounded method
 
-All listed candidates use the exact V16 copy and passed full-copy Voice QA. A is unchanged. B/C use their retained V18 child takes; no new Voice inference was run.
+1. Verify V19E source hash, QA, aligned word windows, level/headroom and local FFmpeg `atempo` availability. One explicit candidate only: smooth gain balance on the weak `断` core and over-prominent first `决定`, a modest `结论` lift, and a small pitch-preserving local duration increase for `落下`. No global speed or pitch change. Do not amplify near-clipping `判`; do not indiscriminately boost already-prominent `结构`.
+2. Preserve every PCM sample outside declared word windows/edge envelopes except the time shift following `落下`; log exact windows, gains, output hash and plan provenance. Apply conservative peak ceiling, reject invalid/empty transformed media, and keep V19E unchanged.
+3. Import one new AudioAsset and run one fresh independent full-master Voice QA. If copy, playability, duration/silence or edit safety fails, set `BLOCKED`; no second DSP settings or provider attempt inside this package.
 
-| Candidate | AudioAsset | Local WAV | Duration | Fresh QA |
-|---|---|---|---:|---|
-| A baseline | `aa0c666f-f976-44f5-97bc-ba154e9f6b83` | `content-os-data/assets/audio-originals/e23e0fedba3b7096868182189e669e1d4814e88f401625f288f43eda95715aa1.wav` | 12320ms | Verified existing QA |
-| B pause-first | `8c85917b-0074-4013-98e2-72fe28428374` | `content-os-data/assets/audio-originals/a5f171390258bd614ac8cab38ebff9a763b9ec0f4632689d9f7fe0f83a0d0ba5.wav` | 12600ms | `7b980e03-3ee3-4f0c-b57a-e27c266eb2e3`, verified |
-| C pause-first | `b31ee4eb-6c26-48a7-904c-2ccffe75f29e` | `content-os-data/assets/audio-originals/360f96540855f832dd9f3e1a7a48fa472bc87c1fe49d2ae88eaa344617236e26.wav` | 14160ms | `96289b95-96fc-49cb-9091-a2e308a71282`, verified |
+### Acceptance / exit
 
-B/C's designed seam after `继续听。` now measures 420ms rather than 720ms/710ms. The change does not alter any silence within a Provider take. Focused narration/Voice tests: 34 passed; documentation and diff checks passed at the original V19A handoff.
+- `AWAITING_U_REVIEW`: candidate passes fresh technical QA; list it beside unchanged V19E. Ask whether `判断` now owns the claim without `决定` sounding artificially suppressed, whether `结论` lands and `落下` has a natural controlled tail, and whether creator likeness/publishability survive. Stop immediately.
+- `BLOCKED`: safe edit or fresh QA fails; preserve evidence and stop.
 
-### Limited U-Voice finding
+Tests: real WAV sample/peak/envelope and duration tests; Performance Plan validation; independent Voice QA; `python scripts/check_docs.py`; `git diff --check`.
 
-The user reports that A/C make `选题有没有判断，` feel more separated from `决定…` than the preceding full stop after `写文案。`. B makes the unpunctuated `选题` feel detached. C's sentence-to-sentence spacing remains too long, although `但是，结构决定这句话能不能被听懂` and `最后，让结论落下` sound comparatively good in isolation. All three need `最后，` to lead into the final claim, with `结论` prominent and `落下` given a controlled closing tail. No overall A/B/C quality ranking or terminal U-Voice decision has been made.
+Non-goals: a second candidate, new OmniVoice generation, another provider/reference, synthetic breath, 30–60s, Talking, paid/remote work, automatic word-level emphasis claims, or product-wide gain/tempo defaults.
 
-The waveform/ASR attribution constrains the remedy: A has no internal physical silence ≥100ms; B Span 0 has none after `选题`; C has a 210ms in-take gap near the comma after `判断`, plus 950ms/560ms gaps in Span 1. The C sentence seam is still 420ms. Perceived separation also depends on syllable duration, pitch contour, energy and the following phrase's onset; a silence-only rule cannot guarantee sentence > comma > unpunctuated word-group hierarchy. Exact text placement from diagnostic word timestamps remains approximate; PCM only establishes physical silence.
+### V20A result — stop for U-Voice
 
-### Acceptance and exit
-
-V19A passes only its scoped structural-boundary and additive-seam repair. The limited human review is `NEEDS_REVISION`; these candidates are not approved for Talking or publication. Historical failed QA and the original A/B/C files remain intact. No next package is active.
+- New derived C AudioAsset `03c3cc12-a0a3-4c55-996f-c190babc182a`: `content-os-data/assets/audio-originals/89e6c19228d3ac6c7006ed5cf87964e0a964ad5fc3117e928bf6bbf84e185ab4.wav` (9.843s). Compare against unchanged, pause-approved V19E AudioAsset `041ca938-6d0c-4346-8b2c-c1652d326b40`: `content-os-data/assets/audio-originals/1b154a71df688e2701c491888425d5ee15e0e0fc198f5116c7c5775d0d7408c2.wav` (9.77s). Both retained hashes match the media.
+- Evaluation-only intervention: smooth +3dB on the `断` core (3380–3550ms), -2dB on the first `决定` (3960–4460ms), +1dB on `结论` (8960–9240ms); each has a 20ms gain ramp and remains below the peak ceiling. `判` was not boosted because it already approaches peak headroom; `结构` was left alone because it is already relatively prominent. The `下`-onset-to-tail window (9460–9670ms) received only local pitch-preserving FFmpeg `atempo=0.65` with a 10ms crossfade, increasing master duration by about 73ms. No pause edit, provider call, new reference or speech synthesis. Updated exact-copy plan adds `结论` emphasis and measured `落下` pace; this is intent/provenance, **not** an OmniVoice application receipt.
+- Fresh independent full-master Voice QA job `7557e7ea-a1f3-4682-9383-ae523028f270` completed on attempt 1: playable, 100% copy coverage, zero missing/duplicate/substituted tokens, QA `verified`; human review pending. File peak remains about -0.7dBFS. Exact windows, transformed tail frames and source lineage: `content-os-data/evaluation-evidence/v20a-c-focus-landing/v20a-c-focus-landing.json` and derived AudioAsset metadata.
+- U-Voice question: versus V19E, does `判断` carry the key claim without `决定` sounding artificially suppressed? Do `结论` and `落下` now land naturally, or does the stretched tail sound processed? Did creator likeness, pauses or publishability regress? Technical QA does not answer these questions. Stop here; do not claim word-level performance capability or overall Voice PASS.
 
 ## Next-package boundary
 
-The next bounded proposal should use the user's prosodic grouping: `先别急着写文案。` / `选题有没有判断，决定观众会不会继续听。` / `但是，结构决定这句话能不能被听懂。` / `最后，让结论落下。`. Boundary strength is perceptual, not a global silence threshold. Preserve C's good sentence delivery while assessing safe removal of verified excess silence at sentence joins; treat `最后` as a connected lead-in, `结论` as the principal focus and `落下` as a modest final cadence. An in-take edit or new inference requires a separate bounded package, fresh full-copy QA and U-Voice review. Do not infer word-level OmniVoice control from the semantic plan.
-
-Only after creator Voice receives U-Voice approval may the first R1 end-to-end product gate start; repeat on a second topic before claiming R1.
+Stop for V20A U-Voice. If level/tail editing cannot deliver true content-aware focus, record that limit and open a separate bounded OmniVoice delivery-generation experiment only after review, not a blind DSP grid. Only after an overall creator Voice approval may first R1 end-to-end and second-topic repeatability proceed.
 
 ## Current blockers
 
-- No local Voice route has passed U-Voice for both creator identity and publishable content-aware delivery. V18/V19A have no terminal overall Voice verdict.
-- V19A's seam repair cannot correct generated in-take phrasing or focus; an evidence-bounded product route for that capability remains to be established.
+- No local Voice route has passed U-Voice for both creator identity and publishable content-aware delivery. V19E's scoped pause approval is not overall U-Voice.
+- OmniVoice semantic plan application and word-level focus remain unverified.
 - OmniVoice official pretrained weights remain a non-commercial evaluation constraint for future commercial release.
 
 ## Documentation rule
