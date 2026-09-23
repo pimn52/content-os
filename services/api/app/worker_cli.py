@@ -39,6 +39,7 @@ from app.providers.voice import OmniVoiceProvider, VoiceConfigurationError, Voic
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
 from app.runtime import resolve_local_executable
+from app.voice_performance import select_voice_reference_windows
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,37 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
             raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
         return clip_start, clip_end, transcript.strip()
 
+    def selected_reference_window(profile: object) -> tuple[Path, int, int, str]:
+        reference_ids = getattr(profile, "reference_clip_ids", None)
+        if not reference_ids:
+            raise VoiceInputError("OmniVoice requires at least one consented reference Clip")
+        referenced = [clips.get(item) for item in reference_ids]
+        available = [item for item in referenced if item is not None]
+        if not available:
+            raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
+        policy = os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment").strip().lower()
+        if policy == "best_window":
+            resolved_assets = {asset.id: asset for asset in (assets.get(clip.asset_id) for clip in available) if asset is not None}
+            windows = select_voice_reference_windows(available, resolved_assets, data_root=config.data_root)
+            if windows:
+                raw_index = os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "0").strip()
+                try:
+                    window_index = int(raw_index)
+                except ValueError as exc:
+                    raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX must be a non-negative integer") from exc
+                if window_index < 0 or window_index >= len(windows):
+                    raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX is outside available authorized windows")
+                window = windows[window_index]
+                return Path(window.source_file), window.start_ms, window.end_ms, window.transcript
+        elif policy != "first_segment":
+            raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY must be first_segment or best_window")
+        clip = available[0]
+        asset = assets.get(clip.asset_id)
+        if asset is None:
+            raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
+        start_ms, end_ms, transcript = reference_window(clip)
+        return _resolve_omnivoice_reference_path(asset.source_file, config.data_root), start_ms, end_ms, transcript
+
     def provider_language(language: str | None) -> str | None:
         # The public contract uses compact language codes.  OmniVoice accepts
         # them, but its current CLI/model path is materially more reliable
@@ -328,19 +360,9 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         return {"zh": "Chinese", "en": "English"}.get(normalized, language.strip() if normalized else None)
 
     def synthesize(profile: object, text: str, target: Path, language: str | None) -> Path:
-        # Resolve the first real Clip only at the worker boundary. This keeps
-        # vendor-specific reference audio/text out of the Core VoiceProfile.
-        reference_ids = getattr(profile, "reference_clip_ids", None)
-        if not reference_ids:
-            raise VoiceInputError("OmniVoice requires at least one consented reference Clip")
-        clip = clips.get(reference_ids[0])
-        if clip is None:
-            raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
-        asset = assets.get(clip.asset_id)
-        source_path = None if asset is None else _resolve_omnivoice_reference_path(asset.source_file, config.data_root)
-        if source_path is None or not source_path.is_file():
+        source_path, reference_start_ms, reference_end_ms, reference_text = selected_reference_window(profile)
+        if not source_path.is_file():
             raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
-        reference_start_ms, reference_end_ms, reference_text = reference_window(clip)
         resolved_language = provider_language(language or getattr(profile, "language", None))
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="content-os-omnivoice-", dir=str(target.parent)) as temporary:

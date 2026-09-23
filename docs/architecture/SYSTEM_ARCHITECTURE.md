@@ -140,6 +140,7 @@ adapter receipt and audio-quality evidence.
 The following support reliable execution but should not leak into product semantics unless needed for diagnosis:
 
 - provider child calls;
+- VoiceGenerationSpans and their bounded generation/QA attempts;
 - Talking slice plans;
 - source reference windows;
 - local GPU leases;

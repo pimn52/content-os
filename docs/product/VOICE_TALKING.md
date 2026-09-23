@@ -28,12 +28,24 @@ new copy
 → U-Voice
 ```
 
-Long narration does not have to be generated in one provider call. A provider may be more reliable with bounded natural sentence/phrase takes. Content OS may compose only independently verified takes and must QA the resulting master again.
+Long narration does not have to be generated in one provider call. A provider may be more reliable with bounded natural sentence/phrase takes. A semantic
+`NarrationPerformanceUnit` is not itself a provider call: the Voice execution
+layer may merge adjacent Units into an adapter/profile-scoped
+`VoiceGenerationSpan`, while retaining each Unit's exact-copy and delivery-cue
+provenance. Its preferred size is local capability evidence, not a universal
+product seconds limit. Content OS may compose only independently verified Span
+takes and must QA the resulting master again.
 
 The composition boundary persists the ordered source-take IDs and provisional
 timing on a QA-pending candidate. Its final timing and eligibility are replaced
 only by fresh independent master-level Voice QA; the candidate is not eligible
 for VideoSpec, Talking or render while pending.
+
+Each GenerationSpan uses bounded generate → independent copy-QA attempts. A
+failed attempt remains a distinct provenance record and is never overwritten;
+the first complete QA-passing take is the only eligible input to composition.
+If the adapter/profile exhausts its configured bounded attempts, the route is a
+generation-integrity block, not evidence about U-Voice performance quality.
 
 ### Voice QA
 
