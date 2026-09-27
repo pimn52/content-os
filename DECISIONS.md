@@ -189,6 +189,16 @@ pass when delivery is adequate for publication; it need not be ideal or prove
 generalized word-level control. Record imperfections and keep improving them
 without turning one bounded human acceptance into a provider capability claim.
 
+## D022 — Visual direction is a product layer, not renderer tuning
+
+ScenePlan owns editorial meaning, Hybrid Asset Router owns the material route, and VideoSpec owns deterministic rendering.
+
+The presentation decision between them belongs to a provider/render-neutral EditPlan: framing policy, text/subtitle treatment, semantic graphic treatment, transition intent, style tokens and explicit fallback.
+
+Unknown face-safe crop evidence must not be converted into a fixed crop. Prefer a safe contain/design treatment until a crop is verified across the full used interval. Full motion-aware reframing may be added later without changing EditPlan semantics.
+
+A successful assisted render does not prove product-generated planning. R1 still requires the normal product flow to produce the scene/edit plan rather than relying on an implementation script.
+
 ## Current provider admission state
 
 Provider-specific current state is maintained in docs/product/VOICE_TALKING.md, not duplicated here.
