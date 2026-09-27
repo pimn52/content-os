@@ -421,49 +421,51 @@ For a multi-slice TalkingRun:
 
 Provider-specific lookahead parameters remain inside the provider settings schema.
 
-## Current evidence and limits
+## Current productization status
 
-- MuseTalk 1.5 and VideoReTalking are rejected for the current product path.
-- LatentSync 1.5 remains a benchmark-only local adapter; its official benchmark/model licensing does not make it a commercial default.
-- On the current development machine, fresh-Voice evidence has established a short local operating bound around 4.46s pass / 5.12s fail for the reviewed setup.
-- A 17.28s source-forward multi-short LatentSync series has received human approval as natural, continuous and publishable for the exact reviewed configuration/reference/take.
-- That evidence proves the execution strategy for the reviewed case; it does not prove every source clip/provider/machine will behave the same.
-- Current long-form OmniVoice reliability is still a product risk. Long Master Narration must not be assumed reliable from short-sample success.
-- Chatterbox has prior short local QA evidence but was rejected as a Voice route
-  by U-Voice for creator similarity and naturalness; it is intentionally not a
-  Core adapter or R1 default.
-- No delivery-capable Voice provider is admitted. The narrow documentation
-  review found Google Chirp 3 Instant Custom Voice as a possible **partial**
-  remote/BYOK experiment: its documentation lists Chinese (`cmn-CN`), required
-  consent/reference audio, pace control and experimental pause control, but not
-  range-scoped emphasis or rhetorical-rhythm control. It is allow-list gated
-  and the published price is per input character, so it needs explicit access,
-  transfer and budget approval before any use. [Google capability and consent
-  requirements](https://docs.cloud.google.com/text-to-speech/docs/chirp3-instant-custom-voice)
-  and [published pricing](https://cloud.google.com/text-to-speech/pricing)
-  are provider documentation—not local capability evidence.
-- Azure Personal Voice is likewise not a documented full-plan route: its
-  current SSML matrix supports rate and break for the listed personal-voice
-  base models, but marks word-level emphasis unsupported. [Azure Personal Voice
-  SSML matrix](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/personal-voice-how-to-use)
-  is documentation evidence only.
+### Voice
+
+The current R1 Voice production path is **accepted as productized for the reviewed local configuration**:
+
+- normal project APIs create bounded generated Voice takes;
+- independent Voice QA persists copy/timing/silence/playability evidence;
+- verified takes can compose one MasterNarration candidate;
+- the composed Master requires fresh whole-master QA;
+- immutable U-Voice review covers likeness, naturalness, emphasis, pace, pauses and rhetorical rhythm;
+- downstream Talking/VideoSpec reject generated narration that has not passed the required gates.
+
+An exact 32.560s OmniVoice Master has passed full-copy automated QA and six-dimension U-Voice. This is sufficient to move R1 forward; perfect generalized word-level emphasis or automatic prosody control is not a separate prerequisite.
+
+### Talking
+
+The current R1 Talking production path is **accepted as productized for the reviewed local configuration**:
+
+- long Talking intent may execute as provider-bounded source-forward children;
+- each child retains Master/reference/provider provenance and independent technical QA;
+- one failed child may use the bounded explicit recovery path without rerunning passed children;
+- exact child assets require immutable U-Talking;
+- the assembled result requires a separate whole-run continuity decision;
+- only then can TalkingRun admission create one first-class generated Asset/Clip;
+- Hybrid Asset Router / VideoSpec consume the admitted Asset/Clip without knowing child-job topology;
+- MasterNarration remains authoritative final audio.
+
+An exact 32.400s reviewed TalkingRun has passed these gates and is consumable by normal VideoSpec.
+
+## Current limits
+
+- Voice and Talking human passes remain asset/configuration specific; they are not universal provider capability claims.
+- Generalized in-take pause, semantic emphasis and rhetorical-rhythm control remain improvement areas rather than R1 blockers when the exact Master passes U-Voice.
+- The current local Talking operating bound remains machine/provider specific; it must not become a narrative rule.
+- OmniVoice official pretrained weights and the current LatentSync benchmark remain non-commercial evaluation dependencies. Commercial provider/model admission is separate from R1 product-path quality.
+- The immediate product bottleneck has moved downstream to visual direction/edit quality and product-generated planning, not additional Voice/Talking provider experimentation.
 
 ## R1 provider focus
 
-For the immediate R1 proof, Voice follows an **OmniVoice-first / one-provider-first** strategy.
-
-Provider-neutral architecture remains mandatory, but it is a replacement boundary rather than a reason to keep shopping providers before one route is product-usable. The installed OmniVoice path already has the strongest local integration and real creator evidence in this repository, so R1 should first exhaust a bounded, evidence-driven attempt to make it production-usable through Content OS-owned performance planning, reference-window selection and composition.
-
-Open another provider benchmark only when a bounded OmniVoice performance experiment shows that the remaining quality gap is provider-acoustic capability rather than product orchestration, reference selection or composition. If that happens, benchmark one alternate route against the same copy/performance evidence; do not start a provider tournament.
-
-This focus does not change the licensing fact: OmniVoice official pretrained weights remain non-commercial evaluation material, so R1 production usability is not a commercial-release decision.
+Keep the current **OmniVoice-first / one-provider-first** Voice route and the admitted local Talking path while finishing R1. Provider-neutral contracts remain replacement boundaries, not a reason to reopen provider shopping after the reviewed product path has passed.
 
 ## Product gaps
 
-1. Close the local OmniVoice performance-rendering gap: convert the existing semantic Narration Performance Plan into bounded semantic units, deliberate pause/continuity composition and better authorized reference-window selection, then judge the actual audio by U-Voice. Do not assume the semantic plan is already acoustically applied.
-2. Establish a reliable fresh 30–60s Master Narration route with an explicitly
-   selected local execution profile or approved provider. The 43.04s composed
-   CUDA candidate passed automated QA but is formally U-Voice-rejected for
-   naturalness, emphasis, pace, pauses and rhythm; it is not a reliability
-   claim and cannot be re-approved in place.
-3. Later add a commercial-safe and/or approved remote provider route without changing Core product semantics.
+1. Finish the visual-direction/EditPlan layer and obtain one 30–60s U-Product pass using already approved Voice/Talking assets.
+2. Replace assisted Scene/EditPlan input with the normal product-generated planning flow.
+3. Run second-topic repeatability.
+4. Later admit commercial-safe Voice/Talking provider/model routes without changing Core product semantics.
