@@ -10,6 +10,29 @@ Master Narration is the authoritative continuous audio timeline for a narrated p
 
 Scenes and generated Talking runs map to intervals on that timeline. Visual execution details must not force manual per-scene audio cutting.
 
+## EditPlan / Visual Direction
+
+EditPlan is the product-level bridge between editorial ScenePlan / routed assets and deterministic VideoSpec.
+
+It answers **how the selected material should be presented**, without changing what the scene means or which provider generated an asset.
+
+Per scene it may carry:
+
+- visual role;
+- selected asset/clip reference;
+- framing policy;
+- subtitle/text treatment;
+- semantic graphic treatment;
+- transition intent;
+- explicit fallback;
+- visual-style tokens/evidence.
+
+For creator Talking footage, unknown crop safety must not silently become a fixed crop. R1 should prefer a face-safe contain/design treatment unless a static crop is verified across the full used interval. Motion-aware crop can be added later without changing EditPlan semantics.
+
+Graphic scenes are semantic treatments such as headline, key point and contrast—not a single generic text card. Visual styling should come from reusable creator/project style tokens rather than hard-coded renderer CSS.
+
+A visual preflight may reject an EditPlan before render when framing, subtitle interaction or text treatment is unsafe or internally contradictory.
+
 ## VideoSpec
 
 VideoSpec is the render contract that binds:
@@ -72,4 +95,4 @@ Feedback and observed metrics may drive evidence-backed next suggestions. R1 doe
 
 MasterNarration, VideoSpec, local rendering, subtitles, publication/feedback records and usage evidence exist.
 
-An approved TalkingRun can now become an ordinary production visual in VideoSpec. The remaining R1 bridge is a fresh 30–60s new-topic end-to-end render and one U-Product review, followed by a separate second-topic repeatability pass.
+Approved Voice and Talking assets can now enter the normal assembly path. The remaining R1 bridge is a productized EditPlan/visual-direction layer, one 30–60s U-Product pass through that path, product-generated planning rather than assisted scene input, and then second-topic repeatability.
