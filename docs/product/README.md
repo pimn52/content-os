@@ -12,7 +12,7 @@ They are not implementation journals.
 | Media / Asset Intelligence | import, continuous Clips, transcript/analysis evidence, Hybrid Asset Router, Shoot Tasks, usage evidence | MEDIA_ASSET_SYSTEM.md |
 | Voice / Talking | Voice Profile, Voice QA, MasterNarration creation, Talking Profile, short-slice execution, continuous TalkingRun, terminal closeout | VOICE_TALKING.md |
 | Execution / Hybrid Compute | capability profiles, provider/runtime/machine evidence, parameter resolution, Advanced Settings, local resource guards, future remote routing | EXECUTION_COMPUTE.md |
-| Timeline / Render / Learning | MasterNarration timeline use, VideoSpec, subtitles, render, review, publication and feedback | TIMELINE_RENDER_LEARNING.md |
+| Timeline / Render / Learning | MasterNarration timeline use, EditPlan/visual direction, VideoSpec, subtitles, render, review, publication and feedback | TIMELINE_RENDER_LEARNING.md |
 
 ## 2. Product flow
 
@@ -32,6 +32,8 @@ They are not implementation journals.
     │         └────┬────┘
     │          TalkingRun
     └──────────────┼─────
+                   ↓
+          EditPlan / Visual Direction
                    ↓
                 VideoSpec
                    ↓
