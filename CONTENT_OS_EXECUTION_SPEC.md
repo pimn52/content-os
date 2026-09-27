@@ -30,11 +30,13 @@ The primary durable object is the creator/brand workspace, not an isolated video
             ↓
     Hybrid Asset Router
             ↓
-    Execution Planner / Compute Router
-            ↓
     Voice / Talking / real media / typography / capture
             ↓
     MasterNarration + TalkingRun + Assets
+            ↓
+    EditPlan / Visual Direction
+            ↓
+    Execution Planner / Compute Router
             ↓
     VideoSpec
             ↓
@@ -160,7 +162,7 @@ The product has strong foundations in creator/project state, local assets, routi
 
 Talking has moved beyond isolated short demos: the approved 26.3s source-forward benchmark is now an admitted first-class TalkingRun with an Asset/Clip consumable by VideoSpec. Its exact assembled media matches the human-approved preview, but it does not satisfy the 30–60s first R1 end-to-end gate.
 
-The largest unresolved R1 capability risk is reliable fresh Master Narration generation for normal 30–60s content. Current local Voice evidence is not yet sufficient for a repeatable long-form claim.
+Voice and Talking now have reviewed normal product paths for the current local R1 configuration: a 32.560s MasterNarration passed U-Voice and a 32.400s source-forward TalkingRun passed U-Talking/continuity and normal admission. The largest immediate R1 capability risk has moved to visual direction/edit quality and product-generated planning: V66's final render failed U-Product despite approved Voice/Talking inputs.
 
 See STATUS.md for the active bounded task.
 
