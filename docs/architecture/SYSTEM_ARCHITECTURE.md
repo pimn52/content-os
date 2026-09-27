@@ -92,11 +92,21 @@ Execution may use short provider-bounded slices. Slices are not product objects.
 
 The product-level output is a **TalkingRun**: a reviewed continuous visual run mapped to one Master Narration interval and one authorized continuous source-performance run.
 
+### Visual Direction / EditPlan
+
+Owns the presentation decision between routed material and deterministic rendering.
+
+It answers:
+
+> How should the selected material be framed, styled, captioned and transitioned so the scene is safe and editorially useful?
+
+EditPlan remains provider/render-neutral. Unknown face-safe crop evidence must fail closed to a safe fallback rather than silently becoming a fixed crop.
+
 ### Timeline / Assembly
 
 Owns MasterNarration and VideoSpec.
 
-It maps verified audio and visual Assets/Clips onto one renderable timeline. Provider execution details must disappear before this boundary.
+It compiles an accepted EditPlan plus verified audio/visual Assets/Clips onto one renderable timeline. Provider execution details must disappear before this boundary.
 
 ### Render / Review / Learning
 
@@ -121,6 +131,8 @@ ScenePlan
         └─────────────── TalkingRun
                               │
                               └─ execution-only Talking slices / child jobs
+        │
+EditPlan
         │
 VideoSpec
         │
