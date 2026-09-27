@@ -66,4 +66,4 @@ A missing visual may create an optional, concrete capture task. Capture is part 
 
 Local import, hash dedupe, continuous Clips, transcript/analysis boundaries, candidate routing, optional Shoot Tasks, usage records and real-media-first selection are implemented foundations.
 
-Current productization work is making reviewed generated Talking runs become normal first-class Assets/Clips that the same router and VideoSpec pipeline can consume.
+Reviewed Talking runs are now normal first-class Assets/Clips consumable by the same routing and VideoSpec pipeline. Current productization work is downstream: convert selected/routed assets into an explicit EditPlan with safe framing, semantic graphic treatment and deterministic preflight before VideoSpec/render.
