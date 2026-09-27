@@ -268,6 +268,29 @@ def test_local_faster_whisper_adapter_maps_timestamped_segments_without_network(
     assert calls == [(str(audio), {"language": "zh", "initial_prompt": "保留专有名词", "vad_filter": True})]
 
 
+def test_local_faster_whisper_retains_individual_word_times(tmp_path: Path) -> None:
+    audio = tmp_path / "local.wav"
+    audio.write_bytes(b"audio")
+
+    class Word:
+        def __init__(self, start: float, end: float, word: str) -> None:
+            self.start, self.end, self.word = start, end, word
+
+    class Segment:
+        text, start, end = "先說。再說", 0.0, 1.0
+        words = [Word(0.1, 0.3, "先說"), Word(0.5, 0.8, "再說")]
+
+    class Model:
+        def transcribe(self, _path: str, **kwargs: object):
+            assert kwargs["word_timestamps"] is True
+            return iter([Segment()]), object()
+
+    result = FasterWhisperASRProvider("tiny", word_timestamps=True,
+                                      model_factory=lambda *_args, **_kwargs: Model()).transcribe(audio)
+    assert [(w.start_ms, w.end_ms, w.text) for w in result.words] == [
+        (100, 300, "先說"), (500, 800, "再說")]
+
+
 def test_local_faster_whisper_adapter_hides_model_loader_diagnostics(tmp_path: Path) -> None:
     audio = tmp_path / "local.wav"
     audio.write_bytes(b"audio")

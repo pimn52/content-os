@@ -4,8 +4,8 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, TalkingSliceSeriesRepository
-from app.domain.models import Asset, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingSliceSeries
+from app.db import AssetRepository, AudioAssetRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, TalkingSliceSeriesRepository
+from app.domain.models import Asset, AudioAsset, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingSliceSeries
 from app.main import create_app
 from app.talking.series_review import assess_talking_slice_series
 
@@ -159,3 +159,48 @@ def test_continuity_decision_is_gated_durable_and_immutable(tmp_path: Path) -> N
             json={**request, "approved": False},
         )
         assert conflict.status_code == 409
+
+
+def test_failed_child_recovery_is_bounded_and_preserves_original_job(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "series-recovery.sqlite"
+    with Database(path) as db:
+        profile = IPProfile(creator_name="Creator")
+        IPProfileRepository(db).create(profile)
+        project = Project(
+            ip_profile_id=profile.id, title="Series", topic="Recovery",
+            fps=RationalFps(numerator=25, denominator=1), created_at=NOW,
+        )
+        ProjectRepository(db).create(project)
+        series = _series().model_copy(update={"project_id": project.id})
+        first = _child(series, 0)
+        failed = _child(series, 1, status=JobStatus.FAILED).model_copy(update={
+            "attempt": 1, "error_code": "talking_invalid_request",
+        })
+        TalkingSliceSeriesRepository(db).create(series)
+        JobRepository(db).create(first)
+        JobRepository(db).create(failed)
+        AssetRepository(db).create(_output(first, human=None))
+        AudioAssetRepository(db).create(AudioAsset(
+            id=series.narration_audio_id, source_file="master.wav", content_hash="a" * 64,
+            duration_ms=2_000, sample_rate=24_000, channels=1,
+            authorization_reference="consent", imported_at=NOW,
+            metadata={"voice_generation": {"qa_state": "verified"}},
+        ))
+    monkeypatch.setattr("app.main.voice_human_review_status", lambda _audio: "approved")
+    url = f"/projects/{project.id}/talking-slice-series/{series.id}/recover-failed-child"
+    request = {"failed_job_id": str(failed.id), "evidence_reference": "v62:staging-validated"}
+    with TestClient(create_app(path)) as client:
+        assert client.post(url, json={**request, "failed_job_id": str(first.id)}).status_code == 422
+        accepted = client.post(url, json=request)
+        assert accepted.status_code == 201, accepted.text
+        replacement_id = UUID(accepted.json()["id"])
+        assert replacement_id != failed.id
+        assert client.post(url, json=request).json()["id"] == str(replacement_id)
+        assert client.post(url, json={**request, "evidence_reference": "conflict"}).status_code == 409
+    with Database(path) as db:
+        saved = TalkingSliceSeriesRepository(db).get(series.id)
+        assert saved.child_job_ids == [first.id, replacement_id]
+        assert saved.recovery_history[0].failed_job_id == failed.id
+        assert saved.recovery_history[0].replacement_job_id == replacement_id
+        assert JobRepository(db).get(failed.id) == failed
+        assert JobRepository(db).get(replacement_id).payload == failed.payload

@@ -174,6 +174,21 @@ For the immediate R1 Voice proof, concentrate implementation and product-quality
 
 This decision does not convert benchmark-only model weights into a commercial-safe dependency; license admission remains separate from product-quality admission.
 
+## D021 — R1 Voice judges publishable delivery, not perfect rhetorical control
+
+Fine-grained word focus and whole-sentence intonation remain valuable Voice
+improvements, but verified automatic control of either is not a hard admission
+prerequisite for this product version. Do not hold an otherwise clear,
+creator-like, natural and publishable short-form narration until an adapter can
+prove full semantic Performance Plan execution.
+
+This does not waive the asset-specific U-Voice gate. Reviewers still judge
+emphasis and rhetorical rhythm, and reject an asset when flat or misplaced
+delivery materially harms understanding or publishability. A dimension can
+pass when delivery is adequate for publication; it need not be ideal or prove
+generalized word-level control. Record imperfections and keep improving them
+without turning one bounded human acceptance into a provider capability claim.
+
 ## Current provider admission state
 
 Provider-specific current state is maintained in docs/product/VOICE_TALKING.md, not duplicated here.

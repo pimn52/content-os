@@ -9,6 +9,7 @@ control.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
 from pathlib import Path
 import struct
@@ -17,7 +18,7 @@ from typing import Sequence
 from uuid import UUID
 import wave
 
-from app.domain.models import Asset, AudioAsset, Clip, NarrationDeliverySegment, NarrationPause, NarrationPerformancePlan, TranscriptSegment
+from app.domain.models import Asset, AudioAsset, Clip, NarrationDeliverySegment, NarrationPause, NarrationPerformancePlan, TranscriptSegment, VoiceProfile, VoiceReferenceWindowSelection
 from app.narration_performance import NarrationBoundaryKind, NarrationBoundaryMap, compile_narration_delivery_plan, validate_narration_performance_plan
 
 
@@ -254,6 +255,39 @@ def select_voice_reference_windows(
     return tuple(sorted(candidates, key=lambda item: (-item.score, item.clip_id.hex, item.start_ms, item.end_ms)))
 
 
+def authorized_voice_reference_choices(
+    profile: VoiceProfile, clips: Sequence[Clip], assets: dict[UUID, Asset], *, data_root: str | Path,
+) -> tuple[tuple[VoiceReferenceWindowSelection, VoiceReferenceWindow], ...]:
+    """Expose stable source-bound choices without claiming a best speaking style."""
+    if not profile.consent.confirmed:
+        raise VoicePerformancePlanningError("Voice reference choices require explicit profile consent")
+    allowed_ids = set(profile.reference_clip_ids)
+    allowed_clips = [clip for clip in clips if clip.id in allowed_ids]
+    windows = select_voice_reference_windows(allowed_clips, assets, data_root=data_root)
+    choices = []
+    for window in windows:
+        asset = assets.get(window.asset_id)
+        if asset is None:
+            continue
+        choices.append((VoiceReferenceWindowSelection(
+            clip_id=window.clip_id, asset_id=window.asset_id,
+            source_content_hash=asset.content_hash, start_ms=window.start_ms,
+            end_ms=window.end_ms,
+            transcript_sha256=hashlib.sha256(window.transcript.encode("utf-8")).hexdigest(),
+        ), window))
+    return tuple(choices)
+
+
+def resolve_authorized_voice_reference_choice(
+    selection: VoiceReferenceWindowSelection, choices: Sequence[tuple[VoiceReferenceWindowSelection, VoiceReferenceWindow]],
+) -> VoiceReferenceWindow:
+    """Reject stale, unauthorized or changed windows instead of falling back."""
+    for available, window in choices:
+        if available == selection:
+            return window
+    raise VoicePerformancePlanningError("selected Voice reference window is no longer authorized or current")
+
+
 def pause_duration_ms(pause: NarrationPause | None) -> int:
     """Actual local composition settings, distinct from a semantic pause cue."""
     return {None: 0, NarrationPause.BRIEF: 180, NarrationPause.BEAT: 420, NarrationPause.LONG: 700}[pause]
@@ -316,4 +350,5 @@ __all__ = [
     "NarrationPerformanceUnit", "VoiceGenerationSpan", "VoicePerformancePlanningError", "VoicePerformanceRenderPlan",
     "VoicePerformanceComposer", "VoicePerformanceComposition", "VoiceReferenceWindow", "pause_duration_ms",
     "plan_voice_generation_spans", "plan_voice_performance_units", "select_voice_reference_windows",
+    "authorized_voice_reference_choices", "resolve_authorized_voice_reference_choice",
 ]

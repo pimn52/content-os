@@ -161,6 +161,17 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
     updated_generation = dict(generation)
     updated_generation["qa"] = report.metadata(provider=provider.strip(), model=model.strip())
     updated_generation["qa_state"] = "verified" if report.verified else "failed"
+    if transcription.words:
+        # Kept separately from the QA verdict: ASR word timing is alignment
+        # evidence, never proof that the requested copy was spoken correctly.
+        metadata["voice_word_timing"] = {
+            "version": "1.0", "source_sha256": audio.content_hash,
+            "transcript_source": f"{provider.strip()}:{model.strip()}",
+            "words": [
+                {"start_ms": word.start_ms, "end_ms": word.end_ms, "text": word.text}
+                for word in transcription.words
+            ],
+        }
     if report.verified:
         # U-Voice remains a separate quality decision.  Mark it explicitly so
         # a technically valid asset cannot look publication-ready merely

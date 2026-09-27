@@ -17,7 +17,7 @@ from app.main import create_app
 from app.media.ffprobe import ProbeMetadata
 from app.providers.talking import TalkingExecutionOptions, TalkingReference, TalkingSynthesisResult
 from app.talking import select_talking_reference
-from app.talking_qa import TalkingHumanReview, TalkingQaReport, apply_talking_human_review, apply_talking_qa, verify_talking_output
+from app.talking_qa import TalkingHumanReview, TalkingQaError, TalkingQaReport, apply_talking_human_review, apply_talking_qa, verify_talking_output
 
 
 def test_talking_job_requires_verified_new_narration_and_persists_video_provenance(tmp_path: Path) -> None:
@@ -262,6 +262,12 @@ def test_talking_job_api_is_typed_idempotent_and_requires_verified_narration(tmp
         AudioAssetRepository(db).create(verified)
         AudioAssetRepository(db).create(pending)
         AudioAssetRepository(db).create(series_narration)
+        unreviewed = verified.model_copy(update={
+            "id": uuid4(),
+            "content_hash": "a" * 64,
+            "metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "verified"}},
+        })
+        AudioAssetRepository(db).create(unreviewed)
     finally:
         db.close()
 
@@ -298,6 +304,13 @@ def test_talking_job_api_is_typed_idempotent_and_requires_verified_narration(tmp
             "authorization_reference": "talking-consent-1",
             "execution_machine_id": "asus-rtx3060-laptop-6gb",
         }
+        no_voice_approval = client.post(f"/projects/{project.id}/talking-slice-series-jobs", json={
+            **series_request,
+            "idempotency_key": "talking-series-unreviewed",
+            "narration_audio_id": str(unreviewed.id),
+        })
+        assert no_voice_approval.status_code == 422
+        assert "approved U-Voice" in no_voice_approval.json()["detail"]
         series = client.post(f"/projects/{project.id}/talking-slice-series-jobs", json=series_request)
         assert series.status_code == 201
         assert len(series.json()["jobs"]) == 2
@@ -444,6 +457,69 @@ def test_talking_qa_and_human_rejection_are_provider_neutral(tmp_path: Path) -> 
     rejected = apply_talking_human_review(verified, TalkingHumanReview(approved=False, evidence_reference="human-review:rejected", findings=("visible lip movement mismatched", "ending expression did not fit delivery")))
     assert rejected.metadata["talking_generation"]["human_review_state"] == "rejected"
     assert rejected.metadata["talking_generation"]["human_review"]["findings"] == ["visible lip movement mismatched", "ending expression did not fit delivery"]
+    with pytest.raises(TalkingQaError, match="already recorded"):
+        apply_talking_human_review(rejected, TalkingHumanReview(
+            approved=True, evidence_reference="human-review:overwrite", findings=("must not overwrite",),
+        ))
+
+
+def test_talking_human_review_api_is_project_scoped_qa_gated_and_immutable(tmp_path: Path) -> None:
+    path = tmp_path / "talking-review.sqlite"
+    db = Database(path)
+    try:
+        ip = IPProfile(creator_name="Creator")
+        IPProfileRepository(db).create(ip)
+        now = datetime.now(timezone.utc)
+        project = Project(ip_profile_id=ip.id, title="Talking review", topic="New copy", fps=RationalFps(numerator=25, denominator=1), created_at=now)
+        other = Project(ip_profile_id=ip.id, title="Other", topic="Other", fps=RationalFps(numerator=25, denominator=1), created_at=now)
+        ProjectRepository(db).create(project)
+        ProjectRepository(db).create(other)
+        narration_id = uuid4()
+        job = Job(
+            project_id=project.id, type=JobType.GENERATE_TALKING, status=JobStatus.COMPLETED,
+            idempotency_key="talking-review-job", created_at=now, updated_at=now,
+            payload=TalkingGenerationJobPayload(
+                project_id=project.id, talking_profile_id=uuid4(), reference_clip_id=uuid4(),
+                narration_audio_id=narration_id, authorization_reference="consent",
+            ),
+        )
+        JobRepository(db).create(job)
+        asset = Asset(
+            source_kind=SourceKind.AI_VIDEO, source_file=str(tmp_path / "talking.mp4"),
+            content_hash="v" * 64, duration_ms=1_000, width=720, height=1280,
+            fps=RationalFps(numerator=25, denominator=1), has_audio=True,
+            authorization_reference="consent", imported_at=now,
+            metadata={"talking_generation": {
+                "job_id": str(job.id), "narration_audio_id": str(narration_id), "qa_state": "verified",
+            }},
+        )
+        AssetRepository(db).create(asset)
+        pending = asset.model_copy(update={
+            "id": uuid4(), "content_hash": "p" * 64,
+            "metadata": {"talking_generation": {
+                "job_id": str(job.id), "narration_audio_id": str(narration_id), "qa_state": "pending",
+            }},
+        })
+        AssetRepository(db).create(pending)
+    finally:
+        db.close()
+
+    review = {"approved": True, "evidence_reference": "u-talking:ordered-viewing", "findings": ["Creator and visible lip sync passed"]}
+    with TestClient(create_app(path)) as client:
+        route = f"/projects/{project.id}/talking-assets/{asset.id}/human-review"
+        assert client.post(f"/projects/{other.id}/talking-assets/{asset.id}/human-review", json=review).status_code == 422
+        assert client.post(f"/projects/{project.id}/talking-assets/{pending.id}/human-review", json=review).status_code == 422
+        accepted = client.post(route, json=review)
+        assert accepted.status_code == 200
+        assert accepted.json()["metadata"]["talking_generation"]["human_review_state"] == "approved"
+        assert client.post(route, json={**review, "approved": False}).status_code == 422
+    db = Database(path)
+    try:
+        saved = AssetRepository(db).get(asset.id)
+        assert saved is not None
+        assert saved.metadata["talking_generation"]["human_review"]["evidence_reference"] == review["evidence_reference"]
+    finally:
+        db.close()
 
 
 def test_talking_output_qa_requires_real_playable_video_audio_and_matching_narration(tmp_path: Path) -> None:

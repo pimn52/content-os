@@ -15,6 +15,31 @@ From new copy, Content OS should be able to produce:
 
 ## Voice system
 
+For normal Voice generation, a consented `VoiceProfile` can enumerate its
+currently authorized, transcript-backed reference windows through
+`GET /voice-profiles/{profile_id}/reference-windows`. A caller may carry one
+returned source-bound `selection` into `POST /projects/{project_id}/voice-jobs`.
+The Job persists that exact window, and the OmniVoice worker rechecks profile
+consent, Clip authorization, transcript identity and source-file hash before
+using it. The generated AudioAsset records the selected window as provenance;
+independent Voice QA and U-Voice still decide technical correctness and
+publishability. Omitting `reference_window` keeps the existing provider-default
+path. This is an explicit human/application choice, not an automatic acoustic
+quality rule. Selected reference and Draft performance-plan application cannot
+yet be combined in one normal Job; the API rejects the combination explicitly.
+
+A normal Voice Job may optionally include a provider-facing `delivery_text`
+alongside the editorial `text`. This is deliberately narrow: the variant may
+only delete punctuation or whitespace already present in the editorial copy,
+and its spoken token sequence must remain identical. The API validates it at
+submission and the Worker validates it again before provider reservation.
+The provider receives the variant, while the generated AudioAsset retains
+both strings and independent Voice QA remains anchored to the exact editorial
+copy. Omitting it leaves the existing one-text route unchanged. This is not
+an automatic punctuation policy, a freeform rewrite, or verified control of
+pause/rhythm; a Draft performance plan cannot yet be combined with a delivery
+variant in one normal Job.
+
 ### Core flow
 
 ```text
@@ -35,6 +60,17 @@ layer may merge adjacent Units into an adapter/profile-scoped
 provenance. Its preferred size is local capability evidence, not a universal
 product seconds limit. Content OS may compose only independently verified Span
 takes and must QA the resulting master again.
+
+Normal Master composition has an explicit measured-quiet seam option. It
+operates only at known joins between ordered, independently QA-verified takes:
+for 24 kHz mono PCM16, it may remove the interior of a measured low-energy
+interval spanning a join while retaining a margin on both sides. Absent or
+ambiguous quiet fails the option instead of inventing a speech boundary.
+The unmodified raw hash, final hash, child hashes and exact cuts are retained;
+ordinary concat remains the default. This is a small publishability edit at a
+known assembly seam, not an intra-take pause detector or proof that words are
+correct. The compacted Master remains QA-pending until fresh full-copy QA and
+asset-specific U-Voice review.
 
 The composition boundary persists the ordered source-take IDs and provisional
 timing on a QA-pending candidate. Its final timing and eligibility are replaced
@@ -57,6 +93,81 @@ At minimum:
 - playable audio;
 - provider/reference provenance.
 
+### Voice performance observation
+
+For a QA-verified narration AudioAsset with its exact requested copy, the
+normal audio contract can create and read a source-hash-bound performance
+observation. This is **measurement evidence**, separate from the editable
+Performance Plan (intent), an adapter application receipt, automated copy QA,
+and U-Voice (human quality judgment).
+
+The observation retains the independent ASR source and alignment state,
+structural sentence/clause boundaries, decoded PCM quiet intervals, apparent
+sentence pace and relative adjacent-sentence pace. A quiet interval is a
+waveform measurement, not proof of the spoken words or of a breath; an ASR
+segment gap is not automatically physical silence. Text-boundary timing is
+unavailable when exact ordered ASR tokens cannot be aligned or when the
+boundary falls inside one coarse ASR segment. A punctuation-hierarchy flag is
+only a review prompt when both compared pauses are physically measurable.
+When measured quiet crosses a contiguous ASR segment edge, it is exposed only
+as a low-confidence nearby candidate, excluded from that hierarchy flag.
+
+The observation is idempotently persisted on the AudioAsset with the source
+hash and measurement limits. It does not rewrite media, alter Voice QA/U-Voice
+eligibility, apply an acoustic correction or claim that emphasis, intonation,
+naturalness or publishability were achieved. Rates count normalized copy
+tokens for within-copy comparison, not universal words-per-minute targets.
+An explicit unsupported/uncertain result is preferable to invented word-level
+timing or focus.
+
+When independent local Voice QA supplies word timestamps, they are retained
+as separate source-hash-bound ASR evidence. A new observation may use exact
+ordered normalized word tokens to locate punctuation between words; malformed,
+overlapping, stale or non-matching word streams make that alignment unavailable.
+Only measured PCM quiet wholly inside the matched adjacent-word gap is a
+definite boundary measurement. Quiet crossing an ASR word edge remains a
+candidate, because estimated word timestamps can extend into real silence.
+This evidence never upgrades copy QA, human review or edit eligibility, and
+older idempotent observations are not silently overwritten.
+
+For older QA-verified assets without retained words, a project-scoped local
+Job can backfill this evidence through the configured local ASR Worker. The
+request is idempotent and source-hash-bound; it records its ASR ProviderCall,
+word stream and boundary alignment separately from the original Voice QA,
+U-Voice and performance observation. A normal read endpoint exposes the
+result. Missing/mismatched words remain explicit unavailable evidence. This
+backfill is not a second copy-verification pass and does not make the audio
+eligible for an edit or release. In particular, an ASR implementation that
+places adjacent word timestamps at the same instant provides no measured
+word-gap duration even when PCM reveals quiet nearby.
+
+### Conservative whole-take pace candidate
+
+For an authorized, same-project narration that has already passed independent
+Voice QA, the normal product API can request one explicit `gentle_slower`
+candidate. A local Job/Worker applies a pitch-preserving whole-take tempo
+factor drawn from a bounded reviewed comparison, never rewriting the source
+or pretending to apply the semantic Performance Plan. The derived AudioAsset
+retains source ID/hash, exact copy, authorization, profile/factor and Job
+provenance. A separate ordinary Voice QA Job is enqueued automatically;
+until it completes, the candidate is QA-pending and cannot be admitted.
+
+The setting is a conservative option, not a universal speaking-rate target.
+It changes the entire take, including natural pauses, so successful technical
+QA cannot establish that the creator still sounds natural or publishable.
+The derived asset needs its own U-Voice judgment before Talking or final
+assembly. Unsupported, cross-project, stale-source and transform failures
+remain explicit; the original AudioAsset and its QA/review records are not
+changed. Fine-grained focus and whole-sentence contour are outside this
+local pace operation.
+
+The Web workspace can play a QA-verified candidate and record the existing
+six-dimension U-Voice decision for that exact AudioAsset. Each dimension and
+concrete findings are explicit; all-pass is required for approval, and the
+irreversible submission is confirmed by the reviewer. The UI does not turn
+the bounded V31 listening response into an automatic approval of another
+candidate.
+
 ### U-Voice review
 
 Human U-Voice is a first-class, asset-specific quality gate after automated
@@ -76,6 +187,15 @@ silent overwrite of feedback. Both pending and rejected generated Voice are
 ineligible for Talking and final VideoSpec assembly. This records subjective
 product judgment without pretending it is provider capability evidence or an
 automatic acoustic score.
+
+For this version, `pass` on emphasis and rhetorical rhythm means the actual
+speech is clear and publishable, not that every word lands ideally or that the
+provider has verified fine-grained focus/whole-sentence contour control.
+Materially confusing or unpublishable delivery still fails the exact asset.
+Those finer controls remain improvement work, not a separate hard prerequisite
+that blocks an otherwise passing Voice asset or R1 solely for lacking an
+adapter-level plan receipt. A saved Performance Plan still cannot be claimed
+as applied without the explicit adapter receipt described below.
 
 ### Narration performance intent
 
@@ -206,6 +326,15 @@ spoken. This controls composition seams only. It does not claim to repair
 provider-take-internal pauses, word focus, sentence landing or rhetorical
 rhythm, all of which still require an adapter application receipt and U-Voice.
 
+For the current OmniVoice route, exact-copy QA cannot certify natural phrasing.
+Punctuation-safe delivery text and measured seam compaction have improved
+individual candidates, but they cannot reliably remove a hesitation or long
+break *inside* a generated take. Repeated listening feedback on that same
+uncontrolled region is not a product control loop. Accept a publishable exact
+asset with a recorded pause caveat when the creator explicitly approves it;
+keep the remaining in-take pause problem visible as a capability gap rather
+than imposing perfect prosody as a release gate or claiming generalization.
+
 ## Talking system
 
 ### Product intent
@@ -251,11 +380,27 @@ A TalkingRun represents:
 
 Provider slices and child jobs remain execution details.
 
+If one child fails while the other children have unique QA-verified outputs,
+the series can explicitly replace that failed child once without rerunning the
+passed children. The replacement inherits the exact failed child's source,
+Master interval and execution payload. The original failed Job and ProviderCall
+remain durable provenance in the series recovery history; a replacement is not
+a QA pass or human approval. Recovery is unavailable after continuity review or
+TalkingRun admission. Further failure needs a new bounded product decision,
+not an automatic retry loop.
+
 The implemented admission path stores a provider-neutral TalkingRun record and
 creates one generated Asset plus one whole-duration Clip only after every child
 has automated QA, individual U-Talking approval and an immutable approved
 continuity review. Hybrid Asset Router, VideoSpec and the renderer consume the
 admitted Asset/Clip without traversing child jobs.
+
+The project-scoped U-Talking API records one immutable human decision on each
+exact generated child Asset only after automated QA and completed-Job
+provenance. A child approval does not imply that joins between children are
+acceptable. An assembled review-only preview can expose those joins with the
+Master Narration as audio, but it is not an admitted TalkingRun or routable
+production Asset; the separate continuity decision remains mandatory.
 
 ### Audio authority
 

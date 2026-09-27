@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 from decimal import Decimal
 import tempfile
 from typing import Literal, Protocol, Sequence
 from uuid import UUID
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, TalkingProfileRepository, VoiceProfileRepository
-from app.domain.models import Asset, AudioAsset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, UsageCost, VoiceGenerationJobPayload, VoiceQaJobPayload
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, JobRepository, TalkingProfileRepository, VoiceProfileRepository
+from app.domain.models import Asset, AudioAsset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, UsageCost, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceQaJobPayload
+from app.voice_delivery import VoiceDeliveryTextError, validate_voice_delivery_text
+from app.voice_boundary_alignment import align_voice_boundaries, voice_asset_project_id
+from app.voice_observation import VoiceObservationError, _resolve_source_path, observe_voice_performance
 from app.media.audio_importer import AudioImportError, AudioImporter
 from app.media.importer import MediaImportError, MediaImporter
 from app.providers.talking import TalkingExecutionOptions
@@ -48,6 +52,7 @@ from app.media.vision_pipeline import (
     VisionPipelineError,
 )
 from app.providers.asr import (
+    ASRError,
     ASRAuthenticationError,
     ASRConfigurationError,
     ASRConnectionError,
@@ -206,6 +211,20 @@ class VoiceGenerationJobHandler:
             raise JobExecutionError("voice_provider_invalid", "voice provider does not expose safe runtime identity", retryable=False)
         if profile.provider != provider_name.strip():
             raise JobExecutionError("voice_profile_provider_mismatch", "voice profile does not belong to the configured provider", retryable=False)
+        delivery_text = job.payload.delivery_text
+        if delivery_text is not None:
+            try:
+                validate_voice_delivery_text(job.payload.text, delivery_text)
+            except VoiceDeliveryTextError:
+                raise JobExecutionError("voice_delivery_text_invalid", "Voice delivery text changes or fails to delimit the editorial copy", retryable=False) from None
+        if delivery_text is not None and job.payload.narration_performance_plan is not None:
+            raise JobExecutionError("voice_delivery_performance_combination_unavailable", "delivery text and performance plan cannot yet be applied together", retryable=False)
+        selected_reference = job.payload.reference_window
+        synthesize_with_reference = getattr(self._provider, "synthesize_with_reference", None)
+        if selected_reference is not None and job.payload.narration_performance_plan is not None:
+            raise JobExecutionError("voice_reference_performance_combination_unavailable", "selected reference and performance plan cannot yet be applied together", retryable=False)
+        if selected_reference is not None and not callable(synthesize_with_reference):
+            raise JobExecutionError("voice_reference_selection_unavailable", "the selected Voice provider cannot apply the requested reference window", retryable=False)
         performance_plan = job.payload.narration_performance_plan
         performance_support = FeatureSupport.UNKNOWN
         synthesize_with_performance = None
@@ -265,8 +284,13 @@ class VoiceGenerationJobHandler:
         )
         output = self._output_root / "voice" / f"{job.id}-attempt-{job.attempt}.wav"
         try:
-            if performance_plan is None:
-                result = self._provider.synthesize(profile, job.payload.text, output, language=job.payload.language or profile.language)
+            if performance_plan is None and selected_reference is not None:
+                result = synthesize_with_reference(
+                    profile, delivery_text or job.payload.text, output,
+                    language=job.payload.language or profile.language, reference_window=selected_reference,
+                )
+            elif performance_plan is None:
+                result = self._provider.synthesize(profile, delivery_text or job.payload.text, output, language=job.payload.language or profile.language)
             else:
                 # The optional extension is guarded above. Keeping this call
                 # distinct prevents ordinary providers from silently dropping
@@ -299,6 +323,8 @@ class VoiceGenerationJobHandler:
             )
         try:
             audio = self._importer.import_path(result.audio_path, job.payload.authorization_reference, language=job.payload.language or profile.language)
+            if "voice_generation" in audio.metadata:
+                raise ValueError("identical generated audio already has provenance")
             metadata = dict(audio.metadata)
             voice_generation: dict[str, object] = {
                 "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
@@ -311,6 +337,11 @@ class VoiceGenerationJobHandler:
                     "application_state": "adapter_applied_pending_quality_review",
                     "adapter_support": performance_support.value,
                 }
+            if selected_reference is not None:
+                voice_generation["reference_window"] = selected_reference.model_dump(mode="json")
+            if delivery_text is not None:
+                voice_generation["provider_delivery_text"] = delivery_text
+                voice_generation["delivery_text_rule"] = "existing_punctuation_whitespace_deletion_only"
             metadata["voice_generation"] = voice_generation
             with self._audios.db.transaction():
                 self._audios.update(audio.model_copy(update={"metadata": metadata}))
@@ -399,6 +430,79 @@ class VoiceQaJobHandler:
         _finish_job_provider_call(self._ledger, job, call, status="completed")
         if not report.verified:
             raise JobExecutionError("voice_qa_failed", "generated narration did not pass copy, silence or playability QA", retryable=False)
+
+
+class VoiceBoundaryAlignmentJobHandler:
+    """Backfill local word-time evidence without rerunning or changing Voice QA."""
+
+    def __init__(self, audios: AudioAssetRepository, jobs: JobRepository, asr: ASRProvider,
+                 ledger: ProviderCallLedger, *, data_root: Path, provider_model: str) -> None:
+        self._audios, self._jobs, self._asr, self._ledger = audios, jobs, asr, ledger
+        self._data_root, self._model = Path(data_root), provider_model
+
+    def __call__(self, job: Job) -> None:
+        if job.status is not JobStatus.RUNNING or job.type is not JobType.ALIGN_VOICE_BOUNDARIES or not isinstance(job.payload, VoiceBoundaryAlignmentJobPayload):
+            raise JobExecutionError("voice_boundary_job_invalid", "voice boundary job is not a claimed typed request", retryable=False)
+        audio = self._audios.get(job.payload.narration_audio_id)
+        if audio is None or voice_asset_project_id(audio, self._jobs) != job.project_id:
+            raise JobExecutionError("voice_boundary_asset_invalid", "narration does not belong to the requested project", retryable=False)
+        if audio.content_hash != job.payload.source_sha256:
+            raise JobExecutionError("voice_boundary_source_changed", "narration source hash changed after enqueue", retryable=False)
+        if "voice_word_timing" in audio.metadata or "voice_boundary_alignment" in audio.metadata:
+            raise JobExecutionError("voice_boundary_evidence_exists", "word-boundary evidence already exists", retryable=False)
+        generation = audio.metadata.get("voice_generation")
+        copy = generation.get("target_text") if isinstance(generation, dict) else None
+        if not isinstance(copy, str):
+            raise JobExecutionError("voice_boundary_copy_missing", "verified narration copy is unavailable", retryable=False)
+        try:
+            observation = observe_voice_performance(audio, copy, data_root=self._data_root)
+        except VoiceObservationError as exc:
+            raise JobExecutionError("voice_boundary_preflight_failed", str(exc), retryable=False) from exc
+        source = _resolve_source_path(audio.source_file, self._data_root)
+        call = _reserve_job_provider_call(
+            self._ledger, job, operation="asr", category=CostCategory.ASR,
+            provider="faster-whisper", model=self._model,
+            input_source=f"voice-boundary:{audio.id}:{audio.content_hash}", known_local_cost=True,
+        )
+        try:
+            transcription = self._asr.transcribe(source, language=audio.language)
+        except (ASRConnectionError, ASRTimeout):
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_boundary_asr_unavailable")
+            raise JobExecutionError("voice_boundary_asr_unavailable", "local ASR is temporarily unavailable", retryable=True) from None
+        except ASRError:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_boundary_asr_invalid")
+            raise JobExecutionError("voice_boundary_asr_invalid", "local ASR could not provide word evidence", retryable=False) from None
+        except Exception:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_boundary_asr_failed")
+            raise JobExecutionError("voice_boundary_asr_failed", "local ASR failed unexpectedly", retryable=True) from None
+        evidence = {
+            "version": "1.0", "source_sha256": audio.content_hash,
+            "transcript_source": f"faster-whisper:{self._model}",
+            "job_id": str(job.id), "provider_call_id": str(call.id) if call else None,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "words": [{"start_ms": word.start_ms, "end_ms": word.end_ms, "text": word.text}
+                      for word in transcription.words],
+        }
+        alignment = align_voice_boundaries(
+            copy, evidence, observation["measurement"]["physical_quiet_intervals"],
+            source_sha256=audio.content_hash, duration_ms=observation["measurement"]["duration_ms"],
+        )
+        alignment["job_id"] = str(job.id)
+        latest = self._audios.get(audio.id)
+        if latest is None or latest.content_hash != audio.content_hash or "voice_word_timing" in latest.metadata or "voice_boundary_alignment" in latest.metadata:
+            _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_boundary_asset_changed")
+            raise JobExecutionError("voice_boundary_asset_changed", "narration evidence changed during alignment", retryable=False)
+        metadata = dict(latest.metadata)
+        metadata["voice_word_timing"] = evidence
+        metadata["voice_boundary_alignment"] = alignment
+        # Account for the completed local inference even if the following
+        # evidence write fails; never leave a successful provider call reserved.
+        _finish_job_provider_call(self._ledger, job, call, status="completed")
+        with self._audios.db.transaction():
+            current = self._audios.get(audio.id)
+            if current is None or current.content_hash != audio.content_hash or "voice_word_timing" in current.metadata or "voice_boundary_alignment" in current.metadata:
+                raise JobExecutionError("voice_boundary_asset_changed", "narration evidence changed during alignment", retryable=False)
+            self._audios.update(current.model_copy(update={"metadata": metadata}))
 
 
 class TalkingGenerationJobHandler:

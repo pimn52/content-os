@@ -24,6 +24,21 @@ VideoSpec is the render contract that binds:
 
 Generated Voice/Talking cannot enter final assembly before their required QA gates pass.
 
+An admitted TalkingRun can carry an explicit, evidence-referenced vertical
+reframe in VideoSpec when source footage has burned-in text outside the usable
+image area. The renderer must not silently crop an unreviewed face. On a
+typography scene, a short display title can coexist with separately timed
+Master Narration captions; repeating the full paragraph as both title and
+subtitles is a visual-QA failure. Neither treatment is automatic evidence of
+publishability: the final rendered video still needs human review.
+
+Fixed center cropping can remove burned-in subtitles yet fail when the
+speaker moves out of the vertical frame. A production edit needs face-safe
+framing over the full selected interval, with an explicit fallback when that
+cannot be verified. Simple text-only cards can likewise be technically
+readable but still fail the final editorial/publishability gate. Automated
+container and sampled-frame QA must not be promoted to U-Product approval.
+
 ## Render
 
 The normal output path remains local Remotion + FFmpeg for vertical video.
@@ -57,4 +72,4 @@ Feedback and observed metrics may drive evidence-backed next suggestions. R1 doe
 
 MasterNarration, VideoSpec, local rendering, subtitles, publication/feedback records and usage evidence exist.
 
-The critical missing bridge is to let an approved TalkingRun become an ordinary production visual in VideoSpec, followed by a fresh end-to-end R1 render and one U-Product review.
+An approved TalkingRun can now become an ordinary production visual in VideoSpec. The remaining R1 bridge is a fresh 30–60s new-topic end-to-end render and one U-Product review, followed by a separate second-topic repeatability pass.

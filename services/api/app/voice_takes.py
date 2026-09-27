@@ -42,8 +42,10 @@ class ProvisionalMasterNarration:
 class VoiceTakeComposer:
     """Create a deterministic local WAV from a bounded ordered take list."""
 
-    def __init__(self, ffmpeg_command: str | Path = "ffmpeg", *, timeout_seconds: float = 120.0) -> None:
+    def __init__(self, ffmpeg_command: str | Path = "ffmpeg", *, timeout_seconds: float = 120.0,
+                 data_root: str | Path | None = None) -> None:
         self._ffmpeg = str(ffmpeg_command)
+        self._data_root = Path(data_root).resolve() if data_root is not None else None
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._timeout_seconds = timeout_seconds
@@ -55,13 +57,13 @@ class VoiceTakeComposer:
             raise VoiceTakeCompositionError("at most 100 voice takes may be composed at once")
         output = Path(output_path).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        prepared = tuple(self._validate(take) for take in takes)
-        if len({take.scene_id for take in prepared}) != len(prepared):
+        prepared = tuple((take, self._validate(take)) for take in takes)
+        if len({take.scene_id for take, _ in prepared}) != len(prepared):
             raise VoiceTakeCompositionError("voice take scene IDs must be unique")
 
         command = [self._ffmpeg, "-y"]
-        for take in prepared:
-            command.extend(("-i", take.audio.source_file))
+        for _, source in prepared:
+            command.extend(("-i", str(source)))
         inputs = "".join(f"[{index}:a]" for index in range(len(prepared)))
         command.extend((
             "-filter_complex", f"{inputs}concat=n={len(prepared)}:v=0:a=1[out]",
@@ -79,7 +81,7 @@ class VoiceTakeComposer:
 
         offset = 0
         segments: list[TranscriptSegment] = []
-        for take in prepared:
+        for take, _ in prepared:
             for segment in take.audio.transcript_segments:
                 segments.append(TranscriptSegment(
                     start_ms=offset + segment.start_ms,
@@ -91,11 +93,10 @@ class VoiceTakeComposer:
             output_path=output,
             expected_duration_ms=offset,
             transcript_segments=tuple(segments),
-            source_asset_ids=tuple(str(take.audio.id) for take in prepared),
+            source_asset_ids=tuple(str(take.audio.id) for take, _ in prepared),
         )
 
-    @staticmethod
-    def _validate(take: VerifiedVoiceTake) -> VerifiedVoiceTake:
+    def _validate(self, take: VerifiedVoiceTake) -> Path:
         if not isinstance(take, VerifiedVoiceTake) or not take.scene_id.strip():
             raise VoiceTakeCompositionError("each voice take needs a scene ID")
         audio = take.audio
@@ -104,6 +105,22 @@ class VoiceTakeComposer:
             raise VoiceTakeCompositionError(f"voice take {take.scene_id!r} is not QA-verified")
         if not audio.transcript_source or not audio.transcript_segments:
             raise VoiceTakeCompositionError(f"voice take {take.scene_id!r} has no real timed transcript")
-        if not Path(audio.source_file).is_file() or Path(audio.source_file).stat().st_size == 0:
+        source = self._resolve_source(audio.source_file)
+        if not source.is_file() or source.stat().st_size == 0:
             raise VoiceTakeCompositionError(f"voice take {take.scene_id!r} media is unavailable")
-        return take
+        return source
+
+    def _resolve_source(self, source_file: str) -> Path:
+        value = Path(source_file)
+        if value.is_absolute():
+            return value.resolve()
+        if self._data_root is None:
+            raise VoiceTakeCompositionError("relative Voice take media requires a configured data root")
+        root = self._data_root
+        source = (root.parent / value if value.parts and value.parts[0].casefold() == root.name.casefold()
+                  else root / value).resolve()
+        try:
+            source.relative_to(root)
+        except ValueError as exc:
+            raise VoiceTakeCompositionError("Voice take media path escapes the configured data root") from exc
+        return source

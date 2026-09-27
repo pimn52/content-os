@@ -166,13 +166,23 @@ class OmniVoiceProvider:
         model: str = "official-pretrained",
         *,
         synthesizer: Callable[[VoiceProfile, str, Path, str | None], object] | None = None,
+        reference_synthesizer: Callable[[VoiceProfile, str, Path, str | None, object], object] | None = None,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
             raise VoiceConfigurationError("OmniVoice model must not be empty")
         self.model = model.strip()
         self._synthesizer = synthesizer
+        self._reference_synthesizer = reference_synthesizer
 
     def synthesize(self, profile: VoiceProfile, text: str, output_path: str | Path, *, language: str | None = None) -> VoiceSynthesisResult:
+        return self._synthesize(profile, text, output_path, language=language)
+
+    def synthesize_with_reference(self, profile: VoiceProfile, text: str, output_path: str | Path, *, language: str | None = None, reference_window: object) -> VoiceSynthesisResult:
+        if self._reference_synthesizer is None:
+            raise VoiceConfigurationError("OmniVoice selected-reference execution is not configured")
+        return self._synthesize(profile, text, output_path, language=language, reference_window=reference_window)
+
+    def _synthesize(self, profile: VoiceProfile, text: str, output_path: str | Path, *, language: str | None = None, reference_window: object | None = None) -> VoiceSynthesisResult:
         if not isinstance(profile, VoiceProfile) or not profile.consent.confirmed:
             raise VoiceInputError("voice synthesis requires an explicitly consented VoiceProfile")
         if not isinstance(text, str) or not text.strip():
@@ -188,7 +198,11 @@ class OmniVoiceProvider:
             )
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            produced = self._synthesizer(profile, text.strip(), target, language.strip() if language else None)
+            if reference_window is None:
+                produced = self._synthesizer(profile, text.strip(), target, language.strip() if language else None)
+            else:
+                assert self._reference_synthesizer is not None
+                produced = self._reference_synthesizer(profile, text.strip(), target, language.strip() if language else None, reference_window)
         except VoiceError:
             raise
         except TimeoutError as exc:

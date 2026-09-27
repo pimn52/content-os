@@ -21,13 +21,15 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingRunRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, UsageCost, VideoSpec, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReviewOutcome
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, TalkingSliceSeriesRecovery, UsageCost, VideoSpec, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceHumanReview, VoicePaceCandidateJobPayload, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
 from app.master_narration import MasterNarrationComposer, MasterNarrationCompositionError
 from app.media import AudioAssetNotFound, AudioImportError, AudioImporter, AudioTranscriptPersistence, ClipTranscriptPersistence, FFProbeAdapter, ImageImportError, ImageImporter, MediaImportError, MediaImporter, NoClipsForAsset, ProbeError, SubtitleParseError, parse_subtitle_file
 from app.workspace import workspace_page
+from app.voice_delivery import VoiceDeliveryTextError, validate_voice_delivery_text
+from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice, VoicePerformancePlanningError
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
     EmbeddingAuthenticationError,
@@ -69,7 +71,10 @@ from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, Capab
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
 from app.talking import TalkingRunAssembler, TalkingRunAssemblyError, TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
+from app.talking_qa import TalkingHumanReview, TalkingQaError, apply_talking_human_review
 from app.voice_takes import VoiceTakeComposer
+from app.voice_observation import VoiceObservationError, observe_voice_performance
+from app.voice_boundary_alignment import voice_asset_project_id
 from app.voice_qa import VoiceQaError, apply_voice_human_review, voice_human_review_status
 
 
@@ -533,9 +538,11 @@ class VoiceGenerationJobRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     voice_profile_id: UUID
     text: str = Field(min_length=1, max_length=100_000)
+    delivery_text: str | None = Field(default=None, min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     use_draft_performance_plan: bool = False
+    reference_window: VoiceReferenceWindowSelection | None = None
 
 
 class NarrationPerformancePlanRequest(BaseModel):
@@ -556,6 +563,21 @@ class VoiceQaJobRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     narration_audio_id: UUID
     target_text: str = Field(min_length=1, max_length=100_000)
+
+
+class VoicePaceCandidateJobRequest(BaseModel):
+    """One explicit, bounded local pace candidate; no provider speed claim."""
+
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    narration_audio_id: UUID
+    profile: Literal["gentle_slower"] = "gentle_slower"
+
+
+class VoiceBoundaryAlignmentJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    narration_audio_id: UUID
 
 
 class VoiceHumanReviewRequest(BaseModel):
@@ -587,11 +609,28 @@ class VoiceHumanReviewRequest(BaseModel):
         )
 
 
+class TalkingHumanReviewRequest(BaseModel):
+    """One asset-specific U-Talking judgment after independent technical QA."""
+
+    model_config = ConfigDict(extra="forbid")
+    approved: bool
+    evidence_reference: str = Field(min_length=1, max_length=500)
+    findings: list[str] = Field(min_length=1, max_length=100)
+
+    def review(self) -> TalkingHumanReview:
+        return TalkingHumanReview(
+            approved=self.approved,
+            evidence_reference=self.evidence_reference,
+            findings=tuple(self.findings),
+        )
+
+
 class MasterNarrationCompositionRequest(BaseModel):
     """Ordered source takes; their existing Voice QA remains the first gate."""
 
     model_config = ConfigDict(extra="forbid")
     take_audio_ids: list[UUID] = Field(min_length=1, max_length=100)
+    compact_quiet_seams: bool = False
 
 
 class TalkingGenerationJobRequest(BaseModel):
@@ -630,6 +669,14 @@ class TalkingSliceSeriesJobRequest(BaseModel):
     authorization_reference: str = Field(min_length=1, max_length=500)
     execution_machine_id: str = Field(min_length=1, max_length=200)
     terminal_face_closeout: bool = False
+
+
+class TalkingSliceSeriesRecoveryRequest(BaseModel):
+    """One exact failed child; the replacement inherits its complete payload."""
+
+    model_config = ConfigDict(extra="forbid")
+    failed_job_id: UUID
+    evidence_reference: str = Field(min_length=1, max_length=2_000)
 
 
 class TalkingReferenceSelectionRequest(BaseModel):
@@ -1772,6 +1819,23 @@ def create_app(
     async def list_voice_profiles(request: Request) -> list[VoiceProfile]:
         return VoiceProfileRepository(request.app.state.database).list()
 
+    @application.get("/voice-profiles/{profile_id}/reference-windows", tags=["voice"])
+    async def list_voice_reference_windows(profile_id: UUID, request: Request) -> list[dict[str, Any]]:
+        db: Database = request.app.state.database
+        profile = VoiceProfileRepository(db).get(profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="voice profile not found")
+        if not profile.consent.confirmed:
+            raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
+        clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
+        assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
+        choices = authorized_voice_reference_choices(profile, clips, assets, data_root=request.app.state.data_root)
+        return [
+            {"selection": selection.model_dump(mode="json"), "transcript": window.transcript,
+             "duration_ms": window.end_ms - window.start_ms, "rank": rank}
+            for rank, (selection, window) in enumerate(choices)
+        ]
+
     @application.post("/voice-profiles", response_model=VoiceProfile, status_code=201, tags=["voice"])
     async def create_voice_profile(payload: VoiceProfileRequest, request: Request) -> VoiceProfile:
         db: Database = request.app.state.database
@@ -2178,6 +2242,56 @@ def create_app(
             raise HTTPException(status_code=404, detail="audio asset not found")
         return audio
 
+    @application.get("/audio-assets/{audio_id}/performance-observation", tags=["voice"])
+    async def get_voice_performance_observation(audio_id: UUID, request: Request) -> dict[str, Any]:
+        """Read persisted acoustic evidence without claiming a U-Voice judgment."""
+        audio = AudioAssetRepository(request.app.state.database).get(audio_id)
+        if audio is None:
+            raise HTTPException(status_code=404, detail="audio asset not found")
+        observation = audio.metadata.get("voice_performance_observation")
+        if not isinstance(observation, dict):
+            raise HTTPException(status_code=404, detail="voice performance observation not found")
+        return observation
+
+    @application.get("/audio-assets/{audio_id}/boundary-alignment", tags=["voice"])
+    async def get_voice_boundary_alignment(audio_id: UUID, request: Request) -> dict[str, Any]:
+        """Read backfilled word/PCM evidence without changing old observations."""
+        audio = AudioAssetRepository(request.app.state.database).get(audio_id)
+        if audio is None:
+            raise HTTPException(status_code=404, detail="audio asset not found")
+        alignment = audio.metadata.get("voice_boundary_alignment")
+        if not isinstance(alignment, dict):
+            raise HTTPException(status_code=404, detail="voice boundary alignment not found")
+        return alignment
+
+    @application.post("/audio-assets/{audio_id}/performance-observation", tags=["voice"])
+    async def create_voice_performance_observation(audio_id: UUID, request: Request) -> dict[str, Any]:
+        """Analyze one QA-verified narration once and retain its source-bound evidence."""
+        db: Database = request.app.state.database
+        audios = AudioAssetRepository(db)
+        audio = audios.get(audio_id)
+        if audio is None:
+            raise HTTPException(status_code=404, detail="audio asset not found")
+        generation = audio.metadata.get("voice_generation")
+        if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+            raise HTTPException(status_code=422, detail="performance observation requires verified Voice QA")
+        copy = generation.get("target_text")
+        if not isinstance(copy, str) or not copy.strip():
+            raise HTTPException(status_code=422, detail="performance observation requires exact requested copy")
+        existing = audio.metadata.get("voice_performance_observation")
+        if isinstance(existing, dict):
+            return existing
+        try:
+            observation = observe_voice_performance(audio, copy, data_root=request.app.state.data_root)
+        except VoiceObservationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        observation["observed_at"] = datetime.now(timezone.utc).isoformat()
+        metadata = dict(audio.metadata)
+        metadata["voice_performance_observation"] = observation
+        with db.transaction():
+            audios.update(audio.model_copy(update={"metadata": metadata}))
+        return observation
+
     @application.get("/audio-assets/{audio_id}/media", tags=["audio"])
     async def audio_asset_media(audio_id: UUID, request: Request) -> FileResponse:
         audio = AudioAssetRepository(request.app.state.database).get(audio_id)
@@ -2406,6 +2520,23 @@ def create_app(
             raise HTTPException(status_code=404, detail="voice profile not found")
         if not profile.consent.confirmed:
             raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
+        if payload.delivery_text is not None:
+            try:
+                validate_voice_delivery_text(payload.text, payload.delivery_text)
+            except VoiceDeliveryTextError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if payload.delivery_text is not None and payload.use_draft_performance_plan:
+            raise HTTPException(status_code=422, detail="delivery text and draft performance plan cannot yet be applied together")
+        if payload.reference_window is not None and payload.use_draft_performance_plan:
+            raise HTTPException(status_code=422, detail="selected reference and draft performance plan cannot yet be applied together")
+        if payload.reference_window is not None:
+            clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
+            assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
+            choices = authorized_voice_reference_choices(profile, clips, assets, data_root=request.app.state.data_root)
+            try:
+                resolve_authorized_voice_reference_choice(payload.reference_window, choices)
+            except VoicePerformancePlanningError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         performance_plan = None
         if payload.use_draft_performance_plan:
             draft = ProjectDraftRepository(db).get(project_id)
@@ -2420,9 +2551,11 @@ def create_app(
             project_id=project_id,
             voice_profile_id=payload.voice_profile_id,
             text=payload.text,
+            delivery_text=payload.delivery_text,
             authorization_reference=payload.authorization_reference,
             language=payload.language,
             narration_performance_plan=performance_plan,
+            reference_window=payload.reference_window,
         )
         job = Job(
             id=uuid4(), project_id=project_id, type=JobType.GENERATE_VOICE,
@@ -2434,6 +2567,44 @@ def create_app(
             or persisted.project_id != project_id
             or persisted.payload != voice_payload
         ):
+            raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+        return _job_response(db, persisted)
+
+    @application.post("/projects/{project_id}/voice-pace-candidate-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
+    async def enqueue_voice_pace_candidate(project_id: UUID, payload: VoicePaceCandidateJobRequest, request: Request) -> dict[str, Any]:
+        """Request one conservative whole-take pace variant of a verified source."""
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        audios = AudioAssetRepository(db)
+        jobs = JobRepository(db)
+        source = audios.get(payload.narration_audio_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if voice_asset_project_id(source, jobs) != project_id:
+            raise HTTPException(status_code=422, detail="narration does not belong to project")
+        generation = source.metadata.get("voice_generation")
+        qa = generation.get("qa") if isinstance(generation, dict) else None
+        if (
+            not isinstance(generation, dict) or generation.get("qa_state") != "verified"
+            or not isinstance(qa, dict) or qa.get("qa_state") != "verified"
+            or not isinstance(generation.get("target_text"), str) or not generation["target_text"].strip()
+            or generation.get("provider") in {"content_os_local_pace", "derived_audio_tempo_evaluation"}
+            or "pace_candidate" in generation or not source.authorization_reference
+        ):
+            raise HTTPException(status_code=422, detail="pace candidate requires an authorized, independently QA-verified original narration")
+        job_payload = VoicePaceCandidateJobPayload(
+            project_id=project_id, narration_audio_id=source.id,
+            source_sha256=source.content_hash, profile=payload.profile,
+        )
+        now = datetime.now(timezone.utc)
+        job = Job(
+            id=uuid4(), project_id=project_id, type=JobType.CREATE_VOICE_PACE_CANDIDATE,
+            idempotency_key=payload.idempotency_key, created_at=now, updated_at=now,
+            payload=job_payload,
+        )
+        persisted = jobs.create(job)
+        if persisted.type is not JobType.CREATE_VOICE_PACE_CANDIDATE or persisted.project_id != project_id or persisted.payload != job_payload:
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 
@@ -2476,6 +2647,46 @@ def create_app(
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 
+    @application.post("/projects/{project_id}/voice-boundary-alignment-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
+    async def enqueue_voice_boundary_alignment(project_id: UUID, payload: VoiceBoundaryAlignmentJobRequest, request: Request) -> dict[str, Any]:
+        """Backfill local word timing for an old verified asset, never rerun QA."""
+        db: Database = request.app.state.database
+        jobs = JobRepository(db)
+        audio = AudioAssetRepository(db).get(payload.narration_audio_id)
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if audio is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if voice_asset_project_id(audio, jobs) != project_id:
+            raise HTTPException(status_code=422, detail="narration does not belong to project")
+        generation = audio.metadata.get("voice_generation")
+        qa = generation.get("qa") if isinstance(generation, dict) else None
+        if not isinstance(generation, dict) or generation.get("qa_state") != "verified" or not isinstance(qa, dict) or qa.get("qa_state") != "verified":
+            raise HTTPException(status_code=422, detail="boundary alignment requires independently verified Voice QA")
+        job_payload = VoiceBoundaryAlignmentJobPayload(project_id=project_id, narration_audio_id=audio.id, source_sha256=audio.content_hash)
+        existing = jobs.get_by_idempotency_key(payload.idempotency_key)
+        if existing is not None:
+            if existing.type is not JobType.ALIGN_VOICE_BOUNDARIES or existing.project_id != project_id or existing.payload != job_payload:
+                raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+            return _job_response(db, existing)
+        if "voice_word_timing" in audio.metadata or "voice_boundary_alignment" in audio.metadata:
+            raise HTTPException(status_code=409, detail="word-boundary evidence already exists")
+        if any(
+            prior.type is JobType.ALIGN_VOICE_BOUNDARIES
+            and isinstance(prior.payload, VoiceBoundaryAlignmentJobPayload)
+            and prior.payload.narration_audio_id == audio.id
+            and prior.status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COMPLETED}
+            for prior in jobs.list()
+        ):
+            raise HTTPException(status_code=409, detail="word-boundary alignment job already exists for this audio")
+        now = datetime.now(timezone.utc)
+        job = Job(id=uuid4(), project_id=project_id, type=JobType.ALIGN_VOICE_BOUNDARIES,
+                  idempotency_key=payload.idempotency_key, created_at=now, updated_at=now, payload=job_payload)
+        persisted = jobs.create(job)
+        if persisted.type is not JobType.ALIGN_VOICE_BOUNDARIES or persisted.project_id != project_id or persisted.payload != job_payload:
+            raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
+        return _job_response(db, persisted)
+
     @application.post(
         "/projects/{project_id}/voice-assets/{audio_id}/human-review",
         response_model=AudioAsset,
@@ -2507,6 +2718,44 @@ def create_app(
         return updated
 
     @application.post(
+        "/projects/{project_id}/talking-assets/{asset_id}/human-review",
+        response_model=Asset,
+        tags=["voice"],
+    )
+    async def record_talking_human_review(
+        project_id: UUID, asset_id: UUID, payload: TalkingHumanReviewRequest, request: Request,
+    ) -> Asset:
+        """Persist one immutable U-Talking decision for the exact project child video."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        assets = AssetRepository(db)
+        asset = assets.get(asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="Talking video asset not found")
+        generation = asset.metadata.get("talking_generation")
+        job_id = generation.get("job_id") if isinstance(generation, dict) else None
+        try:
+            job = JobRepository(db).get(UUID(job_id)) if isinstance(job_id, str) else None
+        except ValueError:
+            job = None
+        if (
+            job is None or job.project_id != project_id or job.type is not JobType.GENERATE_TALKING
+            or job.status is not JobStatus.COMPLETED
+            or not isinstance(job.payload, TalkingGenerationJobPayload)
+            or generation.get("narration_audio_id") != str(job.payload.narration_audio_id)
+        ):
+            raise HTTPException(status_code=422, detail="Talking video does not belong to a completed project job")
+        try:
+            updated = apply_talking_human_review(asset, payload.review())
+        except TalkingQaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        with db.transaction():
+            assets.update(updated)
+        return updated
+
+    @application.post(
         "/projects/{project_id}/master-narration-candidates",
         response_model=AudioAsset,
         status_code=201,
@@ -2523,11 +2772,11 @@ def create_app(
         importer = AudioImporter(db, request.app.state.data_root, FFProbeAdapter(resolve_local_executable("ffprobe")))
         service = MasterNarrationComposer(
             audios=AudioAssetRepository(db), jobs=JobRepository(db), importer=importer,
-            composer=VoiceTakeComposer(resolve_local_executable("ffmpeg")),
+            composer=VoiceTakeComposer(resolve_local_executable("ffmpeg"), data_root=request.app.state.data_root),
             output_root=request.app.state.data_root / "generated" / "master-narration",
         )
         try:
-            return service.compose(project_id, payload.take_audio_ids)
+            return service.compose(project_id, payload.take_audio_ids, compact_quiet_seams=payload.compact_quiet_seams)
         except MasterNarrationCompositionError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2756,6 +3005,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="narration audio not found")
         if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
             raise HTTPException(status_code=422, detail="Talking slice series requires QA-verified generated narration")
+        if voice_human_review_status(narration) != "approved":
+            raise HTTPException(
+                status_code=422,
+                detail="Talking slice series requires an approved U-Voice likeness, naturalness and delivery review",
+            )
         schema = find_unique_provider_settings_schema("talking", profile.provider)
         if schema is None:
             raise HTTPException(status_code=422, detail="the selected Talking provider has no unambiguous capability profile")
@@ -2865,6 +3119,80 @@ def create_app(
                 if persisted.id != job.id or persisted.payload != job.payload:
                     raise HTTPException(status_code=409, detail="Talking slice child idempotency conflict")
         return response_for(series)
+
+    @application.post(
+        "/projects/{project_id}/talking-slice-series/{series_id}/recover-failed-child",
+        response_model=JobResponse,
+        status_code=201,
+        tags=["voice"],
+    )
+    async def recover_talking_slice_series_child(
+        project_id: UUID, series_id: UUID, payload: TalkingSliceSeriesRecoveryRequest, request: Request,
+    ) -> dict[str, Any]:
+        """Replace one failed child without losing its Job/ProviderCall evidence."""
+
+        db: Database = request.app.state.database
+        series_repo = TalkingSliceSeriesRepository(db)
+        jobs = JobRepository(db)
+        with db.transaction(immediate=True):
+            series = series_repo.get(series_id)
+            if series is None or series.project_id != project_id:
+                raise HTTPException(status_code=404, detail="Talking slice series not found")
+            for recovery in series.recovery_history:
+                if recovery.failed_job_id == payload.failed_job_id:
+                    if recovery.evidence_reference != payload.evidence_reference:
+                        raise HTTPException(status_code=409, detail="failed child recovery evidence conflicts")
+                    existing = jobs.get(recovery.replacement_job_id)
+                    if existing is None:
+                        raise HTTPException(status_code=409, detail="replacement child is missing")
+                    return _job_response(db, existing)
+            if series.recovery_history:
+                raise HTTPException(status_code=409, detail="series already used its bounded recovery")
+            if TalkingSliceSeriesContinuityReviewRepository(db).get_by_series_id(series.id) is not None or TalkingRunRepository(db).get_by_series_id(series.id) is not None:
+                raise HTTPException(status_code=409, detail="reviewed or assembled series cannot be recovered")
+            if payload.failed_job_id not in series.child_job_ids:
+                raise HTTPException(status_code=422, detail="failed Job is not an active child")
+            index = series.child_job_ids.index(payload.failed_job_id)
+            failed = jobs.get(payload.failed_job_id)
+            if (
+                failed is None or failed.project_id != project_id or failed.type is not JobType.GENERATE_TALKING
+                or failed.status is not JobStatus.FAILED or failed.attempt != 1
+                or failed.error_code != "talking_invalid_request"
+                or not isinstance(failed.payload, TalkingGenerationJobPayload)
+                or failed.payload.slice_series_id != series.id or failed.payload.slice_series_index != index
+            ):
+                raise HTTPException(status_code=422, detail="child does not match the bounded failed Talking Job")
+            siblings = [jobs.get(job_id) for i, job_id in enumerate(series.child_job_ids) if i != index]
+            if any(job is None or job.status is not JobStatus.COMPLETED for job in siblings):
+                raise HTTPException(status_code=422, detail="other Talking children must be completed")
+            assets = AssetRepository(db).list()
+            for sibling in siblings:
+                matching = [asset for asset in assets if asset.metadata.get("talking_generation", {}).get("job_id") == str(sibling.id)]
+                if len(matching) != 1 or matching[0].metadata["talking_generation"].get("qa_state") != "verified":
+                    raise HTTPException(status_code=422, detail="other Talking children require unique verified outputs")
+            master = AudioAssetRepository(db).get(series.narration_audio_id)
+            if master is None or master.metadata.get("voice_generation", {}).get("qa_state") != "verified" or voice_human_review_status(master) != "approved":
+                raise HTTPException(status_code=422, detail="approved QA-verified Master is unavailable")
+            now = datetime.now(timezone.utc)
+            replacement = Job(
+                project_id=project_id, type=JobType.GENERATE_TALKING,
+                idempotency_key=f"talking-slice-series:{series.id}:{index}:recovery-1",
+                created_at=now, updated_at=now, payload=failed.payload,
+            )
+            persisted = jobs.create(replacement)
+            if persisted.id != replacement.id or persisted.payload != failed.payload:
+                raise HTTPException(status_code=409, detail="replacement child idempotency conflict")
+            child_ids = list(series.child_job_ids)
+            child_ids[index] = replacement.id
+            updated = series.model_copy(update={
+                "child_job_ids": child_ids,
+                "recovery_history": [TalkingSliceSeriesRecovery(
+                    series_index=index, failed_job_id=failed.id, replacement_job_id=replacement.id,
+                    evidence_reference=payload.evidence_reference, recovered_at=now,
+                )],
+            })
+            series_repo.update(updated)
+        return _job_response(db, replacement)
 
     @application.get(
         "/projects/{project_id}/talking-slice-series/{series_id}",

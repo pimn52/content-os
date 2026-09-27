@@ -123,6 +123,10 @@ asset-specific U-Voice record after automated QA must cover likeness,
 naturalness, emphasis, pace, pauses and rhetorical rhythm. Pending or rejected
 generated Voice cannot drive Talking or final assembly; this human judgment
 does not substitute for a provider capability/application receipt.
+For R1, emphasis and rhythm pass when the exact narration is sufficiently
+clear and publishable; perfect word focus or verified automatic whole-sentence
+intonation control is not a separate release prerequisite. Materially harmful
+delivery still fails the asset-level human gate.
 
 ### Talking
 
@@ -154,7 +158,7 @@ Do not introduce Redis, Celery, Kubernetes, n8n or microservices merely because 
 
 The product has strong foundations in creator/project state, local assets, routing, execution evidence, Advanced Settings, jobs, timeline and rendering.
 
-Talking has moved beyond isolated short demos: the current local benchmark has produced an approved source-forward multi-short continuous result. The remaining Talking work is to convert that validated execution path into a normal first-class TalkingRun consumed by Asset Router/VideoSpec.
+Talking has moved beyond isolated short demos: the approved 26.3s source-forward benchmark is now an admitted first-class TalkingRun with an Asset/Clip consumable by VideoSpec. Its exact assembled media matches the human-approved preview, but it does not satisfy the 30–60s first R1 end-to-end gate.
 
 The largest unresolved R1 capability risk is reliable fresh Master Narration generation for normal 30–60s content. Current local Voice evidence is not yet sufficient for a repeatable long-form claim.
 

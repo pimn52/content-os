@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 import sys
 
 import pytest
 
-from app.db import AssetRepository, Database
-from app.domain.models import Asset, Job, JobType, RationalFps
+from app.db import AssetRepository, ClipRepository, Database, VoiceProfileRepository
+from app.domain.models import Asset, Clip, ConsentRecord, Job, JobType, RationalFps, VoiceProfile
 from app.jobs.handlers import AssetAnalysisJobHandler
 from app.jobs.targets import AssetJobTargetStore
 from app.jobs.store import JobStore
@@ -13,7 +14,9 @@ from app.providers.asr import ASRConfigurationError
 from app.providers.talking import TalkingConfigurationError
 from app.providers.vision import VisionConfigurationError
 from app.runtime import resolve_local_executable
-from app.worker_cli import _resolve_omnivoice_reference_path, build_runner, parse_config, run
+from app.worker_cli import _build_voice_provider, _resolve_omnivoice_reference_path, build_runner, parse_config, run
+from app.providers.voice import VoiceInputError
+from app.voice_performance import authorized_voice_reference_choices
 
 
 def test_worker_defaults_and_type_selection(monkeypatch):
@@ -26,6 +29,30 @@ def test_worker_defaults_and_type_selection(monkeypatch):
     assert config.db_path == Path("content-os-data/content-os.sqlite3")
     assert config.ffmpeg == resolve_local_executable("ffmpeg")
     assert config.ffprobe == resolve_local_executable("ffprobe")
+
+
+def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"original authorized bytes")
+    model = tmp_path / "model"
+    model.mkdir()
+    monkeypatch.setenv("CONTENT_OS_VOICE_PROVIDER", "omnivoice")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_PYTHON", sys.executable)
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_MODEL", str(model))
+    db_path = tmp_path / "selected-worker.sqlite"
+    with Database(db_path) as db:
+        asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=12_000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1), authorization_reference="source-rights", imported_at=datetime.now(timezone.utc))
+        AssetRepository(db).create(asset)
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=12_000, asset_duration_ms=12_000, voice_candidate=True, transcript_segments=[{"start_ms": 0, "end_ms": 3_000, "text": "这是前半句"}, {"start_ms": 3_100, "end_ms": 6_000, "text": "这是后半句"}])
+        ClipRepository(db).create(clip)
+        profile = VoiceProfile(name="Creator", provider="omnivoice", provider_profile_id="creator", reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
+        VoiceProfileRepository(db).create(profile)
+        selection, _ = authorized_voice_reference_choices(profile, [clip], {asset.id: asset}, data_root=tmp_path)[0]
+        config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_voice"])
+        provider = _build_voice_provider(config, db)
+        source.write_bytes(b"changed source bytes")
+        with pytest.raises(VoiceInputError, match="source changed"):
+            provider.synthesize_with_reference(profile, "新文案", tmp_path / "output.wav", reference_window=selection)
 
 
 def test_transcribe_requires_runtime_key_but_analyze_does_not(tmp_path: Path, monkeypatch):

@@ -94,7 +94,9 @@ class JobType(StrEnum):
     PLAN_CONTENT = "plan_content"
     MATCH_ASSETS = "match_assets"
     GENERATE_VOICE = "generate_voice"
+    CREATE_VOICE_PACE_CANDIDATE = "create_voice_pace_candidate"
     VERIFY_VOICE = "verify_voice"
+    ALIGN_VOICE_BOUNDARIES = "align_voice_boundaries"
     GENERATE_TALKING = "generate_talking"
     RENDER = "render"
     SYNC_ACCOUNT = "sync_account"
@@ -1243,15 +1245,34 @@ class RenderVideoJobPayload(ContractModel):
         return self
 
 
+class VoiceReferenceWindowSelection(ContractModel):
+    """Stable authorized source window selected for one Voice generation job."""
+
+    clip_id: UUID
+    asset_id: UUID
+    source_content_hash: str = Field(min_length=16, max_length=128)
+    start_ms: NonNegativeMs
+    end_ms: PositiveFrames
+    transcript_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def valid_interval(self) -> "VoiceReferenceWindowSelection":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("Voice reference window end_ms must exceed start_ms")
+        return self
+
+
 class VoiceGenerationJobPayload(ContractModel):
     """Credential-free input for one authorized, persisted voice request."""
 
     project_id: UUID
     voice_profile_id: UUID
     text: str = Field(min_length=1, max_length=100_000)
+    delivery_text: str | None = Field(default=None, min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     narration_performance_plan: NarrationPerformancePlan | None = None
+    reference_window: VoiceReferenceWindowSelection | None = None
 
 
 class VoiceQaJobPayload(ContractModel):
@@ -1260,6 +1281,23 @@ class VoiceQaJobPayload(ContractModel):
     project_id: UUID
     narration_audio_id: UUID
     target_text: str = Field(min_length=1, max_length=100_000)
+
+
+class VoicePaceCandidateJobPayload(ContractModel):
+    """One explicit, source-bound local whole-take pace operation."""
+
+    project_id: UUID
+    narration_audio_id: UUID
+    source_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    profile: Literal["gentle_slower"]
+
+
+class VoiceBoundaryAlignmentJobPayload(ContractModel):
+    """Credential-free request to backfill observation evidence, never QA."""
+
+    project_id: UUID
+    narration_audio_id: UUID
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class TalkingGenerationJobPayload(ContractModel):
@@ -1333,6 +1371,16 @@ class TalkingGenerationJobPayload(ContractModel):
         return self
 
 
+class TalkingSliceSeriesRecovery(ContractModel):
+    """Immutable provenance for one explicitly replaced failed child."""
+
+    series_index: int = Field(ge=0)
+    failed_job_id: UUID
+    replacement_job_id: UUID
+    evidence_reference: str = Field(min_length=1, max_length=2_000)
+    recovered_at: AwareDatetime
+
+
 class TalkingSliceSeries(ContractModel):
     """Atomic parent record for an ordered set of short Talking jobs."""
 
@@ -1342,6 +1390,7 @@ class TalkingSliceSeries(ContractModel):
     request_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     narration_audio_id: UUID
     child_job_ids: list[UUID] = Field(min_length=1, max_length=10_000)
+    recovery_history: list[TalkingSliceSeriesRecovery] = Field(default_factory=list)
     created_at: AwareDatetime
 
 
@@ -1422,7 +1471,7 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoiceQaJobPayload | TalkingGenerationJobPayload | None = None
+    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
@@ -1445,11 +1494,21 @@ class Job(ContractModel):
                 raise ValueError("voice QA job payload must be a VoiceQaJobPayload")
             if self.payload is not None and self.project_id != self.payload.project_id:
                 raise ValueError("voice QA job project_id must match its payload")
+        elif self.type is JobType.CREATE_VOICE_PACE_CANDIDATE:
+            if not isinstance(self.payload, VoicePaceCandidateJobPayload):
+                raise ValueError("voice pace job payload must be a VoicePaceCandidateJobPayload")
+            if self.project_id != self.payload.project_id:
+                raise ValueError("voice pace job project_id must match its payload")
+        elif self.type is JobType.ALIGN_VOICE_BOUNDARIES:
+            if not isinstance(self.payload, VoiceBoundaryAlignmentJobPayload):
+                raise ValueError("voice boundary job payload must be a VoiceBoundaryAlignmentJobPayload")
+            if self.project_id != self.payload.project_id:
+                raise ValueError("voice boundary job project_id must match its payload")
         elif self.type is JobType.GENERATE_TALKING:
             if self.payload is not None and not isinstance(self.payload, TalkingGenerationJobPayload):
                 raise ValueError("talking generation job payload must be a TalkingGenerationJobPayload")
             if self.payload is not None and self.project_id != self.payload.project_id:
                 raise ValueError("talking generation job project_id must match its payload")
         elif self.payload is not None:
-            raise ValueError("only render, voice generation and talking generation jobs may contain a payload")
+            raise ValueError("only declared typed jobs may contain a payload")
         return self

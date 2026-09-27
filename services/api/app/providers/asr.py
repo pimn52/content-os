@@ -76,10 +76,26 @@ class TranscriptionSegment:
 
 
 @dataclass(frozen=True)
+class TranscriptionWord:
+    start_ms: int
+    end_ms: int
+    text: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.start_ms, bool) or not isinstance(self.start_ms, int) or self.start_ms < 0:
+            raise ValueError("word start_ms must be a non-negative integer")
+        if isinstance(self.end_ms, bool) or not isinstance(self.end_ms, int) or self.end_ms <= self.start_ms:
+            raise ValueError("word end_ms must be greater than start_ms")
+        if not isinstance(self.text, str) or not self.text.strip():
+            raise ValueError("word text must be non-empty")
+
+
+@dataclass(frozen=True)
 class TranscriptionResult:
     text: str
     segments: tuple[TranscriptionSegment, ...]
     language: str | None = None
+    words: tuple[TranscriptionWord, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
@@ -88,6 +104,8 @@ class TranscriptionResult:
             raise ValueError("transcription segments must be immutable")
         if self.language is not None and not isinstance(self.language, str):
             raise ValueError("transcription language must be a string or None")
+        if not isinstance(self.words, tuple) or not all(isinstance(word, TranscriptionWord) for word in self.words):
+            raise ValueError("transcription words must be an immutable tuple")
 
 
 class ASRProvider(Protocol):
@@ -279,6 +297,8 @@ class FasterWhisperASRProvider:
                 transcribe_kwargs["word_timestamps"] = True
             raw_segments, info = model.transcribe(str(path), **transcribe_kwargs)
             segments: list[TranscriptionSegment] = []
+            words: list[TranscriptionWord] = []
+            words_valid = True
             for raw in raw_segments:
                 text = getattr(raw, "text", None)
                 start = getattr(raw, "start", None)
@@ -289,6 +309,20 @@ class FasterWhisperASRProvider:
                     word_span = _word_span(getattr(raw, "words", None))
                     if word_span is not None:
                         start, end = word_span
+                    for raw_word in getattr(raw, "words", None) or ():
+                        word_text = getattr(raw_word, "word", None)
+                        if not isinstance(word_text, str) or not word_text.strip():
+                            words_valid = False
+                            continue
+                        try:
+                            word_start = _start_ms(getattr(raw_word, "start", None))
+                            word_end = _end_ms(getattr(raw_word, "end", None))
+                            words.append(TranscriptionWord(word_start, word_end, word_text.strip()))
+                        except (InvalidOperation, TypeError, ValueError):
+                            # Word timing is optional observational evidence;
+                            # malformed words must not turn valid segment QA
+                            # into a different acceptance outcome.
+                            words_valid = False
                 start_ms = _start_ms(start)
                 end_ms = _end_ms(end)
                 if end_ms <= start_ms:
@@ -308,6 +342,7 @@ class FasterWhisperASRProvider:
             " ".join(segment.text for segment in segments),
             tuple(segments),
             detected_language.strip() if detected_language else None,
+            tuple(words) if words_valid else (),
         )
 
     def _loaded_model(self) -> object:

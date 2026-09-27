@@ -188,6 +188,8 @@ def apply_talking_human_review(asset: Asset, review: TalkingHumanReview) -> Asse
     generation = asset.metadata.get("talking_generation")
     if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
         raise TalkingQaError("Talking human review requires verified automated Talking QA")
+    if generation.get("human_review_state") in {"approved", "rejected"}:
+        raise TalkingQaError("Talking human review is already recorded for this exact video asset")
     metadata = dict(asset.metadata)
     updated_generation = dict(generation)
     updated_generation["human_review_state"] = "approved" if review.approved else "rejected"

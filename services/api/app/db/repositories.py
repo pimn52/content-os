@@ -642,6 +642,10 @@ class JobRepository(_Repository[Job]):
         # of spuriously failing with "database is locked".
         self.db.connection.execute("PRAGMA busy_timeout = 5000")
 
+    def get_by_idempotency_key(self, idempotency_key: str) -> Job | None:
+        row = self.db.connection.execute("SELECT * FROM jobs WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+        return None if row is None else _model(row, Job)
+
     def create(self, value: Job) -> Job:
         self.db.connection.execute(
             """INSERT INTO jobs(
@@ -718,6 +722,15 @@ class TalkingSliceSeriesRepository(_Repository[TalkingSliceSeries]):
         if persisted is None:
             raise sqlite3.IntegrityError("Talking slice series insert did not persist")
         return persisted
+
+    def update(self, value: TalkingSliceSeries) -> TalkingSliceSeries:
+        cursor = self.db.connection.execute(
+            "UPDATE talking_slice_series SET payload = ? WHERE id = ? AND project_id = ?",
+            (_payload(value), str(value.id), str(value.project_id)),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
 
 
 class TalkingSliceSeriesContinuityReviewRepository(_Repository[TalkingSliceSeriesContinuityReview]):

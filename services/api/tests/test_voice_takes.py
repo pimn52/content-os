@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+import wave
 
 import pytest
 
 from app.domain.models import AudioAsset, TranscriptSegment
 from app.voice_takes import VerifiedVoiceTake, VoiceTakeComposer, VoiceTakeCompositionError
+from app.runtime import resolve_local_executable
 
 
 def _take(path: Path, *, text: str, start: int = 0, end: int = 500) -> AudioAsset:
@@ -55,3 +57,39 @@ def test_composer_offsets_source_timing_and_uses_pcm_concat(tmp_path: Path, monk
         (100, 800, "第一句"), (1_200, 1_900, "第二句"),
     ]
     assert result.source_asset_ids == (str(first.id), str(second.id))
+
+
+def test_composer_resolves_portable_takes_from_data_root_outside_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "content-os-data"
+    originals = root / "assets" / "audio-originals"
+    originals.mkdir(parents=True)
+    takes: list[VerifiedVoiceTake] = []
+    for index, name in enumerate(("one", "two")):
+        source = originals / f"{name}.wav"
+        audio = _take(source, text=f"第{index + 1}句")
+        # Replace the minimal fixture bytes with real PCM for FFmpeg.
+        with wave.open(str(source), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(24_000)
+            output.writeframes(b"\x00\x00" * 24_000)
+        portable = audio.model_copy(update={"source_file": str(Path(root.name) / "assets" / "audio-originals" / source.name)})
+        takes.append(VerifiedVoiceTake(name, portable))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    master = tmp_path / "master.wav"
+    result = VoiceTakeComposer(resolve_local_executable("ffmpeg"), data_root=root).compose(takes, master)
+    with wave.open(str(master), "rb") as output:
+        assert output.getframerate() == 24_000
+        assert output.getnframes() == 48_000
+    assert result.expected_duration_ms == 2_000
+
+
+def test_composer_rejects_portable_path_escape(tmp_path: Path) -> None:
+    root = tmp_path / "content-os-data"
+    root.mkdir()
+    audio = _take(tmp_path / "one.wav", text="第一句")
+    escaping = audio.model_copy(update={"source_file": "../one.wav"})
+    with pytest.raises(VoiceTakeCompositionError, match="escapes"):
+        VoiceTakeComposer(data_root=root).compose([VerifiedVoiceTake("hook", escaping)], tmp_path / "master.wav")

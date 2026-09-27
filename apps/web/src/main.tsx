@@ -106,6 +106,15 @@ function isVoiceQaCandidate(audio: AudioAsset): boolean {
   const generation = voiceGenerationFor(audio);
   return Boolean(generation && (generation.qa_state === "pending" || generation.qa_state === "failed"));
 }
+function isReviewableVoiceAudio(audio: AudioAsset, projectId: UUID | null): boolean {
+  const generation = voiceGenerationFor(audio);
+  return Boolean(projectId && generation?.project_id === projectId && generation.qa_state === "verified"
+    && !["approved", "rejected"].includes(String(generation.human_review_state ?? "pending")));
+}
+const voiceReviewDimensions = [
+  ["likeness", "本人音色相似度"], ["naturalness", "自然度"], ["emphasis", "重点表达"],
+  ["pace", "语速"], ["pauses", "停顿"], ["rhythm", "节奏"],
+] as const;
 function performanceLabel(value: string | null | undefined): string {
   return value ? narrationPerformanceLabels[value] ?? value : "未知";
 }
@@ -179,6 +188,7 @@ function App() {
   const [voiceJob, setVoiceJob] = useState<JobResponse | null>(null);
   const [voiceQaJob, setVoiceQaJob] = useState<JobResponse | null>(null);
   const [voiceQaText, setVoiceQaText] = useState("");
+  const [voiceReviewAssetId, setVoiceReviewAssetId] = useState<UUID | null>(null);
   const [talkingJob, setTalkingJob] = useState<JobResponse | null>(null);
   const [settingsSchemas, setSettingsSchemas] = useState<ProviderSettingsSchema[]>([]);
   const [settingsSchemaIndex, setSettingsSchemaIndex] = useState(0);
@@ -641,6 +651,26 @@ function App() {
     finally { setBusy(false); }
   }
 
+  async function enqueueGentleVoicePace(audio: AudioAsset) {
+    if (!selectedProject) return;
+    setBusy(true);
+    try {
+      const job = await api<JobResponse>(`/projects/${selectedProject.id}/voice-pace-candidate-jobs`, {
+        method: "POST", body: JSON.stringify({
+          idempotency_key: `web-voice-pace:${selectedProject.id}:${audio.id}:${Date.now()}`,
+          narration_audio_id: audio.id, profile: "gentle_slower",
+        }),
+      });
+      setMessage({ text: "轻度放慢任务已入队；将保留原音频并自动排入独立 Voice QA。" });
+      const completed = await waitForJob(job.id);
+      await loadAll();
+      if (completed.status !== "completed") throw new Error(completed.error_code || "语速候选任务未完成");
+      setMessage({ text: "轻度放慢候选已保留，独立 Voice QA 已入队；QA 与人审通过前不可用于成片。" });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "语速候选创建失败", error: true });
+    } finally { setBusy(false); }
+  }
+
   async function enqueueVoiceQa(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selectedProject) return; setBusy(true);
     const form = new FormData(event.currentTarget);
@@ -652,9 +682,38 @@ function App() {
       setVoiceQaJob(job); setMessage({ text: "Voice QA 已入队；Worker 将用独立本地 ASR 检查文案、时长、静音和可播放性" });
       const completed = await waitForJob(job.id); setVoiceQaJob(completed); await loadAll();
       if (completed.status !== "completed") throw new Error(completed.error_code || "Voice QA 未通过");
-      setMessage({ text: "Voice QA 已通过；现在才允许将这条新旁白提交给 Talking" });
+      setMessage({ text: "Voice QA 已通过；还须对此音频完成人工 U-Voice 审核，才能进入 Talking。" });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Voice QA 失败", error: true }); }
     finally { setBusy(false); }
+  }
+
+  async function submitVoiceReview(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedProject || !voiceReviewAssetId) return;
+    const form = new FormData(event.currentTarget);
+    const outcomes = Object.fromEntries(voiceReviewDimensions.map(([key]) => [key, String(form.get(key) ?? "")])) as Record<string, string>;
+    if (Object.values(outcomes).some((value) => !["pass", "needs_revision"].includes(value))) {
+      setMessage({ text: "请逐项判断全部六个维度。", error: true });
+      return;
+    }
+    const findings = String(form.get("findings") ?? "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    if (!findings.length) { setMessage({ text: "请留下至少一条具体听感发现。", error: true }); return; }
+    if (!window.confirm("这次 U-Voice 判断会固定在此音频上，提交后不能覆盖。确定提交吗？")) return;
+    setBusy(true);
+    try {
+      await api<AudioAsset>(`/projects/${selectedProject.id}/voice-assets/${voiceReviewAssetId}/human-review`, {
+        method: "POST", body: JSON.stringify({
+          approved: Object.values(outcomes).every((value) => value === "pass"),
+          evidence_reference: String(form.get("evidence_reference") ?? "").trim(),
+          findings, ...outcomes,
+        }),
+      });
+      await loadAll();
+      setVoiceReviewAssetId(null);
+      setMessage({ text: "这条音频的六维 U-Voice 判断已保存；结论只适用于这条 AudioAsset。" });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "U-Voice 审核保存失败", error: true });
+    } finally { setBusy(false); }
   }
 
   async function enqueueTalkingGeneration(event: FormEvent<HTMLFormElement>) {
@@ -909,10 +968,20 @@ function App() {
           <form onSubmit={(event) => void importAudioTranscript(event)} className="subform"><h3>为旁白绑定真实字幕</h3><label>目标旁白<select name="audio_id" required disabled={!audioAssets.length}><option value="">选择已导入录音</option>{audioAssets.map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label><Field label="本地 SRT / VTT 路径" name="source_path" placeholder="C:\\Captions\\narration.srt" /><Field label="字幕来源引用" name="source_reference" placeholder="creator-narration-captions-2026-09-09" /><button disabled={busy || !audioAssets.length} className="button">绑定旁白字幕</button><small className="muted">仅绑定你提供的真实时间轴；没有时间轴时不会伪造口型或语义同步。</small></form>
            <form onSubmit={(event) => void importMedia(event, true)} className="subform"><h3>Inbox 按需扫描</h3><Field label="Inbox 路径" name="source_path" placeholder="C:\\Videos\\Inbox" /><Field label="授权记录引用" name="authorization_reference" placeholder="creator-owned-2026" /><label className="checkbox-line"><input name="enqueue_analysis" type="checkbox" defaultChecked /> 新导入素材自动排入本地媒体分析</label><small className="muted">只自动执行本地预处理/连续 Clip 提取；ASR、视觉分析和索引仍按独立阶段显示，不会因入队被标为完成。</small><button disabled={busy} className="button">扫描 Inbox</button></form>
           <div className="asset-list">{assets.slice(0, 8).map((asset) => { const analysis = analysisStage(asset.id); const stage = transcriptStage(asset.id); const active = stage.status === "pending" || stage.status === "running"; const provenance = analysisProvenance(asset); return <div className="asset-row" key={asset.id}><div><strong>{asset.source_file.split(/[\\/]/).pop()}</strong><small>{asset.width}×{asset.height} · {Math.round(asset.duration_ms / 1000)}s · {asset.source_kind}</small><small className={analysis.status === "failed" ? "error" : analysis.status === "completed" ? "ok" : "muted"}>{analysisStageLabel(analysis)}</small><small className={stage.status === "failed" ? "error" : stage.status === "completed" ? "ok" : "muted"}>{transcriptStageLabel(stage)}</small>{provenance && <small className="muted">{provenance}</small>}</div><form className="asset-classification" onSubmit={(event) => void saveAssetClassification(asset.id, event)}><label>用途<select name="usage" defaultValue={String(asset.metadata.r1_usage ?? "unknown")}><option value="unknown">暂不使用</option><option value="reference">仅参考</option><option value="production">可用于生产</option></select></label><label>身份<select name="identity" defaultValue={String(asset.metadata.r1_identity ?? "unknown")}><option value="unknown">未知</option><option value="creator">本人形象</option><option value="other">其他人物</option><option value="none">无人/辅助画面</option></select></label><button disabled={busy} className="button">保存分组</button><button type="button" disabled={busy || active} className="button" onClick={() => void enqueueTranscription(asset)}>{active ? "ASR 处理中" : stage.status === "completed" ? "重新转写" : stage.status === "failed" || stage.status === "cancelled" ? "重试 ASR" : "提交 ASR"}</button></form></div>; })}{assets.length === 0 && <p className="muted">还没有本地素材。</p>}</div>
-          <div className="asset-list"><h3>已导入配音 / 本人录音</h3>{audioAssets.map((audio) => <div className="asset-row" key={audio.id}><div><strong>{audio.source_file.split(/[\\/]/).pop()}</strong><small>{Math.round(audio.duration_ms / 1000)}s · {audio.sample_rate}Hz · {audio.channels}ch · {audio.language ?? "语言未标注"}</small></div><span className="badge">已授权引用</span></div>)}{audioAssets.length === 0 && <p className="muted">尚无本地旁白；可在旧版 workspace 导入后回到这里绑定。</p>}</div>
+          <div className="asset-list"><h3>已导入配音 / 本人录音</h3>{audioAssets.map((audio) => {
+            const generation = voiceGenerationFor(audio);
+            const canSlow = selectedProject && generation?.qa_state === "verified" && !generation.pace_candidate
+              && !["content_os_local_pace", "derived_audio_tempo_evaluation"].includes(String(generation.provider ?? ""));
+            return <div className="asset-row" key={audio.id}><div><strong>{audio.source_file.split(/[\\/]/).pop()}</strong><small>{Math.round(audio.duration_ms / 1000)}s · {audio.sample_rate}Hz · {audio.channels}ch · {audio.language ?? "语言未标注"}</small><small className="muted">{generation?.qa_state === "verified" ? "Voice QA 已通过" : generation?.qa_state === "pending" ? "Voice QA 待完成" : "原始音频"}</small></div><div className="actions"><span className="badge">已授权引用</span>{canSlow && <button type="button" disabled={busy} className="button" onClick={() => void enqueueGentleVoicePace(audio)}>生成轻度放慢候选</button>}</div></div>;
+          })}{audioAssets.length === 0 && <p className="muted">尚无本地旁白；可在旧版 workspace 导入后回到这里绑定。</p>}</div>
         </section>
       </div>
       <section className="card"><div className="section-heading"><div><span className="kicker">03 / SIGNAL</span><h2>有来源选题</h2></div><span className="badge">不抓全网</span></div><div className="columns compact"><form onSubmit={createOpportunity}><Field label="来源引用" name="source_ref" placeholder="note:2026-09-09" /><Field label="标题" name="title" placeholder="要表达什么" /><label>来源类型<select name="source_type" defaultValue="manual"><option value="manual">人工</option><option value="historical_content">历史内容</option><option value="account_signal">账号信号</option></select></label><label>观察时间<input name="observed_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} /></label><Field label="为何适合当前 IP" name="fit_reason" as="textarea" /><Field label="内容角度" name="angle" as="textarea" /><Field label="不确定性" name="uncertainty" as="textarea" /><Field label="证据引用" name="evidence_refs" placeholder="source:..." /><button disabled={busy} className="button primary">保存选题</button></form><div className="opportunity-list">{opportunities.map((value) => <article key={value.id}><div className="row-between"><strong>{value.title}</strong><span className="badge">{sourceLabels[value.source_type] ?? value.source_type}</span></div><p>{value.angle}</p><small>{value.source_ref} · {value.status} · {value.evidence_refs.join(", ") || "无额外证据引用"}</small></article>)}{opportunities.length === 0 && <p className="muted">还没有选题来源。</p>}</div></div></section>
+      {selectedProject && <section className="card"><div className="section-heading"><div><span className="kicker">VOICE / HUMAN GATE</span><h2>旁白试听与 U-Voice 审核</h2></div><span className="badge">逐条判断</span></div>
+        <p className="muted">只审核当前项目中已通过独立 Voice QA 的音频。六个维度必须逐项判断；不追求完美重音，但影响理解或发布的缺陷应标记“需修改”。决定只适用于所选音频且不可覆盖。</p>
+        <label>待审核音频<select value={voiceReviewAssetId ?? ""} onChange={(event) => setVoiceReviewAssetId(event.target.value || null)}><option value="">选择一条 Voice QA 已通过的音频</option>{audioAssets.filter((audio) => isReviewableVoiceAudio(audio, selectedProject.id)).map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label>
+        {voiceReviewAssetId && <><audio controls preload="none" src={`/audio-assets/${voiceReviewAssetId}/media`} style={{ width: "100%", marginTop: 12 }} /><form key={voiceReviewAssetId} onSubmit={(event) => void submitVoiceReview(event)} className="subform"><h3>此音频的六维判断</h3><label>证据引用<input name="evidence_reference" required placeholder="例如：u-voice:2026-09-24:creator-listen" /></label><label>具体发现（每行一条）<textarea name="findings" required rows={3} placeholder="请写下影响判断的具体听感" /></label><div className="columns compact">{voiceReviewDimensions.map(([key, label]) => <label key={key}>{label}<select name={key} required defaultValue=""><option value="">请选择</option><option value="pass">合格</option><option value="needs_revision">需修改</option></select></label>)}</div><button disabled={busy} className="button primary">保存此音频的 U-Voice 判断</button></form></>}
+      </section>}
       <section className="card"><div className="section-heading"><div><span className="kicker">04 / DRAFT</span><h2>项目与草稿</h2></div><span className="badge">可恢复</span></div><div className="project-toolbar"><form onSubmit={createProject} className="project-form"><Field label="项目标题" name="title" placeholder="本次内容的名称" /><Field label="主题" name="topic" placeholder="可以只填主题，不必先写完整稿件" /><button disabled={busy} className="button primary">创建项目</button></form><label className="project-select">当前项目<select value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(event.target.value || null)}><option value="">选择项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title} · {project.topic}</option>)}</select></label></div>
         {selectedProject && <div className="production"><div className="row-between"><div><h3>{selectedProject.title}</h3><p className="muted">{selectedProject.topic} · 草稿 v{draft?.version ?? 0} · 文案 r{draft?.script_revision ?? 0}</p></div><div className="actions"><button disabled={busy} className="button" onClick={() => void planProject()}>生成文案 + ScenePlan</button><button disabled={busy || !draft?.scenes.length} className="button" onClick={() => void routeProject()}>查找候选</button><button disabled={busy || !routes.length} className="button" onClick={() => void assembleSourceLedProject()}>按原声 + ASR 组装</button><button disabled={busy || !routes.length} className="button" onClick={() => void assembleProject()}>主旁白时间线组装</button><button disabled={busy || !videoSpec} className="button primary" onClick={() => void renderProject()}>本地渲染</button></div></div>
         {routes.length > 0 && <div className="cost-actions"><button disabled={busy} className="button" onClick={() => void reduceCostProject()}>按低成本替代方案</button><small className="muted">只比较当前候选；未知价格不会被当作便宜，应用后仍需审核匹配度。</small></div>}

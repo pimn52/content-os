@@ -12,12 +12,12 @@ import pytest
 from app.assembly.video_spec import GeneratedNarrationQaPending, _require_generated_voice_qa
 from app.budget import ProviderCallLedger
 from app.db import AudioAssetRepository, BudgetPolicyRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository, ProviderCallRepository, VoiceProfileRepository
-from app.domain.models import AudioAsset, BudgetPolicy, Clip, ConsentRecord, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReviewOutcome
+from app.domain.models import AudioAsset, BudgetPolicy, Clip, ConsentRecord, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.main import create_app
 from app.providers.voice import VoiceSynthesisResult
-from app.providers.asr import TranscriptionResult, TranscriptionSegment
+from app.providers.asr import TranscriptionResult, TranscriptionSegment, TranscriptionWord
 from app.voice_qa import VoiceQaError, apply_voice_human_review, apply_voice_qa, comparison_tokens, verify_generated_voice, voice_human_review_status
 from app.voice_recovery import VoiceRecoveryRoute, recommend_voice_recovery
 
@@ -102,6 +102,57 @@ def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> 
         call = ProviderCallRepository(db).list_for_project(project.id)[0]
         assert call.operation == "tts" and call.status == "completed"
         assert call.estimated_cost.amount == Decimal("0")
+    finally:
+        db.close()
+
+
+def test_voice_job_selected_reference_is_applied_and_persisted(tmp_path: Path) -> None:
+    db = Database(tmp_path / "selected-reference.sqlite")
+    try:
+        project, profile = _project_and_profile(db, tmp_path)
+        with db.transaction():
+            BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=False, updated_at=datetime.now(timezone.utc)))
+        selection = VoiceReferenceWindowSelection(clip_id=profile.reference_clip_ids[0], asset_id=uuid4(), source_content_hash="a" * 64, start_ms=0, end_ms=6_000, transcript_sha256="b" * 64)
+        payload = VoiceGenerationJobPayload(project_id=project.id, voice_profile_id=profile.id, text="新的，测试文案", delivery_text="新的测试文案", authorization_reference="voice-consent", reference_window=selection)
+        now = datetime.now(timezone.utc)
+        job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, idempotency_key="selected-reference", created_at=now, updated_at=now, payload=payload)
+        JobStore(db).enqueue(job)
+
+        class Provider:
+            provider_name = "test-voice"
+            model = "test-model"
+            is_local = True
+
+            def synthesize_with_reference(self, received: VoiceProfile, text: str, output_path: Path, *, language: str | None, reference_window: VoiceReferenceWindowSelection) -> VoiceSynthesisResult:
+                assert received.id == profile.id and text == payload.delivery_text and reference_window == selection
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"generated-audio")
+                return VoiceSynthesisResult(output_path)
+
+        class Importer:
+            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None) -> AudioAsset:
+                value = AudioAsset(source_file=str(source), content_hash="c" * 64, duration_ms=1_200, sample_rate=24_000, channels=1, authorization_reference=authorization_reference, imported_at=datetime.now(timezone.utc))
+                AudioAssetRepository(db).create(value)
+                return value
+
+        handler = VoiceGenerationJobHandler(VoiceProfileRepository(db), AudioAssetRepository(db), Importer(), Provider(), tmp_path / "generated", ProviderCallLedger(db))  # type: ignore[arg-type]
+        result = JobRunner(JobStore(db), {JobType.GENERATE_VOICE: handler}, worker_id="selected-worker", lease_duration=timedelta(minutes=1), max_attempts=2).run_once()
+        assert result is not None and result.status is JobStatus.COMPLETED
+        generated = AudioAssetRepository(db).list()[0].metadata["voice_generation"]
+        assert generated["reference_window"] == selection.model_dump(mode="json")
+        assert generated["target_text"] == payload.text
+        assert generated["provider_delivery_text"] == payload.delivery_text
+        audio_id = AudioAssetRepository(db).list()[0].id
+        with TestClient(create_app(tmp_path / "selected-reference.sqlite")) as client:
+            qa = client.post(f"/projects/{project.id}/voice-qa-jobs", json={
+                "idempotency_key": "selected-reference-editorial-qa", "narration_audio_id": str(audio_id),
+                "target_text": payload.text,
+            })
+            assert qa.status_code == 201
+            assert client.post(f"/projects/{project.id}/voice-qa-jobs", json={
+                "idempotency_key": "selected-reference-delivery-qa", "narration_audio_id": str(audio_id),
+                "target_text": payload.delivery_text,
+            }).status_code == 422
     finally:
         db.close()
 
@@ -357,12 +408,18 @@ def test_voice_qa_requires_real_timing_and_records_copy_and_silence_evidence(tmp
         authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
         metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
     )
-    transcript = TranscriptionResult("你好世界", (TranscriptionSegment(0, 1_000, "你好世界"),))
+    transcript = TranscriptionResult(
+        "你好世界", (TranscriptionSegment(0, 1_000, "你好世界"),),
+        words=(TranscriptionWord(0, 400, "你好"), TranscriptionWord(600, 1_000, "世界")),
+    )
     report = verify_generated_voice(audio, "你好世界", transcript, max_silence_ms=1_100)
     assert report.verified and report.copy_coverage == 1 and report.substitution_token_count == 0 and report.longest_silence_ms == 1_000
     updated = apply_voice_qa(audio, report, transcript, provider="qa-asr", model="qa-model")
     assert updated.metadata["voice_generation"]["qa_state"] == "verified"
     assert updated.transcript_source == "qa-asr:qa-model"
+    assert updated.metadata["voice_word_timing"]["source_sha256"] == audio.content_hash
+    assert updated.metadata["voice_word_timing"]["words"][1] == {
+        "start_ms": 600, "end_ms": 1000, "text": "世界"}
     failed = verify_generated_voice(audio, "你好世界", TranscriptionResult("你好", (TranscriptionSegment(0, 500, "你好"),)))
     assert not failed.verified and failed.missing_token_count == 2 and "copy_missing_tokens" in failed.checks
 

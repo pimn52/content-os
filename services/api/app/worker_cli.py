@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import os
 import signal
@@ -14,10 +15,10 @@ from pathlib import Path
 from threading import Event
 from typing import Sequence
 
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, ProjectRepository, TalkingProfileRepository, VoiceProfileRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, JobRepository, ProjectRepository, TalkingProfileRepository, VoiceProfileRepository
 from app.budget import ProviderCallLedger
-from app.domain.models import JobType
-from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler, VoiceGenerationJobHandler, VoiceQaJobHandler
+from app.domain.models import JobType, VoiceReferenceWindowSelection
+from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler, VoiceBoundaryAlignmentJobHandler, VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore
@@ -39,7 +40,8 @@ from app.providers.voice import OmniVoiceProvider, VoiceConfigurationError, Voic
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
 from app.runtime import resolve_local_executable
-from app.voice_performance import select_voice_reference_windows
+from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice, select_voice_reference_windows, VoicePerformancePlanningError
+from app.voice_pace import VoicePaceCandidateJobHandler
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_VOICE, JobType.VERIFY_VOICE, JobType.GENERATE_TALKING, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
+    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_VOICE, JobType.CREATE_VOICE_PACE_CANDIDATE, JobType.VERIFY_VOICE, JobType.ALIGN_VOICE_BOUNDARIES, JobType.GENERATE_TALKING, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
     parser.add_argument("--gpu-resource-key", default=None, help="Serialize local Voice/Talking inference sharing this GPU (default gpu:<hostname>)")
     parser.add_argument("--ffmpeg", default=resolve_local_executable("ffmpeg"))
     parser.add_argument("--ffprobe", default=resolve_local_executable("ffprobe"))
@@ -218,7 +220,13 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             config.data_root / "generated",
             ProviderCallLedger(db),
         )
-    if JobType.VERIFY_VOICE in config.job_types:
+    if JobType.CREATE_VOICE_PACE_CANDIDATE in config.job_types:
+        handlers[JobType.CREATE_VOICE_PACE_CANDIDATE] = VoicePaceCandidateJobHandler(
+            AudioAssetRepository(db), JobRepository(db),
+            AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
+            config.data_root, config.ffmpeg,
+        )
+    if JobType.VERIFY_VOICE in config.job_types or JobType.ALIGN_VOICE_BOUNDARIES in config.job_types:
         qa_model = os.environ.get("CONTENT_OS_VOICE_QA_ASR_MODEL", "").strip()
         if not qa_model or not Path(qa_model).exists():
             raise ASRConfigurationError("CONTENT_OS_VOICE_QA_ASR_MODEL must point to a local ASR model directory")
@@ -229,12 +237,18 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             vad_filter=False,
             word_timestamps=True,
         )
-        handlers[JobType.VERIFY_VOICE] = VoiceQaJobHandler(
-            AudioAssetRepository(db), qa_provider, ProviderCallLedger(db),
-            provider_name="faster-whisper", provider_model=qa_model,
-            max_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
-            max_leading_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500")),
-        )
+        if JobType.VERIFY_VOICE in config.job_types:
+            handlers[JobType.VERIFY_VOICE] = VoiceQaJobHandler(
+                AudioAssetRepository(db), qa_provider, ProviderCallLedger(db),
+                provider_name="faster-whisper", provider_model=qa_model,
+                max_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
+                max_leading_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500")),
+            )
+        if JobType.ALIGN_VOICE_BOUNDARIES in config.job_types:
+            handlers[JobType.ALIGN_VOICE_BOUNDARIES] = VoiceBoundaryAlignmentJobHandler(
+                AudioAssetRepository(db), JobRepository(db), qa_provider, ProviderCallLedger(db),
+                data_root=config.data_root, provider_model=qa_model,
+            )
     if JobType.GENERATE_TALKING in config.job_types:
         provider = _build_talking_provider(config)
         handlers[JobType.GENERATE_TALKING] = TalkingGenerationJobHandler(
@@ -359,8 +373,28 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         normalized = language.strip().lower() if isinstance(language, str) and language.strip() else None
         return {"zh": "Chinese", "en": "English"}.get(normalized, language.strip() if normalized else None)
 
-    def synthesize(profile: object, text: str, target: Path, language: str | None) -> Path:
-        source_path, reference_start_ms, reference_end_ms, reference_text = selected_reference_window(profile)
+    def synthesize(profile: object, text: str, target: Path, language: str | None, selection: VoiceReferenceWindowSelection | None = None) -> Path:
+        if selection is None:
+            source_path, reference_start_ms, reference_end_ms, reference_text = selected_reference_window(profile)
+        else:
+            if not isinstance(selection, VoiceReferenceWindowSelection):
+                raise VoiceInputError("selected Voice reference is invalid")
+            reference_ids = getattr(profile, "reference_clip_ids", ())
+            available = [clip for clip_id in reference_ids if (clip := clips.get(clip_id)) is not None]
+            resolved_assets = {asset.id: asset for clip in available if (asset := assets.get(clip.asset_id)) is not None}
+            try:
+                choices = authorized_voice_reference_choices(profile, available, resolved_assets, data_root=config.data_root)
+                window = resolve_authorized_voice_reference_choice(selection, choices)
+            except VoicePerformancePlanningError as exc:
+                raise VoiceInputError(str(exc)) from exc
+            source_path = Path(window.source_file)
+            digest = hashlib.sha256()
+            with source_path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != selection.source_content_hash:
+                raise VoiceInputError("selected Voice reference source changed since authorization")
+            reference_start_ms, reference_end_ms, reference_text = window.start_ms, window.end_ms, window.transcript
         if not source_path.is_file():
             raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
         resolved_language = provider_language(language or getattr(profile, "language", None))
@@ -405,7 +439,7 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
                 raise VoiceProviderResponseError("local OmniVoice inference failed")
         return target
 
-    return OmniVoiceProvider(model=str(model), synthesizer=synthesize)
+    return OmniVoiceProvider(model=str(model), synthesizer=synthesize, reference_synthesizer=synthesize)
 
 
 def _build_talking_provider(config: WorkerConfig) -> LatentSyncProvider:
