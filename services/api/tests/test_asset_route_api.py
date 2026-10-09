@@ -62,6 +62,38 @@ def test_asset_route_api_returns_real_continuous_clip(tmp_path: Path) -> None:
         assert candidate["estimated_cost"]["amount"] == "0"
 
 
+def test_asset_route_api_discovers_admitted_talking_run_without_search_index(tmp_path: Path, monkeypatch, admit_talking_run) -> None:
+    path = tmp_path / "route-talking.sqlite"
+    project, _, scene = _seed(path, tmp_path)
+    db = Database(path)
+    try:
+        source = tmp_path / "talking.mp4"
+        source.write_bytes(b"fixture talking")
+        asset = Asset(
+            source_kind=SourceKind.AI_VIDEO, source_file=str(source), content_hash="a" * 64,
+            duration_ms=5_000, width=720, height=1280, fps=project.fps,
+            authorization_reference="talking-consent", imported_at=datetime.now(timezone.utc),
+        )
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=5_000, asset_duration_ms=5_000))
+        admit_talking_run(db, project.id, asset, clip, scene.voice_text)
+    finally:
+        db.close()
+    monkeypatch.setenv("CONTENT_OS_RETRIEVAL_MODE", "lexical")
+    talking_scene = scene.model_copy(update={
+        "preferred_sources": [SourceKind.AI_VIDEO], "fallback_sources": [SourceKind.CAPTURE],
+        "duration_target_ms": 5_000,
+    })
+    with TestClient(create_app(path)) as client:
+        response = client.post(
+            f"/projects/{project.id}/asset-routes",
+            json={"scenes": [talking_scene.model_dump(mode="json")]},
+        )
+    assert response.status_code == 200
+    assert response.json()[0]["candidates"][0]["asset_id"] == str(asset.id)
+    assert response.json()[0]["candidates"][0]["clip_id"] == str(clip.id)
+
+
 def test_asset_route_api_returns_structured_optional_shoot_list_for_capture_gap(tmp_path: Path) -> None:
     path = tmp_path / "route-shoot-list.sqlite"
     project, _, scene = _seed(path, tmp_path)

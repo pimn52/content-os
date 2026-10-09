@@ -13,12 +13,16 @@ from app.domain.models import (
     CandidateAsset,
     Clip,
     CostCategory,
+    EditPlan,
+    EditPlanScene,
     ImageAsset,
     MasterNarration,
     Project,
+    PortraitPresentation,
     RationalFps,
     ScenePlan,
     SourceKind,
+    TalkingFramingPolicy,
     TranscriptSegment,
     VerticalReframeMode,
     UsageCost,
@@ -27,8 +31,10 @@ from app.domain.models import (
     VideoSpec,
     VideoVisual,
 )
+from .edit_plan import EditPlanPreflightError, resolve_edit_plan
 from app.voice_qa import comparison_tokens, voice_human_review_status
 from app.talking.closeout import TalkingCloseoutPlanningError, plan_terminal_talking_delivery
+from app.talking.admission import talking_visual_blocker
 
 
 class VideoSpecAssemblyError(ValueError):
@@ -118,11 +124,45 @@ class VideoSpecAssembler:
         master_narration_asset_id: UUID | None = None,
         narration_required: bool = False,
         terminal_talking_delivery: bool = False,
+        edit_plan: EditPlan | None = None,
     ) -> VideoSpec:
         if not isinstance(project, Project):
             raise InvalidCandidateSelection("assembly requires a Project contract")
         ordered = _ordered_scenes(scenes, project.id)
         selections = _selections(selected_by_scene, ordered)
+        # Known restricted bytes must not become commercial through a new ID,
+        # stripped metadata or explicit candidate override. Missing lineage is
+        # not a grant; all existing authorization/QA gates below remain intact.
+        from app.execution_scope import commercial_content_blocker
+        media = []
+        for candidate in selections.values():
+            if candidate.asset_id is not None:
+                asset = self.assets.get(candidate.asset_id)
+                if asset is None and self.images is not None:
+                    asset = self.images.get(candidate.asset_id)
+                if asset is not None:
+                    media.append(asset)
+        if self.audios is not None:
+            audio_ids = set((narration_asset_ids or {}).values())
+            if master_narration_asset_id is not None:
+                audio_ids.add(master_narration_asset_id)
+            media.extend(audio for audio_id in audio_ids if (audio := self.audios.get(audio_id)) is not None)
+        for asset in media:
+            blocker = commercial_content_blocker(self.assets.db, asset.content_hash)
+            if blocker is not None:
+                raise VideoSpecAssemblyError(blocker)
+        clip_intervals = {
+            candidate.clip_id: (clip.start_ms, clip.end_ms)
+            for candidate in selections.values()
+            if candidate.clip_id is not None and (clip := self.clips.get(candidate.clip_id)) is not None
+        }
+        try:
+            accepted_edit_plan = resolve_edit_plan(
+                project, ordered, selections, clip_intervals=clip_intervals, supplied=edit_plan,
+            )
+        except EditPlanPreflightError as exc:
+            raise InvalidCandidateSelection(str(exc)) from exc
+        edit_by_scene = {entry.scene_plan_id: entry for entry in accepted_edit_plan.scenes}
         explicit = _explicit_ids(explicit_scene_ids, ordered)
         narration = _narration_ids(narration_asset_ids, ordered)
         master_audio_id = _master_narration_id(master_narration_asset_id, narration, ordered)
@@ -134,6 +174,7 @@ class VideoSpecAssembler:
                 explicit,
                 master_audio_id,
                 terminal_talking_delivery=terminal_talking_delivery,
+                edit_plan=accepted_edit_plan,
             )
         if narration_required:
             missing = next((scene.scene_id for scene in ordered if scene.id not in narration), None)
@@ -156,6 +197,7 @@ class VideoSpecAssembler:
         selected_sources: list[SourceKind] = []
         for scene in ordered:
             candidate = selections[scene.id]
+            edit = edit_by_scene[scene.id]
             audio = narration_audio.get(scene.id)
             duration_ms = scene.duration_target_ms
             narration_start_ms: int | None = None
@@ -185,6 +227,7 @@ class VideoSpecAssembler:
                     narration_start_ms=narration_start_ms,
                     narration_end_ms=narration_end_ms,
                     caption=scene.voice_text,
+                    **_edit_scene_fields(edit, accepted_edit_plan),
                 ))
                 start_frame += duration_frames
                 selected_sources.append(SourceKind.TYPOGRAPHY)
@@ -205,11 +248,15 @@ class VideoSpecAssembler:
                     narration_start_ms=narration_start_ms,
                     narration_end_ms=narration_end_ms,
                     caption=scene.voice_text,
+                    **_edit_scene_fields(edit, accepted_edit_plan),
                 ))
                 start_frame += duration_frames
                 selected_sources.append(image.source_kind)
                 continue
-            asset, clip = self._stored_real_clip(scene, candidate)
+            asset, clip = self._stored_real_clip(
+                scene, candidate, master_audio_id=None if audio is None else audio.id,
+                selected_duration_ms=duration_ms,
+            )
             clip_start_ms, clip_end_ms = clip.start_ms, clip.end_ms
             original_clip_end_ms = clip.end_ms
             captions: list[VideoCaption] = []
@@ -256,7 +303,7 @@ class VideoSpecAssembler:
                 if source_interval_aligned
                 else milliseconds_to_frames(duration_ms, project.fps)
             )
-            vertical_reframe_mode, vertical_reframe_evidence, source_bottom_crop_ratio = _talking_visual_treatment(asset)
+            vertical_reframe_mode, vertical_reframe_evidence, source_bottom_crop_ratio = _talking_visual_treatment(asset, edit)
             visual = VideoVisual(
                 source_kind=asset.source_kind,
                 authorization_reference=asset.authorization_reference,
@@ -284,6 +331,7 @@ class VideoSpecAssembler:
                 # audio.
                 caption=scene.voice_text,
                 captions=captions,
+                **_edit_scene_fields(edit, accepted_edit_plan),
             ))
             start_frame += duration_frames
             selected_sources.append(asset.source_kind)
@@ -295,6 +343,7 @@ class VideoSpecAssembler:
             fps=project.fps,
             scenes=video_scenes,
             estimated_cost=_local_assembly_cost(selected_sources),
+            edit_plan=accepted_edit_plan,
         )
 
     def _assemble_master_narration(
@@ -306,6 +355,7 @@ class VideoSpecAssembler:
         master_audio_id: UUID,
         *,
         terminal_talking_delivery: bool,
+        edit_plan: EditPlan,
     ) -> VideoSpec:
         """Assemble one continuous, timed narration track across many visuals.
 
@@ -347,6 +397,7 @@ class VideoSpecAssembler:
         selected_sources: list[SourceKind] = []
         for scene, narration_start_ms, narration_end_ms in intervals:
             candidate = selections[scene.id]
+            edit = next(entry for entry in edit_plan.scenes if entry.scene_plan_id == scene.id)
             if candidate.source_kind == SourceKind.CAPTURE or candidate.requires_capture:
                 raise CaptureGapSelected(f"scene {scene.scene_id!r} requires capture and cannot be assembled")
             if not candidate.recommended and scene.id not in explicit:
@@ -370,6 +421,8 @@ class VideoSpecAssembler:
                 duration_frames=duration_frames,
                 fps=project.fps,
                 master_audio_id=audio.id,
+                edit=edit,
+                edit_plan=edit_plan,
             )
             video_scenes.extend(fragments)
             selected_sources.extend(fragment.visual.source_kind for fragment in fragments)
@@ -383,6 +436,7 @@ class VideoSpecAssembler:
             scenes=video_scenes,
             master_narration=master,
             estimated_cost=_local_assembly_cost(selected_sources),
+            edit_plan=edit_plan,
         )
 
     def _master_visual_fragments(
@@ -397,6 +451,8 @@ class VideoSpecAssembler:
         duration_frames: int,
         fps: RationalFps,
         master_audio_id: UUID,
+        edit: EditPlanScene,
+        edit_plan: EditPlan,
     ) -> list[VideoScene]:
         """Make valid visual fragments for one timed section of master audio."""
 
@@ -411,6 +467,8 @@ class VideoSpecAssembler:
                 narration_start_ms=narration_start_ms,
                 narration_end_ms=narration_end_ms,
                 caption=scene.voice_text,
+                edit=edit,
+                edit_plan=edit_plan,
             )]
         if candidate.source_kind in {SourceKind.SCREENSHOT, SourceKind.CHART}:
             image = self._stored_image(candidate)
@@ -428,9 +486,14 @@ class VideoSpecAssembler:
                 narration_start_ms=narration_start_ms,
                 narration_end_ms=narration_end_ms,
                 caption=scene.voice_text,
+                edit=edit,
+                edit_plan=edit_plan,
             )]
 
-        asset, clip = self._stored_real_clip(scene, candidate)
+        asset, clip = self._stored_real_clip(
+            scene, candidate, master_audio_id=master_audio_id,
+            selected_duration_ms=narration_end_ms - narration_start_ms,
+        )
         source_frames = source_interval_to_frames(clip.start_ms, clip.end_ms, fps)
         visual = VideoVisual(
             source_kind=asset.source_kind,
@@ -440,6 +503,9 @@ class VideoSpecAssembler:
             clip_start_ms=clip.start_ms,
             clip_end_ms=clip.end_ms,
             source_duration_ms=asset.duration_ms,
+            vertical_reframe_mode=_talking_visual_treatment(asset, edit)[0],
+            vertical_reframe_evidence_reference=_talking_visual_treatment(asset, edit)[1],
+            source_bottom_crop_ratio=_talking_visual_treatment(asset, edit)[2],
         )
         if source_frames >= duration_frames:
             return [_master_video_scene(
@@ -452,6 +518,8 @@ class VideoSpecAssembler:
                 narration_start_ms=narration_start_ms,
                 narration_end_ms=narration_end_ms,
                 caption=scene.voice_text,
+                edit=edit,
+                edit_plan=edit_plan,
             )]
 
         # The source Clip remains a first-class visual for as long as it has
@@ -468,6 +536,9 @@ class VideoSpecAssembler:
                 narration_start_ms=narration_start_ms,
                 narration_end_ms=narration_end_ms,
                 caption=scene.voice_text,
+                edit=edit,
+                edit_plan=edit_plan,
+                fallback=True,
             )]
 
         split_frame = start_frame + source_frames
@@ -482,6 +553,8 @@ class VideoSpecAssembler:
             narration_start_ms=narration_start_ms,
             narration_end_ms=split_ms,
             caption=scene.voice_text,
+            edit=edit,
+            edit_plan=edit_plan,
         )
         tail = _master_video_scene(
             scene_id=_continuation_scene_id(scene, 1),
@@ -493,10 +566,16 @@ class VideoSpecAssembler:
             narration_start_ms=split_ms,
             narration_end_ms=narration_end_ms,
             caption=scene.voice_text,
+            edit=edit,
+            edit_plan=edit_plan,
+            fallback=True,
         )
         return [head, tail]
 
-    def _stored_real_clip(self, scene: ScenePlan, candidate: CandidateAsset) -> tuple[Asset, Clip]:
+    def _stored_real_clip(
+        self, scene: ScenePlan, candidate: CandidateAsset, *, master_audio_id: UUID | None = None,
+        selected_duration_ms: int | None = None,
+    ) -> tuple[Asset, Clip]:
         if candidate.source_kind not in _REAL_CONTINUOUS_SOURCES:
             raise InvalidCandidateSelection(f"scene {scene.scene_id!r} does not select a real continuous Clip")
         if candidate.asset_id is None or candidate.clip_id is None:
@@ -515,22 +594,12 @@ class VideoSpecAssembler:
         ):
             raise AssetIdentityMismatch(f"selected Asset and Clip do not match for scene {scene.scene_id!r}")
         if asset.source_kind is SourceKind.AI_VIDEO:
-            run = asset.metadata.get("talking_run")
-            if isinstance(run, dict):
-                if run.get("admission_state") != "admitted" or run.get("automated_qa_state") != "verified" or run.get("continuity_review_state") != "approved":
-                    raise InvalidCandidateSelection(
-                        f"scene {scene.scene_id!r} TalkingRun is not admitted for production assembly"
-                    )
-                return asset, clip
-            generation = asset.metadata.get("talking_generation")
-            if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
-                raise InvalidCandidateSelection(
-                    f"scene {scene.scene_id!r} generated Talking video requires verified automated QA before assembly"
-                )
-            if generation.get("human_review_state") == "rejected":
-                raise InvalidCandidateSelection(
-                    f"scene {scene.scene_id!r} generated Talking video was rejected by U-Talking and cannot be assembled"
-                )
+            blocker = talking_visual_blocker(
+                asset, clip, self.assets, project_id=scene.project_id, copy=scene.voice_text,
+                master_audio_id=master_audio_id, selected_duration_ms=selected_duration_ms,
+            )
+            if blocker is not None:
+                raise InvalidCandidateSelection(f"scene {scene.scene_id!r} generated Talking visual: {blocker}")
         return asset, clip
 
     def _stored_image(self, candidate: CandidateAsset) -> ImageAsset:
@@ -563,19 +632,36 @@ def _require_generated_voice_qa(audio: AudioAsset) -> None:
         )
 
 
-def _talking_visual_treatment(asset: Asset) -> tuple[VerticalReframeMode, str | None, float]:
-    """Carry an evidence-backed reference subtitle treatment into render."""
-    if asset.source_kind is not SourceKind.AI_VIDEO:
-        return VerticalReframeMode.CONTAIN, None, 0
-    generation = asset.metadata.get("talking_generation")
-    if not isinstance(generation, dict):
-        return VerticalReframeMode.CONTAIN, None, 0
-    raw_ratio = generation.get("reference_subtitle_crop_bottom_ratio")
-    if isinstance(raw_ratio, bool) or not isinstance(raw_ratio, (int, float)) or not 0 < float(raw_ratio) <= 0.4:
-        return VerticalReframeMode.CONTAIN, None, 0
-    job_id = generation.get("job_id")
-    evidence = f"talking-generation:{job_id}" if isinstance(job_id, str) and job_id else "talking-generation:reference-subtitle-review"
-    return VerticalReframeMode.CENTER_CROP, evidence[:500], float(raw_ratio)
+def _talking_visual_treatment(asset: Asset, edit: EditPlanScene) -> tuple[VerticalReframeMode, str | None, float]:
+    """Lower the accepted provider-neutral framing decision into VideoSpec."""
+    if asset.source_kind is SourceKind.AI_VIDEO and edit.framing_policy is TalkingFramingPolicy.VERIFIED_STATIC_CROP:
+        return VerticalReframeMode.CENTER_CROP, edit.crop_safety_evidence_reference, 0
+    # Old generated-media metadata may describe a subtitle crop experiment,
+    # but it is not full-interval face-safe framing evidence.  Fail closed.
+    return VerticalReframeMode.CONTAIN, None, 0
+
+
+def _edit_scene_fields(edit: EditPlanScene, plan: EditPlan, *, fallback: bool = False) -> dict[str, object]:
+    """Copy renderer-neutral visual direction into one deterministic VideoScene."""
+    if fallback:
+        return {
+            "visual_role": "graphic",
+            "framing_policy": TalkingFramingPolicy.FACE_SAFE_CONTAIN,
+            "portrait_presentation": PortraitPresentation.FULL_CANVAS,
+            "subtitle_treatment": edit.subtitle_treatment,
+            "graphic_treatment": edit.fallback.graphic_treatment,
+            "graphic_text": edit.fallback.text,
+            "style_tokens": plan.style_tokens,
+        }
+    return {
+        "visual_role": edit.visual_role,
+        "framing_policy": edit.framing_policy,
+        "portrait_presentation": edit.portrait_presentation,
+        "subtitle_treatment": edit.subtitle_treatment,
+        "graphic_treatment": edit.graphic_treatment,
+        "graphic_text": edit.graphic_text,
+        "style_tokens": plan.style_tokens,
+    }
 
 
 def milliseconds_to_frames(duration_ms: int, fps: RationalFps) -> int:
@@ -788,6 +874,9 @@ def _master_video_scene(
     narration_start_ms: int,
     narration_end_ms: int,
     caption: str,
+    edit: EditPlanScene,
+    edit_plan: EditPlan,
+    fallback: bool = False,
 ) -> VideoScene:
     return VideoScene(
         scene_id=scene_id,
@@ -799,6 +888,7 @@ def _master_video_scene(
         narration_end_ms=narration_end_ms,
         caption=caption,
         captions=_audio_captions_for_interval(audio, narration_start_ms, narration_end_ms),
+        **_edit_scene_fields(edit, edit_plan, fallback=fallback),
     )
 
 

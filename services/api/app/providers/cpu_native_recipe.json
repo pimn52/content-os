@@ -1,0 +1,202 @@
+{
+  "recipe": "omnivoice-cpu-native-static-v1",
+  "version": 1,
+  "packages": [
+    {
+      "name": "torch",
+      "version": "2.5.1+cpu",
+      "wheel_sha256": "a6b720410350765d3d77c01a5ce098a6c45af446284e45e87a98b8a16e7d564d"
+    },
+    {
+      "name": "torchaudio",
+      "version": "2.5.1+cpu",
+      "wheel_sha256": "68b58c1dae7bb738df8a36f0d147d2c9c69e56a35ff40dedb84ac30aff2e59e1"
+    }
+  ],
+  "members": [
+    {
+      "name": "functorch/_C.cp312-win_amd64.pyd",
+      "size_bytes": 184320,
+      "sha256": "4adbce12fcabec60455b7d3652f8135ab12244cb4909b519172f2cbe32da3f3a",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/_C.cp312-win_amd64.pyd",
+      "size_bytes": 10240,
+      "sha256": "ee13bb97eba5238965bddf31886b29a98bfc0f232c46608a68d7b5cdec56323e",
+      "manifest_sha256": "d2952e57023848a37fb0f21f0dfb38c9000f610ac2b00c2f128511dfd68bde04"
+    },
+    {
+      "name": "torch/bin/asmjit.dll",
+      "size_bytes": 358912,
+      "sha256": "8afb389a6b8b703317a39de884d8c1812a791dceb154a660f34608db002ad54a",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/bin/fbgemm.dll",
+      "size_bytes": 4961280,
+      "sha256": "078a6785613dba45c1277559b9b0a6fcea5538402134d334883f2055448004e2",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/asmjit.dll",
+      "size_bytes": 358912,
+      "sha256": "8afb389a6b8b703317a39de884d8c1812a791dceb154a660f34608db002ad54a",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/c10.dll",
+      "size_bytes": 877568,
+      "sha256": "ec509ef192276bfc59b76b752263913d63a12981310d4518a9e66cc2cce7829c",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/fbgemm.dll",
+      "size_bytes": 4961280,
+      "sha256": "078a6785613dba45c1277559b9b0a6fcea5538402134d334883f2055448004e2",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/libiomp5md.dll",
+      "size_bytes": 1250312,
+      "sha256": "7f37e24b28383b21a06a198927c3adda2f0e3a780d553922b3819220e84f7615",
+      "manifest_sha256": null
+    },
+    {
+      "name": "torch/lib/libiompstubs5md.dll",
+      "size_bytes": 41992,
+      "sha256": "c649831e9cc5fdbf6863dad2de9fae765dba09142a0c16782809f85d80a0aee0",
+      "manifest_sha256": null
+    },
+    {
+      "name": "torch/lib/shm.dll",
+      "size_bytes": 14848,
+      "sha256": "5ab6a0b7683b55f6f431d9da6cc656221ed56098c2e503554ed93e87338bf72a",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/torch.dll",
+      "size_bytes": 9728,
+      "sha256": "57241552074ad3345ee551db103a89538a1f3bd977924a2f7c8c0d6d18a53e94",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/torch_cpu.dll",
+      "size_bytes": 249312768,
+      "sha256": "ddca75af7eaaa3f0f88d1dcb506215cfee97ccfb9c527333d935a1ce9c8c8343",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/torch_global_deps.dll",
+      "size_bytes": 9728,
+      "sha256": "2883eb7dc573be1a593c4ed5d2dc8fbf35d5a20a27b27dadb2d147a4a69144aa",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/torch_python.dll",
+      "size_bytes": 16020480,
+      "sha256": "a70ab1d10a200789adc80953e2413a214afe18b222ca9682618544fb13e52a23",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torch/lib/uv.dll",
+      "size_bytes": 195072,
+      "sha256": "d6e517084425092066d4b26678320eb60edf2c79ade855bd67b829113f999da6",
+      "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+    },
+    {
+      "name": "torchaudio/lib/_torchaudio.pyd",
+      "size_bytes": 757760,
+      "sha256": "f9c040484f5041a950105f5797415f0dedcf01a71a681bf8ab81e97e39f0f7d8",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torchaudio/lib/libtorchaudio.pyd",
+      "size_bytes": 1544704,
+      "sha256": "247a737ada126df3998e50c38cd9c2fd9a9fe8696f591d6a964760e62a50bbf4",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torio/lib/_torio_ffmpeg4.pyd",
+      "size_bytes": 1746432,
+      "sha256": "f1aca9620d1e9f2789104fd22747d5e505cfdc3ed0f72970f77e846cef463cdd",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torio/lib/_torio_ffmpeg5.pyd",
+      "size_bytes": 1746432,
+      "sha256": "0701a20451140d0fa35595adab53c5d82ed662bedd32e5abc5553d54d43c335a",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torio/lib/_torio_ffmpeg6.pyd",
+      "size_bytes": 1746432,
+      "sha256": "5ab7eb18b7f089c69dc243da789d66274687b23d4171c116895959d6f64ba10b",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torio/lib/libtorio_ffmpeg4.pyd",
+      "size_bytes": 964096,
+      "sha256": "716346f77c0d18cd7db69e7b75d39fd6cb492a2691329ef20cb8e52eb1b7495b",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torio/lib/libtorio_ffmpeg5.pyd",
+      "size_bytes": 964096,
+      "sha256": "29dfd97bd8806bea9d962ba7ae81fce6b8449985d371ef91a61b5cfb6eef8585",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    },
+    {
+      "name": "torio/lib/libtorio_ffmpeg6.pyd",
+      "size_bytes": 964096,
+      "sha256": "08c576011a8101ec4953879928829dd0b8e52eb49695f991be9c27a596d11478",
+      "manifest_sha256": "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e"
+    }
+  ],
+  "manifests": {
+    "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df": {
+      "hex": "3c3f786d6c2076657273696f6e3d27312e302720656e636f64696e673d275554462d3827207374616e64616c6f6e653d27796573273f3e0d0a3c617373656d626c7920786d6c6e733d2775726e3a736368656d61732d6d6963726f736f66742d636f6d3a61736d2e763127206d616e696665737456657273696f6e3d27312e30273e0d0a20203c7472757374496e666f20786d6c6e733d2275726e3a736368656d61732d6d6963726f736f66742d636f6d3a61736d2e7633223e0d0a202020203c73656375726974793e0d0a2020202020203c72657175657374656450726976696c656765733e0d0a20202020202020203c726571756573746564457865637574696f6e4c6576656c206c6576656c3d276173496e766f6b6572272075694163636573733d2766616c736527202f3e0d0a2020202020203c2f72657175657374656450726976696c656765733e0d0a202020203c2f73656375726974793e0d0a20203c2f7472757374496e666f3e0d0a3c2f617373656d626c793e0d0a",
+      "size_bytes": 381,
+      "codepage": 0,
+      "ids": [
+        24,
+        2,
+        1033
+      ]
+    },
+    "d2952e57023848a37fb0f21f0dfb38c9000f610ac2b00c2f128511dfd68bde04": {
+      "hex": "3c3f786d6c2076657273696f6e3d27312e302720656e636f64696e673d275554462d3827207374616e64616c6f6e653d27796573273f3e0d0a3c617373656d626c7920786d6c6e733d2775726e3a736368656d61732d6d6963726f736f66742d636f6d3a61736d2e763127206d616e696665737456657273696f6e3d27312e30273e0d0a3c2f617373656d626c793e0d0a",
+      "size_bytes": 145,
+      "codepage": 0,
+      "ids": [
+        24,
+        2,
+        1033
+      ]
+    },
+    "49a60be4b95b6d30da355a0c124af82b35000bce8f24f957d1c09ead47544a1e": {
+      "hex": "3c617373656d626c7920786d6c6e733d2275726e3a736368656d61732d6d6963726f736f66742d636f6d3a61736d2e763122206d616e696665737456657273696f6e3d22312e30223e0d0a20203c7472757374496e666f20786d6c6e733d2275726e3a736368656d61732d6d6963726f736f66742d636f6d3a61736d2e7633223e0d0a202020203c73656375726974793e0d0a2020202020203c72657175657374656450726976696c656765733e0d0a20202020202020203c726571756573746564457865637574696f6e4c6576656c206c6576656c3d226173496e766f6b6572222075694163636573733d2266616c7365223e3c2f726571756573746564457865637574696f6e4c6576656c3e0d0a2020202020203c2f72657175657374656450726976696c656765733e0d0a202020203c2f73656375726974793e0d0a20203c2f7472757374496e666f3e0d0a3c2f617373656d626c793e",
+      "size_bytes": 346,
+      "codepage": 1252,
+      "ids": [
+        24,
+        2,
+        1033
+      ]
+    }
+  },
+  "sources": {
+    "torch/__init__.py": "b6639a0441d7c404443ba90901caaff93f07790d9357e65abe715cad1e897b2d",
+    "torch/_ops.py": "a6b41c82fc9c6e1c085579886a121a9f357cf6d97714f0111f2cbdab76752159",
+    "torch/_utils_internal.py": "5ce2488726e947fdf2c92a8488fba577d8ec2adda0a813c8cfcc26cd49f49ce2",
+    "torch/version.py": "9232177de264db29cda9bc9e1b86f535c13cfc96a5a7f06c5adeadaaa47da728",
+    "torchaudio/_extension/__init__.py": "b3a0335e870372e8749ad61550238e8d9fe60a64829e8f236d937be74608f8fb",
+    "torchaudio/_extension/utils.py": "c050c5f01e90db650bdf3c97f2cc19f898e50e09bdf957637ab6ac950af6c886",
+    "torchaudio/__init__.py": "9145a793070a111323ee6f81e04f36e9a1995866b9b09b350c4a4b3fa2d9a04b",
+    "torchaudio/_backend/__init__.py": "d9b313677b46dbfe67be7a80026bc49c60489cee5af437543cda325c49d7d4cd",
+    "torchaudio/_backend/utils.py": "f0792657f1821d9843f9768a350eb49c616cbbbad582bd523a16ac37abfdd5a2",
+    "torio/_extension/__init__.py": "f469c588b58f0958936d450d8a8f40b7533400b1aa2ad67d9453ae3d49f549cf",
+    "torio/_extension/utils.py": "a6920604593cebccfb41b7d28dac0752448edf267b30bda31c5804fa3e86ca62",
+    "torchaudio/_backend/soundfile_backend.py": "b154843363a7e8f318ec06cfaa97ef135bb5060dbfd1a892ad9e137250058bfc"
+  }
+}

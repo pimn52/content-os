@@ -56,6 +56,31 @@ def _chat_response(scenes: list[dict[str, object]]) -> dict[str, object]:
     return {"choices": [{"message": {"content": json.dumps({"scenes": scenes})}}]}
 
 
+@pytest.mark.parametrize("requirement", ["unknown", "creator_speaking", "action_evidence", "explanatory"])
+def test_planner_accepts_explicit_visual_requirement_and_requests_it(requirement):
+    from app.providers.scene_planner import _PLAN_SCHEMA
+    scene = {**_scene("intent", 0), "visual_requirement": requirement,
+             "visual_requirement_reason": None if requirement == "unknown" else "Retain the editorial evidence this scene needs."}
+    with _fake_server(200, _chat_response([scene])) as (url, requests):
+        result = OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions").plan(_project())
+    assert result.scenes[0].visual_requirement == requirement
+    schema = _PLAN_SCHEMA["properties"]["scenes"]["items"]
+    assert "visual_requirement" in schema["required"]
+    assert "Never classify as explanatory merely" in json.loads(requests[0][2])["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"visual_requirement": "explanatory"},
+    {"visual_requirement": "explanatory", "visual_requirement_reason": None},
+    {"visual_requirement": "action_evidence", "visual_requirement_reason": "   "},
+    {"visual_requirement": "invented", "visual_requirement_reason": "Invalid classification"},
+])
+def test_planner_rejects_partial_or_unreasoned_visual_requirement(fields):
+    with _fake_server(200, _chat_response([{**_scene("intent", 0), **fields}])) as (url, _):
+        with pytest.raises(ScenePlannerProviderResponseError):
+            OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions").plan(_project())
+
+
 @contextmanager
 def _fake_server(
     status: int,
@@ -139,12 +164,305 @@ def test_scene_planner_supports_explicit_chat_completions_protocol() -> None:
     assert list(request) == ["model", "messages"]
     assert request["messages"][0]["role"] == "user"
     assert "H.265 码率与平台转码" in request["messages"][0]["content"]
+    prompt = request["messages"][0]["content"]
+    from app.providers.scene_planner import _PLAN_SCHEMA
+    schema_text = prompt.split("Required output JSON Schema (return only the JSON instance, not the schema):\n", 1)[1].split("\n", 1)[0]
+    assert json.loads(schema_text) == _PLAN_SCHEMA
+    assert "milliseconds" in prompt
+    assert "response_format" not in request
+
+
+def test_chat_schema_opt_in_uses_the_same_contract_and_ignores_reasoning():
+    from app.providers.scene_planner import _PLAN_SCHEMA
+    payload = _chat_response([_scene("schema", 0)])
+    payload["choices"][0]["message"]["reasoning_content"] = "private reasoning, not JSON"
+    with _fake_server(200, payload) as (url, requests):
+        result = OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions", chat_output_mode="json_schema").plan(_project())
+    assert result.scenes[0].scene_id == "schema"
+    assert json.loads(requests[0][2])["response_format"] == {
+        "type": "json_schema", "json_schema": {"name": "scene_plan", "strict": True, "schema": _PLAN_SCHEMA}}
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("mode,protocol", [("auto", "chat_completions"), ("", "chat_completions"), (None, "chat_completions"), ("json_schema", "responses")])
+def test_chat_output_mode_is_explicitly_validated(mode, protocol):
+    with pytest.raises(ScenePlannerConfigurationError):
+        OpenAICompatibleScenePlanner("key", protocol=protocol, chat_output_mode=mode)
+
+
+def test_schema_rejection_does_not_trigger_prompt_fallback():
+    with _fake_server(400, {"error": "unsupported schema private-key"}) as (url, requests):
+        with pytest.raises(ScenePlannerHTTPError):
+            OpenAICompatibleScenePlanner("private-key", base_url=url, protocol="chat_completions", chat_output_mode="json_schema").plan(_project())
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("response_json", "response_json"), ("response_envelope", "response_envelope"),
+    ("output_text", "output_text"), ("output_json", "output_json"), ("fence", "output_json"),
+    ("plan_shape", "plan_shape"), ("scene_shape", "scene_shape"), ("scene_values", "scene_values"),
+    ("incomplete_answer", "incomplete_answer"),
+])
+def test_safe_validation_codes_without_provider_values(failure, code, caplog):
+    import traceback
+    secret = "private-provider-content"
+    payload = _chat_response([_scene("safe", 0)])
+    if failure == "response_json": payload = ("not json " + secret).encode()
+    elif failure == "response_envelope": payload = [secret]
+    elif failure == "output_text": payload = {"choices": [{"message": {"reasoning_content": secret}}]}
+    elif failure == "output_json": payload["choices"][0]["message"]["content"] = secret
+    elif failure == "fence": payload["choices"][0]["message"]["content"] = "```" + secret
+    elif failure == "plan_shape": payload["choices"][0]["message"]["content"] = json.dumps({"wrong": secret})
+    elif failure == "scene_shape":
+        scene = _scene("safe", 0)
+        scene[secret] = secret
+        payload = _chat_response([scene])
+    elif failure == "scene_values":
+        scene = _scene("safe", 0)
+        scene["duration_target_ms"] = secret
+        payload = _chat_response([scene])
+    elif failure == "incomplete_answer": payload["choices"][0]["finish_reason"] = "length"
+    with _fake_server(200, payload) as (url, requests):
+        with pytest.raises(ScenePlannerProviderResponseError) as raised:
+            OpenAICompatibleScenePlanner(secret, base_url=url, protocol="chat_completions").plan(_project())
+    assert raised.value.validation_code == code
+    assert f"validation_code={code}" in caplog.text
+    assert secret not in caplog.text
+    assert secret not in "".join(traceback.format_exception(raised.value))
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("failure,rule,field", [
+    ("duration", "field_value", "duration_target_ms"),
+    ("intent", "field_value", "visual_intent"),
+    ("reason", "visual_requirement_reason_required", "visual_requirement_reason"),
+    ("order", "scene_order", "unknown"),
+    ("duplicate", "scene_id_duplicate", "unknown"),
+    ("priority", "real_asset_priority", "unknown"),
+    ("fallback", "real_asset_fallback_only", "unknown"),
+    ("empty", "empty_plan", "unknown"),
+])
+def test_domain_diagnostics_are_specific_fixed_and_private(failure, rule, field, caplog):
+    import traceback
+    secret = "private-source-response-content"
+    scenes = [_scene(secret, 0)]
+    if failure == "duration": scenes[0]["duration_target_ms"] = secret
+    elif failure == "intent": scenes[0]["visual_intent"]["action"] = [secret]
+    elif failure == "reason": scenes[0].update(visual_requirement="explanatory", visual_requirement_reason="   ")
+    elif failure == "order": scenes[0]["order"] = 1
+    elif failure == "duplicate": scenes.append({**_scene(secret, 1)})
+    elif failure == "priority": scenes[0]["preferred_sources"] = ["typography", "user_asset"]
+    elif failure == "fallback": scenes[0].update(preferred_sources=["typography"], fallback_sources=["user_asset"])
+    elif failure == "empty": scenes = []
+    with _fake_server(200, _chat_response(scenes)) as (url, requests):
+        with pytest.raises(ScenePlannerProviderResponseError) as raised:
+            OpenAICompatibleScenePlanner(secret, base_url=url, protocol="chat_completions").plan(_project())
+    assert raised.value.validation_code == "scene_values"
+    assert raised.value.domain_rule == rule and raised.value.domain_field == field
+    assert f"domain_rule={rule} domain_field={field}" in caplog.text
+    assert secret not in caplog.text + "".join(traceback.format_exception(raised.value))
+    assert len(requests) == 1
+
+
+def test_domain_diagnostic_rejects_untrusted_identifiers():
+    error = ScenePlannerProviderResponseError("safe", domain_rule="private-rule", domain_field="private-field")
+    assert error.domain_rule == error.domain_field == "unknown"
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
+@pytest.mark.parametrize("graphic,accepted", [
+    ({"kind": "text_card", "treatment": "key_point", "points": ["结论", "条件", "证据", "限制"], "reason": None}, True),
+    ({"kind": "unsupported", "treatment": None, "points": [], "reason": "Requires node links"}, True),
+    (None, False),
+    ({"kind": "text_card", "treatment": "headline", "points": ["结论", "条件"], "reason": None}, False),
+])
+def test_explicit_graphic_provider_shape_preserves_realization_or_rejects_invalid(protocol, graphic, accepted):
+    value = {**_scene("graphic", 0), "visual_requirement": "explanatory",
+             "visual_requirement_reason": "A concept explanation", "graphic_plan": graphic}
+    response = _response([value]) if protocol == "responses" else _chat_response([value])
+    with _fake_server(200, response) as (url, requests):
+        planner = OpenAICompatibleScenePlanner("key", base_url=url, protocol=protocol)
+        if accepted:
+            assert planner.plan(_project()).scenes[0].graphic_plan.model_dump(mode="json", exclude={"schema_version"}) == graphic
+        else:
+            with pytest.raises(ScenePlannerProviderResponseError) as failure:
+                planner.plan(_project())
+            assert failure.value.validation_code == "scene_values"
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
+def test_prompt_states_local_cross_field_source_rules(protocol):
+    response = _response([_scene("valid", 0)]) if protocol == "responses" else _chat_response([_scene("valid", 0)])
+    with _fake_server(200, response) as (url, requests):
+        result = OpenAICompatibleScenePlanner("key", base_url=url, protocol=protocol).plan(_project())
+    body = json.loads(requests[0][2])
+    text = body["messages"][0]["content"] if protocol == "chat_completions" else body["input"][0]["content"][0]["text"]
+    assert "every user_asset/historical_asset in preferred_sources must precede every" in text
+    assert "real sources cannot be fallback-only" in text
+    assert "creative preference from an irreplaceable visual requirement" in text
+    assert "not proof that the creator must visibly speak" in text
+    assert "not merely because the topic mentions an action" in text
+    assert "Read production_feasibility before choosing sources" in text
+    assert "Unknown price is not zero" in text
+    assert result.scenes[0].visual_requirement == "unknown"  # unchanged legacy behavior
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
+@pytest.mark.parametrize("topic,accepted", [("保住采访原意", False), ("Content OS 的预检流程", True)])
+def test_retained_audience_control_leak_across_protocols(protocol, topic, accepted, caplog):
+    from test_planning_input import context, LEAKED_VOICE
+    value = {**_scene("caption-discipline", 0), "voice_text": LEAKED_VOICE}
+    response = _response([value]) if protocol == "responses" else _chat_response([value])
+    with _fake_server(200, response) as (url, requests):
+        planner = OpenAICompatibleScenePlanner("private-key", base_url=url, protocol=protocol)
+        if accepted:
+            assert planner.plan(_project(), topic=topic, context=context()).scenes[0].voice_text == LEAKED_VOICE
+        else:
+            with pytest.raises(ScenePlannerProviderResponseError) as failure:
+                planner.plan(_project(), topic=topic, context=context())
+            assert failure.value.validation_code == "scene_values"
+            assert failure.value.domain_rule == "audience_control_leak"
+            assert failure.value.domain_field == "voice_text"
+            assert "domain_rule=audience_control_leak" in caplog.text
+        assert len(requests) == 1
+        body = json.loads(requests[0][2])
+        prompt = body["messages"][0]["content"] if protocol == "chat_completions" else body["input"][0]["content"][0]["text"]
+        serialized = prompt.split("Project request:\n", 1)[1].split("\n\nRequired output JSON Schema", 1)[0]
+        request = json.loads(serialized)
+        assert request["audience_brief"]["topic"] == topic
+        assert "planning_preferences" not in request["background_evidence"]
+        assert "instruction" not in request["production_controls"]["planning_preferences"][0]
+    assert LEAKED_VOICE not in caplog.text and "private-key" not in caplog.text
+
+
+@pytest.mark.parametrize("requirement,preferred,accepted", [
+    ("explanatory", ["typography"], True),
+    ("explanatory", ["typography", "screenshot"], True),
+    ("unknown", ["typography"], False),
+    ("creator_speaking", ["typography"], False),
+    ("action_evidence", ["typography"], False),
+    ("explanatory", ["screenshot", "typography"], False),
+    ("explanatory", ["typography", "ai_video"], False),
+    ("explanatory", ["typography", "talking_profile"], False),
+    ("explanatory", ["typography", "user_asset"], False),
+])
+def test_explanatory_typography_first_exception_is_narrow(requirement, preferred, accepted):
+    scene = {**_scene("explain", 0, preferred=preferred, fallback=["user_asset", "historical_asset"]),
+        "visual_requirement": requirement, "visual_requirement_reason": "A concept card preserves the explanation without person/action evidence."}
+    with _fake_server(200, _chat_response([scene])) as (url, requests):
+        planner = OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions")
+        if accepted:
+            result = planner.plan(_project())
+            assert [s.value for s in result.scenes[0].preferred_sources] == preferred
+            assert [s.value for s in result.scenes[0].fallback_sources] == ["user_asset", "historical_asset"]
+        else:
+            with pytest.raises(ScenePlannerProviderResponseError) as raised:
+                planner.plan(_project())
+            assert raised.value.domain_rule == ("real_asset_priority" if "user_asset" in preferred else "real_asset_fallback_only")
+    assert len(requests) == 1
 
 
 @pytest.mark.parametrize("protocol", ["", "chat", "responses/v1", 1, [], None])
 def test_scene_planner_rejects_unknown_protocol(protocol: object) -> None:
     with pytest.raises(ScenePlannerConfigurationError, match="protocol"):
         OpenAICompatibleScenePlanner("key", protocol=protocol)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("protocol,field", [("responses", "max_output_tokens"), ("chat_completions", "max_completion_tokens")])
+def test_explicit_output_limit_and_effort(protocol, field, caplog):
+    payload = _response([_scene("bounded", 0)]) if protocol == "responses" else _chat_response([_scene("bounded", 0)])
+    with _fake_server(200, payload) as (url, requests):
+        with caplog.at_level("INFO", logger="app.providers.scene_planner"):
+            OpenAICompatibleScenePlanner("private-key", base_url=url, protocol=protocol,
+                max_output_tokens=4096, reasoning_effort="low" if protocol == "chat_completions" else None).plan(_project(), script="private-script")
+    body = json.loads(requests[0][2])
+    assert body[field] == 4096
+    assert body.get("reasoning_effort") == ("low" if protocol == "chat_completions" else None)
+    assert len(requests) == 1
+    assert "outcome=success stage=validation http=200" in caplog.text
+    assert "private-key" not in caplog.text and "private-script" not in caplog.text
+
+
+@pytest.mark.parametrize("options", [
+    {"max_output_tokens": True}, {"max_output_tokens": 0}, {"max_output_tokens": -1},
+    {"max_output_tokens": "4096"}, {"max_output_tokens": 1.5},
+    {"reasoning_effort": "medium", "protocol": "chat_completions"},
+    {"reasoning_effort": "low"}, {"reasoning_effort": ""},
+])
+def test_invalid_planner_controls_fail_before_dispatch(options):
+    with pytest.raises(ScenePlannerConfigurationError):
+        OpenAICompatibleScenePlanner("key", **options)
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "tool_calls", "content_filter"])
+def test_incomplete_chat_response_is_rejected_even_if_json_valid(finish_reason, caplog):
+    payload = _chat_response([_scene("partial", 0)])
+    payload["choices"][0]["finish_reason"] = finish_reason
+    with _fake_server(200, payload) as (url, requests):
+        with pytest.raises(ScenePlannerProviderResponseError, match="complete answer"):
+            OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions").plan(_project())
+    assert len(requests) == 1
+    assert "outcome=failure stage=validation http=200" in caplog.text
+
+
+@pytest.mark.parametrize("stage", ["awaiting_headers", "reading_body", "private-key"])
+def test_diagnostic_failure_stage_is_allowlisted(stage, caplog):
+    class FailureTransport:
+        calls = 0
+        def post(self, *args):
+            self.calls += 1
+            error = ScenePlannerTimeout("safe timeout")
+            error.stage = stage
+            raise error
+    transport = FailureTransport()
+    with pytest.raises(ScenePlannerTimeout):
+        OpenAICompatibleScenePlanner("private-key", transport=transport).plan(_project(), script="private-script")
+    expected = stage if stage != "private-key" else "transport"
+    assert f"stage={expected} http=None" in caplog.text
+    assert transport.calls == 1
+    assert "private-key" not in caplog.text and "private-script" not in caplog.text
+
+
+@pytest.mark.parametrize("stage", ["awaiting_headers", "reading_body"])
+def test_default_transport_reports_timeout_stage(monkeypatch, stage):
+    from app.providers.scene_planner import UrllibScenePlannerTransport
+    class Response:
+        status = 200
+        headers = {}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): raise TimeoutError("private upstream detail")
+    class Opener:
+        def open(self, *args, **kwargs):
+            if stage == "awaiting_headers": raise TimeoutError("private upstream detail")
+            return Response()
+    monkeypatch.setattr("app.providers.scene_planner.build_opener", lambda *args: Opener())
+    with pytest.raises(ScenePlannerTimeout) as raised:
+        UrllibScenePlannerTransport().post("https://example.com/v1", {}, b"{}", 1)
+    assert raised.value.stage == stage
+    assert "private" not in str(raised.value)
+
+
+def test_incomplete_responses_output_cannot_be_admitted():
+    payload = _response([_scene("partial", 0)])
+    payload["status"] = "incomplete"
+    with _fake_server(200, payload) as (url, requests):
+        with pytest.raises(ScenePlannerProviderResponseError, match="complete answer"):
+            OpenAICompatibleScenePlanner("key", base_url=url).plan(_project())
+    assert len(requests) == 1
+
+
+def test_wrapped_socket_timeout_is_not_misclassified(monkeypatch):
+    from urllib.error import URLError
+    from app.providers.scene_planner import UrllibScenePlannerTransport
+    class Opener:
+        def open(self, *args, **kwargs):
+            raise URLError(TimeoutError("private detail"))
+    monkeypatch.setattr("app.providers.scene_planner.build_opener", lambda *args: Opener())
+    with pytest.raises(ScenePlannerTimeout) as raised:
+        UrllibScenePlannerTransport().post("https://example.com/v1", {}, b"{}", 1)
+    assert raised.value.stage == "awaiting_headers"
 
 
 @pytest.mark.parametrize(

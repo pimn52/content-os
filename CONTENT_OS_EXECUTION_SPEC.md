@@ -1,6 +1,6 @@
 # Content OS — Product & R1 Specification
 
-Updated: 2026-09-21
+Updated: 2026-10-03
 
 This is the authoritative whole-product map and R1 acceptance contract. Module details live under docs/product/. Technical layering lives in docs/architecture/SYSTEM_ARCHITECTURE.md. Current execution state lives in STATUS.md.
 
@@ -11,6 +11,8 @@ Know what to create → Create it as you → Learn what works.
 Content OS is a Local-first / BYOK content operating system for creators, professionals and small teams that have useful knowledge but insufficient time or production capacity to repeatedly turn it into short-form content.
 
 The primary durable object is the creator/brand workspace, not an isolated video.
+
+The core product objective is to maximize repeatable automatic creation, then extend toward authorized operations. Progress is measured by publishable outcomes with less manual planning, dispatch, repair and repeated review—not by the number of successful provider experiments.
 
 ## 2. Product system
 
@@ -26,23 +28,25 @@ The primary durable object is the creator/brand workspace, not an isolated video
             ↓
     IP-aware editable copy + narration performance intent
             ↓
-    ScenePlan / editorial intent
+    ScenePlan + preliminary EditPlan / editorial and visual intent
             ↓
-    Hybrid Asset Router
+    Asset suitability + Hybrid Asset Router
             ↓
-    Voice / Talking / real media / typography / capture
+    Execution feasibility + whole-production cost/budget preflight
             ↓
-    MasterNarration + TalkingRun + Assets
+    Necessary Voice / Talking / transforms / capture only
             ↓
-    EditPlan / Visual Direction
+    MasterNarration + TalkingRun + Assets / measured timing
             ↓
-    Execution Planner / Compute Router
+    Timing-resolved EditPlan / visual preflight
             ↓
     VideoSpec
             ↓
     30–60s render
             ↓
     Review / publication / feedback
+
+Visual intent and feasibility precede expensive generation. After generation, measured audio/visual timing resolves the plan. This is one versioned planning lifecycle, not a second planner that first discovers the visual concept after production. Unsuitable material returns a reason and bounded alternative to planning before dispatch.
 
 ## 3. R1 product gate
 
@@ -57,6 +61,12 @@ R1 is complete only when an authorized creator can, through the normal product f
 7. repeat the flow for another topic without re-recording the entire narration or manually cutting all media from scratch.
 
 Imported finished narration, source-led recuts, old mouth motion, generic TTS or generic avatars may remain explicit fallback paths but do not prove the R1 core gate.
+
+These are acceptance scenarios, not a rule that every future video must generate Talking or have one fixed length. Source eligibility and usable intervals come from evidence, not conversational duration examples.
+
+Both topic trials must use the normal UI/application workflow, without implementation scripts supplying scenes, cuts, crop coordinates or child-job dispatch. Record user-active time, manual corrections, review events, quality failures, retries, actual/unknown cost and elapsed time. Unknown measurements cannot be reported as zero. Accepted assets remain reusable unless their dependencies change.
+
+[D029](DECISIONS.md#d029--admit-execution-for-an-evidenced-purpose-and-preserve-that-scope-downstream) separates an internal R1 workflow-quality trial from commercial provider admission. A future explicitly admitted internal-evaluation lane must use the same normal workflow and quality gates, verify that the exact provider terms permit the intended activity, and retain output-use restrictions. Such a pass establishes R1 workflow quality only; commercial readiness remains separate. The scope migration is not implemented yet, so current commercial-safe dispatch checks remain in force. Neither an evaluation label nor this specification grants provider rights.
 
 ## 4. Product modules
 
@@ -101,13 +111,14 @@ Spec: docs/product/TIMELINE_RENDER_LEARNING.md
 - Consent and rights are hard gates.
 - Unknown cost is not zero; unknown capability is not verified.
 - Evidence and human judgment are separate. Automated QA does not claim likeness or publishability.
+- Lowest cost means the lowest adequate total production effort: cash/compute, waiting, failed work and creator time remain separately visible. Cheap but unpublishable output is not success.
 
 ## 6. First-class product outputs
 
 The normal product pipeline should converge on these objects:
 
 - IP Profile / creator context;
-- Project / Draft / ScenePlan;
+- Project / Draft / ScenePlan and versioned EditPlan;
 - Asset / Clip / AudioAsset;
 - verified MasterNarration;
 - reviewed TalkingRun;
@@ -140,6 +151,8 @@ The final U-Product review judges the normal 30–60s rendered result.
 
 A single successful experiment is not enough: R1 requires one full pass and then a second-topic repeatability pass.
 
+Policy v1 retains child-level subjective review. New normal Web Runs explicitly select v2, while existing/unspecified policy records retain v1. The v2 lane for planned single-child collections preserves technical QA and requires explicit six-dimension review of the exact Master-audio preview, with focused concern answers. Its core UI path has isolated fixture evidence; real planned-media judgments remain unverified. Master judgment and final review remain required. Calibration/provider-change experiments are separate from ordinary production; they must not make every new video repeat the original validation campaign.
+
 ## 8. R1 architecture boundary
 
 Keep the current modular-monolith direction:
@@ -158,13 +171,11 @@ Do not introduce Redis, Celery, Kubernetes, n8n or microservices merely because 
 
 ## 9. Current R1 status at a glance
 
-The product has strong foundations in creator/project state, local assets, routing, execution evidence, Advanced Settings, jobs, timeline and rendering.
+Creator/project state, local assets, routing, jobs, capability settings, Voice/Talking APIs and deterministic rendering are implemented foundations. Exact reviewed MasterNarration/TalkingRun assets are valuable runtime evidence; they do not establish a normal automatic creation flow.
 
-Talking has moved beyond isolated short demos: the approved 26.3s source-forward benchmark is now an admitted first-class TalkingRun with an Asset/Clip consumable by VideoSpec. Its exact assembled media matches the human-approved preview, but it does not satisfy the 30–60s first R1 end-to-end gate.
+Current gaps span production-before-planning drift, generated-asset routing/admission consistency, manual UI orchestration, source suitability, review granularity and feedback consumption. EditPlan presentation contracts exist; automatic visual planning and reliable derived-media eligibility are not proven. Assisted renders have failed final visual review.
 
-Voice and Talking now have reviewed normal product paths for the current local R1 configuration: a 32.560s MasterNarration passed U-Voice and a 32.400s source-forward TalkingRun passed U-Talking/continuity and normal admission. The largest immediate R1 capability risk has moved to visual direction/edit quality and product-generated planning: V66's final render failed U-Product despite approved Voice/Talking inputs.
-
-See STATUS.md for the active bounded task.
+STATUS.md owns the current maturity/evidence matrix and single active package. docs/implementation/ROADMAP.md defines the bounded recovery sequence. No R1 or autonomous-production completion is claimed.
 
 ## 10. Deferred beyond the immediate R1 proof
 

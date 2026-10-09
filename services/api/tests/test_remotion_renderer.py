@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository
-from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, MasterNarration, ProjectFormat, RationalFps, SourceKind, TranscriptSegment, VideoScene, VideoSpec, VideoVisual
+from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, MasterNarration, PortraitPresentation, ProjectFormat, RationalFps, SourceKind, TranscriptSegment, VideoScene, VideoSpec, VideoVisual
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, UnauthorizedVisualError
 
 
@@ -72,6 +72,25 @@ def _setup(tmp_path: Path) -> tuple[Database, Asset, Clip, VideoSpec]:
     return db, asset, clip, spec
 
 
+def test_remotion_portable_media_uses_configured_root_not_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db, asset, _, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        db.data_root = tmp_path
+        AssetRepository(db).update(asset.model_copy(update={"source_file": Path(asset.source_file).name}))
+        renderer_root = _renderer_project(tmp_path / "renderer")
+        monkeypatch.chdir(renderer_root)
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=renderer_root, runner=runner)
+        renderer.render(spec, tmp_path / "portable.mp4")
+        assert b"original-media-bytes" in runner.staged_bytes.values()
+        AssetRepository(db).update(asset.model_copy(update={"source_file": "../outside.mp4"}))
+        with pytest.raises(LocalResourceError):
+            renderer.render(spec, tmp_path / "escape.mp4")
+        assert len(runner.calls) == 1
+    finally:
+        db.close()
+
+
 def test_remotion_adapter_stages_local_clip_trims_and_preserves_source(tmp_path: Path) -> None:
     db, asset, _, spec = _setup(tmp_path)
     runner = _Runner()
@@ -90,6 +109,7 @@ def test_remotion_adapter_stages_local_clip_trims_and_preserves_source(tmp_path:
         assert props["audioMode"] == "source"
         source_props = props["sceneSources"]["scene_01"]
         assert source_props["trimBefore"] == 30 and source_props["trimAfter"] == 60
+        assert source_props["portraitPresentation"] == "full_canvas"
         assert runner.staged_bytes[source_props["src"]] == source.read_bytes()
         assert hashlib.sha256(source.read_bytes()).hexdigest() == before
         assert list((renderer_root / "public" / "content-os-renders").iterdir()) == []
@@ -148,10 +168,58 @@ def test_remotion_adapter_rejects_a_human_rejected_talking_asset(tmp_path: Path)
             "clip_start_ms": 0, "clip_end_ms": 1_001,
         })
         blocked = spec.model_copy(update={"scenes": [spec.scenes[0].model_copy(update={"visual": visual})]})
-        with pytest.raises(UnauthorizedVisualError, match="rejected by U-Talking"):
+        with pytest.raises(UnauthorizedVisualError, match="generated_talking_human_review_not_approved"):
             RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=_Runner()).render(
                 blocked, tmp_path / "blocked.mp4"
             )
+    finally:
+        db.close()
+
+
+def test_remotion_talking_rechecks_admission_project_and_copy(tmp_path: Path, admit_talking_run) -> None:
+    db, original, _, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        asset = original.model_copy(update={
+            "id": uuid4(), "source_kind": SourceKind.AI_VIDEO, "content_hash": "b" * 64,
+            "duration_ms": 3_003, "metadata": {"talking_generation": {
+                "qa_state": "verified", "human_review_state": "approved",
+            }},
+        })
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=3_003, asset_duration_ms=3_003))
+        visual = spec.scenes[0].visual.model_copy(update={
+            "source_kind": SourceKind.AI_VIDEO, "asset_id": asset.id, "clip_id": clip.id,
+            "clip_start_ms": 0, "clip_end_ms": 3_003, "source_duration_ms": 3_003,
+        })
+        talking_spec = spec.model_copy(update={
+            "scenes": [spec.scenes[0].model_copy(update={"visual": visual})],
+        })
+        renderer = RemotionRenderer(
+            AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner,
+        )
+        with pytest.raises(UnauthorizedVisualError, match="generated_talking_run_admission_required"):
+            renderer.render(talking_spec, tmp_path / "unadmitted.mp4")
+        stored, _, _ = admit_talking_run(
+            db, spec.project_id, asset, clip, "A local caption", transcript_end_ms=1_000,
+        )
+        renderer.render(talking_spec, tmp_path / "admitted.mp4")
+        assert len(runner.calls) == 1
+        cut_scene = talking_spec.scenes[0].model_copy(update={"duration_frames": 15})
+        with pytest.raises(UnauthorizedVisualError, match="talking_run_speech_would_be_cut"):
+            renderer.render(talking_spec.model_copy(update={"scenes": [cut_scene]}), tmp_path / "cut-speech.mp4")
+        wrong_copy = talking_spec.model_copy(update={
+            "scenes": [talking_spec.scenes[0].model_copy(update={"caption": "Other copy"})],
+        })
+        with pytest.raises(UnauthorizedVisualError, match="talking_run_copy_mismatch"):
+            renderer.render(wrong_copy, tmp_path / "wrong-copy.mp4")
+        with pytest.raises(UnauthorizedVisualError, match="talking_run_project_mismatch"):
+            renderer.render(talking_spec.model_copy(update={"project_id": uuid4()}), tmp_path / "wrong-project.mp4")
+        pending = dict(stored.metadata)
+        pending["talking_run"] = {**pending["talking_run"], "admission_state": "pending"}
+        AssetRepository(db).update(stored.model_copy(update={"metadata": pending}))
+        with pytest.raises(UnauthorizedVisualError, match="talking_run_not_admitted"):
+            renderer.render(talking_spec, tmp_path / "pending.mp4")
     finally:
         db.close()
 
@@ -178,6 +246,18 @@ def test_remotion_adapter_rejects_remote_unauthorized_and_unsupported_visuals(tm
         with pytest.raises(RenderInputError, match="9:16"):
             renderer.render(horizontal, tmp_path / "bad.mp4")
         assert runner.calls == []
+    finally:
+        db.close()
+
+
+def test_remotion_adapter_rejects_a_portrait_panel_for_non_talking_media(tmp_path: Path) -> None:
+    db, _, _, spec = _setup(tmp_path)
+    try:
+        panel = spec.model_copy(update={"scenes": [spec.scenes[0].model_copy(update={"portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})]})
+        with pytest.raises(RenderInputError, match="portrait_panel"):
+            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=_Runner()).render(
+                panel, tmp_path / "panel.mp4"
+            )
     finally:
         db.close()
 
@@ -209,8 +289,30 @@ def test_remotion_adapter_renders_typography_without_staging_media(tmp_path: Pat
         output = tmp_path / "output" / "typography.mp4"
         RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=root, runner=runner).render(typography_spec, output)
         source_props = runner.calls[0][3]["sceneSources"]["scene_01"]
-        assert source_props == {"kind": "typography", "text": "Use the fallback"}
+        assert source_props["kind"] == "typography" and source_props["text"] == "Use the fallback"
+        assert source_props["graphicTreatment"] == "key_point"
+        assert source_props["styleTokens"]["name"] == "content-os-dark"
         assert runner.staged_bytes == {}
+    finally:
+        db.close()
+
+
+def test_remotion_props_keep_all_card_points_and_line_breaks(tmp_path: Path) -> None:
+    from app.domain.models import GraphicTreatment, EditVisualRole
+    db, _, _, spec = _setup(tmp_path)
+    runner = _Runner()
+    points = "结论\n条件\n证据\n限制"
+    try:
+        root = _renderer_project(tmp_path / "renderer")
+        entry = spec.scenes[0].model_copy(update={
+            "visual": VideoVisual(source_kind=SourceKind.TYPOGRAPHY, authorization_reference="local-typography"),
+            "visual_role": EditVisualRole.GRAPHIC, "graphic_treatment": GraphicTreatment.KEY_POINT,
+            "graphic_text": points,
+        })
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=root, runner=runner).render(
+            spec.model_copy(update={"scenes": [entry]}), tmp_path / "output" / "points.mp4")
+        props = runner.calls[0][3]["sceneSources"]["scene_01"]
+        assert props["text"] == points and props["graphicTreatment"] == "key_point"
     finally:
         db.close()
 
@@ -349,3 +451,5 @@ def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_sourc
     assert "objectFit: 'contain'" in timeline
     assert "objectFit: 'cover'" not in timeline
     assert "scene.caption && audioMode !== 'source'" in timeline
+    assert "headline" in timeline and "key_point" in timeline and "contrast" in timeline and "GraphicCard" in timeline
+    assert "portrait_panel" in timeline and "PortraitPanel" in timeline and "PanelText" in timeline

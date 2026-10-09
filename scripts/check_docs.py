@@ -28,6 +28,10 @@ ARCHITECTURE_DOCS = {
     "docs/architecture/SYSTEM_ARCHITECTURE.md",
 }
 
+IMPLEMENTATION_DOCS = {
+    "docs/implementation/ROADMAP.md",
+}
+
 FORBIDDEN_ROOT_DOCS = {
     "PRD.md",
     "DEVELOPMENT_PLAN.md",
@@ -52,13 +56,14 @@ REQUIRED_START_REFERENCES = {
     "AGENTS.md",
     "DECISIONS.md",
     "README.md",
+    "docs/implementation/ROADMAP.md",
 }
 
 STALE_REFERENCE_NAMES = FORBIDDEN_ROOT_DOCS | {"CONTENT_OS_REVIEW_2026-09-10.md"}
 
 # Implementation-model policy belongs only in AGENTS and the one active STATUS
 # package. Product/architecture specs must not repeat it.
-IMPLEMENTATION_TIER_TERMS = re.compile(r"\b(?:Luna|Terra|Sol)\b")
+IMPLEMENTATION_TIER_TERMS = re.compile(r"\b(?:Luna|Terra|Sol|Astra)\b", re.IGNORECASE)
 
 MAX_LINES = {
     "STATUS.md": 220,
@@ -83,7 +88,7 @@ def read(path_name: str) -> str:
 def main() -> int:
     errors: list[str] = []
 
-    required_docs = ACTIVE_ROOT_DOCS | PRODUCT_DOCS | ARCHITECTURE_DOCS
+    required_docs = ACTIVE_ROOT_DOCS | PRODUCT_DOCS | ARCHITECTURE_DOCS | IMPLEMENTATION_DOCS
     for name in required_docs:
         if not (ROOT / name).is_file():
             errors.append(f"missing active document: {name}")
@@ -138,6 +143,7 @@ def main() -> int:
     tier_free_docs = (
         PRODUCT_DOCS
         | ARCHITECTURE_DOCS
+        | IMPLEMENTATION_DOCS
         | {
             "CONTENT_OS_EXECUTION_SPEC.md",
             "DECISIONS.md",
@@ -149,7 +155,7 @@ def main() -> int:
         path = ROOT / name
         if path.is_file() and IMPLEMENTATION_TIER_TERMS.search(path.read_text(encoding="utf-8")):
             errors.append(
-                f"{name} repeats implementation-model tier policy; keep Luna/Terra/Sol policy in AGENTS.md (and active STATUS assignment) only"
+                f"{name} repeats implementation-model tier policy; keep model mappings in AGENTS.md (and active STATUS assignment) only"
             )
 
     # Product specs describe current capability, not task lifecycle.
@@ -174,6 +180,10 @@ def main() -> int:
     print("Architecture:")
     for name in sorted(ARCHITECTURE_DOCS):
         print(f"- {name}")
+    print("Implementation contracts (not live status):")
+    for name in sorted(IMPLEMENTATION_DOCS):
+        print(f"- {name}")
+    print("Structural validation only; capability claims still require code/runtime evidence review.")
     return 0
 
 

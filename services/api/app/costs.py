@@ -132,6 +132,44 @@ def estimate_selected_candidates(
     )
 
 
+def estimate_whole_production(
+    selections: Sequence[CandidateAsset],
+    *,
+    required_scene_count: int,
+    actions: Sequence[object],
+    currency: str = "USD",
+) -> CostEstimate:
+    """Combine reusable visual choices with every planned production operation.
+
+    This is a dry-run estimate, not a provider quote. Unknown amounts remain
+    unknown, including the optional bounded repair reserve.
+    """
+    base = estimate_selected_candidates(
+        selections, required_scene_count=required_scene_count,
+        currency=currency, include_local_render=False,
+    )
+    items = list(base.line_items)
+    for action in actions:
+        kind = getattr(action, "kind")
+        scene_id = getattr(action, "scene_plan_id")
+        cost = getattr(action, "cost")
+        if not isinstance(cost, UsageCost):
+            raise ValueError("production actions require UsageCost")
+        items.append(CostLineItem(
+            scope="render" if kind == "render" else "scene" if scene_id is not None else "provider",
+            scene_plan_id=scene_id,
+            label=f"{kind} ({'contingency' if kind == 'repair_allowance' else 'required' if getattr(action, 'required') else 'conditional'})",
+            cost=cost,
+        ))
+    known = sum((item.cost.amount for item in items if item.cost.amount is not None and item.cost.currency == currency), Decimal("0"))
+    unknown = sum(item.cost.amount is None or item.cost.currency != currency for item in items)
+    return CostEstimate(
+        currency=currency, known_amount=known, unknown_cost_count=unknown,
+        selected_scene_count=base.selected_scene_count,
+        required_scene_count=required_scene_count, line_items=tuple(items),
+    )
+
+
 @dataclass(frozen=True)
 class CostReductionDecision:
     current: CandidateAsset

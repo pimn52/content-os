@@ -96,6 +96,9 @@ class ProviderExecutionService:
         encode_result: Callable[[ResultT], object],
         decode_result: Callable[[object], ResultT],
         error_code: Callable[[Exception], str | None],
+        reservation_guard: Callable[[], None] | None = None,
+        before_action: Callable[[], None] | None = None,
+        before_replay: Callable[[], None] | None = None,
     ) -> ResultT:
         """Execute once, then persist a replayable result beside the ledger row.
 
@@ -129,6 +132,7 @@ class ProviderExecutionService:
                 input_source=input_source,
                 input_digest=digest,
                 estimated_cost=estimate,
+                reservation_guard=reservation_guard,
             )
         except BudgetLimitError:
             raise
@@ -138,9 +142,13 @@ class ProviderExecutionService:
             raise ProviderExecutionAccountingFailure("provider call could not be reserved") from exc
 
         if not reservation.owner:
+            if before_replay is not None:
+                before_replay()
             return self._replay(reservation.record, decode_result)
 
         try:
+            if before_action is not None:
+                before_action()
             result = action()
         except Exception as exc:
             self._finish_failure(project_id, reservation.record, error_code(exc))
@@ -166,6 +174,35 @@ class ProviderExecutionService:
         except ProviderCallError as exc:
             raise ProviderExecutionAccountingFailure("provider call result could not be reconciled") from exc
         return result
+
+    def execute_prepared_voice(self, *, frozen, idempotency_key: str,
+            input_source: str, input_document: object, action: Callable[[object], ResultT],
+            encode_result: Callable[[ResultT], object], decode_result: Callable[[object], ResultT],
+            error_code: Callable[[Exception], str | None]) -> ResultT:
+        """Application-only accounting seam, NOT normal Voice admission.
+
+        The caller must preserve all Worker/purpose/source/consent/QA and native
+        recipe gates. No endpoint/handler uses this seam to enable the unfinished
+        evaluation lane. Synthetic prepared objects provide offline evidence only.
+        Expensive observation precedes this call; only its reservation owner can
+        perform the final outside-lock recheck and receive the retained object.
+        """
+        from app.frozen_worker import FrozenWorkerIdentity
+        from app.execution_admission import UseAdmissionError
+        if not isinstance(frozen, FrozenWorkerIdentity) or not frozen.belongs_to(self._ledger.db):
+            raise UseAdmissionError('execution_frozen_database_mismatch')
+        job, snapshot = frozen.job, frozen.snapshot
+        if job.type.value != 'generate_voice' or snapshot.identity.capability != 'voice' or snapshot.identity.mode != 'local':
+            raise UseAdmissionError('execution_prepared_voice_required')
+        return self.execute(project_id=job.project_id, idempotency_key=idempotency_key,
+            operation='tts', provider=RuntimeProviderIdentity(snapshot.identity.provider, snapshot.identity.model),
+            input_source=input_source, category=CostCategory.VOICE,
+            input_document={'job_id': str(job.id), 'scope_fingerprint': frozen.scope_fingerprint,
+                'execution_sha256': snapshot.execution_sha256, 'input': input_document},
+            reservation_guard=frozen.reservation_guard, before_action=frozen.verify_before_launch,
+            before_replay=frozen.verify_for_replay,
+            action=lambda: action(frozen.prepared), encode_result=encode_result,
+            decode_result=decode_result, error_code=error_code)
 
     def _replay(self, record: ProviderCallRecord, decode_result: Callable[[object], ResultT]) -> ResultT:
         if record.status == "completed":

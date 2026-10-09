@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 44
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -296,7 +296,252 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
            )""",
         "CREATE INDEX IF NOT EXISTS talking_runs_project_idx ON talking_runs(project_id, id)",
     )),
+    (25, (
+        """CREATE TABLE IF NOT EXISTS crop_assessments (
+               id TEXT PRIMARY KEY NOT NULL,
+               source_asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+               source_clip_id TEXT NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+               payload TEXT NOT NULL
+           )""",
+        "CREATE INDEX IF NOT EXISTS crop_assessments_source_idx ON crop_assessments(source_asset_id, source_clip_id)",
+    )),
+    (26, (
+        """CREATE TABLE IF NOT EXISTS production_runs (
+               id TEXT PRIMARY KEY NOT NULL,
+               project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+               idempotency_key TEXT NOT NULL UNIQUE,
+               preflight_fingerprint TEXT NOT NULL,
+               render_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+               created_at TEXT NOT NULL,
+               UNIQUE(project_id, preflight_fingerprint)
+           )""",
+        "CREATE INDEX IF NOT EXISTS production_runs_project_idx ON production_runs(project_id, created_at)",
+    )),
+    (27, (
+        """CREATE TABLE production_runs_next (
+               id TEXT PRIMARY KEY NOT NULL,
+               project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+               idempotency_key TEXT NOT NULL UNIQUE,
+               preflight_fingerprint TEXT NOT NULL,
+               draft_version INTEGER NOT NULL,
+               script_revision INTEGER NOT NULL,
+               style_tokens TEXT NOT NULL,
+               repair_allowance INTEGER NOT NULL,
+               stage TEXT NOT NULL,
+               render_job_id TEXT UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+               created_at TEXT NOT NULL,
+               UNIQUE(project_id, preflight_fingerprint)
+           )""",
+        """INSERT INTO production_runs_next(
+               id, project_id, idempotency_key, preflight_fingerprint, draft_version,
+               script_revision, style_tokens, repair_allowance, stage, render_job_id, created_at
+           ) SELECT id, project_id, idempotency_key, preflight_fingerprint, 0, 0,
+                    '{}', 1, 'render', render_job_id, created_at FROM production_runs""",
+        "DROP TABLE production_runs",
+        "ALTER TABLE production_runs_next RENAME TO production_runs",
+        "CREATE INDEX IF NOT EXISTS production_runs_project_idx ON production_runs(project_id, created_at)",
+    )),
+    (28, (
+        "ALTER TABLE production_runs ADD COLUMN voice_job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS production_runs_voice_job_idx ON production_runs(voice_job_id)",
+    )),
+    (29, (
+        "ALTER TABLE production_runs ADD COLUMN voice_audio_id TEXT REFERENCES audio_assets(id) ON DELETE RESTRICT",
+        "ALTER TABLE production_runs ADD COLUMN voice_qa_job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS production_runs_voice_qa_job_idx ON production_runs(voice_qa_job_id)",
+    )),
+    (30, (
+        "ALTER TABLE production_runs ADD COLUMN voice_qa_auto_stop_reasons TEXT NOT NULL DEFAULT '[]'",
+    )),
+    (31, (
+        "ALTER TABLE production_runs ADD COLUMN talking_master_audio_id TEXT REFERENCES audio_assets(id) ON DELETE RESTRICT",
+        "ALTER TABLE production_runs ADD COLUMN talking_dependencies TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE production_runs ADD COLUMN waiting_stop_reasons TEXT NOT NULL DEFAULT '[]'",
+    )),
+    (32, (
+        "ALTER TABLE production_runs ADD COLUMN talking_source_bindings TEXT NOT NULL DEFAULT '[]'",
+    )),
+    (33, (
+        """CREATE TABLE talking_source_suitability (
+               id TEXT PRIMARY KEY NOT NULL,
+               idempotency_key TEXT NOT NULL UNIQUE,
+               source_asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+               source_clip_id TEXT NOT NULL REFERENCES clips(id) ON DELETE RESTRICT,
+               payload TEXT NOT NULL
+           )""",
+        "CREATE INDEX talking_source_suitability_source_idx ON talking_source_suitability(source_asset_id, source_clip_id)",
+    )),
+    (34, (
+        """CREATE TABLE talking_source_admissions (
+               id TEXT PRIMARY KEY NOT NULL,
+               idempotency_key TEXT NOT NULL UNIQUE,
+               assessment_id TEXT NOT NULL UNIQUE REFERENCES talking_source_suitability(id) ON DELETE RESTRICT,
+               payload TEXT NOT NULL
+           )""",
+    )),
+
+    (35, (
+        "ALTER TABLE production_runs ADD COLUMN talking_review_policy_version INTEGER NOT NULL DEFAULT 1 CHECK(talking_review_policy_version IN (1,2))",
+        "ALTER TABLE production_runs ADD COLUMN review_request_fingerprint TEXT",
+        """CREATE TABLE talking_review_concerns (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+            series_id TEXT NOT NULL REFERENCES talking_slice_series(id) ON DELETE RESTRICT,
+            idempotency_key TEXT NOT NULL,
+            payload TEXT NOT NULL
+        )""",
+        "CREATE UNIQUE INDEX talking_review_concerns_key_idx ON talking_review_concerns(project_id, idempotency_key)",
+        "CREATE INDEX talking_review_concerns_series_idx ON talking_review_concerns(series_id)",
+        """CREATE TABLE talking_review_concern_answers (
+            concern_id TEXT PRIMARY KEY NOT NULL REFERENCES talking_review_concerns(id) ON DELETE RESTRICT,
+            payload TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+    )),
+    (36, (
+        """CREATE TABLE talking_repairs (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+            run_id TEXT NOT NULL REFERENCES production_runs(id) ON DELETE RESTRICT,
+            scene_plan_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            replacement_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+            predecessor_series_id TEXT REFERENCES talking_slice_series(id) ON DELETE RESTRICT,
+            successor_series_id TEXT REFERENCES talking_slice_series(id) ON DELETE RESTRICT,
+            payload TEXT NOT NULL,
+            UNIQUE(project_id, idempotency_key),
+            UNIQUE(run_id, scene_plan_id)
+        )""",
+    )),
+    (37, (
+        "CREATE TABLE voice_dispatch_snapshots (job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT, payload TEXT NOT NULL)",
+        "CREATE TABLE voice_execution_receipts (job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT, payload TEXT NOT NULL)",
+        """CREATE TABLE voice_repairs (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+            run_id TEXT NOT NULL UNIQUE REFERENCES production_runs(id) ON DELETE RESTRICT,
+            idempotency_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            replacement_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+            qa_job_id TEXT UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+            payload TEXT NOT NULL,
+            UNIQUE(project_id, idempotency_key)
+        )""",
+    )),
+    (38, (
+        """CREATE TABLE presentation_observations (
+            id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT NOT NULL REFERENCES production_runs(id), render_job_id TEXT NOT NULL REFERENCES jobs(id),
+            idempotency_key TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(project_id,idempotency_key)
+        )""",
+        """CREATE TABLE presentation_repairs (
+            id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT NOT NULL REFERENCES production_runs(id), idempotency_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL, replacement_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+            payload TEXT NOT NULL, technical_qa TEXT, UNIQUE(project_id,idempotency_key)
+        )""",
+    )),
 )
+
+
+_MIGRATIONS += ((39, (
+    """CREATE TABLE planning_preferences (
+        id TEXT PRIMARY KEY NOT NULL, creator_id TEXT NOT NULL REFERENCES ip_profiles(id),
+        observation_id TEXT NOT NULL REFERENCES presentation_observations(id),
+        classification TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(observation_id, classification)
+    )""",
+    "CREATE INDEX planning_preferences_creator_idx ON planning_preferences(creator_id)",
+    """CREATE TABLE planning_preference_versions (
+        preference_id TEXT NOT NULL REFERENCES planning_preferences(id), version INTEGER NOT NULL,
+        payload TEXT NOT NULL, PRIMARY KEY(preference_id, version)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((40, (
+    """CREATE TABLE planning_preferences_new (
+        id TEXT PRIMARY KEY NOT NULL, creator_id TEXT NOT NULL REFERENCES ip_profiles(id),
+        observation_id TEXT REFERENCES presentation_observations(id),
+        classification TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(observation_id, classification)
+    )""",
+    "INSERT INTO planning_preferences_new SELECT * FROM planning_preferences",
+    """CREATE TABLE planning_preference_versions_new (
+        preference_id TEXT NOT NULL REFERENCES planning_preferences_new(id), version INTEGER NOT NULL,
+        payload TEXT NOT NULL, PRIMARY KEY(preference_id, version)
+    )""",
+    "INSERT INTO planning_preference_versions_new SELECT * FROM planning_preference_versions",
+    "DROP TABLE planning_preference_versions",
+    "DROP TABLE planning_preferences",
+    "ALTER TABLE planning_preferences_new RENAME TO planning_preferences",
+    "ALTER TABLE planning_preference_versions_new RENAME TO planning_preference_versions",
+    "CREATE INDEX planning_preferences_creator_idx ON planning_preferences(creator_id)",
+    "CREATE UNIQUE INDEX planning_preferences_selection_idx ON planning_preferences(creator_id) WHERE observation_id IS NULL",
+)),)
+
+
+_MIGRATIONS += ((41, (
+    """CREATE TABLE ip_profile_revision_baselines (
+        profile_id TEXT PRIMARY KEY NOT NULL REFERENCES ip_profiles(id),
+        version INTEGER NOT NULL, captured_at TEXT NOT NULL,
+        provenance TEXT NOT NULL
+    )""",
+    """INSERT INTO ip_profile_revision_baselines
+        SELECT id, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'migration_snapshot_not_historical_revision'
+        FROM ip_profiles WHERE NOT EXISTS (
+            SELECT 1 FROM ip_profile_revisions WHERE profile_id=ip_profiles.id
+        )""",
+    """INSERT INTO ip_profile_revisions(profile_id,version,created_at,payload)
+        SELECT ip_profiles.id, 1, ip_profile_revision_baselines.captured_at, ip_profiles.payload
+        FROM ip_profiles JOIN ip_profile_revision_baselines ON ip_profiles.id=ip_profile_revision_baselines.profile_id""",
+)),)
+
+
+_MIGRATIONS += ((42, (
+    """CREATE TABLE source_use_constraints (
+        id TEXT PRIMARY KEY NOT NULL, creator_id TEXT NOT NULL REFERENCES ip_profiles(id),
+        project_id TEXT NOT NULL REFERENCES projects(id), payload TEXT NOT NULL
+    )""",
+    "CREATE INDEX source_use_constraints_creator_idx ON source_use_constraints(creator_id)",
+    """CREATE TABLE source_use_constraint_versions (
+        constraint_id TEXT NOT NULL REFERENCES source_use_constraints(id), version INTEGER NOT NULL,
+        payload TEXT NOT NULL, PRIMARY KEY(constraint_id,version)
+    )""",
+    """CREATE TABLE source_use_constraint_requests (
+        project_id TEXT NOT NULL REFERENCES projects(id), idempotency_key TEXT NOT NULL,
+        request TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(project_id,idempotency_key)
+    )""",
+    """CREATE TABLE render_use_constraint_snapshots (
+        job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id), fingerprint TEXT NOT NULL
+    )""",
+)),)
+
+
+_MIGRATIONS += ((43, (
+    """CREATE TABLE provider_use_admissions (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        idempotency_key TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(project_id, idempotency_key)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((44, (
+    """CREATE TABLE execution_use_scopes (
+        subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
+        subject_sha256 TEXT,
+        PRIMARY KEY(subject_kind, subject_id)
+    )""",
+    """CREATE TABLE execution_use_content_origins (
+        content_hash TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+        PRIMARY KEY(content_hash, subject_kind, subject_id),
+        FOREIGN KEY(subject_kind, subject_id)
+            REFERENCES execution_use_scopes(subject_kind, subject_id)
+    )""",
+)),)
 
 
 def apply_migrations(connection: sqlite3.Connection) -> int:

@@ -31,6 +31,19 @@ def test_worker_defaults_and_type_selection(monkeypatch):
     assert config.ffprobe == resolve_local_executable("ffprobe")
 
 
+def test_talking_qa_worker_is_local_and_needs_no_generation_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CONTENT_OS_TALKING_PROVIDER", raising=False)
+    db_path = tmp_path / "talking-qa-worker.sqlite"
+    with Database(db_path) as db:
+        config = parse_config([
+            "--once", "--db", str(db_path), "--data-root", str(tmp_path),
+            "--job-type", "verify_talking",
+        ])
+        runner = build_runner(config, db)
+        assert runner.handler_types == {JobType.VERIFY_TALKING}
+        assert runner._handlers[JobType.VERIFY_TALKING].__class__.__name__ == "TalkingQaJobHandler"
+
+
 def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"original authorized bytes")
@@ -189,7 +202,7 @@ def test_once_uses_fake_runner_and_closes_database(tmp_path: Path, monkeypatch):
     calls = []
 
     class FakeRunner:
-        handler_types = frozenset({JobType.ANALYZE_ASSET})
+        handler_types = frozenset({JobType.VERIFY_VOICE})
         def recover_expired(self):
             return []
         def run_once(self, **kwargs):
@@ -206,9 +219,18 @@ def test_once_uses_fake_runner_and_closes_database(tmp_path: Path, monkeypatch):
             closed.append(self.path)
 
     monkeypatch.setattr("app.worker_cli.Database", RecordingDatabase)
-    config = parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "analyze_asset"])
+    class FakeProductionRunService:
+        def __init__(self, db, data_root):
+            pass
+        def reconcile_completed_voice_jobs_once(self, *, qa_worker_ready):
+            assert qa_worker_ready is True
+            calls.append("reconcile")
+            return ()
+
+    monkeypatch.setattr("app.worker_cli.ProductionRunService", FakeProductionRunService)
+    config = parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "verify_voice"])
     assert run(config) == 0
-    assert calls == ["run"]
+    assert calls == ["reconcile", "run"]
     assert closed == [config.db_path]
 
 

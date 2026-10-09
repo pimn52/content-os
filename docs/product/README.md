@@ -16,32 +16,21 @@ They are not implementation journals.
 
 ## 2. Product flow
 
-    Creator context + topic evidence
+    Creator context + topic + authorized media
               ↓
-        editable new copy
+    Editable copy / ScenePlan / preliminary EditPlan
               ↓
-          ScenePlan
+    Suitability / asset routing / execution and cost preflight
               ↓
-       Hybrid Asset Router
+    Required production → MasterNarration / TalkingRun / Assets
               ↓
-    ┌─────────┼─────────┐
-    │         │         │
- real media  Voice    Talking
-    │         │         │
-    │   MasterNarration │
-    │         └────┬────┘
-    │          TalkingRun
-    └──────────────┼─────
-                   ↓
-          EditPlan / Visual Direction
-                   ↓
-                VideoSpec
-                   ↓
-                  Render
-                   ↓
-            Review / Publish
-                   ↓
-                Feedback
+    Measured timing → resolved EditPlan → VideoSpec
+              ↓
+    Render / technical QA / bounded repair / human review
+              ↓
+    Explicit publication / feedback → next planning input
+
+This is the target flow. Module sections distinguish implemented contracts, runtime evidence and missing normal-flow automation. A presentation default is not automatic visual planning.
 
 ## 3. How to read
 
@@ -50,6 +39,7 @@ They are not implementation journals.
 - Open the module spec relevant to the task.
 - Read ../architecture/SYSTEM_ARCHITECTURE.md when object/layer ownership matters.
 - Read ../../AGENTS.md only when implementing.
+- Read ../implementation/ROADMAP.md for the selected future package contract; STATUS alone owns live package state.
 
 ## 4. What belongs in a module spec
 
@@ -92,4 +82,5 @@ Use this rule when deciding where a change belongs:
 - technical layer/object ownership changed → SYSTEM_ARCHITECTURE.md;
 - durable cross-package rationale changed → DECISIONS.md;
 - current task/progress changed → STATUS.md;
+- future package dependencies/acceptance changed → docs/implementation/ROADMAP.md;
 - implementation/model/process rule changed → AGENTS.md.

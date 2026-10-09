@@ -68,6 +68,7 @@ def verify_talking_output(
     *,
     evidence_reference: str,
     duration_tolerance_ms: int = 80,
+    expected_duration_ms: int | None = None,
 ) -> TalkingQaReport:
     """Run independent container/timing checks on a real Talking output.
 
@@ -87,6 +88,8 @@ def verify_talking_output(
         raise TalkingQaError("Talking output QA requires a traceable evidence reference")
     if isinstance(duration_tolerance_ms, bool) or not isinstance(duration_tolerance_ms, int) or duration_tolerance_ms < 0:
         raise TalkingQaError("duration_tolerance_ms must be a non-negative integer")
+    if expected_duration_ms is not None and (isinstance(expected_duration_ms, bool) or not isinstance(expected_duration_ms, int) or expected_duration_ms < 1 or expected_duration_ms > narration.duration_ms):
+        raise TalkingQaError("expected Talking slice duration must be within the Master")
 
     output = Path(asset.source_file)
     if not output.is_file() or output.stat().st_size == 0:
@@ -103,7 +106,7 @@ def verify_talking_output(
     } if isinstance(streams, list) else set()
     playable = metadata.duration_ms > 0 and {"video", "audio"}.issubset(stream_types)
     checks: list[str] = ["output_playable_video_audio" if playable else "output_not_playable_video_audio"]
-    duration_drift_ms = abs(metadata.duration_ms - narration.duration_ms)
+    duration_drift_ms = abs(metadata.duration_ms - (expected_duration_ms or narration.duration_ms))
     checks.append(
         "output_duration_matches_narration"
         if duration_drift_ms <= duration_tolerance_ms

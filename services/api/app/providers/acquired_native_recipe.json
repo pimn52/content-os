@@ -1,0 +1,823 @@
+{
+  "recipe": "omnivoice-acquired-native-static-v1",
+  "version": 1,
+  "evidence_level": "retained_static_records_not_runtime",
+  "records": [
+    {
+      "name": "v77b30-m4-c3j3-source-result.json",
+      "sha256": "7df56923319aae29059c6bd2789ead5549ec1b8032f045c6ac2d79596dffca22",
+      "size_bytes": 39681
+    },
+    {
+      "name": "v77b30-m4-c3o2-package-result.json",
+      "sha256": "890018568d46f12010df24d01fb10884e6e88386f07e68c2dcfd2238430c3152",
+      "size_bytes": 63176
+    },
+    {
+      "name": "v77b30-m4-c3s-compiler-result.json",
+      "sha256": "080ad7f6ffd268c49cf990fc0ae5599034628d939705754dc4f90c941c4865e1",
+      "size_bytes": 14537
+    },
+    {
+      "name": "v77b30-m4-c3y-facts-result.json",
+      "sha256": "5ca4b3f362124024fe436243529a2924f31b9f93ffccbe3f1f0bf5547ace4e99",
+      "size_bytes": 18616
+    },
+    {
+      "name": "v77b30-m4-c3z-numpy-result.json",
+      "sha256": "3d8007fb5c5d49c20cff294093cce5169529af36999f00471dbfbdc91594b07d",
+      "size_bytes": 38411
+    }
+  ],
+  "containers": [
+    {
+      "id": "bootstrap-record",
+      "kind": "retained_observation",
+      "name": "v77b30-m4-c3j3-source-result.json",
+      "size_bytes": 39681,
+      "sha256": "7df56923319aae29059c6bd2789ead5549ec1b8032f045c6ac2d79596dffca22",
+      "parent": null
+    },
+    {
+      "id": "vc-installer",
+      "kind": "installer_data",
+      "name": "VC_redist.x64.exe",
+      "size_bytes": 25635768,
+      "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+      "parent": null
+    },
+    {
+      "id": "vc-cab",
+      "kind": "cab_data",
+      "name": "packages/vcRuntimeMinimum_amd64/cab1.cab",
+      "size_bytes": 987836,
+      "sha256": "640aa6c516c72444523b8fbe034db46ff4e118ed02705340e3ccb62d426ff040",
+      "parent": "vc-installer"
+    },
+    {
+      "id": "cffi",
+      "kind": "wheel_data",
+      "name": "cffi-2.1.1-cp312-cp312-win_amd64.whl",
+      "size_bytes": 185919,
+      "sha256": "f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a",
+      "parent": null
+    },
+    {
+      "id": "soundfile",
+      "kind": "wheel_data",
+      "name": "soundfile-0.14.0-py2.py3-none-win_amd64.whl",
+      "size_bytes": 1021480,
+      "sha256": "299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e",
+      "parent": null
+    },
+    {
+      "id": "numpy",
+      "kind": "wheel_data",
+      "name": "numpy-2.5.3-cp312-cp312-win_amd64.whl",
+      "size_bytes": 12567828,
+      "sha256": "0a59a421a32580a009e8a1751345bf829631b990dc1794b80514ab722b435def",
+      "parent": null
+    }
+  ],
+  "members": [
+    {
+      "slot": "Lib/site-packages/_cffi_backend.cp312-win_amd64.pyd",
+      "container": "cffi",
+      "member": "_cffi_backend.cp312-win_amd64.pyd",
+      "size_bytes": 181248,
+      "sha256": "9af5e4f68a41f26b726f2e9424f9d58a4f5666189f6a48be95f406b257102aec",
+      "dependencies": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "user32.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "requires_private_root_context",
+        "leaf_count": 1,
+        "manifest_sha256": "d2952e57023848a37fb0f21f0dfb38c9000f610ac2b00c2f128511dfd68bde04"
+      }
+    },
+    {
+      "slot": "Lib/site-packages/_soundfile_data/libsndfile_x64.dll",
+      "container": "soundfile",
+      "member": "_soundfile_data/libsndfile_x64.dll",
+      "size_bytes": 2364416,
+      "sha256": "22518c16f9d13eda5ae5adf999c4740d7d16cc2d6b178b36dd4ac2f759a38559",
+      "dependencies": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-filesystem-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+        "kernel32.dll",
+        "shlwapi.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "requires_private_root_context",
+        "leaf_count": 2,
+        "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy.libs/libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+      "container": "numpy",
+      "member": "numpy.libs/libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+      "size_bytes": 20589056,
+      "sha256": "ed4f167a5330424524f45258e7ca2c8d7f03c0cba1f30ee4985553ac1f88ecf8",
+      "dependencies": null,
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy.libs/msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll",
+      "container": "numpy",
+      "member": "numpy.libs/msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll",
+      "size_bytes": 575056,
+      "sha256": "a4c2229bdc2a2a630acdc095b4d86008e5c3e3bc7773174354f3da4f5beb9cde",
+      "dependencies": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-filesystem-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+        "kernel32.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll"
+      ],
+      "resources": {
+        "kind": "data_resources",
+        "leaf_count": 1,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_multiarray_tests.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_multiarray_tests.cp312-win_amd64.pyd",
+      "size_bytes": 65536,
+      "sha256": "8fdd39b1dcd81239b1fe0b10744afd76dc85c8575aa09429b392e323fb750f4b",
+      "dependencies": [
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_multiarray_umath.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_multiarray_umath.cp312-win_amd64.pyd",
+      "size_bytes": 3854848,
+      "sha256": "a9d5c4202cf109bf24305f3f1180e0509aaf661ba850612bd75df7cfd9f928b8",
+      "dependencies": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+        "kernel32.dll",
+        "libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+        "msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll",
+        "python312.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_operand_flag_tests.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_operand_flag_tests.cp312-win_amd64.pyd",
+      "size_bytes": 12288,
+      "sha256": "945f38c14b4db5a7b0245e05384aebc89f98d7de2518f27b7a925bdc5de15d90",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_rational_tests.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_rational_tests.cp312-win_amd64.pyd",
+      "size_bytes": 43520,
+      "sha256": "e81ddc98f7a8aaea03c5fa4c78eecccbca8d7a76a8c77d15a08224dfa4d8b7f3",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_simd.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_simd.cp312-win_amd64.pyd",
+      "size_bytes": 831488,
+      "sha256": "084b3674eeea7c184a7b226bafb8995ff64a5331ec1dc43a9dd166baf4391b05",
+      "dependencies": [
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_struct_ufunc_tests.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_struct_ufunc_tests.cp312-win_amd64.pyd",
+      "size_bytes": 14336,
+      "sha256": "129032221c18c9544f1798183fb69b305823c78b0a78fe819c01705fb6a39488",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/_umath_tests.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/_core/_umath_tests.cp312-win_amd64.pyd",
+      "size_bytes": 34304,
+      "sha256": "adcab506bb007e412f33fc3262cdcc35ec9278b09477babcbfb0902135b9f63b",
+      "dependencies": [
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/fft/_pocketfft_umath.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/fft/_pocketfft_umath.cp312-win_amd64.pyd",
+      "size_bytes": 276480,
+      "sha256": "3ed9c2f73c7dc165e41e98ecfd0a4f66481a5afec7e39148a2af317b9a4ff62e",
+      "dependencies": [
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll",
+        "python312.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/linalg/_umath_linalg.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/linalg/_umath_linalg.cp312-win_amd64.pyd",
+      "size_bytes": 112128,
+      "sha256": "15884ab8ded82bc5f834e429a63cc9cfdcc24f61737a5c563efb2c2f274213a8",
+      "dependencies": [
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "kernel32.dll",
+        "libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/linalg/lapack_lite.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/linalg/lapack_lite.cp312-win_amd64.pyd",
+      "size_bytes": 18944,
+      "sha256": "c82cf326d254a9897f94453dd94ac2991c8a05ef106e3f4dd2268787d417b783",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_bounded_integers.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_bounded_integers.cp312-win_amd64.pyd",
+      "size_bytes": 208896,
+      "sha256": "031cbd54dcbef2ff3fda13889879a6442f17c31df6d008154708b31d7582309c",
+      "dependencies": [
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_common.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_common.cp312-win_amd64.pyd",
+      "size_bytes": 174080,
+      "sha256": "8bd4fcd63a3f0643a81b4095a8221a4a3917dd86816ecbeea595db237071369f",
+      "dependencies": [
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_generator.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_generator.cp312-win_amd64.pyd",
+      "size_bytes": 624640,
+      "sha256": "8dd9ad224065d8c38d99149d6816a519eb769b3e01210164b3bcb186e7d59479",
+      "dependencies": [
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_mt19937.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_mt19937.cp312-win_amd64.pyd",
+      "size_bytes": 92672,
+      "sha256": "9b3aff503e8872d6e6b71b2d41a5a1304c02092cb75f5387194c3fa98c1a5610",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_pcg64.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_pcg64.cp312-win_amd64.pyd",
+      "size_bytes": 105984,
+      "sha256": "f68a6a65df54920f091c6745694fd7adacc7311d980a429c8217385b43f8df26",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_philox.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_philox.cp312-win_amd64.pyd",
+      "size_bytes": 89088,
+      "sha256": "1872654c8ade0ed9e11ca3f1b2714154f39a0cef46416b48e40c7e96a6dc2018",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/_sfc64.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/_sfc64.cp312-win_amd64.pyd",
+      "size_bytes": 64000,
+      "sha256": "958af4dd25196f436d67b681c64a8639f0ec5a98dbb37124859def7eb353c0ab",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/bit_generator.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/bit_generator.cp312-win_amd64.pyd",
+      "size_bytes": 173056,
+      "sha256": "1e7a030cfd348ab125a681eaf21b227be145d8329430b8d521f9bde520390267",
+      "dependencies": [
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/mtrand.cp312-win_amd64.pyd",
+      "container": "numpy",
+      "member": "numpy/random/mtrand.cp312-win_amd64.pyd",
+      "size_bytes": 522752,
+      "sha256": "2dbf4488af25a9d6b2863b3eea53d4a39b692b3be579e970761730d310e8ea65",
+      "dependencies": [
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "no_resources",
+        "leaf_count": 0,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "msvcp140.dll",
+      "container": "vc-cab",
+      "member": "msvcp140.dll_amd64",
+      "size_bytes": 557728,
+      "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+      "dependencies": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-filesystem-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "api-ms-win-crt-utility-l1-1-0.dll",
+        "kernel32.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll"
+      ],
+      "resources": {
+        "kind": "data_resources",
+        "leaf_count": 1,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "python.exe",
+      "container": "bootstrap-record",
+      "member": "python.exe",
+      "size_bytes": 107312,
+      "sha256": "b7a12c3af0b4db44191eec14ea095eba731b7328917f570806183093d19ddca2",
+      "dependencies": [
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "kernel32.dll",
+        "python312.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "requires_os_sxs_binding",
+        "leaf_count": 15,
+        "manifest_sha256": "bd76c737191489222cc219b605648fee50ae2721a7d1af7ebd756b429dee7ec2"
+      }
+    },
+    {
+      "slot": "python312.dll",
+      "container": "bootstrap-record",
+      "member": "python312.dll",
+      "size_bytes": 6985520,
+      "sha256": "b354a5caed2b89f811c5a7a1262aca49f7132d9d9c631607280d50f1036838fe",
+      "dependencies": [
+        "advapi32.dll",
+        "api-ms-win-core-path-l1-1-0.dll",
+        "api-ms-win-crt-conio-l1-1-0.dll",
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-environment-l1-1-0.dll",
+        "api-ms-win-crt-filesystem-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-process-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-time-l1-1-0.dll",
+        "bcrypt.dll",
+        "kernel32.dll",
+        "vcruntime140.dll",
+        "version.dll",
+        "ws2_32.dll"
+      ],
+      "resources": {
+        "kind": "requires_os_sxs_binding",
+        "leaf_count": 2,
+        "manifest_sha256": "bd76c737191489222cc219b605648fee50ae2721a7d1af7ebd756b429dee7ec2"
+      }
+    },
+    {
+      "slot": "vcomp140.dll",
+      "container": "vc-cab",
+      "member": "vcomp140.dll_amd64",
+      "size_bytes": 193152,
+      "sha256": "55aba23cdcd6484fbb06f4155b8ca75adfce7a881f10afd0c49457165e677164",
+      "dependencies": [
+        "kernel32.dll"
+      ],
+      "resources": {
+        "kind": "requires_private_root_context",
+        "leaf_count": 7,
+        "manifest_sha256": "4bb79dcea0a901f7d9eac5aa05728ae92acb42e0cb22e5dd14134f4421a3d8df"
+      }
+    },
+    {
+      "slot": "vcruntime140_1.dll",
+      "container": "vc-cab",
+      "member": "vcruntime140_1.dll_amd64",
+      "size_bytes": 49792,
+      "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+      "dependencies": [
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll",
+        "vcruntime140.dll"
+      ],
+      "resources": {
+        "kind": "data_resources",
+        "leaf_count": 1,
+        "manifest_sha256": null
+      }
+    },
+    {
+      "slot": "vcruntime140.dll",
+      "container": "vc-cab",
+      "member": "vcruntime140.dll_amd64",
+      "size_bytes": 124544,
+      "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+      "dependencies": [
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "kernel32.dll"
+      ],
+      "resources": {
+        "kind": "data_resources",
+        "leaf_count": 1,
+        "manifest_sha256": null
+      }
+    }
+  ],
+  "sources": [
+    {
+      "slot": "Lib/site-packages/_soundfile_data/__init__.py",
+      "container": "soundfile",
+      "member": "_soundfile_data/__init__.py",
+      "size_bytes": 125,
+      "sha256": "3723e81d0145341d5ae3c67a745373192a70c7f672ad028f76c95129339aafe9"
+    },
+    {
+      "slot": "Lib/site-packages/_soundfile.py",
+      "container": "soundfile",
+      "member": "_soundfile.py",
+      "size_bytes": 5914,
+      "sha256": "b5d8fbeb52efee81689fd4105c04e2b878b820b920d88ffeb3156bbb197b3266"
+    },
+    {
+      "slot": "Lib/site-packages/cffi/__init__.py",
+      "container": "cffi",
+      "member": "cffi/__init__.py",
+      "size_bytes": 511,
+      "sha256": "c47b2db28c5f197e242d4dd4af95b7ebb0da65763fc76972cafd06f93e942cda"
+    },
+    {
+      "slot": "Lib/site-packages/cffi/api.py",
+      "container": "cffi",
+      "member": "cffi/api.py",
+      "size_bytes": 42013,
+      "sha256": "7165f5665b1c98ec9392fb61881a5458b712441b6a9699fe9a806ee1eb019b32"
+    },
+    {
+      "slot": "Lib/site-packages/numpy/__init__.py",
+      "container": "numpy",
+      "member": "numpy/__init__.py",
+      "size_bytes": 26470,
+      "sha256": "a6958cb364663b7acce81ccfd58eeb65a2b34d5376157f924777b97211a73be4"
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_core/__init__.py",
+      "container": "numpy",
+      "member": "numpy/_core/__init__.py",
+      "size_bytes": 6865,
+      "sha256": "73c57a7f3a54e33399ddb9b142eb27ed3aae2bf4be2f4c159396788e16b620e5"
+    },
+    {
+      "slot": "Lib/site-packages/numpy/_distributor_init.py",
+      "container": "numpy",
+      "member": "numpy/_distributor_init.py",
+      "size_bytes": 436,
+      "sha256": "879fc2abb22d0ebb75259a00874e1a3b9e195ec5d1464c86a0d1451fd4fed3c5"
+    },
+    {
+      "slot": "Lib/site-packages/numpy/linalg/__init__.py",
+      "container": "numpy",
+      "member": "numpy/linalg/__init__.py",
+      "size_bytes": 2171,
+      "sha256": "cb491584b896825cd10be0fa03ea70d7ccbfa7a1143d2e7acc772543209cb560"
+    },
+    {
+      "slot": "Lib/site-packages/numpy/random/__init__.py",
+      "container": "numpy",
+      "member": "numpy/random/__init__.py",
+      "size_bytes": 7693,
+      "sha256": "f21e391916d7a4bd74c49ceac3f9fa5e09e6e9263f254602a87e92a5e0a7a946"
+    },
+    {
+      "slot": "Lib/site-packages/soundfile.py",
+      "container": "soundfile",
+      "member": "soundfile.py",
+      "size_bytes": 67278,
+      "sha256": "085feb318464c2a5e82747e0d6da43c214f3a6a4ed3a7a18f2c07fe7b3750df2"
+    }
+  ],
+  "terms": [
+    {
+      "slot": "_source_terms/vc-license.rtf",
+      "container": "vc-installer",
+      "member": "license.rtf",
+      "size_bytes": 9235,
+      "sha256": "8099dc3cf9502c335da829e5c755948a12e3e6de490eb492a99deb673d883d8b"
+    },
+    {
+      "slot": "Lib/site-packages/_soundfile_data/COPYING",
+      "container": "soundfile",
+      "member": "_soundfile_data/COPYING",
+      "size_bytes": 26518,
+      "sha256": "ad01ea5cd2755f6048383c8d54c88459cd6fcb17757c5c8892f8c5ea060f6140"
+    },
+    {
+      "slot": "Lib/site-packages/cffi-2.1.1.dist-info/licenses/LICENSE",
+      "container": "cffi",
+      "member": "cffi-2.1.1.dist-info/licenses/LICENSE",
+      "size_bytes": 1123,
+      "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63"
+    },
+    {
+      "slot": "Lib/site-packages/numpy-2.5.3.dist-info/licenses/LICENSE.txt",
+      "container": "numpy",
+      "member": "numpy-2.5.3.dist-info/licenses/LICENSE.txt",
+      "size_bytes": 45831,
+      "sha256": "a804dff0ead9fadc5293456410bcbfc32bf024be9c4513459663fb7b442d2341"
+    },
+    {
+      "slot": "Lib/site-packages/soundfile-0.14.0.dist-info/LICENSE",
+      "container": "soundfile",
+      "member": "soundfile-0.14.0.dist-info/LICENSE",
+      "size_bytes": 1512,
+      "sha256": "0dd2e411fed553ba891845077e5a32c5b726d1bbc46ff31a2118ae1ccf816752"
+    }
+  ],
+  "numpy_loader": {
+    "source_slot": "Lib/site-packages/numpy/__init__.py",
+    "source_sha256": "a6958cb364663b7acce81ccfd58eeb65a2b34d5376157f924777b97211a73be4",
+    "helper": "_delvewheel_patch_1_11_2",
+    "directory": "Lib/site-packages/numpy.libs",
+    "members": [
+      "Lib/site-packages/numpy.libs/libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+      "Lib/site-packages/numpy.libs/msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll"
+    ]
+  },
+  "pending": [
+    "actual_current_source_identity",
+    "compiler_toolset_floor_and_ABI",
+    "compiler_terms_adoption",
+    "CFFI_source_build_correspondence",
+    "SoundFile_derived_loader_session_binding",
+    "numpy_directory_registration_lifetime",
+    "numpy_actual_module_origins",
+    "whole_python_import_closure",
+    "independent_source_parent_contexts",
+    "normal_worker_integration"
+  ]
+}

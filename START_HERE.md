@@ -14,6 +14,8 @@ Read in this order:
 6. [DECISIONS.md](DECISIONS.md) — durable choices only, when rationale is needed.
 7. [README.md](README.md) — developer setup and repository quick start.
 
+For an implementation package, then open only its section in [docs/implementation/ROADMAP.md](docs/implementation/ROADMAP.md). That document owns future package contracts, not live status or product truth.
+
 Do not start from old reviews, experiment logs or historical plans.
 
 When STATUS names a concrete evidence question, retrieve only the named Git
@@ -22,26 +24,21 @@ old fixture, rejected artifact or unrelated runtime result into current truth.
 
 ## 2. Product map
 
-    Creator / IP / Intelligence
-                |
-          Project / ScenePlan
-                |
-         Media / Asset System
-                |
-       Hybrid Asset Router
-                |
-     Execution / Compute Router
-           /           \
-        Voice        Talking
-           \           /
-         Master Narration
-          + TalkingRun
-                |
-             VideoSpec
-                |
-              Render
-                |
-      Publication / Feedback
+    Creator / IP + topic + authorized media
+                ↓
+    Copy / ScenePlan + preliminary EditPlan
+                ↓
+    Asset suitability + routing + execution/cost preflight
+                ↓
+    Required Voice / Talking / media transforms only
+                ↓
+    Actual timing + admitted assets → resolved EditPlan / VideoSpec
+                ↓
+    Render / technical QA / bounded repair / human review
+                ↓
+    Explicit publication / feedback → next planning input
+
+This is the target dependency order, not a claim that the entire flow is implemented. Initial visual feasibility precedes generation; post-generation planning refines measured timing, not the first visual decision.
 
 Detailed current behavior belongs in the product module specs, not in this navigation file.
 
@@ -61,6 +58,7 @@ Detailed current behavior belongs in the product module specs, not in this navig
 | Product module specs | current product functions and boundaries | experiment log |
 | System Architecture | stable technical layers/objects | current task list |
 | STATUS | current truth + one active package + short queue | history archive |
+| Implementation roadmap | future bounded package contracts / dependencies / tests | second STATUS or product PRD |
 | DECISIONS | durable decisions and rationale | duplicate product spec |
 | AGENTS | implementation/process/model policy | product PRD |
 | README | setup/contributor entry | governance source |

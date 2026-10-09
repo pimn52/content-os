@@ -11,6 +11,14 @@ from .audio_importer import AudioImportError, AudioImporter
 from .ffprobe import AudioProbeMetadata, FFProbeAdapter, ProbeError, ProbeMetadata
 from .image_importer import ImageImportError, ImageImporter
 from .importer import MediaImportError, MediaImporter
+from .vertical_derivation import (
+    VerticalDerivationConflict,
+    VerticalDerivationError,
+    VerticalDerivationProcessError,
+    VerticalDerivationResult,
+    VerticalDerivationValidationError,
+    VerticalSourceDerivationService,
+)
 from .pipeline import MediaAnalysisPipeline, MediaAnalysisResult, MediaAnalysisService, MediaPipelineError
 from .segmentation import FFmpegSceneDetector, SceneDetector, SegmentationError
 from .subtitles import SubtitleParseError, parse_subtitle_file, parse_subtitle_text
@@ -61,6 +69,12 @@ __all__ = [
     "VisionAnalysisResult",
     "VisionPipelineError",
     "VisualMetadata",
+    "VerticalDerivationConflict",
+    "VerticalDerivationError",
+    "VerticalDerivationProcessError",
+    "VerticalDerivationResult",
+    "VerticalDerivationValidationError",
+    "VerticalSourceDerivationService",
     "map_transcript_to_clips",
     "map_visual_metadata",
     "parse_subtitle_file",

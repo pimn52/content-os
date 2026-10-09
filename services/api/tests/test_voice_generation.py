@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 from pathlib import Path
 from uuid import uuid4
 import wave
@@ -11,10 +12,11 @@ import pytest
 
 from app.assembly.video_spec import GeneratedNarrationQaPending, _require_generated_voice_qa
 from app.budget import ProviderCallLedger
-from app.db import AudioAssetRepository, BudgetPolicyRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository, ProviderCallRepository, VoiceProfileRepository
-from app.domain.models import AudioAsset, BudgetPolicy, Clip, ConsentRecord, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
+from app.db import AudioAssetRepository, BudgetPolicyRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, VoiceProfileRepository
+from app.domain.models import AudioAsset, BudgetPolicy, Clip, ConsentRecord, IPProfile, Job, JobStatus, JobType, Project, ProviderMachineCapabilityProfile, RationalFps, SourceKind, VoiceGenerationJobPayload, VoiceHumanReview, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import VoiceGenerationJobHandler, VoiceQaJobHandler
+from app.jobs.runner import JobExecutionError
 from app.main import create_app
 from app.providers.voice import VoiceSynthesisResult
 from app.providers.asr import TranscriptionResult, TranscriptionSegment, TranscriptionWord
@@ -54,6 +56,47 @@ def _approved_u_voice_review() -> VoiceHumanReview:
     )
 
 
+def test_voice_job_rejects_admitted_model_mismatch_before_provider_call(tmp_path: Path) -> None:
+    with Database(tmp_path / "voice-model.sqlite") as db:
+        project, profile = _project_and_profile(db, tmp_path)
+        now = datetime.now(timezone.utc)
+        capability = ProviderMachineCapabilityProfile(
+            capability="voice", mode="local", provider="test-voice", model="admitted-model",
+            runtime="fixture", machine_id="fixture", readiness="verified", quality_status="verified",
+            commercial_status="commercial_safe", license_evidence_reference="fixture:license",
+            provenance_source="fixture", evidence_reference="fixture:capability", updated_at=now,
+        )
+        ProviderMachineCapabilityProfileRepository(db).save(capability)
+        job = Job(
+            project_id=project.id, type=JobType.GENERATE_VOICE, status=JobStatus.RUNNING,
+            idempotency_key="admitted-model", created_at=now, updated_at=now,
+            payload=VoiceGenerationJobPayload(
+                project_id=project.id, voice_profile_id=profile.id, text="New words.",
+                authorization_reference="fixture:consent", expected_provider="test-voice",
+                expected_model="admitted-model", execution_capability_profile_id=capability.id,
+            ),
+        )
+
+        class WrongModel:
+            provider_name = "test-voice"
+            model = "different-model"
+
+        handler = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db), AudioAssetRepository(db), object(), WrongModel(),
+            tmp_path / "generated", ProviderCallLedger(db),
+        )  # type: ignore[arg-type]
+        with pytest.raises(JobExecutionError, match="configured Voice provider/model differs"):
+            handler(job)
+        assert ProviderCallRepository(db).list_for_project(project.id) == []
+        WrongModel.model = "admitted-model"
+        ProviderMachineCapabilityProfileRepository(db).save(capability.model_copy(update={
+            "commercial_status": "unknown", "license_evidence_reference": None,
+        }))
+        with pytest.raises(JobExecutionError, match="admission is no longer valid"):
+            handler(job)
+        assert ProviderCallRepository(db).list_for_project(project.id) == []
+
+
 def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> None:
     db = Database(tmp_path / "voice.sqlite")
     try:
@@ -77,7 +120,7 @@ def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> 
                 return VoiceSynthesisResult(output_path, provider_version="test-version")
 
         class Importer:
-            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None) -> AudioAsset:
+            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None, generated_job=None) -> AudioAsset:
                 assert source.is_file() and authorization_reference == "voice-consent-1"
                 value = AudioAsset(
                     source_file=str(source), content_hash="a" * 64, duration_ms=1_200, sample_rate=24_000, channels=1,
@@ -130,7 +173,7 @@ def test_voice_job_selected_reference_is_applied_and_persisted(tmp_path: Path) -
                 return VoiceSynthesisResult(output_path)
 
         class Importer:
-            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None) -> AudioAsset:
+            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None, generated_job=None) -> AudioAsset:
                 value = AudioAsset(source_file=str(source), content_hash="c" * 64, duration_ms=1_200, sample_rate=24_000, channels=1, authorization_reference=authorization_reference, imported_at=datetime.now(timezone.utc))
                 AudioAssetRepository(db).create(value)
                 return value
@@ -188,7 +231,7 @@ def test_voice_qa_job_uses_real_asr_and_persists_verified_evidence(tmp_path: Pat
         source = tmp_path / "generated.wav"
         source.write_bytes(b"playable")
         audio = AudioAsset(
-            source_file=str(source), content_hash="f" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+            source_file=source.name, content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=2_000, sample_rate=24_000, channels=1,
             language="zh", authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
             metadata={"voice_generation": {"provider": "test-voice", "model": "test-model", "target_text": "你好世界", "qa_state": "pending"}},
         )
@@ -210,7 +253,7 @@ def test_voice_qa_job_uses_real_asr_and_persists_verified_evidence(tmp_path: Pat
 
         handler = VoiceQaJobHandler(
             AudioAssetRepository(db), ASR(), ProviderCallLedger(db),
-            provider_name="faster-whisper", provider_model="qa-model",
+            provider_name="faster-whisper", provider_model="qa-model", data_root=tmp_path,
         )
         result = JobRunner(JobStore(db), {JobType.VERIFY_VOICE: handler}, worker_id="voice-qa-worker", lease_duration=timedelta(minutes=1), max_attempts=2).run_once()
 
@@ -226,6 +269,40 @@ def test_voice_qa_job_uses_real_asr_and_persists_verified_evidence(tmp_path: Pat
         assert call.operation == "asr" and call.status == "completed" and call.estimated_cost.amount == Decimal("0")
     finally:
         db.close()
+
+
+def test_voice_qa_worker_rejects_changed_portable_source_before_asr(tmp_path: Path) -> None:
+    with Database(tmp_path / "voice-qa-changed.sqlite") as db:
+        project, _ = _project_and_profile(db, tmp_path)
+        source = tmp_path / "changed.wav"
+        source.write_bytes(b"changed")
+        audio = AudioAsset(
+            source_file=source.name, content_hash=hashlib.sha256(b"original").hexdigest(),
+            duration_ms=1_000, sample_rate=24_000, channels=1,
+            authorization_reference="fixture:consent", imported_at=datetime.now(timezone.utc),
+            metadata={"voice_generation": {"target_text": "New words.", "qa_state": "pending"}},
+        )
+        AudioAssetRepository(db).create(audio)
+
+        class ASR:
+            is_local = True
+
+            def transcribe(self, *args: object, **kwargs: object) -> None:
+                raise AssertionError("changed source must not reach ASR")
+
+        now = datetime.now(timezone.utc)
+        job = Job(
+            project_id=project.id, type=JobType.VERIFY_VOICE, status=JobStatus.RUNNING,
+            idempotency_key="qa-changed", created_at=now, updated_at=now,
+            payload=VoiceQaJobPayload(project_id=project.id, narration_audio_id=audio.id, target_text="New words."),
+        )
+        handler = VoiceQaJobHandler(
+            AudioAssetRepository(db), ASR(), ProviderCallLedger(db),
+            provider_name="faster-whisper", provider_model="fixture", data_root=tmp_path,
+        )  # type: ignore[arg-type]
+        with pytest.raises(JobExecutionError, match="source bytes changed"):
+            handler(job)
+        assert ProviderCallRepository(db).list_for_project(project.id) == []
 
 
 def test_voice_qa_job_api_requires_matching_generated_copy(tmp_path: Path) -> None:

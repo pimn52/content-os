@@ -17,25 +17,21 @@ This file owns implementation behavior only. Product scope belongs in the produc
 
 ## 2. Implementation model cost policy
 
-Use the cheapest model that can reliably complete the bounded task:
+Use the cheapest model that can reliably complete the bounded task, including repair, validation and human review cost. This is an implementation-agent policy, not the product's runtime provider router.
 
-Luna → Terra → Sol
+Model mapping rechecked 2026-10-03 after the user selected GPT-6.1 Sol, against the current host and [GPT-6.1 Sol guidance](https://developers.openai.com/api/docs/models/gpt-6.1-sol), [selection guidance](https://developers.openai.com/api/docs/guides/model-selection) and [Codex pricing](https://learn.chatgpt.com/docs/pricing). Official model roles inform the mapping; the scope restrictions below are this repository's engineering policy, not a vendor benchmark. API prices do not establish subscription usage.
 
-### Luna
+| Work class | Default model / reasoning | Allowed responsibility |
+|---|---|---|
+| F — focused | `gpt-6-luna` / low; medium for coordinated bounded changes | frozen-contract UI/CRUD, focused tests, documentation synchronization, mechanical refactors, simple adapters |
+| I — integration | `gpt-6.1-sol` / medium; high for demonstrated cross-module uncertainty | schemas, media/timeline, planning/routing, durable jobs, migrations, provider accounting, application orchestration |
+| J — judgment/review | `gpt-6-astra` / high, bounded to the unresolved question | architecture conflicts, critical admission-policy design, security/privacy/release review, or a reproduced integration failure after materially different repair attempts |
 
-Use for isolated UI/CRUD, focused tests, docs, mechanical refactors and simple adapters with stable interfaces.
+F must not independently redesign schemas, execution semantics, capability routing, accounting or media architecture. I owns the smallest necessary integration seam, then returns stable follow-on work to F. J returns a decision, threat/gate analysis or minimal failing case to I; it is not the default implementation owner of the whole phase.
 
-Do not let Luna independently redesign schemas, execution semantics, provider accounting, capability routing or media/timeline architecture.
+The old unversioned Luna → Terra → Sol ladder is superseded. Do not interpret the old top-tier Sol label as today's `gpt-6-sol` assignment. Older models are explicit compatibility fallbacks only when availability or measured task cost justifies them; record the actual model ID.
 
-### Terra
-
-Use for cross-module media/timeline/provider/planner/router/job/migration work, capability profiles, application orchestration and compatibility-sensitive Voice/Talking debugging.
-
-### Sol
-
-Use for unresolved architecture conflicts, security/privacy/release review, critical quality-gate design, or a Terra task that still fails after materially different attempts with a minimal reproduction.
-
-Task importance alone does not justify Sol.
+Do not assume API token prices equal subscription usage/credits. Record actual model/reasoning, attempts, test outcome and observable usage; mark unobservable cost unknown. No automatic Fast/max/ultra setting, repeated model comparison or multi-agent execution merely to follow this table. The host/user must actually select a model; a document assignment does not switch a running chat.
 
 ## 3. Escalation
 
@@ -45,6 +41,8 @@ Escalate when:
 2. the lower tier has a concrete reproducible failure after a materially different repair attempt.
 
 Do not escalate merely because a task is tedious.
+
+Before escalation retain the failing test/reproduction, attempted different repair, affected interface and a narrow question. Stop an unproductive retry loop; do not spend more on trial-and-error than on a bounded review. After resolution, return to the lowest sufficient work class. Recheck the model mapping when availability changes, not on every package.
 
 ## 4. Task contract
 
@@ -57,6 +55,8 @@ Every active implementation package must state:
 - Tests/build commands
 - Non-goals
 - Exit states
+- Work class, actual model/reasoning and escalation trigger
+- Evidence level, permitted external calls, experiment/repair budget and expected reduction in manual work
 
 A completion report must state:
 
@@ -86,12 +86,17 @@ Rules:
 4. Numeric examples in conversation are hypotheses/constraints, not automatic fixed requirements.
 5. Capability experiments optimize information gained per run and stop when more precision would not change product decisions.
 6. Architecture work should build the smallest useful seam, close it, then open a separate package.
+7. A documentation/planning request does not authorize starting the next implementation package. Queue readiness and execution authorization are separate.
 
 ## 6. Productization discipline
 
 Do not confuse experiment success with product capability.
 
 A capability is productized only when normal product contracts can create/select it, QA/provenance is persisted, downstream normal flows can consume it, and failure/recovery is explicit.
+
+Report maturity separately: contract/code, real runtime, normal UI/workflow, repeatability and automatic decision-making. A package PASS covers its stated acceptance only. Fixture success, an API-only path and an assisted render must never be combined into an end-to-end capability claim.
+
+Every review request must name the decision it enables, exact artifact/version and whether existing evidence already answers it. Keep child technical evidence, but do not add subjective review gates by default. Review-granularity changes require an explicit policy migration and regression tests; never waive current admission checks silently.
 
 Prefer product-level objects over leaking execution internals upward. For example:
 
@@ -108,6 +113,7 @@ Current docs have distinct ownership:
 - docs/product/*.md — current product-module specifications;
 - docs/architecture/SYSTEM_ARCHITECTURE.md — stable technical map;
 - STATUS.md — current facts + one active package + short queue;
+- docs/implementation/ROADMAP.md — dependency-ordered future package contracts and acceptance/test matrix; no live status, duplicate product specification or model-name policy;
 - DECISIONS.md — durable decisions only;
 - AGENTS.md — implementation policy;
 - README.md — setup/contributor entry.
@@ -123,6 +129,8 @@ Run:
     python scripts/check_docs.py
 
 before handoff.
+
+The documentation checker validates structure, not product truth. Also cross-check plan order, admission rules, model assignment and every changed capability claim against code/evidence.
 
 ## 8. Testing and evidence
 

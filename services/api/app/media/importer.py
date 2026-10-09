@@ -12,7 +12,8 @@ from typing import BinaryIO, Iterator
 from uuid import uuid4
 
 from app.db import AssetRepository, Database
-from app.domain.models import Asset, SourceKind
+from app.domain.models import Asset, Job, SourceKind
+from app.execution_scope import register_generated_import_scope
 
 from .ffprobe import FFProbeAdapter, ProbeMetadata
 
@@ -35,17 +36,17 @@ class MediaImporter:
         self.originals.mkdir(parents=True, exist_ok=True)
         self.probe = probe or FFProbeAdapter()
 
-    def import_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
+    def import_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET, generated_job: Job | None = None) -> Asset:
         source_path = Path(source)
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
         with source_path.open("rb") as stream:
-            return self._import_stream(stream, source_path.name, authorization_reference, source_kind)
+            return self._import_stream(stream, source_path.name, authorization_reference, source_kind, generated_job)
 
     def import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
         return self._import_stream(stream, filename, authorization_reference, source_kind)
 
-    def _import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, source_kind: SourceKind) -> Asset:
+    def _import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, source_kind: SourceKind, generated_job: Job | None = None) -> Asset:
         temp = self.originals / f".import-{secrets.token_hex(12)}.tmp"
         digest = hashlib.sha256()
         try:
@@ -60,7 +61,11 @@ class MediaImporter:
             repository = AssetRepository(self.db)
             existing = repository.get_by_content_hash(content_hash)
             if existing is not None:
-                return self._existing_or_error(existing)
+                if generated_job is None:
+                    return self._existing_or_error(existing)
+                with self._write_transaction():
+                    register_generated_import_scope(self.db, "asset", existing, generated_job)
+                    return self._existing_or_error(existing)
             # One content hash maps to one retained local original regardless
             # of the source filename or extension supplied by a concurrent
             # importer. ffprobe identifies the file by contents, not suffix.
@@ -72,8 +77,10 @@ class MediaImporter:
                 with self._write_transaction():
                     existing = repository.get_by_content_hash(content_hash)
                     if existing is not None:
+                        register_generated_import_scope(self.db, "asset", existing, generated_job)
                         return self._existing_or_error(existing)
                     repository.create(value)
+                    register_generated_import_scope(self.db, "asset", value, generated_job)
                     newly_created = self._place(temp, destination)
                     if not newly_created:
                         self._verify_content_hash(destination, content_hash)
@@ -86,6 +93,8 @@ class MediaImporter:
                 except Exception:
                     raise conflict
                 if winner is not None:
+                    with self._write_transaction():
+                        register_generated_import_scope(self.db, "asset", winner, generated_job)
                     return self._existing_or_error(winner)
                 if newly_created:
                     self._cleanup_created(destination)

@@ -249,8 +249,12 @@ def test_migration_from_v1_backfills_asset_hash_and_unique_index(tmp_path: Path)
     connection.executescript(
         "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP);"
         "INSERT INTO schema_migrations(version) VALUES (1);"
-        "CREATE TABLE assets(id TEXT PRIMARY KEY, duration_ms INTEGER NOT NULL, payload TEXT NOT NULL);"
     )
+    # A real v1 database includes creator/project tables as well as assets.
+    # Later profile-baseline migrations legitimately depend on those tables.
+    from app.db.migrations import _MIGRATIONS
+    for statement in _MIGRATIONS[0][1]:
+        connection.execute(statement)
     payload = json.dumps({"content_hash": "b" * 64})
     connection.execute("INSERT INTO assets(id, duration_ms, payload) VALUES (?, ?, ?)", ("asset-1", 1, payload))
     connection.commit()

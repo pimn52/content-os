@@ -16,12 +16,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spec", required=True, type=Path, help="VideoSpec JSON file")
     parser.add_argument("--output", required=True, type=Path, help="Local .mp4 destination")
     parser.add_argument("--renderer-dir", default=Path("apps/renderer"), type=Path)
+    parser.add_argument("--data-root", type=Path, help="Configured Content OS data root (default: database directory)")
     parser.add_argument("--npm-command", default="npm")
     parser.add_argument("--timeout-seconds", default=600.0, type=float)
     args = parser.parse_args(argv)
     try:
         spec = VideoSpec.model_validate_json(args.spec.read_text(encoding="utf-8"))
         db = Database(args.database)
+        db.data_root = (args.data_root or args.database.parent).resolve()
         try:
             RemotionRenderer(
                 AssetRepository(db), ClipRepository(db), renderer_dir=args.renderer_dir,

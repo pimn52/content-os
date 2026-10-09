@@ -89,6 +89,8 @@ def test_render_api_assembles_and_serves_a_local_mp4_under_owned_root(tmp_path: 
         assert body["project_id"] == str(project.id)
         assert body["download_url"] == body["preview_url"]
         assert body["video_spec"]["project_id"] == str(project.id)
+        assert body["video_spec"]["edit_plan"]["project_id"] == str(project.id)
+        assert body["video_spec"]["edit_plan"]["scenes"][0]["fallback"]["source_kind"] == "typography"
         file_response = client.get(body["download_url"])
         assert file_response.status_code == 200
         assert file_response.headers["content-type"].startswith("video/mp4")

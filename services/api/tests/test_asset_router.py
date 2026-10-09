@@ -120,6 +120,46 @@ def test_router_filters_disallowed_assets_and_penalizes_reuse(tmp_path: Path) ->
         db.close()
 
 
+def test_router_talking_requires_persisted_same_project_exact_copy_admission(tmp_path: Path, admit_talking_run) -> None:
+    db = Database(tmp_path / "talking-route.sqlite")
+    try:
+        scene = _scene().model_copy(update={
+            "preferred_sources": [SourceKind.AI_VIDEO], "fallback_sources": [SourceKind.CAPTURE],
+            "duration_target_ms": 4_000,
+        })
+        asset = _asset(SourceKind.AI_VIDEO, 8).model_copy(update={
+            "duration_ms": 4_000,
+            "metadata": {"talking_generation": {"qa_state": "verified", "human_review_state": "approved"}},
+        })
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=4_000, asset_duration_ms=4_000))
+
+        class EmptySearch:
+            def search(self, query, *, top_k):
+                return []
+
+        router = AssetRouter(EmptySearch(), AssetRepository(db))
+        def routed(s):
+            return {candidate.asset_id for candidate in router.route(s).candidates if candidate.asset_id}
+
+        assert asset.id not in routed(scene)  # approved child, no Run
+        stored, _, _ = admit_talking_run(db, scene.project_id, asset, clip, scene.voice_text)
+        assert asset.id in routed(scene)
+        assert asset.id not in routed(scene.model_copy(update={"duration_target_ms": 3_000}))
+        assert asset.id not in routed(scene.model_copy(update={"voice_text": "Unreviewed different copy"}))
+        assert asset.id not in routed(scene.model_copy(update={"project_id": uuid4()}))
+        pending = dict(stored.metadata)
+        pending["talking_run"] = {**pending["talking_run"], "admission_state": "pending"}
+        AssetRepository(db).update(stored.model_copy(update={"metadata": pending}))
+        assert asset.id not in routed(scene)
+        rejected = dict(stored.metadata)
+        rejected["talking_run"] = {**rejected["talking_run"], "continuity_review_state": "rejected"}
+        AssetRepository(db).update(stored.model_copy(update={"metadata": rejected}))
+        assert asset.id not in routed(scene)
+    finally:
+        db.close()
+
+
 def test_router_does_not_publish_assets_marked_reference_or_unknown(tmp_path: Path) -> None:
     db, router, clips, primary_asset = _router(tmp_path)
     try:
@@ -200,3 +240,79 @@ def test_router_validates_configuration_input_and_returns_scene_order(tmp_path: 
             router.route_all((first_scene, second.model_copy(update={"order": 2})))
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("preferred,fallback,expected", [
+    ([SourceKind.USER_ASSET, SourceKind.TYPOGRAPHY], [SourceKind.CAPTURE], SourceKind.TYPOGRAPHY),
+    ([SourceKind.USER_ASSET], [SourceKind.TYPOGRAPHY, SourceKind.CAPTURE], SourceKind.CAPTURE),
+    ([SourceKind.AI_VIDEO, SourceKind.TYPOGRAPHY], [SourceKind.CAPTURE], SourceKind.CAPTURE),
+])
+def test_weak_lexical_match_only_selects_explicit_preferred_graphic(tmp_path, preferred, fallback, expected):
+    from app.search import ClipTextSearchService
+    from app.routing.asset_router import WEAK_LEXICAL_ROUTE_REASON
+
+    db, _, _, _ = _router(tmp_path)
+    try:
+        scene = _scene().model_copy(update={"preferred_sources": preferred, "fallback_sources": fallback})
+        router = AssetRouter(ClipTextSearchService(db), AssetRepository(db), capture_gap_threshold=0.99, now=lambda: NOW)
+        first = router.route(scene)
+        second = router.route(scene)
+        assert first == second
+        recommended = [c for c in first.candidates if c.recommended]
+        assert len(recommended) == 1 and recommended[0].source_kind is expected
+        if expected is SourceKind.TYPOGRAPHY:
+            assert any("Explicit preferred typography" in reason for reason in recommended[0].why)
+            assert recommended[0].requires_capture is False
+        if SourceKind.USER_ASSET in preferred:
+            capture = next(c for c in first.candidates if c.source_kind is SourceKind.CAPTURE)
+            assert WEAK_LEXICAL_ROUTE_REASON in capture.why
+            assert any(c.clip_id is not None and c.match_score < 0.99 for c in first.candidates)
+    finally:
+        db.close()
+
+
+def test_strong_local_match_still_precedes_typography(tmp_path):
+    db, router, clips, _ = _router(tmp_path)
+    try:
+        scene = _scene().model_copy(update={"preferred_sources": [SourceKind.USER_ASSET, SourceKind.TYPOGRAPHY]})
+        recommended = next(c for c in router.route(scene).candidates if c.recommended)
+        assert recommended.clip_id == clips[0].id
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("requirement,expected", [
+    ("unknown", SourceKind.CAPTURE), ("creator_speaking", SourceKind.CAPTURE),
+    ("action_evidence", SourceKind.CAPTURE), ("explanatory", SourceKind.TYPOGRAPHY),
+])
+def test_declared_requirement_controls_fallback_not_retrieval_score(tmp_path, requirement, expected):
+    from app.search import ClipTextSearchService
+    db, _, _, _ = _router(tmp_path)
+    try:
+        values = {**_scene().model_dump(), "visual_requirement": requirement,
+            "visual_requirement_reason": None if requirement == "unknown" else "This scene expresses the editorial point.",
+            "fallback_sources": [SourceKind.TYPOGRAPHY, SourceKind.CAPTURE]}
+        scene = ScenePlan.model_validate(values)
+        candidates = AssetRouter(ClipTextSearchService(db), AssetRepository(db), capture_gap_threshold=0.99, now=lambda: NOW).route(scene).candidates
+        chosen = next(c for c in candidates if c.recommended)
+        assert chosen.source_kind is expected
+        if requirement == "explanatory":
+            assert any(scene.visual_requirement_reason in reason for reason in chosen.why)
+        # Changing declaration cannot upgrade any real Clip's score/quality.
+        assert all(c.match_score < 0.99 for c in candidates)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("requirement", ["creator_speaking", "action_evidence"])
+def test_direct_assembly_cannot_replace_required_visual_with_typography(requirement):
+    from app.assembly.edit_plan import resolve_edit_plan, EditPlanPreflightError
+    from app.domain.models import Project
+    from app.routing.asset_router import _typography_fallback
+    scene = ScenePlan.model_validate({**_scene().model_dump(), "visual_requirement": requirement,
+        "visual_requirement_reason": "The source performance is necessary."})
+    project = Project(id=scene.project_id, ip_profile_id=uuid4(), title="Requirement", topic="Requirement", created_at=NOW,
+        fps=RationalFps(numerator=30, denominator=1))
+    candidate = _typography_fallback(scene, recommended=True)
+    with pytest.raises(EditPlanPreflightError, match="cannot replace required"):
+        resolve_edit_plan(project, [scene], {scene.id: candidate}, clip_intervals={}, supplied=None)

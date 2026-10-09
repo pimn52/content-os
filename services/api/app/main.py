@@ -19,14 +19,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
+from app.planning_feasibility import planning_feasibility, planning_identity_context
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingRunRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, TalkingSliceSeriesRecovery, UsageCost, VideoSpec, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceHumanReview, VoicePaceCandidateJobPayload, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, EditPlan, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, TalkingSliceSeriesRecovery, UsageCost, VerifiedVerticalDerivationRequest, VideoSpec, VisualStyleTokens, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceHumanReview, VoicePaceCandidateJobPayload, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
 from app.m1_gate import m1_gate_page
 from app.master_narration import MasterNarrationComposer, MasterNarrationCompositionError
-from app.media import AudioAssetNotFound, AudioImportError, AudioImporter, AudioTranscriptPersistence, ClipTranscriptPersistence, FFProbeAdapter, ImageImportError, ImageImporter, MediaImportError, MediaImporter, NoClipsForAsset, ProbeError, SubtitleParseError, parse_subtitle_file
+from app.media import AudioAssetNotFound, AudioImportError, AudioImporter, AudioTranscriptPersistence, ClipTranscriptPersistence, FFProbeAdapter, ImageImportError, ImageImporter, MediaImportError, MediaImporter, NoClipsForAsset, ProbeError, SubtitleParseError, VerticalDerivationConflict, VerticalDerivationProcessError, VerticalDerivationValidationError, VerticalSourceDerivationService, parse_subtitle_file
+from app.media.crop_assessment import CropAssessment, CropAssessmentRepository, CropProposal
 from app.workspace import workspace_page
 from app.voice_delivery import VoiceDeliveryTextError, validate_voice_delivery_text
 from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice, VoicePerformancePlanningError
@@ -44,6 +46,7 @@ from app.providers.embedding import (
     OpenAICompatibleEmbeddingProvider,
 )
 from app.providers.scene_planner import (
+    validate_audience_boundary,
     OpenAICompatibleScenePlanner,
     ScenePlanner,
     ScenePlannerAuthenticationError,
@@ -65,13 +68,27 @@ from app.provider_execution import (
     runtime_provider_identity,
 )
 from app.project_drafts import save_project_draft as persist_project_draft
+from app.production_preflight import PreflightInputError, ProductionPreflight, StaleProductionPreflight, build_production_preflight
+from app.production_runs import ProductionRun, ProductionRunConflict, ProductionRunNotReady, ProductionRunService, TalkingSourceContext, is_planned_talking_collection
+from app.talking.planned_admission import PlannedTalkingAdmissionError, PlannedTalkingAdmissionService
+from app.talking.repair import TalkingRepairPlan, TalkingRepairRecord, TalkingRepairRequest, TalkingRepairService
+from app.voice_repair import VoiceRepairPlan, VoiceRepairRequest, VoiceRepairService
+from app.presentation_repair import PresentationObservationRequest, PresentationRepairRequest, PresentationRepairService
+from app.feedback_learning import FeedbackLearningService, PreferenceCandidateRequest, PreferenceStateRequest, CreatorPreferenceSelectionRequest, apply_preferences
+from app.source_use_constraints import SourceUseConstraintService, RetainedRejectionRequest, UseConstraintStateRequest, digest as use_constraint_digest
 from app.narration_performance import NarrationPerformancePlanError, build_narration_performance_plan, compile_narration_delivery_plan, suggest_narration_performance, validate_narration_performance_plan
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, CapabilityReadiness, CommercialStatus, EvidenceProvenance, EvidenceStatus, ExecutionOverride, ExecutionSafetyContext, FeatureSupport, OperatingBound, ResolutionSource, RoutingConfigurationError, RoutingInputError, find_provider_settings_schema, find_unique_provider_settings_schema, list_provider_settings_schemas, resolve_execution, resolve_feature_support, resolve_verified_operating_limit, validate_schema_values
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
 from app.talking import TalkingRunAssembler, TalkingRunAssemblyError, TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
+from app.talking.source_suitability import TalkingSourceSuitabilityAssessment, TalkingSourceSuitabilityRepository
+from app.talking.source_admission import TalkingSourceAdmission, TalkingSourceAdmissionRepository, configured_review_actor, legacy_talking_evaluation_enabled
+from app.execution_admission import ProviderUseAdmissionService, UseAdmissionError, ProviderUseDecision
+from app.domain.models import ExecutionPurpose, ExecutionUseIdentity, ProviderUseAdmission, ProviderUseOperation
+from app.talking.source_review import ManagedTalkingSourceReviewRequest, SourceReviewChoice, SourceReviewResult, TalkingSourceReviewService
 from app.talking_qa import TalkingHumanReview, TalkingQaError, apply_talking_human_review
+from app.domain.models import TalkingReviewDimensions, TalkingReviewFinding, TalkingReviewConcernAnswer
 from app.voice_takes import VoiceTakeComposer
 from app.voice_observation import VoiceObservationError, observe_voice_performance
 from app.voice_boundary_alignment import voice_asset_project_id
@@ -131,6 +148,12 @@ class TalkingSliceSeriesReviewResponse(BaseModel):
     continuity_review_state: str
     continuity_review_evidence_reference: str | None
     continuity_review_findings: list[str]
+    planned_origin_sha256: str | None = None
+    preview_asset_id: UUID | None = None
+    preview_sha256: str | None = None
+    review_policy_version: Literal[1, 2] = 1
+    required_dimensions: list[str] = Field(default_factory=list)
+    review_concerns: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TalkingSliceSeriesContinuityReviewRequest(BaseModel):
@@ -138,6 +161,12 @@ class TalkingSliceSeriesContinuityReviewRequest(BaseModel):
     approved: bool
     evidence_reference: str = Field(min_length=1, max_length=2_000)
     findings: list[str] = Field(default_factory=list, max_length=100)
+    preview_asset_id: UUID | None = None
+    preview_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    review_policy_version: Literal[1, 2] = 1
+    dimensions: TalkingReviewDimensions | None = None
+    scoped_findings: list[TalkingReviewFinding] = Field(default_factory=list, max_length=100)
+    concern_answers: list[TalkingReviewConcernAnswer] = Field(default_factory=list, max_length=100)
 
 
 class TalkingSliceSeriesContinuityReviewResponse(BaseModel):
@@ -148,7 +177,30 @@ class TalkingSliceSeriesContinuityReviewResponse(BaseModel):
     evidence_reference: str
     findings: list[str]
     child_job_ids: list[UUID]
+    planned_origin_sha256: str | None = None
+    preview_asset_id: UUID | None = None
+    preview_sha256: str | None = None
+    preview_qa_sha256: str | None = None
     reviewed_at: datetime
+    review_policy_version: Literal[1, 2] = 1
+    dimensions: TalkingReviewDimensions | None = None
+    scoped_findings: list[TalkingReviewFinding] = Field(default_factory=list)
+
+
+class TalkingReviewConcernRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    preview_asset_id: UUID
+    preview_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    finding: TalkingReviewFinding
+    evidence_reference: str = Field(min_length=1, max_length=2000)
+
+
+class TalkingReviewConcernAnswersRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    preview_asset_id: UUID
+    preview_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    answers: list[TalkingReviewConcernAnswer] = Field(min_length=1, max_length=100)
 
 
 class TalkingRunResponse(BaseModel):
@@ -166,7 +218,10 @@ class TalkingRunResponse(BaseModel):
     assembled_clip_id: UUID
     automated_qa_state: Literal["verified"]
     admission_state: Literal["admitted"]
+    planned_origin_sha256: str | None = None
+    reviewed_preview_sha256: str | None = None
     created_at: datetime
+    review_policy_version: Literal[1, 2] = 1
 
 
 class ClipSearchRequest(BaseModel):
@@ -193,6 +248,74 @@ class ScenePlanRequest(BaseModel):
     persist: bool = False
 
 
+class ProductionPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    style_tokens: VisualStyleTokens = Field(default_factory=VisualStyleTokens)
+    expected_fingerprint: str | None = Field(default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    repair_allowance: int = Field(default=1, ge=0, le=2)
+    crop_proposals: tuple[CropProposal, ...] = ()
+    purpose: ExecutionPurpose = "commercial_production"
+    use_admission_ids: tuple[UUID, ...] = Field(default=(), max_length=20)
+
+
+class ProductionRunStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    expected_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    style_tokens: VisualStyleTokens = Field(default_factory=VisualStyleTokens)
+    repair_allowance: int = Field(default=1, ge=0, le=2)
+    talking_review_policy_version: Literal[1, 2] = 1
+    purpose: ExecutionPurpose = "commercial_production"
+    use_admission_ids: tuple[UUID, ...] = Field(default=(), max_length=20)
+
+
+class ProductionRunVoiceDispatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice_profile_id: UUID
+    capability_profile_id: UUID
+    authorization_reference: str = Field(min_length=1, max_length=500)
+
+
+class ProductionRunTalkingSourceBindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scene_plan_id: UUID
+    talking_profile_id: UUID
+    reference_clip_id: UUID
+    capability_profile_id: UUID
+    master_start_ms: int = Field(ge=0)
+    master_end_ms: int = Field(gt=0)
+    authorization_reference: str = Field(min_length=1, max_length=500)
+    brief: TalkingPerformanceBrief = Field(default_factory=TalkingPerformanceBrief)
+
+
+class ProductionRunTalkingSuitabilityApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scene_plan_id: UUID
+    assessment_id: UUID
+
+
+class ProductionRunTalkingDispatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scene_plan_id: UUID
+    source_admission_id: UUID
+
+
+class ProductionRunTalkingQaAdvanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scene_plan_id: UUID
+
+
+class TalkingSourceAdmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TalkingSourceAdmissionRevocationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
 class ScenePlanResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: UUID
@@ -207,6 +330,7 @@ class AssetRouteRequest(BaseModel):
     scenes: list[ScenePlan] = Field(min_length=1, max_length=100)
     max_candidates: int = Field(default=3, ge=1, le=20)
     capture_gap_threshold: float = Field(default=0.45, ge=0, le=1)
+    crop_proposals: tuple[CropProposal, ...] = ()
 
 
 class ShootListInstruction(BaseModel):
@@ -251,6 +375,7 @@ class VideoSpecAssemblyRequest(BaseModel):
     narration_asset_ids: dict[UUID, UUID] = Field(default_factory=dict, max_length=1_000)
     master_narration_asset_id: UUID | None = None
     narration_required: bool = False
+    edit_plan: EditPlan | None = None
 
 
 class RenderRequest(BaseModel):
@@ -263,6 +388,7 @@ class RenderRequest(BaseModel):
     explicit_scene_ids: list[UUID] = Field(default_factory=list, max_length=1_000)
     narration_asset_ids: dict[UUID, UUID] = Field(default_factory=dict, max_length=1_000)
     master_narration_asset_id: UUID | None = None
+    edit_plan: EditPlan | None = None
 
     @model_validator(mode="after")
     def one_render_input_shape(self) -> "RenderRequest":
@@ -278,6 +404,8 @@ class RenderRequest(BaseModel):
             raise ValueError("narration_asset_ids is only valid with scenes and selections")
         if has_spec and self.master_narration_asset_id is not None:
             raise ValueError("master_narration_asset_id is only valid with scenes and selections")
+        if has_spec and self.edit_plan is not None:
+            raise ValueError("edit_plan is only valid with scenes and selections")
         return self
 
 
@@ -343,6 +471,12 @@ class AssetReadinessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_id: UUID
     stages: dict[str, AssetStageResponse]
+
+
+class VerticalDerivationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset: Asset
+    clip: Clip
 
 
 class MediaImportRequest(BaseModel):
@@ -900,6 +1034,28 @@ def _shoot_list_for_scene(scene: ScenePlan, candidates: tuple[CandidateAsset, ..
     ),)
 
 
+class ProviderUseAdoptionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    review_reference: str = Field(min_length=1, max_length=1000)
+    review_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ProviderUseRevocationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ProviderUseResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    capability_profile_id: UUID
+    identity: ExecutionUseIdentity | None = None
+    purpose: ExecutionPurpose = "commercial_production"
+    operation: ProviderUseOperation = "generation"
+    admission_id: UUID | None = None
+    dependency_purposes: tuple[ExecutionPurpose, ...] = ()
+
+
 class RuntimeCapabilityResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str
@@ -925,6 +1081,7 @@ def create_app(
     scene_planner: ScenePlanner | None = None,
     renderer_factory: Callable[[Database], RemotionRenderer] | None = None,
     media_importer_factory: Callable[[Database, Path], MediaImporter] | None = None,
+    vertical_derivation_factory: Callable[[Database, Path], VerticalSourceDerivationService] | None = None,
     image_importer_factory: Callable[[Database, Path], ImageImporter] | None = None,
     audio_importer_factory: Callable[[Database, Path], AudioImporter] | None = None,
     render_output_root: str | Path | None = None,
@@ -936,6 +1093,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         selected = Database(selected_path)
+        selected.data_root = application.state.data_root
+        selected.render_output_root = application.state.render_output_root
         application.state.database = selected
         application.state.database_closed = False
         try:
@@ -966,6 +1125,7 @@ def create_app(
     application.state.scene_planner = scene_planner
     application.state.renderer_factory = renderer_factory
     application.state.media_importer_factory = media_importer_factory
+    application.state.vertical_derivation_factory = vertical_derivation_factory
     application.state.image_importer_factory = image_importer_factory
     application.state.audio_importer_factory = audio_importer_factory
     application.state.cost_estimator = cost_estimator or UnknownProviderCostEstimator()
@@ -995,6 +1155,55 @@ def create_app(
         """Return serializable provider-owned settings schemas without probing models."""
 
         return {"schemas": [schema.as_dict() for schema in list_provider_settings_schemas()]}
+
+    @application.get("/execution-settings/capabilities", response_model=list[ProviderMachineCapabilityProfile], tags=["execution-settings"])
+    async def list_execution_capabilities(request: Request) -> list[ProviderMachineCapabilityProfile]:
+        """Enumerate persisted evidence only; do not probe, seed or authorize execution."""
+        profiles = ProviderMachineCapabilityProfileRepository(request.app.state.database).list()
+        return sorted(profiles, key=lambda profile: (profile.scope_key, str(profile.id)))
+
+    def _use_admission_service(project_id: UUID, request: Request) -> ProviderUseAdmissionService:
+        if ProjectRepository(request.app.state.database).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return ProviderUseAdmissionService(request.app.state.database, request.app.state.data_root)
+
+    def _use_admission_error(exc: UseAdmissionError) -> HTTPException:
+        return HTTPException(status_code=403 if str(exc) == "execution_admission_operator_required" else 409, detail=str(exc))
+
+    @application.get("/projects/{project_id}/provider-use-admissions", response_model=list[ProviderUseAdmission], tags=["execution-settings"])
+    async def list_provider_use_admissions(project_id: UUID, request: Request):
+        return _use_admission_service(project_id, request).list(project_id)
+
+    @application.get("/projects/{project_id}/provider-use-admissions/{admission_id}", response_model=ProviderUseAdmission, tags=["execution-settings"])
+    async def get_provider_use_admission(project_id: UUID, admission_id: UUID, request: Request):
+        value = _use_admission_service(project_id, request).get(project_id, admission_id)
+        if value is None:
+            raise HTTPException(status_code=404, detail="provider use admission not found")
+        return value
+
+    @application.post("/projects/{project_id}/provider-use-admissions", response_model=ProviderUseAdmission, status_code=201, tags=["execution-settings"])
+    async def adopt_provider_use(project_id: UUID, payload: ProviderUseAdoptionRequest, request: Request):
+        try:
+            return _use_admission_service(project_id, request).adopt(project_id, **payload.model_dump(),
+                operator_key=request.headers.get("x-content-os-execution-admission-key"))
+        except UseAdmissionError as exc:
+            raise _use_admission_error(exc) from None
+
+    @application.post("/projects/{project_id}/provider-use-admissions/{admission_id}/revoke", response_model=ProviderUseAdmission, tags=["execution-settings"])
+    async def revoke_provider_use(project_id: UUID, admission_id: UUID, payload: ProviderUseRevocationRequest, request: Request):
+        try:
+            value = _use_admission_service(project_id, request).revoke(project_id, admission_id, reason=payload.reason,
+                operator_key=request.headers.get("x-content-os-execution-admission-key"))
+        except UseAdmissionError as exc:
+            raise _use_admission_error(exc) from None
+        if value is None:
+            raise HTTPException(status_code=404, detail="provider use admission not found")
+        return value
+
+    @application.post("/projects/{project_id}/provider-use-resolution", response_model=ProviderUseDecision, tags=["execution-settings"])
+    async def resolve_provider_use_admission(project_id: UUID, payload: ProviderUseResolutionRequest, request: Request):
+        return _use_admission_service(project_id, request).resolve(project_id,
+            **payload.model_dump(exclude={"identity"}), identity=payload.identity)
 
     def _seed_d6g_terminal_closeout_profile(
         capability: str, provider: str, model: str, runtime: str, machine_id: str,
@@ -1432,6 +1641,438 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @application.post("/projects/{project_id}/production-preflight", response_model=ProductionPreflight, tags=["projects"])
+    async def production_preflight(project_id: UUID, payload: ProductionPreflightRequest, request: Request) -> ProductionPreflight:
+        """Preview the persisted draft without invoking providers or dispatching work."""
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return build_production_preflight(
+                db, project, ProjectDraftRepository(db).get(project_id),
+                style_tokens=payload.style_tokens,
+                expected_fingerprint=payload.expected_fingerprint,
+                repair_allowance=payload.repair_allowance,
+                crop_proposals=payload.crop_proposals,
+                purpose=payload.purpose, use_admission_ids=payload.use_admission_ids,
+                data_root=request.app.state.data_root,
+            )
+        except StaleProductionPreflight as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PreflightInputError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (RoutingInputError, IndexError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.post("/assets/{asset_id}/crop-assessments", response_model=CropAssessment, status_code=201, tags=["assets"])
+    async def record_crop_assessment(asset_id: UUID, payload: CropAssessment, request: Request) -> CropAssessment:
+        if payload.proposal.source_asset_id != asset_id:
+            raise HTTPException(status_code=422, detail="crop assessment asset identity mismatch")
+        if payload.evidence_class == "runtime":
+            raise HTTPException(status_code=422, detail="runtime evidence must originate from an internal detector")
+        try:
+            return CropAssessmentRepository(request.app.state.database).create(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.post("/projects/{project_id}/production-runs", response_model=ProductionRun, status_code=201, tags=["projects"])
+    async def start_production_run(project_id: UUID, payload: ProductionRunStartRequest, request: Request) -> ProductionRun:
+        if ProjectRepository(request.app.state.database).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            return ProductionRunService(request.app.state.database, request.app.state.data_root).start(
+                project_id, idempotency_key=payload.idempotency_key,
+                expected_fingerprint=payload.expected_fingerprint,
+                style_tokens=payload.style_tokens, repair_allowance=payload.repair_allowance,
+                talking_review_policy_version=payload.talking_review_policy_version,
+                purpose=payload.purpose, use_admission_ids=payload.use_admission_ids,
+            )
+        except StaleProductionPreflight as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "production_plan_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}", response_model=ProductionRun, tags=["projects"])
+    async def get_production_run(project_id: UUID, run_id: UUID, request: Request) -> ProductionRun:
+        run = ProductionRunService(request.app.state.database, request.app.state.data_root).get(project_id, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/cancel", response_model=ProductionRun, tags=["projects"])
+    async def cancel_production_run(project_id: UUID, run_id: UUID, request: Request) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).cancel(project_id, run_id)
+        except ProductionRunConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/resume", response_model=ProductionRun, tags=["projects"])
+    async def resume_production_run(project_id: UUID, run_id: UUID, request: Request) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).resume(project_id, run_id)
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "production_plan_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/talking-reference-suitability-assessments", response_model=TalkingSourceSuitabilityAssessment, status_code=201, tags=["voice"])
+    async def record_talking_reference_suitability(
+        payload: TalkingSourceSuitabilityAssessment, request: Request,
+    ) -> TalkingSourceSuitabilityAssessment:
+        evidence_parts = [part for part in payload.evidence_reference.replace("\\", "/").casefold().split("/")
+                          if part not in {"", "."}]
+        if (payload.idempotency_key.startswith("managed:")
+            or "talking-source-reviews" in evidence_parts):
+            raise HTTPException(status_code=422, detail="managed Talking source reviews require the trusted Clip action")
+        try:
+            with request.app.state.database.transaction(immediate=True):
+                return TalkingSourceSuitabilityRepository(
+                    request.app.state.database, request.app.state.data_root,
+                ).create(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/clips/{clip_id}/talking-source-reviews", response_model=list[SourceReviewChoice], tags=["voice"])
+    async def list_talking_source_reviews(clip_id: UUID, request: Request) -> list[SourceReviewChoice]:
+        try:
+            return TalkingSourceReviewService(request.app.state.database, request.app.state.data_root).list_for_clip(clip_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.post("/clips/{clip_id}/talking-source-reviews", response_model=SourceReviewResult, status_code=201, tags=["voice"])
+    async def record_managed_talking_source_review(
+        clip_id: UUID, payload: ManagedTalkingSourceReviewRequest, request: Request,
+    ) -> SourceReviewResult:
+        actor = configured_review_actor(request.headers.get("x-content-os-talking-review-key"))
+        if actor is None:
+            raise HTTPException(status_code=403, detail="configured Talking reviewer credential required")
+        try:
+            return TalkingSourceReviewService(request.app.state.database, request.app.state.data_root).record(
+                clip_id, payload, actor_id=actor,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/talking-reference-suitability-assessments/{assessment_id}", response_model=TalkingSourceSuitabilityAssessment, tags=["voice"])
+    async def get_talking_reference_suitability(
+        assessment_id: UUID, request: Request,
+    ) -> TalkingSourceSuitabilityAssessment:
+        assessment = TalkingSourceSuitabilityRepository(
+            request.app.state.database, request.app.state.data_root,
+        ).get(assessment_id)
+        if assessment is None:
+            raise HTTPException(status_code=404, detail="Talking reference suitability assessment not found")
+        return assessment
+
+    @application.get("/talking-reference-suitability-assessments/{assessment_id}/evidence", tags=["voice"])
+    async def download_talking_source_review_evidence(assessment_id: UUID, request: Request) -> Response:
+        try:
+            data, digest = TalkingSourceReviewService(
+                request.app.state.database, request.app.state.data_root,
+            ).evidence_bytes(assessment_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(content=data, media_type="application/octet-stream", headers={
+            "X-Content-SHA256": digest,
+            "Content-Disposition": f'attachment; filename="talking-source-review-{assessment_id}.bin"',
+            "X-Content-Type-Options": "nosniff",
+        })
+
+    @application.post("/talking-reference-suitability-assessments/{assessment_id}/admissions", response_model=TalkingSourceAdmission, status_code=201, tags=["voice"])
+    async def admit_talking_source_review(
+        assessment_id: UUID, payload: TalkingSourceAdmissionRequest, request: Request,
+    ) -> TalkingSourceAdmission:
+        actor = configured_review_actor(request.headers.get("x-content-os-talking-review-key"))
+        if actor is None:
+            raise HTTPException(status_code=403, detail="configured Talking reviewer credential required")
+        try:
+            with request.app.state.database.transaction(immediate=True):
+                return TalkingSourceAdmissionRepository(
+                    request.app.state.database, request.app.state.data_root,
+                ).admit(assessment_id, idempotency_key=payload.idempotency_key,
+                        actor_id=actor, evidence_sha256=payload.evidence_sha256)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/talking-source-admissions/{admission_id}", response_model=TalkingSourceAdmission, tags=["voice"])
+    async def get_talking_source_admission(admission_id: UUID, request: Request) -> TalkingSourceAdmission:
+        admission = TalkingSourceAdmissionRepository(
+            request.app.state.database, request.app.state.data_root,
+        ).get(admission_id)
+        if admission is None:
+            raise HTTPException(status_code=404, detail="Talking source admission not found")
+        return admission
+
+    @application.post("/talking-source-admissions/{admission_id}/revoke", response_model=TalkingSourceAdmission, tags=["voice"])
+    async def revoke_talking_source_admission(
+        admission_id: UUID, payload: TalkingSourceAdmissionRevocationRequest, request: Request,
+    ) -> TalkingSourceAdmission:
+        actor = configured_review_actor(request.headers.get("x-content-os-talking-review-key"))
+        if actor is None:
+            raise HTTPException(status_code=403, detail="configured Talking reviewer credential required")
+        with request.app.state.database.transaction(immediate=True):
+            admission = TalkingSourceAdmissionRepository(
+                request.app.state.database, request.app.state.data_root,
+            ).revoke(admission_id, actor_id=actor, reason=payload.reason)
+        if admission is None:
+            raise HTTPException(status_code=404, detail="Talking source admission not found")
+        return admission
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-suitability-apply", response_model=ProductionRun, tags=["projects"])
+    async def apply_production_talking_suitability(
+        project_id: UUID, run_id: UUID, payload: ProductionRunTalkingSuitabilityApplyRequest, request: Request,
+    ) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).apply_talking_suitability(
+                project_id, run_id, scene_plan_id=payload.scene_plan_id, assessment_id=payload.assessment_id,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_suitability_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/talking-repair-plan", response_model=TalkingRepairPlan, tags=["projects"])
+    async def get_talking_repair_plan(project_id: UUID, run_id: UUID, scene_plan_id: UUID, request: Request):
+        try:
+            return TalkingRepairService(request.app.state.database, request.app.state.data_root).plan(project_id, run_id, scene_plan_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_repair_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/voice-repair-plan", response_model=VoiceRepairPlan, tags=["projects"])
+    async def get_voice_repair_plan(project_id: UUID, run_id: UUID, request: Request):
+        try:
+            return VoiceRepairService(request.app.state.database, request.app.state.data_root).plan(project_id, run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "voice_repair_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/voice-repair", status_code=201, tags=["projects"])
+    async def execute_voice_repair(project_id: UUID, run_id: UUID, payload: VoiceRepairRequest, request: Request):
+        try:
+            return VoiceRepairService(request.app.state.database, request.app.state.data_root).execute(project_id, run_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "voice_repair_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/voice-repairs", tags=["projects"])
+    async def list_voice_repairs(project_id: UUID, run_id: UUID, request: Request):
+        try:
+            return VoiceRepairService(request.app.state.database, request.app.state.data_root).records(project_id, run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def presentation_service(request: Request):
+        return PresentationRepairService(request.app.state.database, request.app.state.data_root, request.app.state.render_output_root)
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/presentation-observations", status_code=201, tags=["projects"])
+    async def observe_presentation(project_id: UUID, run_id: UUID, payload: PresentationObservationRequest, request: Request):
+        try: return presentation_service(request).observe(project_id, run_id, payload)
+        except LookupError as exc: raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc: raise HTTPException(status_code=409, detail={"code": "presentation_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc: raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/presentation-repair-plan", tags=["projects"])
+    async def plan_presentation(project_id: UUID, run_id: UUID, observation_id: UUID, request: Request):
+        try: return presentation_service(request).plan(project_id, run_id, observation_id)
+        except LookupError as exc: raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc: raise HTTPException(status_code=409, detail={"code": "presentation_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc: raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/presentation-repair", status_code=201, tags=["projects"])
+    async def apply_presentation(project_id: UUID, run_id: UUID, payload: PresentationRepairRequest, request: Request):
+        try: return presentation_service(request).apply(project_id, run_id, payload)
+        except LookupError as exc: raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc: raise HTTPException(status_code=409, detail={"code": "presentation_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc: raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/presentation-repairs", tags=["projects"])
+    async def history_presentation(project_id: UUID, run_id: UUID, request: Request):
+        try: return presentation_service(request).history(project_id, run_id)
+        except LookupError as exc: raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-repair", response_model=TalkingRepairRecord, status_code=201, tags=["projects"])
+    async def execute_talking_repair(project_id: UUID, run_id: UUID, payload: TalkingRepairRequest, request: Request):
+        try:
+            return TalkingRepairService(request.app.state.database, request.app.state.data_root).execute(project_id, run_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_repair_not_ready", "reasons": exc.reasons}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/talking-repairs", tags=["projects"])
+    async def list_talking_repairs(project_id: UUID, run_id: UUID, request: Request):
+        db = request.app.state.database
+        if ProductionRunService(db, request.app.state.data_root).get(project_id, run_id) is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        calls = ProviderCallRepository(db).list_for_project(project_id)
+        return [{**record.model_dump(mode="json"),
+                 "replacement_job_status": None if (job := JobRepository(db).get(record.replacement_job_id)) is None else job.status.value,
+                 "provider_calls": [call.model_dump(mode="json") for call in calls
+                 if call.idempotency_key.startswith(f"job:{record.replacement_job_id}:talking:")],
+                 "predecessor_provider_calls": [call.model_dump(mode="json") for call in calls
+                 if call.idempotency_key.startswith(f"job:{record.old_binding.talking_job_id}:talking:")]}
+                for record in TalkingRepairService(db, request.app.state.data_root).records(project_id, run_id)]
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-dispatch", response_model=ProductionRun, tags=["projects"])
+    async def dispatch_production_talking(
+        project_id: UUID, run_id: UUID, payload: ProductionRunTalkingDispatchRequest, request: Request,
+    ) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).dispatch_talking(
+                project_id, run_id, scene_plan_id=payload.scene_plan_id,
+                admission_id=payload.source_admission_id,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "planned_talking_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-qa-advance", response_model=ProductionRun, tags=["projects"])
+    async def advance_production_talking_qa(
+        project_id: UUID, run_id: UUID, payload: ProductionRunTalkingQaAdvanceRequest, request: Request,
+    ) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).advance_talking_qa(
+                project_id, run_id, scene_plan_id=payload.scene_plan_id,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_qa_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-preview-prepare", response_model=ProductionRun, tags=["projects"])
+    async def prepare_production_talking_preview(
+        project_id: UUID, run_id: UUID, payload: ProductionRunTalkingQaAdvanceRequest, request: Request,
+    ) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).prepare_talking_run_preview(
+                project_id, run_id, scene_plan_id=payload.scene_plan_id,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_preview_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-run-admit", response_model=ProductionRun, tags=["projects"])
+    async def admit_production_talking_run(
+        project_id: UUID, run_id: UUID, payload: ProductionRunTalkingQaAdvanceRequest, request: Request,
+    ) -> ProductionRun:
+        db: Database = request.app.state.database
+        production = ProductionRunService(db, request.app.state.data_root)
+        current = production.get(project_id, run_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        binding = next((item for item in current.talking_source_bindings if item.scene_plan_id == payload.scene_plan_id), None)
+        if binding is None or binding.talking_series_id is None:
+            raise HTTPException(status_code=409, detail="planned Talking collection is not bound")
+        series = TalkingSliceSeriesRepository(db).get(binding.talking_series_id)
+        if series is None or series.project_id != project_id or series.planned_origin is None:
+            raise HTTPException(status_code=409, detail="planned Talking origin is missing")
+        try:
+            PlannedTalkingAdmissionService(db, request.app.state.data_root).admit(series)
+        except (PlannedTalkingAdmissionError, ProductionRunNotReady, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return production.get(project_id, run_id)
+
+    @application.get("/projects/{project_id}/production-runs/{run_id}/talking-source-context", response_model=TalkingSourceContext, tags=["projects"])
+    async def get_production_talking_source_context(
+        project_id: UUID, run_id: UUID, scene_plan_id: UUID, request: Request,
+    ) -> TalkingSourceContext:
+        try:
+            context = ProductionRunService(request.app.state.database, request.app.state.data_root).talking_source_context(
+                project_id, run_id, scene_plan_id=scene_plan_id,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_source_context_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if context is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return context
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/talking-source-bind", response_model=ProductionRun, tags=["projects"])
+    async def bind_production_talking_source(
+        project_id: UUID, run_id: UUID, payload: ProductionRunTalkingSourceBindRequest, request: Request,
+    ) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).bind_talking_source(
+                project_id, run_id, scene_plan_id=payload.scene_plan_id,
+                talking_profile_id=payload.talking_profile_id, reference_clip_id=payload.reference_clip_id,
+                capability_profile_id=payload.capability_profile_id, master_start_ms=payload.master_start_ms,
+                master_end_ms=payload.master_end_ms, authorization_reference=payload.authorization_reference,
+                brief=payload.brief,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "talking_source_bind_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/voice-dispatch", response_model=ProductionRun, tags=["projects"])
+    async def dispatch_production_voice(
+        project_id: UUID, run_id: UUID, payload: ProductionRunVoiceDispatchRequest, request: Request,
+    ) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).dispatch_voice(
+                project_id, run_id, voice_profile_id=payload.voice_profile_id,
+                capability_profile_id=payload.capability_profile_id,
+                authorization_reference=payload.authorization_reference,
+            )
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "voice_dispatch_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
+    @application.post("/projects/{project_id}/production-runs/{run_id}/voice-qa-advance", response_model=ProductionRun, tags=["projects"])
+    async def advance_production_voice_qa(project_id: UUID, run_id: UUID, request: Request) -> ProductionRun:
+        try:
+            run = ProductionRunService(request.app.state.database, request.app.state.data_root).advance_voice_qa(project_id, run_id)
+        except ProductionRunNotReady as exc:
+            raise HTTPException(status_code=409, detail={"code": "voice_qa_not_ready", "reasons": exc.reasons}) from exc
+        except (ProductionRunConflict, PreflightInputError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if run is None:
+            raise HTTPException(status_code=404, detail="production run not found")
+        return run
+
     @application.get("/projects/{project_id}/cost-reduction", response_model=CostReductionResponse, tags=["runtime"])
     async def get_project_cost_reduction(project_id: UUID, request: Request) -> CostReductionResponse:
         db: Database = request.app.state.database
@@ -1679,6 +2320,74 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
         return FeedbackRepository(db).list_for_project(project_id)
 
+    def learning_service(request: Request):
+        return FeedbackLearningService(request.app.state.database, request.app.state.render_output_root)
+
+    def learning_result(action):
+        try:
+            return action()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def use_constraint_service(request: Request):
+        return SourceUseConstraintService(request.app.state.database, request.app.state.data_root)
+
+    def use_constraint_result(action):
+        try:
+            return learning_result(action)
+        except OSError:
+            raise HTTPException(status_code=409, detail="use_constraint_evidence_unavailable") from None
+
+    @application.get("/projects/{project_id}/source-use-constraints", tags=["planning"])
+    async def source_use_constraints(project_id: UUID, request: Request):
+        return use_constraint_result(lambda: use_constraint_service(request).records(project_id))
+
+    @application.get("/projects/{project_id}/retained-render-rejections", tags=["planning"])
+    async def retained_render_rejections(project_id: UUID, request: Request):
+        return use_constraint_result(lambda: use_constraint_service(request).retained_choices(project_id))
+
+    @application.post("/projects/{project_id}/source-use-constraints", status_code=201, tags=["planning"])
+    async def intake_use_constraint(project_id: UUID, payload: RetainedRejectionRequest, request: Request):
+        return use_constraint_result(lambda: use_constraint_service(request).intake(project_id, payload))
+
+    @application.put("/projects/{project_id}/source-use-constraints/{constraint_id}", tags=["planning"])
+    async def adopt_use_constraint(project_id: UUID, constraint_id: UUID, payload: UseConstraintStateRequest, request: Request):
+        return use_constraint_result(lambda: use_constraint_service(request).state(project_id, constraint_id, payload))
+
+    @application.get("/projects/{project_id}/source-use-constraints/{constraint_id}/versions", tags=["planning"])
+    async def use_constraint_versions(project_id: UUID, constraint_id: UUID, request: Request):
+        return use_constraint_result(lambda: use_constraint_service(request).history(project_id, constraint_id))
+
+    @application.get("/projects/{project_id}/planning-observations", tags=["planning"])
+    async def planning_observations(project_id: UUID, request: Request):
+        return learning_result(lambda: learning_service(request).observations(project_id))
+
+    @application.get("/projects/{project_id}/planning-preferences", tags=["planning"])
+    async def planning_preferences(project_id: UUID, request: Request):
+        return learning_result(lambda: learning_service(request).list(project_id))
+
+    @application.get("/projects/{project_id}/planning-preference-selection", tags=["planning"])
+    async def creator_preference_scope(project_id: UUID, request: Request):
+        return learning_result(lambda: learning_service(request).selection_scope(project_id))
+
+    @application.post("/projects/{project_id}/planning-preference-selection", status_code=201, tags=["planning"])
+    async def select_creator_preference(project_id: UUID, payload: CreatorPreferenceSelectionRequest, request: Request):
+        return learning_result(lambda: learning_service(request).select(project_id, payload))
+
+    @application.post("/projects/{project_id}/planning-preferences", status_code=201, tags=["planning"])
+    async def candidate_preference(project_id: UUID, payload: PreferenceCandidateRequest, request: Request):
+        return learning_result(lambda: learning_service(request).candidate(project_id, payload))
+
+    @application.put("/projects/{project_id}/planning-preferences/{preference_id}", tags=["planning"])
+    async def adopt_preference(project_id: UUID, preference_id: UUID, payload: PreferenceStateRequest, request: Request):
+        return learning_result(lambda: learning_service(request).set_state(project_id, preference_id, payload))
+
+    @application.get("/projects/{project_id}/planning-preferences/{preference_id}/versions", tags=["planning"])
+    async def preference_versions(project_id: UUID, preference_id: UUID, request: Request):
+        return learning_result(lambda: learning_service(request).history(project_id, preference_id))
+
     @application.get("/projects/{project_id}/next-suggestions", response_model=list[NextSuggestion], tags=["publishing"])
     async def next_suggestions(project_id: UUID, request: Request) -> list[NextSuggestion]:
         db: Database = request.app.state.database
@@ -1918,6 +2627,28 @@ def create_app(
         if AssetRepository(db).get(asset_id) is None:
             raise HTTPException(status_code=404, detail="asset not found")
         return ClipRepository(db).list_by_asset(asset_id)
+
+    @application.post("/assets/vertical-derivations", response_model=VerticalDerivationResponse, status_code=201, tags=["assets"])
+    async def derive_vertical_asset(payload: VerifiedVerticalDerivationRequest, request: Request) -> VerticalDerivationResponse:
+        """Create one verified 9:16 source interval without mutating its parent Asset."""
+        db: Database = request.app.state.database
+        service = request.app.state.vertical_derivation_factory(
+            db, request.app.state.data_root,
+        ) if request.app.state.vertical_derivation_factory else VerticalSourceDerivationService(
+            db,
+            request.app.state.data_root,
+            MediaImporter(db, request.app.state.data_root, FFProbeAdapter(resolve_local_executable("ffprobe"))),
+            command=resolve_local_executable("ffmpeg"),
+        )
+        try:
+            result = service.derive(payload)
+            return VerticalDerivationResponse(asset=result.asset, clip=result.clip)
+        except VerticalDerivationValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except VerticalDerivationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except VerticalDerivationProcessError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @application.get("/assets/{asset_id}/readiness", response_model=AssetReadinessResponse, tags=["assets"])
     async def get_asset_readiness(asset_id: UUID, request: Request) -> AssetReadinessResponse:
@@ -2783,6 +3514,8 @@ def create_app(
     @application.post("/projects/{project_id}/talking-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
     async def enqueue_talking_generation(project_id: UUID, payload: TalkingGenerationJobRequest, request: Request) -> dict[str, Any]:
         """Persist one consented TalkingProvider request for a local worker."""
+        if not legacy_talking_evaluation_enabled():
+            raise HTTPException(status_code=403, detail="legacy_talking_evaluation_disabled")
         db: Database = request.app.state.database
         if ProjectRepository(db).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
@@ -2954,6 +3687,9 @@ def create_app(
         project_id: UUID, payload: TalkingSliceSeriesJobRequest, request: Request,
     ) -> dict[str, Any]:
         """Atomically persist an ordered, evidence-bounded short-Talking series."""
+
+        if not legacy_talking_evaluation_enabled():
+            raise HTTPException(status_code=403, detail="legacy_talking_evaluation_disabled")
 
         db: Database = request.app.state.database
         series_repository = TalkingSliceSeriesRepository(db)
@@ -3131,6 +3867,9 @@ def create_app(
     ) -> dict[str, Any]:
         """Replace one failed child without losing its Job/ProviderCall evidence."""
 
+        if not legacy_talking_evaluation_enabled():
+            raise HTTPException(status_code=403, detail="legacy_talking_evaluation_disabled")
+
         db: Database = request.app.state.database
         series_repo = TalkingSliceSeriesRepository(db)
         jobs = JobRepository(db)
@@ -3138,6 +3877,8 @@ def create_app(
             series = series_repo.get(series_id)
             if series is None or series.project_id != project_id:
                 raise HTTPException(status_code=404, detail="Talking slice series not found")
+            if is_planned_talking_collection(db, series):
+                raise HTTPException(status_code=409, detail="planned Talking collection cannot use legacy child recovery")
             for recovery in series.recovery_history:
                 if recovery.failed_job_id == payload.failed_job_id:
                     if recovery.evidence_reference != payload.evidence_reference:
@@ -3208,6 +3949,8 @@ def create_app(
         series = TalkingSliceSeriesRepository(db).get(series_id)
         if series is None or series.project_id != project_id:
             raise HTTPException(status_code=404, detail="Talking slice series not found")
+        if is_planned_talking_collection(db, series):
+            return PlannedTalkingAdmissionService(db, request.app.state.data_root).review_status(series)
         review = assess_talking_slice_series(
             series,
             [JobRepository(db).get(job_id) for job_id in series.child_job_ids],
@@ -3254,6 +3997,9 @@ def create_app(
         continuity_reviews = TalkingSliceSeriesContinuityReviewRepository(db)
         values: list[dict[str, Any]] = []
         for series in TalkingSliceSeriesRepository(db).list_for_project(project_id):
+            if is_planned_talking_collection(db, series):
+                values.append(PlannedTalkingAdmissionService(db, request.app.state.data_root).review_status(series))
+                continue
             review = assess_talking_slice_series(series, [jobs.get(job_id) for job_id in series.child_job_ids], assets)
             continuity = continuity_reviews.get_by_series_id(series.id)
             values.append({
@@ -3309,8 +4055,33 @@ def create_app(
                 "evidence_reference": review.evidence_reference,
                 "findings": list(review.findings),
                 "child_job_ids": list(review.child_job_ids),
+                "planned_origin_sha256": review.planned_origin_sha256,
+                "preview_asset_id": review.preview_asset_id,
+                "preview_sha256": review.preview_sha256,
+                "preview_qa_sha256": review.preview_qa_sha256,
                 "reviewed_at": review.reviewed_at,
+                "review_policy_version": review.review_policy_version,
+                "dimensions": review.dimensions,
+                "scoped_findings": review.scoped_findings,
             }
+
+        if is_planned_talking_collection(db, series):
+            if series.planned_origin is None or payload.preview_asset_id is None or payload.preview_sha256 is None:
+                raise HTTPException(status_code=409, detail="planned continuity review requires exact preview identity")
+            try:
+                return response_for(PlannedTalkingAdmissionService(db, request.app.state.data_root).record_review(
+                    series, approved=payload.approved, evidence_reference=payload.evidence_reference,
+                    findings=payload.findings, preview_asset_id=payload.preview_asset_id,
+                    preview_sha256=payload.preview_sha256,
+                    review_policy_version=payload.review_policy_version, dimensions=payload.dimensions,
+                    scoped_findings=payload.scoped_findings, concern_answers=payload.concern_answers,
+                ))
+            except (PlannedTalkingAdmissionError, ProductionRunNotReady, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if (payload.preview_asset_id is not None or payload.preview_sha256 is not None
+            or payload.review_policy_version != 1 or payload.dimensions is not None
+            or payload.scoped_findings or payload.concern_answers):
+            raise HTTPException(status_code=409, detail="legacy continuity review cannot claim a planned preview")
 
         existing = reviews.get_by_series_id(series.id)
         if existing is not None:
@@ -3375,8 +4146,46 @@ def create_app(
             "evidence_reference": review.evidence_reference,
             "findings": list(review.findings),
             "child_job_ids": list(review.child_job_ids),
+            "planned_origin_sha256": review.planned_origin_sha256,
+            "preview_asset_id": review.preview_asset_id,
+            "preview_sha256": review.preview_sha256,
+            "preview_qa_sha256": review.preview_qa_sha256,
             "reviewed_at": review.reviewed_at,
+            "review_policy_version": review.review_policy_version,
+            "dimensions": review.dimensions,
+            "scoped_findings": review.scoped_findings,
         }
+
+    @application.post("/projects/{project_id}/talking-slice-series/{series_id}/review-concerns", tags=["voice"], status_code=201)
+    async def register_talking_review_concern(project_id: UUID, series_id: UUID,
+                                             payload: TalkingReviewConcernRequest, request: Request):
+        db = request.app.state.database
+        series = TalkingSliceSeriesRepository(db).get(series_id)
+        if series is None or series.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Talking collection not found")
+        try:
+            return PlannedTalkingAdmissionService(db, request.app.state.data_root).register_concern(
+                series, preview_asset_id=payload.preview_asset_id, preview_sha256=payload.preview_sha256,
+                finding=payload.finding, evidence_reference=payload.evidence_reference,
+                idempotency_key=payload.idempotency_key,
+            )
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post("/projects/{project_id}/talking-slice-series/{series_id}/review-concern-answers", tags=["voice"], response_model=TalkingSliceSeriesReviewResponse)
+    async def answer_talking_review_concerns(project_id: UUID, series_id: UUID,
+                                            payload: TalkingReviewConcernAnswersRequest, request: Request):
+        db = request.app.state.database
+        series = TalkingSliceSeriesRepository(db).get(series_id)
+        if series is None or series.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Talking collection not found")
+        try:
+            return PlannedTalkingAdmissionService(db, request.app.state.data_root).answer_concerns(
+                series, preview_asset_id=payload.preview_asset_id, preview_sha256=payload.preview_sha256,
+                answers=payload.answers,
+            )
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @application.post(
         "/projects/{project_id}/talking-slice-series/{series_id}/talking-run",
@@ -3391,6 +4200,13 @@ def create_app(
         series = TalkingSliceSeriesRepository(db).get(series_id)
         if series is None or series.project_id != project_id:
             raise HTTPException(status_code=404, detail="Talking slice series not found")
+        if is_planned_talking_collection(db, series):
+            if series.planned_origin is None:
+                raise HTTPException(status_code=409, detail="planned Talking origin is missing")
+            try:
+                return PlannedTalkingAdmissionService(db, request.app.state.data_root).admit(series)
+            except (PlannedTalkingAdmissionError, ProductionRunNotReady, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         existing = TalkingRunRepository(db).get_by_series_id(series.id)
         if existing is not None:
             return existing
@@ -3500,6 +4316,9 @@ def create_app(
                 **({"context": planning_context} if include_context else {}),
             )
             scenes = tuple(scene.model_copy(update={"evidence_refs": list(evidence_refs)}) for scene in result.scenes)
+            scenes = apply_preferences(scenes, planning_context.get("planning_preferences", []))
+            validate_audience_boundary(scenes, topic=payload.topic or project.topic,
+                                       script=payload.script, context=planning_context)
             generated_script = payload.script is None
             script = payload.script or "\n\n".join(scene.voice_text for scene in scenes)
             return ScenePlanResponse(
@@ -3522,7 +4341,7 @@ def create_app(
                     category=CostCategory.LLM,
                     input_document={
                         "request": payload.model_dump(mode="json"),
-                        "planning_context": planning_context,
+                        "planning_context": planning_identity_context(planning_context),
                         "evidence_refs": list(evidence_refs),
                     },
                     action=lambda: plan_response(planner, include_context=True),
@@ -3534,6 +4353,14 @@ def create_app(
                 # Deterministic/local test adapters retain the narrow original
                 # protocol and do not claim an externally metered identity.
                 response = plan_response(planner, include_context=False)
+            # Accounted replay is not allowed to bypass current content guards.
+            validate_audience_boundary(response.scenes, topic=payload.topic or project.topic,
+                                       script=payload.script, context=planning_context)
+            # A preference changed while the provider was planning: preserve
+            # its accounted result, but never save stale policy as current.
+            _, current_refs = _scene_planning_context(db, project)
+            if current_refs != evidence_refs:
+                raise HTTPException(status_code=409, detail="planning_context_changed_replan")
             if payload.persist:
                 with db.transaction():
                     draft = persist_project_draft(
@@ -3575,6 +4402,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
         if any(scene.project_id != project_id for scene in payload.scenes):
             raise HTTPException(status_code=422, detail="all scenes must belong to the requested project")
+        proposal_ids = [proposal.scene_plan_id for proposal in payload.crop_proposals]
+        if None in proposal_ids or len(set(proposal_ids)) != len(proposal_ids) or not set(proposal_ids).issubset({scene.id for scene in payload.scenes}):
+            raise HTTPException(status_code=422, detail="crop proposals require unique routed ScenePlan identities")
 
         def route_response(searcher: object) -> list[AssetRouteResponse]:
             router = AssetRouter(
@@ -3583,6 +4413,7 @@ def create_app(
                 images=ImageAssetRepository(db),
                 max_candidates=payload.max_candidates,
                 capture_gap_threshold=payload.capture_gap_threshold,
+                crop_proposals={proposal.scene_plan_id: proposal for proposal in payload.crop_proposals if proposal.scene_plan_id is not None},
             )
             results = router.route_all(payload.scenes)
             return [
@@ -3665,6 +4496,7 @@ def create_app(
                 narration_asset_ids=payload.narration_asset_ids,
                 master_narration_asset_id=payload.master_narration_asset_id,
                 narration_required=payload.narration_required,
+                edit_plan=payload.edit_plan,
             )
         except VideoSpecAssemblyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -3831,6 +4663,7 @@ def _resolve_render_spec(db: Database, project: Project, project_id: UUID, paylo
             project, payload.scenes, selected, explicit_scene_ids=payload.explicit_scene_ids,
             narration_asset_ids=payload.narration_asset_ids,
             master_narration_asset_id=payload.master_narration_asset_id,
+            edit_plan=payload.edit_plan,
         )
     except VideoSpecAssemblyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -3858,6 +4691,7 @@ def _scene_planning_context(db: Database, project: Project) -> tuple[dict[str, o
     profile = IPProfileRepository(db).get(project.ip_profile_id)
     refs: list[str] = []
     context: dict[str, object] = {}
+    context["production_feasibility"] = planning_feasibility(db, project.id)
     if profile is not None:
         revisions = IPProfileRepository(db).revisions(profile.id)
         profile_version = revisions[-1][0] if revisions else 1
@@ -3895,6 +4729,26 @@ def _scene_planning_context(db: Database, project: Project) -> tuple[dict[str, o
         refs.append(f"opportunity:{opportunity.id}")
         refs.extend(opportunity.evidence_refs)
         opportunity_context.append(opportunity.model_dump(mode="json"))
+    # Adopted feedback is a fresh-planning input, not a grant of rights or QA.
+    render_root = getattr(db, "render_output_root", Path(db.path).parent / "renders")
+    preferences = FeedbackLearningService(db, render_root).active(project.id)
+    for preference in preferences:
+        refs.append(f"planning_preference:{preference['id']}:v{preference['version']}")
+        if preference.get("authority_source") == "creator_selection":
+            refs.append(f"creator_selection:{preference['id']}:v{preference['version']}")
+        else:
+            refs.append(f"presentation_observation:{preference['observation_id']}")
+    context["planning_preferences"] = preferences
+    constraints = SourceUseConstraintService(db).records(project.id)
+    context["source_use_constraints"] = [
+        {**{k: value[k] for k in ("id", "version", "rule", "state", "adopted_use_ids", "current_stop_reasons")},
+         "uses": [use for use in value["uses"] if use["use_id"] in value["adopted_use_ids"]],
+         "authority": "explicit_future_use_policy_not_scene_rejection_or_positive_qa",
+         "applicability": "held" if value["current_stop_reasons"] else "active"}
+        for value in constraints if value["state"] == "enabled"
+    ]
+    # Tombstones also fence pending provider results; disabled rules are not instructions.
+    refs.extend(f"source_use_constraint:{v['id']}:v{v['version']}:{v['state']}:{use_constraint_digest(v['current_stop_reasons'])}" for v in constraints)
     unique_refs = tuple(dict.fromkeys(refs))
     context.update({
         "evidence_refs": list(unique_refs),
@@ -3908,11 +4762,20 @@ def _scene_planner_from_env() -> OpenAICompatibleScenePlanner:
     api_key = os.environ.get("CONTENT_OS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ScenePlannerConfigurationError("scene planner API key must be supplied at runtime")
+    output_limit = os.environ.get("CONTENT_OS_LLM_MAX_OUTPUT_TOKENS")
+    try:
+        max_output_tokens = int(output_limit) if output_limit is not None else None
+    except ValueError:
+        raise ScenePlannerConfigurationError("output token limit must be a positive integer") from None
     return OpenAICompatibleScenePlanner(
         api_key,
         base_url=os.environ.get("CONTENT_OS_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         model=os.environ.get("CONTENT_OS_LLM_MODEL", "gpt-4.1-mini"),
         protocol=os.environ.get("CONTENT_OS_LLM_PROTOCOL", "responses"),
+        reasoning_effort=os.environ.get("CONTENT_OS_LLM_REASONING_EFFORT"),
+        max_output_tokens=max_output_tokens,
+        timeout_seconds=os.environ.get("CONTENT_OS_LLM_TIMEOUT_SECONDS", "60"),
+        chat_output_mode=os.environ.get("CONTENT_OS_LLM_CHAT_OUTPUT_MODE", "prompt"),
     )
 
 

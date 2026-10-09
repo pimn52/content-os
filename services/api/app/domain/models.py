@@ -4,11 +4,15 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+import hashlib
+import json
 from math import isfinite
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Discriminator, Field, JsonValue, Tag, field_validator, model_validator
+from pydantic_core import PydanticCustomError
+from .execution_runtime import HostRuntimeObservation, HostRuntimeObservationV3Policy2, RuntimeInventoryDescriptor
 
 SCHEMA_VERSION = "0.1"
 
@@ -98,6 +102,8 @@ class JobType(StrEnum):
     VERIFY_VOICE = "verify_voice"
     ALIGN_VOICE_BOUNDARIES = "align_voice_boundaries"
     GENERATE_TALKING = "generate_talking"
+    VERIFY_TALKING = "verify_talking"
+    PREPARE_TALKING_RUN_PREVIEW = "prepare_talking_run_preview"
     RENDER = "render"
     SYNC_ACCOUNT = "sync_account"
 
@@ -250,6 +256,74 @@ class Asset(ContractModel):
     authorization_reference: str = Field(min_length=1, max_length=500, description="Rights or authorization record reference; never credentials.")
     imported_at: AwareDatetime
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class SourceCropWindow(ContractModel):
+    """One fixed pixel-space rectangle in an original video Asset."""
+
+    x: int = Field(ge=0, le=16_383)
+    y: int = Field(ge=0, le=16_383)
+    width: int = Field(gt=0, le=16_384)
+    height: int = Field(gt=0, le=16_384)
+
+
+class VerifiedVerticalDerivationEvidence(ContractModel):
+    """Evidence that one exact source interval is safe for one fixed crop."""
+
+    source_asset_id: UUID
+    source_clip_id: UUID
+    source_content_hash: str | None = Field(default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    crop_window: SourceCropWindow | None = None
+    covered_start_ms: NonNegativeMs
+    covered_end_ms: PositiveFrames
+    method: Literal["human_full_interval_review"] | None = None
+    method_version: str | None = Field(default=None, min_length=1, max_length=100)
+    coverage: Literal["full_interval_continuous"] | None = None
+    confidence: Literal["reviewed"] | None = None
+    face_head_clearance_verified: Literal[True]
+    crop_stability_verified: Literal[True]
+    source_subtitle_clearance_verified: Literal[True]
+    evidence_reference: str = Field(min_length=1, max_length=2_000)
+
+    @model_validator(mode="after")
+    def covered_interval_is_positive(self) -> "VerifiedVerticalDerivationEvidence":
+        if self.covered_end_ms <= self.covered_start_ms:
+            raise ValueError("derivation evidence end_ms must be greater than start_ms")
+        return self
+
+
+class VerifiedVerticalDerivationRequest(ContractModel):
+    """A bounded, evidence-backed transform from one horizontal Clip to 9:16 media.
+
+    This deliberately accepts a fixed crop only. It does not claim face
+    tracking, subtitle removal, or a general approval for the parent Asset.
+    """
+
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    source_asset_id: UUID
+    source_clip_id: UUID
+    start_ms: NonNegativeMs
+    end_ms: PositiveFrames
+    crop_window: SourceCropWindow
+    source_subtitle_state: Literal["known_burned_in", "not_observed"]
+    known_subtitle_regions: list[SourceCropWindow] = Field(default_factory=list, max_length=100)
+    evidence: VerifiedVerticalDerivationEvidence
+
+    @model_validator(mode="after")
+    def request_interval_and_subtitle_claim_are_consistent(self) -> "VerifiedVerticalDerivationRequest":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("vertical derivation end_ms must be greater than start_ms")
+        if self.evidence.source_asset_id != self.source_asset_id or self.evidence.source_clip_id != self.source_clip_id:
+            raise ValueError("derivation evidence must name the requested source Asset and Clip")
+        if self.evidence.crop_window is not None and self.evidence.crop_window != self.crop_window:
+            raise ValueError("derivation evidence must name the exact requested crop")
+        if self.evidence.covered_start_ms > self.start_ms or self.evidence.covered_end_ms < self.end_ms:
+            raise ValueError("derivation evidence must cover the complete requested interval")
+        if self.source_subtitle_state == "known_burned_in" and not self.known_subtitle_regions:
+            raise ValueError("known burned-in subtitles require their source regions")
+        if self.source_subtitle_state == "not_observed" and self.known_subtitle_regions:
+            raise ValueError("subtitle regions require known_burned_in source state")
+        return self
 
 
 class ImageAsset(ContractModel):
@@ -482,6 +556,31 @@ class VisualIntent(ContractModel):
     description: str | None = Field(default=None, max_length=2_000)
 
 
+class GraphicCardPlan(ContractModel):
+    """Explicit executable text card, or a named unsupported visual need."""
+
+    kind: Literal["text_card", "unsupported"]
+    treatment: Literal["headline", "key_point", "contrast"] | None = None
+    points: list[str] = Field(default_factory=list, max_length=4)
+    reason: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def bounded_realization(self) -> "GraphicCardPlan":
+        if self.kind == "unsupported":
+            if self.reason is None or self.treatment is not None or self.points:
+                raise ValueError("unsupported graphics require a reason and no executable card")
+        else:
+            if self.reason is not None or self.treatment is None or not self.points or any(
+                not point.strip() or len(point) > 24 or "\n" in point or "\r" in point for point in self.points
+            ) or sum(len(point) for point in self.points) > 72:
+                raise ValueError("text cards require bounded nonblank points and treatment")
+            if self.treatment == "headline" and len(self.points) != 1:
+                raise ValueError("headline requires one point")
+            if self.treatment == "contrast" and len(self.points) != 2:
+                raise ValueError("contrast requires two points")
+        return self
+
+
 class ScenePlan(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
@@ -491,10 +590,26 @@ class ScenePlan(ContractModel):
     voice_text: str = Field(min_length=1, max_length=10_000)
     duration_target_ms: PositiveFrames
     visual_intent: VisualIntent
+    graphic_plan: GraphicCardPlan | None = None
     preferred_sources: list[SourceKind] = Field(min_length=1, max_length=10)
     fallback_sources: list[SourceKind] = Field(default_factory=list, max_length=10)
     caption_emphasis: list[str] = Field(default_factory=list, max_length=30)
     evidence_refs: list[str] = Field(default_factory=list, max_length=100, description="Traceable IP/material evidence identifiers.")
+    visual_requirement: Literal["unknown", "creator_speaking", "action_evidence", "explanatory"] = "unknown"
+    visual_requirement_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @field_validator("visual_requirement_reason", mode="before")
+    @classmethod
+    def visual_requirement_reason_not_blank(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            raise PydanticCustomError("visual_requirement_reason_required", "editorial reason must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def visual_requirement_has_reason(self) -> "ScenePlan":
+        if self.visual_requirement != "unknown" and not (self.visual_requirement_reason or "").strip():
+            raise PydanticCustomError("visual_requirement_reason_required", "explicit visual requirement needs an editorial reason")
+        return self
 
 
 class UsageCost(ContractModel):
@@ -615,6 +730,286 @@ class ProviderMachineSetting(ContractModel):
         return ":".join((self.capability, self.mode, self.provider, self.model, self.runtime, self.machine_id))
 
 
+ExecutionPurpose = Literal["commercial_production", "internal_evaluation"]
+ProviderUseOperation = Literal["generation", "derivation", "review", "download"]
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class ExecutionUseIdentity(ContractModel):
+    capability: str = Field(min_length=1, max_length=100)
+    mode: Literal["local", "remote"]
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    model_artifact_sha256: Sha256
+
+
+class ProviderUseLicenseReview(ContractModel):
+    """Operator-reviewed applicability report; adoption is a separate trusted action."""
+    policy_version: Literal[1] = 1
+    evidence_class: Literal["operator_verified"]
+    project_id: UUID
+    purpose: Literal["internal_evaluation"]
+    capability_profile_id: UUID
+    configuration_sha256: Sha256
+    identity: ExecutionUseIdentity
+    intended_activity: str = Field(min_length=1, max_length=2000)
+    license_source: str = Field(min_length=1, max_length=2000)
+    license_version: str = Field(min_length=1, max_length=200)
+    license_terms_reference: str = Field(min_length=1, max_length=1000)
+    license_terms_sha256: Sha256
+    permits_intended_activity: Literal[True]
+    permitted_operations: list[ProviderUseOperation] = Field(min_length=1, max_length=4)
+    findings: list[str] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def distinct_operations_and_findings(self) -> "ProviderUseLicenseReview":
+        if len(set(self.permitted_operations)) != len(self.permitted_operations):
+            raise ValueError("permitted operations must be distinct")
+        if any(not line.strip() or len(line) > 2000 for line in self.findings):
+            raise ValueError("license findings must be nonempty and bounded")
+        return self
+
+
+class ExecutionArtifact(BaseModel):
+    """Logical artifact identity; deployment paths do not enter the digest."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    role: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=500)
+    size_bytes: int = Field(gt=0)
+    sha256: Sha256
+
+    @field_validator("role", "name")
+    @classmethod
+    def logical_name(cls, value: str) -> str:
+        if (value != value.strip() or "\\" in value or ":" in value
+            or any(part in ("", ".", "..") for part in value.split("/"))):
+            raise ValueError("execution_artifact_name_invalid")
+        return value
+
+
+def execution_canonical_sha256(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+
+
+class ExecutionMachineObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    installation_id: UUID
+    host_sha256: Sha256
+    device_sha256: Sha256
+
+
+class ExecutionSpecification(BaseModel):
+    """Selected execution configuration, independent of mutable evidence rows.
+
+    Completeness is owned by the adapter's observation recipe; this contract
+    validates structure and identity, never grants permission or quality.
+    """
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[1]
+    capability: str = Field(min_length=1, max_length=100)
+    mode: Literal["local"] = "local"
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    observation_recipe: str = Field(min_length=1, max_length=100)
+    observation_version: int = Field(gt=0)
+    model_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=1, max_length=512)
+    runtime_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=1, max_length=512)
+    machine: ExecutionMachineObservation
+    parameters: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def exact_schema_version(cls, value):
+        if type(value) is not int:
+            raise ValueError("execution_version_invalid")
+        return value
+
+    @field_validator("capability", "provider", "model", "runtime", "machine_id", "observation_recipe")
+    @classmethod
+    def exact_identity_label(cls, value):
+        if value != value.strip() or not value.strip():
+            raise ValueError("execution_identity_label_invalid")
+        return value
+
+    @field_validator("parameters", mode="before")
+    @classmethod
+    def exact_scalar_parameters(cls, value):
+        if not isinstance(value, dict) or any(
+            not isinstance(k, str) or not k.strip() or k != k.strip()
+            or type(v) not in (str, int, float, bool)
+            or isinstance(v, float) and not isfinite(v) for k, v in value.items()):
+            raise ValueError("execution_parameters_invalid")
+        return value
+
+    @model_validator(mode="after")
+    def complete_manifest_structure(self):
+        for entries, required in ((self.model_artifacts, {"weights"}),
+                                  (self.runtime_artifacts, {"interpreter", "entrypoint", "dependency"})):
+            keys = [(entry.role, entry.name) for entry in entries]
+            if len(keys) != len(set(keys)) or not required.issubset(entry.role for entry in entries):
+                raise ValueError("execution_manifest_invalid")
+        return self
+
+    def canonical(self) -> dict:
+        value = self.model_dump(mode="json")
+        for field in ("model_artifacts", "runtime_artifacts"):
+            value[field] = sorted(value[field], key=lambda item: (item["role"], item["name"]))
+        return value
+
+    @property
+    def execution_sha256(self) -> str:
+        return execution_canonical_sha256(self.canonical())
+
+    @property
+    def model_artifact_sha256(self) -> str:
+        return execution_canonical_sha256({"manifest_version": 1,
+            "artifacts": self.canonical()["model_artifacts"]})
+
+    @property
+    def identity(self) -> ExecutionUseIdentity:
+        return ExecutionUseIdentity(**{key: getattr(self, key) for key in
+            ("capability", "mode", "provider", "model", "runtime", "machine_id")},
+            model_artifact_sha256=self.model_artifact_sha256)
+
+
+class ExecutionSpecificationV2(BaseModel):
+    """Detached runtime inventory; schema1's serialized meaning is unchanged."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[2]
+    capability: str = Field(min_length=1, max_length=100)
+    mode: Literal["local"] = "local"
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    observation_recipe: str = Field(min_length=1, max_length=100)
+    observation_version: int = Field(gt=0)
+    model_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=1, max_length=512)
+    runtime_inventory: RuntimeInventoryDescriptor
+    host_runtime: HostRuntimeObservation
+    machine: ExecutionMachineObservation
+    parameters: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
+
+    _version = field_validator("schema_version", mode="before")(ExecutionSpecification.exact_schema_version.__func__)
+    _labels = field_validator("capability", "provider", "model", "runtime", "machine_id", "observation_recipe")(
+        ExecutionSpecification.exact_identity_label.__func__)
+    _parameters = field_validator("parameters", mode="before")(ExecutionSpecification.exact_scalar_parameters.__func__)
+
+    @model_validator(mode="after")
+    def valid_model_and_device(self):
+        keys = [(item.role, item.name) for item in self.model_artifacts]
+        if len(keys) != len(set(keys)) or not any(item.role == "weights" for item in self.model_artifacts):
+            raise ValueError("execution_manifest_invalid")
+        expected = "cpu" if self.host_runtime.device.kind == "cpu" else "cuda:0"
+        if self.parameters.get("device") != expected:
+            raise ValueError("execution_host_device_mismatch")
+        return self
+
+    def canonical(self) -> dict:
+        value = self.model_dump(mode="json")
+        value["model_artifacts"].sort(key=lambda item: (item["role"], item["name"]))
+        value["host_runtime"] = self.host_runtime.canonical()
+        return value
+
+    execution_sha256 = ExecutionSpecification.execution_sha256
+    model_artifact_sha256 = ExecutionSpecification.model_artifact_sha256
+    identity = ExecutionSpecification.identity
+
+
+class ExecutionSpecificationV3(BaseModel):
+    """Explicit schema3/host3-policy2 representation; not dispatch authority.
+
+    Standalone rather than a V2 subclass: old typed-instance validators must
+    not accept this version. Neither its digest nor a host observation proves
+    complete model preparation, current license authority or dispatch rights.
+    """
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[3]
+    capability: str = Field(min_length=1, max_length=100)
+    mode: Literal["local"] = "local"
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    observation_recipe: str = Field(min_length=1, max_length=100)
+    observation_version: int = Field(gt=0)
+    model_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=1, max_length=512)
+    runtime_inventory: RuntimeInventoryDescriptor
+    host_runtime: HostRuntimeObservationV3Policy2
+    machine: ExecutionMachineObservation
+    parameters: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
+
+    _version = field_validator("schema_version", mode="before")(ExecutionSpecification.exact_schema_version.__func__)
+    _labels = field_validator("capability", "provider", "model", "runtime", "machine_id", "observation_recipe")(
+        ExecutionSpecification.exact_identity_label.__func__)
+    _parameters = field_validator("parameters", mode="before")(ExecutionSpecification.exact_scalar_parameters.__func__)
+    _manifest = model_validator(mode="after")(ExecutionSpecificationV2.valid_model_and_device)
+
+    canonical = ExecutionSpecificationV2.canonical
+    execution_sha256 = ExecutionSpecification.execution_sha256
+    model_artifact_sha256 = ExecutionSpecification.model_artifact_sha256
+    identity = ExecutionSpecification.identity
+
+
+def _execution_specification_version(value):
+    version = value.get("schema_version") if isinstance(value, dict) else getattr(value, "schema_version", None)
+    return version if type(version) is int else None
+
+
+ExecutionSpecificationRecord = Annotated[
+    Annotated[ExecutionSpecification, Tag(1)] | Annotated[ExecutionSpecificationV2, Tag(2)]
+    | Annotated[ExecutionSpecificationV3, Tag(3)],
+    Discriminator(_execution_specification_version)]
+
+
+class ProviderUseLicenseReviewV2(ProviderUseLicenseReview):
+    policy_version: Literal[2]
+    execution_specification: ExecutionSpecificationRecord
+    execution_sha256: Sha256
+
+    @field_validator("policy_version", mode="before")
+    @classmethod
+    def exact_policy_version(cls, value):
+        if type(value) is not int:
+            raise ValueError("execution_version_invalid")
+        return value
+
+    @model_validator(mode="after")
+    def execution_matches(self):
+        if (self.execution_sha256 != self.execution_specification.execution_sha256
+            or self.identity != self.execution_specification.identity):
+            raise ValueError("execution_attestation_mismatch")
+        return self
+
+
+class ProviderUseAdmission(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    review_reference: str = Field(min_length=1, max_length=1000)
+    review_sha256: Sha256
+    review: ProviderUseLicenseReview | ProviderUseLicenseReviewV2
+    actor_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,100}$")
+    created_at: AwareDatetime
+    revoked_at: AwareDatetime | None = None
+    revoked_by: str | None = None
+    revocation_reason: str | None = None
+
+    @model_validator(mode="after")
+    def consistent_scope_and_revocation(self) -> "ProviderUseAdmission":
+        if self.project_id != self.review.project_id:
+            raise ValueError("admission project differs from report")
+        fields = (self.revoked_at, self.revoked_by, self.revocation_reason)
+        if any(v is not None for v in fields) and not all(v is not None for v in fields):
+            raise ValueError("revocation requires actor, time and reason")
+        return self
+
+
 class ProviderMachineCapabilityProfile(ContractModel):
     """Persisted evidence, distinct from a user-selected Advanced Setting."""
 
@@ -630,6 +1025,8 @@ class ProviderMachineCapabilityProfile(ContractModel):
     feature_support: dict[str, Literal["verified", "available", "unsupported", "unknown"]] = Field(default_factory=dict, max_length=100)
     quality_status: Literal["verified", "observed", "unknown"] = "unknown"
     continuity_status: Literal["verified", "observed", "unknown"] = "unknown"
+    commercial_status: Literal["unknown", "non_commercial_only", "commercial_safe"] = "unknown"
+    license_evidence_reference: str | None = Field(default=None, min_length=1, max_length=1_000)
     provenance_source: str = Field(min_length=1, max_length=500)
     evidence_reference: str | None = Field(default=None, min_length=1, max_length=1_000)
     last_verified_at: AwareDatetime | None = None
@@ -651,6 +1048,8 @@ class ProviderMachineCapabilityProfile(ContractModel):
             raise ValueError("verified parameters require a verified capability profile")
         if self.readiness != "verified" and "verified" in self.feature_support.values():
             raise ValueError("verified feature support requires a verified capability profile")
+        if self.commercial_status == "commercial_safe" and not self.license_evidence_reference:
+            raise ValueError("commercial-safe capability requires license evidence")
         return self
 
     @property
@@ -818,6 +1217,134 @@ class VideoCaption(ContractModel):
         return self
 
 
+class EditVisualRole(StrEnum):
+    """Editorial presentation role, independent of the renderer or provider."""
+
+    TALKING = "talking"
+    FOOTAGE = "footage"
+    GRAPHIC = "graphic"
+
+
+class TalkingFramingPolicy(StrEnum):
+    """Bounded R1 framing choices for creator Talking footage."""
+
+    FACE_SAFE_CONTAIN = "face_safe_contain"
+    VERIFIED_STATIC_CROP = "verified_static_crop"
+
+
+class PortraitPresentation(StrEnum):
+    """Where an authorized source sits inside the vertical output canvas."""
+
+    FULL_CANVAS = "full_canvas"
+    PORTRAIT_PANEL = "portrait_panel"
+
+
+class SubtitleTreatment(StrEnum):
+    TIMED_CAPTIONS = "timed_captions"
+    NONE = "none"
+
+
+class GraphicTreatment(StrEnum):
+    NONE = "none"
+    HEADLINE = "headline"
+    KEY_POINT = "key_point"
+    CONTRAST = "contrast"
+
+
+class VisualStyleTokens(ContractModel):
+    """Reusable visual tokens consumed by the renderer, never provider settings."""
+
+    name: str = Field(default="content-os-dark", min_length=1, max_length=100)
+    background_color: str = Field(default="#172033", pattern=r"^#[0-9a-fA-F]{6}$")
+    foreground_color: str = Field(default="#f8fbff", pattern=r"^#[0-9a-fA-F]{6}$")
+    accent_color: str = Field(default="#65d3b4", pattern=r"^#[0-9a-fA-F]{6}$")
+    font_family: str = Field(default="Inter, ui-sans-serif, system-ui", min_length=1, max_length=500)
+
+
+class EditPlanFallback(ContractModel):
+    """An explicit local graphic fallback if the selected visual cannot be used."""
+
+    source_kind: Literal[SourceKind.TYPOGRAPHY] = SourceKind.TYPOGRAPHY
+    graphic_treatment: GraphicTreatment
+    text: str = Field(min_length=1, max_length=2_000)
+
+    @model_validator(mode="after")
+    def treatment_is_renderable(self) -> "EditPlanFallback":
+        if self.graphic_treatment is GraphicTreatment.NONE:
+            raise ValueError("graphic fallback requires a semantic graphic treatment")
+        return self
+
+
+class EditPlanScene(ContractModel):
+    """One provider-neutral presentation decision for one routed ScenePlan."""
+
+    scene_plan_id: UUID
+    scene_id: str = Field(min_length=1, max_length=100)
+    visual_role: EditVisualRole
+    selected_source_kind: SourceKind
+    selected_asset_id: UUID | None = None
+    selected_clip_id: UUID | None = None
+    framing_policy: TalkingFramingPolicy = TalkingFramingPolicy.FACE_SAFE_CONTAIN
+    portrait_presentation: PortraitPresentation = PortraitPresentation.FULL_CANVAS
+    crop_safety_evidence_reference: str | None = Field(default=None, max_length=500)
+    crop_safety_start_ms: NonNegativeMs | None = None
+    crop_safety_end_ms: NonNegativeMs | None = None
+    subtitle_treatment: SubtitleTreatment = SubtitleTreatment.TIMED_CAPTIONS
+    burned_in_subtitles: Literal["unknown", "present", "absent"] = "unknown"
+    graphic_treatment: GraphicTreatment = GraphicTreatment.NONE
+    graphic_text: str | None = Field(default=None, min_length=1, max_length=10_000)
+    transition_intent: Literal["cut"] = "cut"
+    fallback: EditPlanFallback
+
+    @model_validator(mode="after")
+    def presentation_is_complete(self) -> "EditPlanScene":
+        source_requires_media = self.selected_source_kind in {
+            SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO,
+        }
+        if source_requires_media != (self.selected_asset_id is not None and self.selected_clip_id is not None):
+            raise ValueError("continuous selected visuals require both asset and Clip identities")
+        if self.selected_source_kind in {SourceKind.SCREENSHOT, SourceKind.CHART} and (
+            self.selected_asset_id is None or self.selected_clip_id is not None
+        ):
+            raise ValueError("static selected visuals require an asset identity without a Clip")
+        crop_values = (self.crop_safety_evidence_reference, self.crop_safety_start_ms, self.crop_safety_end_ms)
+        if self.framing_policy is TalkingFramingPolicy.VERIFIED_STATIC_CROP:
+            if any(value is None for value in crop_values):
+                raise ValueError("verified static crop requires evidence and a complete verified interval")
+            if self.crop_safety_end_ms is not None and self.crop_safety_start_ms is not None and self.crop_safety_end_ms <= self.crop_safety_start_ms:
+                raise ValueError("verified static crop interval must be valid")
+        elif any(value is not None for value in crop_values):
+            raise ValueError("crop safety evidence is only valid for verified_static_crop")
+        if self.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL and (
+            self.visual_role is not EditVisualRole.TALKING
+            or self.selected_source_kind is not SourceKind.AI_VIDEO
+            or self.framing_policy is not TalkingFramingPolicy.FACE_SAFE_CONTAIN
+        ):
+            raise ValueError("portrait_panel requires a face-safe Talking visual without a crop")
+        if self.visual_role is EditVisualRole.GRAPHIC:
+            if self.graphic_treatment is GraphicTreatment.NONE or self.graphic_text is None:
+                raise ValueError("graphic scenes require semantic treatment and display text")
+        elif self.graphic_text is not None and self.graphic_treatment is GraphicTreatment.NONE:
+            raise ValueError("graphic text requires a semantic graphic treatment")
+        return self
+
+
+class EditPlan(ContractModel):
+    """Visual-direction bridge from ScenePlan/routed assets to VideoSpec."""
+
+    project_id: UUID
+    scenes: list[EditPlanScene] = Field(min_length=1, max_length=1_000)
+    style_tokens: VisualStyleTokens = Field(default_factory=VisualStyleTokens)
+
+    @model_validator(mode="after")
+    def scene_identities_are_unique(self) -> "EditPlan":
+        if len({scene.scene_plan_id for scene in self.scenes}) != len(self.scenes):
+            raise ValueError("EditPlan scenes must have unique ScenePlan identities")
+        if len({scene.scene_id for scene in self.scenes}) != len(self.scenes):
+            raise ValueError("EditPlan scenes must have unique scene_id values")
+        return self
+
+
 class VideoScene(ContractModel):
     scene_id: str = Field(min_length=1, max_length=100)
     start_frame: int = Field(ge=0, strict=True)
@@ -829,6 +1356,13 @@ class VideoScene(ContractModel):
     caption: str | None = Field(default=None, max_length=10_000)
     captions: list[VideoCaption] = Field(default_factory=list, max_length=1_000)
     transition: str = Field(default="cut", max_length=100)
+    visual_role: EditVisualRole = EditVisualRole.FOOTAGE
+    framing_policy: TalkingFramingPolicy = TalkingFramingPolicy.FACE_SAFE_CONTAIN
+    portrait_presentation: PortraitPresentation = PortraitPresentation.FULL_CANVAS
+    subtitle_treatment: SubtitleTreatment = SubtitleTreatment.TIMED_CAPTIONS
+    graphic_treatment: GraphicTreatment = GraphicTreatment.NONE
+    graphic_text: str | None = Field(default=None, max_length=10_000)
+    style_tokens: VisualStyleTokens = Field(default_factory=VisualStyleTokens)
 
     @model_validator(mode="after")
     def narration_interval_is_complete(self) -> "VideoScene":
@@ -838,6 +1372,10 @@ class VideoScene(ContractModel):
             raise ValueError("narration interval must be valid")
         if self.narration_asset_id is None and self.narration_start_ms is not None:
             raise ValueError("narration interval requires narration_asset_id")
+        if self.visual_role is EditVisualRole.GRAPHIC and (
+            self.graphic_treatment is GraphicTreatment.NONE or not self.graphic_text
+        ):
+            raise ValueError("graphic video scenes require semantic treatment and display text")
         return self
 
 
@@ -879,6 +1417,7 @@ class VideoSpec(ContractModel):
     master_narration: MasterNarration | None = None
     voice_profile_id: UUID | None = None
     estimated_cost: UsageCost | None = None
+    edit_plan: EditPlan | None = None
 
     @model_validator(mode="after")
     def scenes_are_valid_for_timeline(self) -> "VideoSpec":
@@ -921,6 +1460,8 @@ class VideoSpec(ContractModel):
             required_frames = (master_frames + frame_denominator - 1) // frame_denominator
             if expected_video_start < required_frames:
                 raise ValueError("master narration video timeline ends before its audio")
+        if self.edit_plan is not None and self.edit_plan.project_id != self.project_id:
+            raise ValueError("EditPlan must belong to the VideoSpec project")
         return self
 
 
@@ -1273,6 +1814,16 @@ class VoiceGenerationJobPayload(ContractModel):
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     narration_performance_plan: NarrationPerformancePlan | None = None
     reference_window: VoiceReferenceWindowSelection | None = None
+    expected_provider: str | None = None
+    expected_model: str | None = None
+    execution_capability_profile_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def complete_execution_pin(self) -> "VoiceGenerationJobPayload":
+        pins = (self.expected_provider, self.expected_model, self.execution_capability_profile_id)
+        if any(value is not None for value in pins) and not all(value is not None for value in pins):
+            raise ValueError("pinned Voice execution requires provider, model and capability profile")
+        return self
 
 
 class VoiceQaJobPayload(ContractModel):
@@ -1300,6 +1851,42 @@ class VoiceBoundaryAlignmentJobPayload(ContractModel):
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class PlannedTalkingContext(ContractModel):
+    """Execution-only identity for one admitted ProductionRun Talking scene."""
+
+    run_id: UUID
+    scene_plan_id: UUID
+    source_admission_id: UUID
+    capability_profile_id: UUID
+    expected_provider: str = Field(min_length=1, max_length=100)
+    expected_model: str = Field(min_length=1, max_length=200)
+    expected_runtime: str = Field(min_length=1, max_length=200)
+    expected_machine_id: str = Field(min_length=1, max_length=200)
+    binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    consent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TalkingQaJobPayload(ContractModel):
+    """One exact planned output, measured against its Master slice."""
+
+    project_id: UUID
+    run_id: UUID
+    scene_plan_id: UUID
+    generation_job_id: UUID
+    output_asset_id: UUID
+    output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    master_audio_id: UUID
+    master_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    master_start_ms: int = Field(ge=0)
+    master_end_ms: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def positive_interval(self) -> "TalkingQaJobPayload":
+        if self.master_end_ms <= self.master_start_ms:
+            raise ValueError("Talking QA interval must be positive")
+        return self
+
+
 class TalkingGenerationJobPayload(ContractModel):
     """Credential-free input for one authorized Talking/lip-sync request."""
 
@@ -1308,6 +1895,7 @@ class TalkingGenerationJobPayload(ContractModel):
     reference_clip_id: UUID
     narration_audio_id: UUID
     authorization_reference: str = Field(min_length=1, max_length=500)
+    planned_context: PlannedTalkingContext | None = None
     terminal_face_closeout: bool = False
     terminal_delivery_end_ms: int | None = Field(default=None, ge=1)
     execution_parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=100)
@@ -1368,6 +1956,11 @@ class TalkingGenerationJobPayload(ContractModel):
                 raise ValueError("Talking slice series index must be below its size")
             if self.terminal_face_closeout and self.slice_series_index != self.slice_series_size - 1:
                 raise ValueError("only the final Talking slice series child may request terminal face closeout")
+        if self.planned_context is not None and (
+            self.slice_start_segment_index is None or self.reference_window_start_ms is None
+            or self.slice_series_id is not None or self.terminal_face_closeout
+        ):
+            raise ValueError("planned Talking requires one bounded source-forward slice without series/terminal options")
         return self
 
 
@@ -1381,6 +1974,100 @@ class TalkingSliceSeriesRecovery(ContractModel):
     recovered_at: AwareDatetime
 
 
+class PlannedTalkingRunOrigin(ContractModel):
+    """Immutable evidence snapshot linking an existing planned child to a collection."""
+
+    version: Literal[1] = 1
+    run_id: UUID
+    scene_plan_id: UUID
+    binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation_job_id: UUID
+    qa_job_id: UUID
+    qa_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    output_asset_id: UUID
+    output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    master_audio_id: UUID
+    master_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    master_review_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    master_start_ms: int = Field(ge=0)
+    master_end_ms: int = Field(ge=1)
+    source_clip_id: UUID
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_start_ms: int = Field(ge=0)
+    source_end_ms: int = Field(ge=1)
+    source_admission_id: UUID
+    consent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authorization_reference: str = Field(min_length=1)
+    license_evidence_reference: str = Field(min_length=1)
+    child_review_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def intervals_are_positive(self) -> "PlannedTalkingRunOrigin":
+        if self.master_end_ms <= self.master_start_ms or self.source_end_ms <= self.source_start_ms:
+            raise ValueError("planned Talking origin intervals must be positive")
+        return self
+
+
+class PlannedTalkingRunOriginV2(PlannedTalkingRunOrigin):
+    """Aggregate policy keeps child technical provenance without inventing approval."""
+
+    version: Literal[2] = 2
+    review_policy_version: Literal[2] = 2
+    child_review_sha256: None = None
+    execution_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TalkingReviewDimensions(ContractModel):
+    visible_sync: Literal["pass", "fail", "unknown"]
+    identity: Literal["pass", "fail", "unknown"]
+    artifacts: Literal["pass", "fail", "unknown"]
+    source_performance: Literal["pass", "fail", "unknown"]
+    continuity: Literal["pass", "fail", "unknown"]
+    publishability: Literal["pass", "fail", "unknown"]
+
+
+class TalkingReviewFinding(ContractModel):
+    dimension: Literal["visible_sync", "identity", "artifacts", "source_performance", "continuity", "publishability"]
+    reason: str = Field(min_length=1, max_length=2000)
+    start_ms: NonNegativeMs | None = None
+    end_ms: PositiveFrames | None = None
+
+    @model_validator(mode="after")
+    def complete_interval(self) -> "TalkingReviewFinding":
+        if (self.start_ms is None) != (self.end_ms is None) or (
+            self.start_ms is not None and self.end_ms <= self.start_ms
+        ):
+            raise ValueError("review finding requires a complete positive interval or whole-result scope")
+        return self
+
+
+class TalkingReviewConcern(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    idempotency_key: str = Field(min_length=1, max_length=500)
+    series_id: UUID
+    subject_asset_id: UUID
+    subject_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    finding: TalkingReviewFinding
+    evidence_reference: str = Field(min_length=1, max_length=2000)
+    source: Literal["human_review"] = "human_review"
+    created_at: AwareDatetime
+
+
+class TalkingReviewConcernAnswer(ContractModel):
+    concern_id: UUID
+    approved: bool
+    evidence_reference: str = Field(min_length=1, max_length=2000)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class TalkingRunPreviewJobPayload(ContractModel):
+    project_id: UUID
+    series_id: UUID
+    origin_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class TalkingSliceSeries(ContractModel):
     """Atomic parent record for an ordered set of short Talking jobs."""
 
@@ -1391,7 +2078,18 @@ class TalkingSliceSeries(ContractModel):
     narration_audio_id: UUID
     child_job_ids: list[UUID] = Field(min_length=1, max_length=10_000)
     recovery_history: list[TalkingSliceSeriesRecovery] = Field(default_factory=list)
+    planned_origin: PlannedTalkingRunOrigin | PlannedTalkingRunOriginV2 | None = None
     created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def planned_collection_is_one_immutable_child(self) -> "TalkingSliceSeries":
+        if self.planned_origin is not None and (
+            self.child_job_ids != [self.planned_origin.generation_job_id]
+            or self.narration_audio_id != self.planned_origin.master_audio_id
+            or self.recovery_history
+        ):
+            raise ValueError("planned Talking collection must contain exactly its original child")
+        return self
 
 
 class TalkingSliceSeriesContinuityReview(ContractModel):
@@ -1404,7 +2102,34 @@ class TalkingSliceSeriesContinuityReview(ContractModel):
     evidence_reference: str = Field(min_length=1, max_length=2_000)
     findings: list[str] = Field(default_factory=list, max_length=100)
     child_job_ids: list[UUID] = Field(min_length=1, max_length=10_000)
+    planned_origin_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    preview_asset_id: UUID | None = None
+    preview_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    preview_qa_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     reviewed_at: AwareDatetime
+    review_policy_version: Literal[1, 2] = 1
+    dimensions: TalkingReviewDimensions | None = None
+    scoped_findings: list[TalkingReviewFinding] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def policy_scope_is_explicit(self) -> "TalkingSliceSeriesContinuityReview":
+        if self.review_policy_version == 2:
+            if self.dimensions is None or self.preview_asset_id is None:
+                raise ValueError("aggregate review requires six dimensions and exact preview")
+            if self.approved and any(value != "pass" for value in self.dimensions.model_dump(exclude={"schema_version"}).values()):
+                raise ValueError("aggregate approval requires all six dimensions to pass")
+            if not self.approved and not self.scoped_findings:
+                raise ValueError("aggregate rejection requires scoped findings")
+        elif self.dimensions is not None or self.scoped_findings:
+            raise ValueError("legacy review cannot claim aggregate scope")
+        return self
+
+    @model_validator(mode="after")
+    def planned_review_fields_are_complete(self) -> "TalkingSliceSeriesContinuityReview":
+        fields = (self.planned_origin_sha256, self.preview_asset_id, self.preview_sha256, self.preview_qa_sha256)
+        if any(value is not None for value in fields) and any(value is None for value in fields):
+            raise ValueError("planned continuity review must bind the entire exact preview")
+        return self
 
 
 class TalkingRunChildEvidence(ContractModel):
@@ -1446,7 +2171,16 @@ class TalkingRun(ContractModel):
     assembled_clip_id: UUID
     automated_qa_state: Literal["verified"]
     admission_state: Literal["admitted"]
+    planned_origin_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    reviewed_preview_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     created_at: AwareDatetime
+    review_policy_version: Literal[1, 2] = 1
+
+    @model_validator(mode="after")
+    def planned_run_fields_are_complete(self) -> "TalkingRun":
+        if (self.planned_origin_sha256 is None) != (self.reviewed_preview_sha256 is None):
+            raise ValueError("planned TalkingRun requires origin and reviewed preview hashes together")
+        return self
 
     @model_validator(mode="after")
     def admitted_run_is_contiguous(self) -> "TalkingRun":
@@ -1471,7 +2205,7 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | None = None
+    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | TalkingQaJobPayload | TalkingRunPreviewJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
@@ -1509,6 +2243,14 @@ class Job(ContractModel):
                 raise ValueError("talking generation job payload must be a TalkingGenerationJobPayload")
             if self.payload is not None and self.project_id != self.payload.project_id:
                 raise ValueError("talking generation job project_id must match its payload")
+        elif self.type is JobType.VERIFY_TALKING:
+            if not isinstance(self.payload, TalkingQaJobPayload):
+                raise ValueError("talking QA job payload must be a TalkingQaJobPayload")
+            if self.project_id != self.payload.project_id:
+                raise ValueError("talking QA job project_id must match its payload")
+        elif self.type is JobType.PREPARE_TALKING_RUN_PREVIEW:
+            if not isinstance(self.payload, TalkingRunPreviewJobPayload) or self.project_id != self.payload.project_id:
+                raise ValueError("Talking preview job requires matching typed project payload")
         elif self.payload is not None:
             raise ValueError("only declared typed jobs may contain a payload")
         return self

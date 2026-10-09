@@ -11,10 +11,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 import re
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TYPE_CHECKING
 
 from app.domain.models import NarrationPerformancePlan, VoiceProfile
 from app.routing.execution import FeatureSupport
+
+if TYPE_CHECKING:
+    from .omnivoice_local import OmniVoiceLocalParameters, OmniVoiceLocalSelection
 
 
 class VoiceError(RuntimeError):
@@ -176,6 +179,45 @@ class OmniVoiceProvider:
 
     def synthesize(self, profile: VoiceProfile, text: str, output_path: str | Path, *, language: str | None = None) -> VoiceSynthesisResult:
         return self._synthesize(profile, text, output_path, language=language)
+
+    def prepare_execution(self, request: object):
+        """Opaque injected callables do not prove a closed, fixed loader.
+
+        Keep legacy synthesis unchanged; this explicit stop applies only to
+        the future purpose-scoped native preparation extension.
+        """
+        from .prepared import NativeExecutionUnsupported
+        raise NativeExecutionUnsupported("execution_native_opaque_callable_unsupported")
+
+    def select_local_execution_model(self, parameters: OmniVoiceLocalParameters) -> OmniVoiceLocalSelection:
+        """Read-only model selection; never promotes an injected callable.
+
+        Application must pass resolved parameters explicitly. This extension
+        does not read ambient env, inspect a receipt or authorize synthesis.
+        """
+        from .omnivoice_local import OmniVoiceLocalParameters, select_local_omnivoice
+        from .prepared import ExecutionPreparationError
+        if not isinstance(parameters, OmniVoiceLocalParameters):
+            raise ExecutionPreparationError("omnivoice_effective_parameters_required")
+        return select_local_omnivoice(Path(self.model), parameters)
+
+    def prepare_local_execution_identity(self, parameters, *, runtime, host, data_root,
+            staging_parent, max_model_bytes, runtime_label, machine_id):
+        """Stage actual model bytes with the same owned runtime/host witness.
+
+        Read-only preparation identity extension, not synthesize/execute. Opaque
+        native preparation and ordinary evaluation dispatch remain disabled.
+        """
+        from .omnivoice_prepared import prepare_omnivoice_identity
+        return prepare_omnivoice_identity(model_root=Path(self.model), parameters=parameters,
+            runtime=runtime, host=host, data_root=data_root, staging_parent=staging_parent,
+            max_model_bytes=max_model_bytes, provider=self.provider_name, model=self.model,
+            runtime_label=runtime_label, machine_id=machine_id)
+
+    def select_local_execution_model_v2(self, parameters):
+        """Explicit CPU component selection; no synthesis or runtime authority."""
+        from .omnivoice_recipe_v2 import select_local_omnivoice_v2
+        return select_local_omnivoice_v2(Path(self.model), parameters)
 
     def synthesize_with_reference(self, profile: VoiceProfile, text: str, output_path: str | Path, *, language: str | None = None, reference_window: object) -> VoiceSynthesisResult:
         if self._reference_synthesizer is None:

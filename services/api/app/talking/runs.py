@@ -35,6 +35,9 @@ class TalkingRunAssembler:
         self.ffmpeg_command = str(ffmpeg_command)
 
     def assemble(self, series: TalkingSliceSeries) -> TalkingRun:
+        from app.production_runs import is_planned_talking_collection
+        if is_planned_talking_collection(self.assets.db, series):
+            raise TalkingRunAssemblyError("planned Talking collection requires exact preview review and admission")
         existing = self.runs.get_by_series_id(series.id)
         if existing is not None:
             return existing

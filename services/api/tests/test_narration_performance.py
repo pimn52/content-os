@@ -458,7 +458,7 @@ def test_voice_handler_refuses_unapplied_plan_and_records_an_explicit_applicatio
                 return VoiceSynthesisResult(output_path, provider_version="test-version", performance_intent_applied=True)
 
         class SupportedImporter:
-            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None) -> AudioAsset:
+            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None, generated_job=None) -> AudioAsset:
                 assert source.is_file() and authorization_reference == "voice-consent-1" and language == "en"
                 value = AudioAsset(
                     source_file=str(source), content_hash="p" * 64, duration_ms=1_200, sample_rate=24_000, channels=1,

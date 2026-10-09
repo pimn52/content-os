@@ -18,7 +18,7 @@ from typing import Sequence
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository, JobRepository, ProjectRepository, TalkingProfileRepository, VoiceProfileRepository
 from app.budget import ProviderCallLedger
 from app.domain.models import JobType, VoiceReferenceWindowSelection
-from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler, VoiceBoundaryAlignmentJobHandler, VoiceGenerationJobHandler, VoiceQaJobHandler
+from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler, TalkingQaJobHandler, VoiceBoundaryAlignmentJobHandler, VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore
@@ -37,6 +37,8 @@ from app.providers.vision import OpenAICompatibleVisionProvider, VisionConfigura
 from app.providers.latentsync import LatentSyncProvider
 from app.providers.talking import TalkingConfigurationError
 from app.providers.voice import OmniVoiceProvider, VoiceConfigurationError, VoiceConnectionError, VoiceInputError, VoiceProviderResponseError, VoiceTimeout
+from app.production_runs import ProductionRunService
+from app.talking.planned_preview import TalkingRunPreviewJobHandler
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
 from app.runtime import resolve_local_executable
@@ -91,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_VOICE, JobType.CREATE_VOICE_PACE_CANDIDATE, JobType.VERIFY_VOICE, JobType.ALIGN_VOICE_BOUNDARIES, JobType.GENERATE_TALKING, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
+    parser.add_argument("--job-type", dest="job_types", action="append", choices=[item.value for item in (JobType.ANALYZE_ASSET, JobType.TRANSCRIBE_AUDIO, JobType.INDEX_CLIPS, JobType.GENERATE_VOICE, JobType.CREATE_VOICE_PACE_CANDIDATE, JobType.VERIFY_VOICE, JobType.ALIGN_VOICE_BOUNDARIES, JobType.GENERATE_TALKING, JobType.VERIFY_TALKING, JobType.PREPARE_TALKING_RUN_PREVIEW, JobType.RENDER)], help="Restrict handlers; repeat to select multiple")
     parser.add_argument("--gpu-resource-key", default=None, help="Serialize local Voice/Talking inference sharing this GPU (default gpu:<hostname>)")
     parser.add_argument("--ffmpeg", default=resolve_local_executable("ffmpeg"))
     parser.add_argument("--ffprobe", default=resolve_local_executable("ffprobe"))
@@ -124,6 +126,9 @@ def parse_config(argv: Sequence[str] | None = None) -> WorkerConfig:
 
 
 def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
+    # The same configured root owns media AND current use-admission evidence.
+    # Never infer it from Worker CWD or the SQLite file's containing directory.
+    db.data_root = config.data_root.resolve()
     store = JobStore(db)
     targets = AssetJobTargetStore(db)
     assets = AssetRepository(db)
@@ -243,6 +248,14 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
                 provider_name="faster-whisper", provider_model=qa_model,
                 max_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
                 max_leading_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500")),
+                data_root=config.data_root,
+                repair_execution={"runtime": os.environ.get("CONTENT_OS_VOICE_QA_RUNTIME_ID"),
+                    "machine_id": os.environ.get("CONTENT_OS_VOICE_QA_MACHINE_ID"),
+                    "parameters": {"device": os.environ.get("CONTENT_OS_VOICE_QA_ASR_DEVICE", "cpu"),
+                        "compute_type": os.environ.get("CONTENT_OS_VOICE_QA_ASR_COMPUTE_TYPE", "int8"),
+                        "vad_filter": False, "word_timestamps": True,
+                        "max_silence_ms": int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
+                        "max_leading_silence_ms": int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500"))}},
             )
         if JobType.ALIGN_VOICE_BOUNDARIES in config.job_types:
             handlers[JobType.ALIGN_VOICE_BOUNDARIES] = VoiceBoundaryAlignmentJobHandler(
@@ -260,6 +273,16 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             config.data_root / "generated",
             ProviderCallLedger(db),
             ffmpeg_command=config.ffmpeg,
+            execution_runtime=os.environ.get("CONTENT_OS_TALKING_RUNTIME_ID"),
+            execution_machine_id=os.environ.get("CONTENT_OS_TALKING_MACHINE_ID"),
+        )
+    if JobType.VERIFY_TALKING in config.job_types:
+        handlers[JobType.VERIFY_TALKING] = TalkingQaJobHandler(
+            AssetRepository(db), data_root=config.data_root, probe=FFProbeAdapter(config.ffprobe),
+        )
+    if JobType.PREPARE_TALKING_RUN_PREVIEW in config.job_types:
+        handlers[JobType.PREPARE_TALKING_RUN_PREVIEW] = TalkingRunPreviewJobHandler(
+            db, config.data_root, ffmpeg_command=config.ffmpeg, probe=FFProbeAdapter(config.ffprobe),
         )
     gpu_job_types = {JobType.GENERATE_VOICE, JobType.GENERATE_TALKING}
     resource_keys = {job_type: config.gpu_resource_key for job_type in config.job_types if job_type in gpu_job_types}
@@ -268,6 +291,14 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
         lease_duration=timedelta(seconds=config.lease_seconds),
         heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts,
         resource_keys_by_type=resource_keys,
+        on_completed=lambda job: (
+            ProductionRunService(db, config.data_root).reconcile_completed_voice_job(
+                job.id, qa_worker_ready=JobType.VERIFY_VOICE in handlers,
+            ) if job.type is JobType.GENERATE_VOICE else
+            ProductionRunService(db, config.data_root).reconcile_completed_talking_job(
+                job.id, qa_worker_ready=JobType.VERIFY_TALKING in handlers,
+            ) if job.type is JobType.GENERATE_TALKING else None
+        ),
     )
 
 
@@ -439,7 +470,11 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
                 raise VoiceProviderResponseError("local OmniVoice inference failed")
         return target
 
-    return OmniVoiceProvider(model=str(model), synthesizer=synthesize, reference_synthesizer=synthesize)
+    provider = OmniVoiceProvider(model=str(model), synthesizer=synthesize, reference_synthesizer=synthesize)
+    provider.repair_execution = {"runtime": os.environ.get("CONTENT_OS_VOICE_RUNTIME_ID"),
+        "machine_id": os.environ.get("CONTENT_OS_VOICE_MACHINE_ID"),
+        "parameters": {"runtime_python": str(runtime), "num_step": num_step, "speed": speed, "timeout_seconds": timeout_seconds}}
+    return provider
 
 
 def _build_talking_provider(config: WorkerConfig) -> LatentSyncProvider:
@@ -498,8 +533,17 @@ def _build_talking_provider(config: WorkerConfig) -> LatentSyncProvider:
 def run(config: WorkerConfig, *, stop_event: Event | None = None) -> int:
     stop = stop_event or Event()
     db = Database(config.db_path)
+    db.data_root = Path(config.data_root).resolve()
     try:
         runner = build_runner(config, db)
+        if {JobType.GENERATE_VOICE, JobType.VERIFY_VOICE} & set(config.job_types):
+            ProductionRunService(db, config.data_root).reconcile_completed_voice_jobs_once(
+                qa_worker_ready=JobType.VERIFY_VOICE in runner.handler_types,
+            )
+        if {JobType.GENERATE_TALKING, JobType.VERIFY_TALKING} & set(config.job_types):
+            ProductionRunService(db, config.data_root).reconcile_completed_talking_jobs_once(
+                qa_worker_ready=JobType.VERIFY_TALKING in runner.handler_types,
+            )
         if config.once:
             runner.recover_expired()
             runner.run_once(allowed_types=runner.handler_types)

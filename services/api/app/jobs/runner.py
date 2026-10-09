@@ -132,6 +132,7 @@ class JobRunner:
         heartbeat_interval: timedelta | None = None,
         heartbeat_store_factory: HeartbeatStoreFactory | None = None,
         resource_keys_by_type: Mapping[JobType, str] | None = None,
+        on_completed: Callable[[Job], None] | None = None,
     ) -> None:
         if not isinstance(store, JobStore):
             raise TypeError("store must be a JobStore")
@@ -158,6 +159,7 @@ class JobRunner:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat_store_factory = heartbeat_store_factory or self._default_heartbeat_store_factory(store)
         self._resource_keys_by_type = {} if resource_keys_by_type is None else dict(resource_keys_by_type)
+        self._on_completed = on_completed
 
     @property
     def handler_types(self) -> frozenset[JobType]:
@@ -191,6 +193,12 @@ class JobRunner:
         heartbeat = self._start_heartbeat(job)
         try:
             try:
+                from app.execution_scope import require_evaluation_lane_closed
+                from app.execution_admission import UseAdmissionError
+                try:
+                    require_evaluation_lane_closed(self._store.db, job)
+                except UseAdmissionError as exc:
+                    raise JobExecutionError(str(exc), str(exc), retryable=False) from None
                 handler(job)
             except JobExecutionError as error:
                 handler_error: JobExecutionError | None = error
@@ -214,6 +222,8 @@ class JobRunner:
         completed = self._store.complete(job.id, self._worker_id)
         if completed is None:
             raise LeaseLost("job lease was lost before completion could be recorded")
+        if self._on_completed is not None:
+            self._on_completed(completed)
         return completed
 
     def _start_heartbeat(self, job: Job) -> _LeaseHeartbeat | None:

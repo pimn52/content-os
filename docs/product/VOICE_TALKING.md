@@ -42,6 +42,10 @@ variant in one normal Job.
 
 ### Core flow
 
+The saved ProductionRun UI now exposes its Voice step using the normal VoiceProfile list and persisted execution capability choices. It requires an explicit profile, provider-matching capability identity and authorization reference, then submits only to the Run's existing guarded Voice dispatch/QA actions. Unknown quality, commercial license and budget evidence remain visible and are rechecked server side; this is no runtime recommendation or capability admission.
+
+When the Run identifies its generated AudioAsset, the UI verifies its project and originating Voice Job before loading metadata or protected media. Preview bytes use the current local access token and an object URL released on candidate/scope changes. U-Voice controls appear only when that exact Run is awaiting review and no prior judgment exists. The six dimensions start unset, each requires an outcome plus evidence reference and findings, and a confirmation names the AudioAsset/hash before calling the existing immutable review endpoint. A saved outcome refreshes the Run but does not auto-resume production. The isolated browser fixture exercises Voice selection, unknown evidence, QA progression, bound candidate playback and review-form rendering; it cannot establish real Voice runtime or subjective audio quality.
+
 ```text
 new copy
 → editable narration performance intent
@@ -82,6 +86,12 @@ failed attempt remains a distinct provenance record and is never overwritten;
 the first complete QA-passing take is the only eligible input to composition.
 If the adapter/profile exhausts its configured bounded attempts, the route is a
 generation-integrity block, not evidence about U-Voice performance quality.
+
+### Voice recovery boundary
+
+The current Voice recovery classifier exposes recommendations, not an executable ProductionRun repair action. Normal Run dispatch produces a single take; standalone take composition does not make arbitrary intervals of that take independently replaceable. A leading-silence warning may use the first ASR timestamp when waveform measurement is unavailable, so the warning alone never authorizes trimming.
+
+[D027](../../DECISIONS.md#d027--repair-the-supported-dependency-and-preserve-the-review-boundary) defines the next bounded action, not shipped capability: a terminal, unapproved single take with no downstream consumption may receive one explicitly confirmed same-payload replacement for a supported transient generation or independent copy-QA failure. Preserve old evidence and charge records; independently QA the entire new take and require exact U-Voice again. Incomplete QA, unknown failures and missing audio require diagnosis; subjective delivery, reference/configuration changes, approved Masters and multi-take dependencies require replanning rather than this action. Voice/Talking/presentation repairs must share the original production allowance; both TTS and fresh QA ASR operations need declared bounds. No automatic splice, silence normalization or downstream Master substitution is implied.
 
 ### Voice QA
 
@@ -389,11 +399,17 @@ a QA pass or human approval. Recovery is unavailable after continuity review or
 TalkingRun admission. Further failure needs a new bounded product decision,
 not an automatic retry loop.
 
-The implemented admission path stores a provider-neutral TalkingRun record and
+The policy-v1 admission path stores a provider-neutral TalkingRun record and
 creates one generated Asset plus one whole-duration Clip only after every child
 has automated QA, individual U-Talking approval and an immutable approved
-continuity review. Hybrid Asset Router, VideoSpec and the renderer consume the
-admitted Asset/Clip without traversing child jobs.
+continuity review. Explicit VideoSpec selection and the renderer consume the
+admitted Asset/Clip without traversing child jobs. Normal routing now discovers
+the admitted whole Run Clip for the same project and exact reviewed speech;
+unreviewed children do not become normal candidates. Explicit assembly and
+rendering recheck persisted Run identity, review state, project, speech and
+whether the selected scene interval reaches the last timed word
+instead of trusting copied Asset labels. Generated AI_VIDEO outside this
+admission path remains ineligible.
 
 The project-scoped U-Talking API records one immutable human decision on each
 exact generated child Asset only after automated QA and completed-Job
@@ -401,6 +417,57 @@ provenance. A child approval does not imply that joins between children are
 acceptable. An assembled review-only preview can expose those joins with the
 Master Narration as audio, but it is not an admitted TalkingRun or routable
 production Asset; the separate continuity decision remains mandatory.
+
+The planned-child bridge described next is policy v1. The versioned v2 API lane below retains its exact-preview and provenance boundary with a broader whole-result judgment replacing mandatory child judgment.
+
+The single planned child uses an existing one-element series evidence collection with a versioned planned-origin snapshot; completed Job payloads remain unchanged. After exact technical QA and child U-Talking approval, a guarded product action links the completed output, current plan, Master interval, source admission, consent/license and review evidence to a durable local preview Job. The Worker rechecks inputs and bytes before and after FFmpeg, remuxes the authoritative Master interval, probes the candidate and persists a review-only Asset with its hash and measured streams/timing. A separate immutable continuity decision must explicitly name that exact preview Asset and hash; it also binds origin and technical-report hashes. Approved admission atomically promotes the same Asset bytes, creates one full Clip and existing TalkingRun, and binds ProductionRun without re-encoding. Product and series admission endpoints share the same service; replay and downstream generated-visual gates reopen current source authority, reviews, origin and bytes. Marker-stripped collections and legacy direct assembly remain blocked. ProductionRun exposes preview/review/admitted states. Its narrow resume action can consume all exact bound native-portrait Runs plus deterministic typography, resolve Master timestamps and enqueue the existing render Job. It does not reselect substitutes or silently extend short Talking with a frozen frame, loop, stretch or typography tail. Unknown burned-in subtitles remain unknown; no new caption overlay is added to such Talking. Child QA does not inherit as technical QA of the new encoding, and a single child grants no human-review exemption. D025 owns the boundary. This bridge is fixture/API-integrated, with synthetic real-media evidence for preview preparation only; real planned provider output, human approval, normal UI and repeatability are not proven.
+
+### Versioned aggregate review (planned API lane)
+
+[D026](../../DECISIONS.md#d026--consolidate-talking-judgment-on-the-exact-output-through-a-versioned-policy) is implemented for newly created planned Runs through the API and the normal Web entry point. `POST /projects/{project_id}/production-runs` accepts `talking_review_policy_version: 2`; omission retains v1. The normal Web entry explicitly selects v2 for new Runs; a loaded Run without the field is treated as legacy v1, preserving its child-plus-aggregate controls. Version is immutable and included in request identity; an existing plan bound to another policy returns a conflict. Current execution/source admission and an exact Master-audio preview remain required. Legacy/evaluation and multi-child series retain v1. Unknown/new configurations still need bounded capability validation before normal dispatch; changing the topic alone does not require a new calibration campaign.
+
+The v2 Web review shows child technical QA separately from subjective Run review, the exact preview and all six dimensions, plus persisted local concerns and answers. A local concern may be registered against that preview and answered with the aggregate review, or appended after an existing approval without rewriting it. Existing rejection remains visibly immutable. The isolated same-fixture browser comparison verified the core v1/v2 review path and records required subjective submission actions (v1: child + whole Run; v2: whole Run), not elapsed user time. The concern/answer browser submission branch remains unverified. Real planned-media quality, repeatability and real human-time reduction are not established.
+
+### Bounded planned Talking repair
+
+`GET /projects/{project_id}/production-runs/{run_id}/talking-repair-plan`
+requires a current bound scene and reads the existing generation failure or
+exact negative aggregate/local review evidence. The plan names the action,
+finding range, reused Master, required fresh review, remaining repair allowance
+and fixed call/cost boundaries. Only `talking_temporarily_unavailable` or
+negative findings restricted to visible sync/artifacts permit regeneration.
+Other quality dimensions return replanning; invalid/unknown failures or absent
+negative evidence stop. A requested preference change alone cannot be submitted
+as verified quality failure. Source/subtitle/crop problems require a suitable
+source/presentation decision before any further inference.
+
+`POST .../talking-repair` explicitly confirms that scene regeneration against
+the current plan fingerprint. The application reopens consent, source receipt,
+Master, exact execution identity, plan and budget gates in a write transaction,
+then persists one repair record and new ordinary generation Job while changing
+only that scene's active binding. Each scene can be repaired once, within the
+Run's original repair allowance. A durable record retains the old binding,
+Job/collection predecessor, reason, evidence, budget snapshot, unchanged Master
+and other scene identities; `GET .../talking-repairs` also exposes replacement
+status and predecessor/replacement accounting records. Replaying an accepted
+request returns its existing record and never dispatches again.
+
+The replacement's new QA, collection and exact Master-audio preview keep the
+existing review policy. Once prepared, its successor collection is linked to
+the repair record without modifying the predecessor collection or review.
+Rejected original bytes remain blocked. Changed bytes need a fresh whole-result
+judgment; only unrelated approvals are reusable. Worker reservation allows at
+most one local provider call per repair and no external charge, independently
+of Job attempt numbers, while retaining ordinary budget accounting. Unknown
+local resource/time costs remain unknown. API/fixture and synthetic FFmpeg
+evidence establish these contracts; normal repair UI, actual inference and
+creator-quality improvement are not yet verified.
+
+In that lane, mandatory child technical QA feeds one explicit whole-preview human judgment covering visible sync, identity, artifacts, source-performance retention, continuity and publishability. The existing continuity-review endpoint requires the exact preview Asset/hash, matching `review_policy_version`, and all six `dimensions` (`visible_sync`, `identity`, `artifacts`, `source_performance`, `continuity`, `publishability`). Every outcome is explicit `pass/fail/unknown`; approval requires all pass. An incomplete attempted approval leaves the object awaiting review. Explicit rejection requires `scoped_findings` containing a dimension, reason and optional complete in-range interval; no interval means whole-result scope. Unsubmitted child judgment stays unsubmitted. Exact U-Voice and final U-Product remain required, and source review reuse follows its existing trusted receipt contract.
+
+The planned series review projection lists the policy, required dimensions, blockers and exact-subject concerns. Its `review-concerns` action persists an idempotent human inspection concern, bound to current preview Asset/hash, dimension, evidence and optional interval. The reviewer can answer concerns within the full-review request's `concern_answers`, or through `review-concern-answers` after approval. Answers are immutable and timestamped. Pending concerns block approval/admission and downstream consumption; a positive exact answer restores an otherwise current full approval without re-encoding or rewriting it. Negative answers, child rejections and exact-preview rejections remain vetoes, including across collection aliases. This interface records human concerns; it does not detect visual low confidence automatically.
+
+Old judgments keep their scope and canonical origin hashes; a continuity-only approval cannot become an expanded whole-result approval. V2 origin retains child/QA/media and execution evidence without hashing optional positive child judgment, so recording that judgment later does not invalidate the aggregate. Replacing a dependency invalidates the affected aggregate, retaining unrelated judgments. Collection/review records remain immutable; the bounded repair API creates a distinct successor as described above. API, Worker preparation, admission/replay and Router/Assembly/Renderer share the versioned gate. Synthetic real FFmpeg preview and offline routing/resume/render staging tests cover compatibility; no real v2 provider result, human quality judgment or measured time reduction is established. UI migration and regression criteria belong in [V76a](../implementation/ROADMAP.md#v76a--审核粒度迁移).
 
 ### Audio authority
 
@@ -425,7 +492,13 @@ Provider-specific lookahead parameters remain inside the provider settings schem
 
 ### Voice
 
-The current R1 Voice production path is **accepted as productized for the reviewed local configuration**:
+The ProductionRun backend exposes `GET voice-repair-plan`, `POST voice-repair` and `GET voice-repairs` under `/projects/{project_id}/production-runs/{run_id}/`. This bounded action replaces one terminal, unapproved and unconsumed original single take, not a composed Master or arbitrary audio interval. A known transient generation failure, or a complete timed independent QA report with explicit missing/duplicate/over-tolerance substitution checks, can propose whole-take regeneration. The report is technical evidence of ASR/copy disagreement, not a claim that a human confirmed missing speech. Invalid/unknown errors, absent timing/media and silence-only findings stop for diagnosis; subjective revision replans; approved/consumed Master and composition stop.
+
+Dispatch preserves the exact copy, Job payload, VoiceProfile/consent/reference metadata, admitted capability/runtime/machine and a digest of persisted provider settings. Worker execution receipts retain the configured runtime/machine/parameters from the original reservation. Missing historical snapshots or receipts are unknown, not backfilled permission. Repair compares current reference bytes and frozen evidence, then atomically preserves the predecessor, creates one ordinary replacement Job and clears current AudioAsset/QA bindings. Fresh full-copy QA has a repair-specific identity; old completion callbacks cannot relink the predecessor. Existing audio deduplication/provenance protection rejects identical old failed bytes as a new candidate. U-Voice and explicit downstream resume remain unchanged.
+
+Voice, Talking and presentation repair records consume the same Run creation allowance under a SQLite write transaction; prior usage survives migration. Each Voice action allows at most one locally admitted TTS reservation and one locally admitted QA ASR reservation, with zero external-charge authority. Provider/model/runtime/machine/configuration changes and missing accounting stop before inference. The plan exposes unobserved live Worker readiness: a queued action is not a claim that a Worker is running. A single unambiguous persisted local ASR capability is required; the Worker must match its QA configuration. Unchanged qualified Master/Talking dependencies can be retained by the separate presentation-only render revision, which never copies final approval. Normal Run UI exposes read-only Voice recovery plans, explicit reasoned whole-take replacement, durable lineage/history across generation/QA/review states and the existing fresh QA/U-Voice route. Presentation UI binds a human observation to the exact completed Render hash, displays the backend before/after candidate and retained dependencies, then requires explicit reasoned revision. Component event/effect regressions cover new identities, fresh unknown review defaults, reload/replay, stale input, authorization/allowance denial and confirmation refusal. User-operated isolated screenshots confirm new Voice/QA/history and fresh unselected six-dimension fields; refresh is offline-tested, not independently recorded in these screenshots; these controls do not establish real repair quality or measured user-time savings. Fixture counters report successful workflow requests and zero manual internal binding actions. The old implementation path had no complete ordinary recovery entry; its historical action total and user minutes are unknown, so no numeric reduction is inferred.
+
+The current local configuration has **implemented Voice APIs and exact-asset runtime/human evidence**, not a proven automatic end-user production flow:
 
 - normal project APIs create bounded generated Voice takes;
 - independent Voice QA persists copy/timing/silence/playability evidence;
@@ -434,11 +507,11 @@ The current R1 Voice production path is **accepted as productized for the review
 - immutable U-Voice review covers likeness, naturalness, emphasis, pace, pauses and rhetorical rhythm;
 - downstream Talking/VideoSpec reject generated narration that has not passed the required gates.
 
-An exact 32.560s OmniVoice Master has passed full-copy automated QA and six-dimension U-Voice. This is sufficient to move R1 forward; perfect generalized word-level emphasis or automatic prosody control is not a separate prerequisite.
+An exact OmniVoice Master passed full-copy automated QA and six-dimension U-Voice; STATUS owns its identity. Retain this evidence and proceed with workflow integration. Perfect generalized emphasis/prosody control is not a separate prerequisite. The Web workspace does not yet orchestrate Master creation and downstream work as one normal creation action.
 
 ### Talking
 
-The current R1 Talking production path is **accepted as productized for the reviewed local configuration**:
+The current local configuration has **implemented Talking APIs and an admitted, human-reviewed Run**, with incomplete normal-flow integration:
 
 - long Talking intent may execute as provider-bounded source-forward children;
 - each child retains Master/reference/provider provenance and independent technical QA;
@@ -446,10 +519,18 @@ The current R1 Talking production path is **accepted as productized for the revi
 - exact child assets require immutable U-Talking;
 - the assembled result requires a separate whole-run continuity decision;
 - only then can TalkingRun admission create one first-class generated Asset/Clip;
-- Hybrid Asset Router / VideoSpec consume the admitted Asset/Clip without knowing child-job topology;
+- explicit VideoSpec selection and normal routing consume the admitted Asset/Clip for a matching project and reviewed speech, without exposing child-job topology;
 - MasterNarration remains authoritative final audio.
 
-An exact 32.400s reviewed TalkingRun has passed these gates and is consumable by normal VideoSpec.
+An exact reviewed Run passed these gates and is consumable by VideoSpec; STATUS owns its identity. UI-driven source-forward series/Run orchestration and fresh-topic repeatability are not yet proven.
+
+### Review consistency and target granularity
+
+Policy v1 series admission requires each child's human approval plus whole-run continuity. New planned policy-v2 collections instead require exact six-dimension whole-preview approval and current localized-concern evidence, as described above. Direct generated-child selection fails closed under either policy: production requires the admitted Run. The normal Web entry selects v2 for new Runs and preserves v1 controls for legacy Runs; this is fixture evidence, not real-media quality proof.
+
+Target normal production keeps detailed child technical QA while consolidating subjective judgment at the Master, complete Run and final output, with localized exception review. Implement this only through an explicit versioned migration across API, routing and consumption. Existing immutable judgments remain scoped to their exact media; changes invalidate only affected dependencies. Calibration/new-configuration experiments stay separate from routine production.
+
+Human findings are currently asset evidence, not automatically learned behavior. A future scoped rule/preference needs explicit adoption, regression evidence and planning provenance; it cannot silently become a provider default or edit a saved performance plan.
 
 ## Current limits
 
@@ -457,15 +538,38 @@ An exact 32.400s reviewed TalkingRun has passed these gates and is consumable by
 - Generalized in-take pause, semantic emphasis and rhetorical-rhythm control remain improvement areas rather than R1 blockers when the exact Master passes U-Voice.
 - The current local Talking operating bound remains machine/provider specific; it must not become a narrative rule.
 - OmniVoice official pretrained weights and the current LatentSync benchmark remain non-commercial evaluation dependencies. Commercial provider/model admission is separate from R1 product-path quality.
-- The immediate product bottleneck has moved downstream to visual direction/edit quality and product-generated planning, not additional Voice/Talking provider experimentation.
+- The immediate bottleneck is production-before-planning drift, source suitability and normal-flow orchestration/review. Additional provider/prosody experiments do not by themselves close these gaps.
 
 ## R1 provider focus
 
-Keep the current **OmniVoice-first / one-provider-first** Voice route and the admitted local Talking path while finishing R1. Provider-neutral contracts remain replacement boundaries, not a reason to reopen provider shopping after the reviewed product path has passed.
+[D029](../../DECISIONS.md#d029--admit-execution-for-an-evidenced-purpose-and-preserve-that-scope-downstream) defines a pending migration for explicit, license-evidenced internal evaluation through the normal Run. Existing commercial-safe checks described below remain the current implementation. An old approved Master/Run can support exact configuration-evidence adoption where its provenance is sufficient, but does not fill unknown runtime/settings/bounds or authorize a new copy. Internal use must itself be permitted by the exact provider/model terms; this document does not admit the current benchmark weights. Evaluation purpose will preserve normal QA, U-Voice, the Run's review-policy version and final U-Product; it will not route new planned work through legacy direct evaluation APIs.
+
+In the narrow typography-only ProductionRun flow, a waiting run may dispatch one ordinary Voice generation Job when a consented VoiceProfile, exact verified provider/model capability, commercial-safe license evidence, current budget and explicit authorization all match. The run persists the Job dependency across restart and exposes pending/running/failed states. After durable Voice completion, a Worker also configured for Voice QA automatically attempts the same idempotent product-level advance: it discovers the unique exact-copy generated AudioAsset, rechecks local bytes and budget, and schedules one existing local-ASR Voice QA Job. A Voice-only Worker instead records `voice_qa_worker_not_configured` without dispatching QA. A one-time startup reconciliation on a Voice QA Worker can recover a completed dependency, but separate Workers have no live cross-Worker notification loop. Failed authorization, budget or output evidence leaves a visible last automatic stop reason and no QA Job; after correction the explicit advance endpoint is the bounded retry. The QA Worker resolves portable audio through the configured data root and rechecks bytes before ASR. A single full-copy QA-verified take is a Master candidate awaiting the current exact U-Voice human review; rejected and approved-but-not-resumed states remain distinct. Multi-take composition is not part of this Voice lane. A fixture-qualified execution profile does not admit the evaluation-only OmniVoice weights for commercial use.
+
+An approved-Master plan can retain explicit `new_talking` scene dependencies in a ProductionRun waiting state. Those scene IDs and visual fingerprints do not stand in for a suitable authorized source, consent, a generated TalkingRun or QA/human admission. A narrow, admitted single-scene action can now enqueue one Talking Job; waiting and generated states still cannot render without later QA/Run admission.
+
+A plan requiring new Voice and Talking can remain in one ProductionRun: existing Voice/QA actions create a single-take Master candidate, and exact U-Voice approval permits an atomic transition to Talking waiting. The completed Voice/QA, exact Master identity/bytes, current consent/license and scene-resolvable timing remain required; another approved take is not a substitute. This is fixture/API integration, not real new Voice/Talking production or fewer subjective review gates.
+
+The waiting run may retain one explicit reference candidate for each planned Talking scene after exact speech-interval alignment, profile consent, Clip rights and bytes, recorded reference fit, commercial-safe capability and budget checks. This is a provenance-bearing candidate, not source admission: the existing fit selector does not establish continuous full-interval visual suitability. That state remains `full_interval_unknown`; candidate binding alone cannot generate or render.
+
+An exact source-native portrait Clip can carry a separate full-interval suitability review claim. Its method, coverage, evidence class/reference, source hash/interval and face/head, continuity, subtitle and quality judgments persist independently of the start/end reference selector. The waiting run can consume only a matching assessment after rechecking the candidate and source bytes. `review_claimed_suitable` means a complete assisted assertion was recorded, not that Content OS automatically proved it or that U-Talking/Run admission passed; fixture and incomplete claims remain unknown, while an assisted negative requires replan. A separate current trusted admission receipt is required before a planned Talking Job; that receipt alone does not authorize rendering.
+
+The claim endpoint still accepts caller-supplied reviewer/evidence references; a claim alone is non-executable. A separate local reviewer action resolves an actor from a configured per-reviewer key digest, verifies that a complete assisted positive claim points to intact local evidence bytes inside the data root, rechecks the exact source bytes, and persists one content-bound, revocable admission receipt. Retained evidence can be adopted once and reused for the same exact source review without repeating the subjective decision; this is still a human attestation, not an automatic detector. Missing credentials/evidence, fixture/partial/negative claims, changed bytes and revoked receipts fail closed. A planned single-scene dispatch reopens that exact receipt, current plan/Master, source rights/consent, provider/model/runtime/machine capability, commercial license, budget and a verified provider-scoped duration limit before atomically linking one Job. The Worker repeats those gates before ProviderCall, and planned native-portrait generation cannot silently crop source subtitles. Longer scenes without a verified one-slice bound stop for separate planning; no fixed duration from a conversational example applies. On completed planned generation, an enabled local Talking QA Worker can automatically bind the unique content-verified output and enqueue a separate technical QA Job; a one-time startup reconciliation or explicit product action can recover a missed handoff. QA verifies playable video/audio and compares measured duration to the planned Master slice, while requiring the Master's existing copy QA. The waiting ProductionRun exposes generation/QA pending, failed and technical-verified-awaiting-U-Talking states across restart. This does not prove visible lip-sync, likeness, naturalness or publishability: human review, whole TalkingRun admission and rendering remain separate. Direct Talking Job/series creation and recovery, including previously queued Jobs at the Worker, default to disabled; an explicit local-evaluation-only opt-in retains the legacy experiment path and does not confer commercial or planned-run admission.
+
+The normal API lists exact source reviews and their receipt state per Clip, with protected evidence download bound to the recorded data-root path. It discovers retained assisted claims and trusted receipts without creating another review. A separate reviewer-key action can save an explicit human full-interval inspection as a versioned server-managed report and `assisted_test` assessment; the caller-supplied claim endpoint cannot occupy this managed report namespace. Only a complete positive judgment explicitly marked for reuse receives the existing admission receipt; incomplete or negative judgments remain visible without dispatch authority. The report stores source/interval, actor, four checks and findings, with its bytes bound to the assessment; replay is idempotent and conflicting content is rejected. ProductionRun also exposes a read-only scene setup context with its current Master and exact speech interval when ordered transcript segments have one unambiguous match. That interval is revalidated by source bind and differs from the assembled visual timeline.
+
+The normal ProductionRun Talking panel lists only the selected Talking Profile's authorized reference Clips and persisted Talking capability choices. It displays source dimensions, rights reference, consent, subtitle/reference evidence, capability/license evidence and Run stop reasons without treating unknown as acceptable. For a scene it reads the server-resolved exact Master speech interval; unresolved timing cannot be typed around in the UI. A source bind is an explicit operation and does not dispatch generation. Existing Clip-bound reviews are shown and only a current positive receipt can be applied; when no exact review exists, a separate full-interval human form requires all four judgments, findings and a configured reviewer key kept in component memory and sent only in the existing header. It is cleared after submit, explicit clear, scope change or leaving the panel. The UI does not call horizontal media crop-ready, infer suitability, or auto-select a provider/source.
+
+After explicit source adoption and dispatch, the Run panel separates generation/technical QA from U-Talking on the exact output Asset. It then requires an explicit request for the planned preview, shows its exact Asset/hash, technical QA, planned-origin fingerprint and current blockers, and binds whole continuity review to that preview's identity. Run admission is a further explicit action; backend validation remains authoritative and consumes the same preview bytes. Authenticated preview fetches use ephemeral object URLs which are revoked when the run scope changes or the panel leaves. Stale scopes, unavailable media, server denials and unknown evidence stay visible. No UI action automatically retries, approves, resumes, or renders. The isolated V75b2 fixture exercised profile/Clip/capability selection, server timing, reuse of an existing receipt, child review, exact preview review and admission; its synthetic records do not establish real provider runtime, source quality, subjective media approval or repeatability. Real Talking UI implementation is present, while real planned source/child/Run review remains to be performed through the normal workflow.
+
+For an exact completed-but-rejected preview, generation failure or approved-preview negative concern, the normal panel can read the bounded repair plan and submit a reason-bearing, fingerprint-bound `regenerate_scene` when authorized. It displays durable repair history even while a successor has no preview, including saved predecessor findings and separate predecessor/successor IDs; technical evidence remains distinct from human review. Candidate series, preview bytes, QA and policy define the review cache identity. Changed candidate or concern state remounts the review form and clears stale repair confirmation; responses are fenced to the current Run/media scope. Missing/null cost remains unknown rather than a measured zero. Executed offline fixture-state tests cover pending generation with no output/preview, explicit simulated Worker completion, independent QA, distinct unreviewed successor identities, persisted history, idempotent replay and technical/negative-concern evidence. These tests use in-memory storage, not a browser or provider. Unit tests, fixture TypeScript checking and production build pass. User-operated V76b2r fixture screenshots verify durable pending history, explicit simulated Worker completion, separate QA, distinct successor preview/series, six fresh unknown form dimensions and state/history after browser refresh. Seeded technical-failure and approved-preview negative-concern repair entries were also observed; concern creation/answer submission and real-media playback remain unverified. No actual inference, quality gain or time savings is established.
+
+Reuse the reviewed local route for bounded integration proof where it satisfies the plan. Provider-neutral contracts are replacement boundaries, not a requirement to reopen provider shopping. A demonstrated quality, capability, consent or license blocker may justify a separately scoped provider-admission package; the current route is not an unconditional shipping commitment.
 
 ## Product gaps
 
-1. Finish the visual-direction/EditPlan layer and obtain one 30–60s U-Product pass using already approved Voice/Talking assets.
-2. Replace assisted Scene/EditPlan input with the normal product-generated planning flow.
-3. Run second-topic repeatability.
-4. Later admit commercial-safe Voice/Talking provider/model routes without changing Core product semantics.
+1. Unify admission and generated-media selection without repeating valid asset-level human review.
+2. Plan visual feasibility and required production before dispatch; wire ordinary UI/application orchestration to existing Master/Run APIs.
+3. Validate normal UI aggregate-review and bound repair on real authorized media, then consume scoped feedback in later decisions.
+4. Prove fresh-topic creation and second-topic repeatability through the normal flow, not an assisted script.
+5. Admit commercial-safe provider/model routes separately before commercial release, preserving Core semantics.

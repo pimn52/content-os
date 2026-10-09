@@ -152,7 +152,20 @@ class LatentSyncProvider:
         self.guidance_scale = _positive_float(guidance_scale, "guidance_scale")
         self.seed = seed
         self.timeout_seconds = _positive_float(timeout_seconds, "timeout_seconds")
+        self._has_custom_command_runner = command_runner is not None
         self._command_runner = command_runner or self._run_command
+
+    def prepare_execution(self, request: object):
+        """A checkpoint and U-Net config are not the complete loader closure.
+
+        Auxiliary models, imports and implicit caches must be audited/fixed
+        before this adapter may produce an evaluation execution snapshot.
+        No model loading, subprocess or fallback occurs in this extension.
+        """
+        from .prepared import NativeExecutionUnsupported
+        reason = ("execution_native_opaque_runner_unsupported" if self._has_custom_command_runner
+                  else "execution_native_dependency_closure_unsupported")
+        raise NativeExecutionUnsupported(reason)
 
     @staticmethod
     def _executable_available(executable: str) -> bool:

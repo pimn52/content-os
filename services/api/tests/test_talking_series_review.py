@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.db import AssetRepository, AudioAssetRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, TalkingSliceSeriesRepository
 from app.domain.models import Asset, AudioAsset, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingSliceSeries
@@ -11,6 +12,11 @@ from app.talking.series_review import assess_talking_slice_series
 
 
 NOW = datetime(2026, 9, 20, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def legacy_talking_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONTENT_OS_ALLOW_LEGACY_TALKING_EVALUATION", "1")
 
 
 def _series() -> TalkingSliceSeries:
@@ -90,6 +96,40 @@ def test_series_review_requires_completed_unique_qa_and_individually_approved_ch
     ambiguous = assess_talking_slice_series(series, [first, second], [_output(first), _output(first), _output(second)])
     assert ambiguous.readiness == "blocked"
     assert "slice_0:child_output_ambiguous" in ambiguous.blockers
+
+
+def test_single_child_is_valid_but_planned_job_cannot_claim_legacy_series_membership() -> None:
+    """D025 reproduction: collection size is valid; planned membership is missing."""
+    series = _series()
+    series = series.model_copy(update={"child_job_ids": [series.child_job_ids[0]]})
+    legacy = _child(series, 0)
+    legacy_payload = legacy.payload.model_dump(mode="json")
+    legacy_payload["slice_series_size"] = 1
+    legacy = legacy.model_copy(update={"payload": TalkingGenerationJobPayload.model_validate(legacy_payload)})
+    assert assess_talking_slice_series(series, [legacy], [_output(legacy)]).ready_for_human_continuity_review
+
+    planned_payload = {
+        **legacy_payload,
+        "slice_series_id": None, "slice_series_index": None, "slice_series_size": None,
+        "reference_window_start_ms": 0, "reference_window_end_ms": 1_000,
+        "planned_context": {
+            "run_id": str(uuid4()), "scene_plan_id": str(uuid4()),
+            "source_admission_id": str(uuid4()), "capability_profile_id": str(uuid4()),
+            "expected_provider": "fixture", "expected_model": "fixture",
+            "expected_runtime": "fixture", "expected_machine_id": "fixture",
+            "binding_sha256": "b" * 64, "consent_sha256": "c" * 64,
+        },
+    }
+    planned = legacy.model_copy(update={"payload": TalkingGenerationJobPayload.model_validate(planned_payload)})
+    before = planned.model_dump(mode="json")
+    result = assess_talking_slice_series(series, [planned], [_output(planned)])
+    assert not result.ready_for_human_continuity_review
+    assert result.children[0].blockers == ("child_job_series_provenance_mismatch",)
+    assert planned.model_dump(mode="json") == before
+    with pytest.raises(ValueError, match="planned Talking requires"):
+        TalkingGenerationJobPayload.model_validate({
+            **planned_payload, "slice_series_id": str(series.id), "slice_series_index": 0, "slice_series_size": 1,
+        })
 
 
 def test_continuity_decision_is_gated_durable_and_immutable(tmp_path: Path) -> None:

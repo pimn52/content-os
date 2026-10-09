@@ -12,7 +12,8 @@ from typing import BinaryIO, Iterator, Protocol
 from uuid import uuid4
 
 from app.db import AudioAssetRepository, Database
-from app.domain.models import AudioAsset, SourceKind
+from app.domain.models import AudioAsset, Job, SourceKind
+from app.execution_scope import register_generated_import_scope
 
 from .ffprobe import AudioProbeMetadata, FFProbeAdapter, ProbeError
 
@@ -40,6 +41,7 @@ class AudioImporter:
         *,
         source_kind: SourceKind = SourceKind.USER_ASSET,
         language: str | None = None,
+        generated_job: Job | None = None,
     ) -> AudioAsset:
         path = Path(source)
         if not path.is_file():
@@ -47,7 +49,7 @@ class AudioImporter:
         with path.open("rb") as stream:
             return self.import_stream(
                 stream, path.name, authorization_reference, source_kind=source_kind,
-                language=language,
+                language=language, generated_job=generated_job,
             )
 
     def import_stream(
@@ -58,6 +60,7 @@ class AudioImporter:
         *,
         source_kind: SourceKind = SourceKind.USER_ASSET,
         language: str | None = None,
+        generated_job: Job | None = None,
     ) -> AudioAsset:
         if source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}:
             raise AudioImportError("audio source_kind must be user_asset or historical_asset")
@@ -72,7 +75,11 @@ class AudioImporter:
             repository = AudioAssetRepository(self.db)
             existing = repository.get_by_content_hash(content_hash)
             if existing is not None:
-                return self._existing_or_error(existing)
+                if generated_job is None:
+                    return self._existing_or_error(existing)
+                with self._write_transaction():
+                    register_generated_import_scope(self.db, "audio", existing, generated_job)
+                    return self._existing_or_error(existing)
             try:
                 metadata = self.probe.probe_audio(temp)
             except ProbeError as exc:
@@ -92,8 +99,10 @@ class AudioImporter:
                 with self._write_transaction():
                     existing = repository.get_by_content_hash(content_hash)
                     if existing is not None:
+                        register_generated_import_scope(self.db, "audio", existing, generated_job)
                         return self._existing_or_error(existing)
                     repository.create(value)
+                    register_generated_import_scope(self.db, "audio", value, generated_job)
                     placed = self._place(temp, destination)
                     if not placed:
                         _verify_hash(destination, content_hash)
@@ -101,6 +110,8 @@ class AudioImporter:
             except sqlite3.IntegrityError:
                 winner = repository.get_by_content_hash(content_hash)
                 if winner is not None:
+                    with self._write_transaction():
+                        register_generated_import_scope(self.db, "audio", winner, generated_job)
                     return self._existing_or_error(winner)
                 if placed:
                     destination.unlink(missing_ok=True)

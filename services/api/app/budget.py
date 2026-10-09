@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 from uuid import UUID
 
 from app.domain.models import BudgetPolicy, ProviderCallRecord, UsageCost
@@ -185,6 +185,7 @@ class ProviderCallLedger:
         input_digest: str,
         estimated_cost: UsageCost,
         allow_existing_unknown_cost: bool = False,
+        reservation_guard: Callable[[], None] | None = None,
     ) -> ProviderExecutionReservation:
         """Durably claim the sole execution owner for one provider request.
 
@@ -192,6 +193,9 @@ class ProviderCallLedger:
         ``running`` record has unknown external side effects after a crash, so
         a retry receives that existing state instead of blindly sending a
         second billable request.
+
+        Optional application limits run under the same write reservation as
+        budget accounting; a failed guard writes no new ProviderCall.
         """
         candidate = self._candidate(
             project_id=project_id,
@@ -213,6 +217,9 @@ class ProviderCallLedger:
             if existing is not None:
                 self._assert_same_identity(existing, candidate)
                 return ProviderExecutionReservation(existing, owner=False)
+
+            if reservation_guard is not None:
+                reservation_guard()
 
             # A client may accidentally submit two distinct retry keys for the
             # same request. The digest covers provider/model, project, and

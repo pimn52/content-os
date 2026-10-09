@@ -11,12 +11,24 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
 
-from app.db import AssetRepository, ImageAssetRepository
+from app.db import AssetRepository, ClipRepository, ImageAssetRepository, TalkingRunRepository
 from app.domain.models import Asset, CandidateAsset, Clip, CostCategory, ProjectFormat, ScenePlan, SourceKind, UsageCost
+from app.media.crop_assessment import CropAssessmentRepository, CropProposal
 from app.search import ClipSearchHit
+from app.talking.admission import talking_visual_blocker
+from app.execution_scope import commercial_content_blocker
+
+WEAK_LEXICAL_ROUTE_REASON = "Weak lexical retrieval leaves the visual route unresolved; capture is an optional proposal, not proven necessary."
+
+def typography_preserves_declared_intent(scene: ScenePlan) -> bool:
+    """Editorial declaration is not a source/media-quality admission."""
+    if SourceKind.AI_VIDEO in scene.preferred_sources or scene.visual_requirement in {"creator_speaking", "action_evidence"}:
+        return False
+    return (SourceKind.TYPOGRAPHY in scene.preferred_sources
+            or scene.visual_requirement == "explanatory" and SourceKind.TYPOGRAPHY in scene.fallback_sources)
 
 
 class RoutingConfigurationError(ValueError):
@@ -78,7 +90,7 @@ class RoutingResult:
 
 
 class AssetRouter:
-    """Score real, continuous local Clips and expose a capture-only gap when needed."""
+    """Score eligible continuous local Clips and expose a capture gap when needed."""
 
     def __init__(
         self,
@@ -89,8 +101,9 @@ class AssetRouter:
         candidate_pool_size: int = 20,
         max_candidates: int = 3,
         capture_gap_threshold: float = 0.45,
-        allowed_source_kinds: Sequence[SourceKind] = (SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET),
+        allowed_source_kinds: Sequence[SourceKind] = (SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO),
         images: ImageAssetRepository | None = None,
+        crop_proposals: Mapping[UUID, CropProposal] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(candidate_pool_size, int) or isinstance(candidate_pool_size, bool) or not 1 <= candidate_pool_size <= 1_000:
@@ -117,7 +130,20 @@ class AssetRouter:
         self.capture_gap_threshold = float(capture_gap_threshold)
         self.allowed_source_kinds = frozenset(normalized_sources)
         self.images = images
+        self.crop_proposals = dict(crop_proposals or {})
+        self.crop_assessments = CropAssessmentRepository(assets.db)
         self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def _known_bad_crop(self, scene: ScenePlan, asset: Asset, clip: Clip) -> bool:
+        proposal = self.crop_proposals.get(scene.id)
+        return bool(
+            proposal is not None
+            and proposal.scene_plan_id == scene.id
+            and proposal.source_asset_id == asset.id
+            and proposal.source_clip_id == clip.id
+            and proposal.end_ms - proposal.start_ms >= scene.duration_target_ms
+            and self.crop_assessments.decision(proposal) == "unusable"
+        )
 
     def route(self, scene: ScenePlan) -> RoutingResult:
         if not isinstance(scene, ScenePlan):
@@ -131,6 +157,17 @@ class AssetRouter:
         if not isinstance(hits, list) or any(not isinstance(hit, ClipSearchHit) for hit in hits):
             raise RoutingInputError("scene searcher returned invalid Clip hits")
         candidates = self._score_hits(scene, hits)
+        # TalkingRun admission is persisted independently of the optional
+        # search index. Discover it locally without another embedding call.
+        seen_clips = {candidate.clip_id for _, candidate in candidates}
+        for score, candidate in self._admitted_run_candidates(scene):
+            if candidate.clip_id not in seen_clips:
+                candidates.append((score, candidate))
+        candidates.sort(key=lambda value: (
+            -value[0],
+            0 if value[1].source_kind is SourceKind.USER_ASSET else 1 if value[1].source_kind is SourceKind.HISTORICAL_ASSET else 2,
+            str(value[1].asset_id), str(value[1].clip_id),
+        ))
         selected = candidates[: self.max_candidates]
         needs_capture = not selected or selected[0][0] < self.capture_gap_threshold
         requested_sources = set(scene.preferred_sources) | set(scene.fallback_sources)
@@ -138,14 +175,28 @@ class AssetRouter:
         if needs_capture:
             values.extend(_static_fallbacks(scene, requested_sources, self.images, recommended=not values))
             if SourceKind.TYPOGRAPHY in requested_sources:
-                values.append(_typography_fallback(scene, recommended=not values))
+                values.append(_typography_fallback(scene, recommended=not values and typography_preserves_declared_intent(scene)))
             values.append(_capture_gap(scene, recommended=not values))
         if not values and SourceKind.TYPOGRAPHY in requested_sources:
             values.append(_typography_fallback(scene, recommended=True))
         if values and not needs_capture:
             values[0] = CandidateAsset.model_validate({**values[0].model_dump(mode="python"), "recommended": True})
-        elif values and not any(value.recommended for value in values):
-            values[-1] = CandidateAsset.model_validate({**values[-1].model_dump(mode="python"), "recommended": True})
+        elif values:
+            # An explicitly preferred graphic route is established planning
+            # intent. Merely allowing typography as fallback is not proof
+            # that it can replace creator/footage intent.
+            graphic = next((value for value in values if value.source_kind is SourceKind.TYPOGRAPHY), None)
+            if graphic is not None and typography_preserves_declared_intent(scene):
+                values = [value.model_copy(update={
+                    "recommended": value is graphic,
+                    "why": [*value.why, (f"Explicit explanatory intent permits typography: {scene.visual_requirement_reason}"
+                        if scene.visual_requirement == "explanatory" else "Explicit preferred typography preserves the planned graphic route.")] if value is graphic else value.why,
+                }) for value in values]
+            elif not any(value.recommended for value in values):
+                values[-1] = values[-1].model_copy(update={"recommended": True})
+            if selected and all(hit.score_basis == "lexical_overlap" for hit in hits):
+                values = [value.model_copy(update={"why": [*value.why, WEAK_LEXICAL_ROUTE_REASON]})
+                    if value.source_kind is SourceKind.CAPTURE else value for value in values]
         return RoutingResult(scene_plan_id=scene.id, candidates=tuple(values))
 
     def route_all(self, scenes: Sequence[ScenePlan]) -> tuple[RoutingResult, ...]:
@@ -182,6 +233,8 @@ class AssetRouter:
                 continue
             seen.add(clip.id)
             asset = self.assets.get(clip.asset_id)
+            if asset is not None and commercial_content_blocker(self.assets.db, asset.content_hash) is not None:
+                continue
             usage = None if asset is None else asset.metadata.get("r1_usage")
             if (
                 asset is None
@@ -190,6 +243,13 @@ class AssetRouter:
                 or usage is not None and usage != "production"
                 or clip.end_ms - clip.start_ms < scene.duration_target_ms
             ):
+                continue
+            if asset.source_kind is SourceKind.AI_VIDEO and talking_visual_blocker(
+                asset, clip, self.assets, project_id=scene.project_id, copy=scene.voice_text,
+                selected_duration_ms=scene.duration_target_ms,
+            ) is not None:
+                continue
+            if self._known_bad_crop(scene, asset, clip):
                 continue
             score, why = _score(scene, clip, asset, hit.score, self.weights, now, score_basis=hit.score_basis)
             candidate = CandidateAsset(
@@ -206,6 +266,38 @@ class AssetRouter:
             ranked.append((score, source_rank, str(asset.id), clip.start_ms, clip.end_ms, str(clip.id), candidate))
         ranked.sort(key=lambda value: (-value[0], value[1], value[2], value[3], value[4], value[5]))
         return [(value[0], value[-1]) for value in ranked]
+
+    def _admitted_run_candidates(self, scene: ScenePlan) -> list[tuple[float, CandidateAsset]]:
+        if SourceKind.AI_VIDEO not in self.allowed_source_kinds or SourceKind.AI_VIDEO not in (
+            set(scene.preferred_sources) | set(scene.fallback_sources)
+        ):
+            return []
+        clips = ClipRepository(self.assets.db)
+        candidates: list[tuple[float, CandidateAsset]] = []
+        for run in TalkingRunRepository(self.assets.db).list_for_project(scene.project_id):
+            asset = self.assets.get(run.assembled_asset_id)
+            clip = clips.get(run.assembled_clip_id)
+            if asset is None or clip is None or asset.metadata.get("r1_usage") not in (None, "production"):
+                continue
+            if commercial_content_blocker(self.assets.db, asset.content_hash) is not None:
+                continue
+            if clip.end_ms - clip.start_ms < scene.duration_target_ms:
+                continue
+            if talking_visual_blocker(
+                asset, clip, self.assets, project_id=scene.project_id, copy=scene.voice_text,
+                selected_duration_ms=scene.duration_target_ms,
+            ) is not None:
+                continue
+            if self._known_bad_crop(scene, asset, clip):
+                continue
+            candidate = CandidateAsset(
+                scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
+                match_score=0.7, why=["admitted TalkingRun", "same project and exact reviewed speech"],
+                reuse_count=clip.used_count,
+                estimated_cost=_local_cost(SourceKind.AI_VIDEO),
+            )
+            candidates.append((candidate.match_score, candidate))
+        return candidates
 
 
 def _scene_query(scene: ScenePlan) -> str:
@@ -238,7 +330,7 @@ def _score(
     suitability = _shot_suitability(scene, clip)
     freshness = _freshness(clip.last_used_at, now)
     reuse = min(1.0, clip.used_count / 5.0)
-    bonus = weights.user_asset_bonus if asset.source_kind == SourceKind.USER_ASSET else weights.historical_asset_bonus
+    bonus = weights.user_asset_bonus if asset.source_kind == SourceKind.USER_ASSET else weights.historical_asset_bonus if asset.source_kind == SourceKind.HISTORICAL_ASSET else 0.0
     total = (
         semantic * weights.semantic_match
         + quality * weights.visual_quality
@@ -248,7 +340,11 @@ def _score(
         + bonus
     )
     score = max(0.0, min(1.0, total))
-    source_label = "user-provided media" if asset.source_kind == SourceKind.USER_ASSET else "historical creator media"
+    source_label = (
+        "user-provided media" if asset.source_kind == SourceKind.USER_ASSET else
+        "historical creator media" if asset.source_kind == SourceKind.HISTORICAL_ASSET else
+        "admitted generated TalkingRun"
+    )
     retrieval_label = "semantic match" if score_basis == "embedding_similarity" else "lexical text overlap"
     why = [
         f"{retrieval_label} {semantic:.2f}", f"visual quality {quality:.2f}",
@@ -293,7 +389,11 @@ def _aware_now(value: datetime) -> datetime:
 
 
 def _local_cost(source_kind: SourceKind) -> UsageCost:
-    category = CostCategory.USER_ASSET if source_kind == SourceKind.USER_ASSET else CostCategory.HISTORICAL_ASSET
+    category = (
+        CostCategory.USER_ASSET if source_kind == SourceKind.USER_ASSET else
+        CostCategory.HISTORICAL_ASSET if source_kind == SourceKind.HISTORICAL_ASSET else
+        CostCategory.TALKING
+    )
     return UsageCost(category=category, amount=Decimal("0"), currency="USD", note="Local continuous Clip reuse; no provider cost.")
 
 
@@ -353,6 +453,8 @@ def _static_fallbacks(
     values: list[CandidateAsset] = []
     for image in images.list():
         if image.source_kind not in requested_sources:
+            continue
+        if commercial_content_blocker(images.db, image.content_hash) is not None:
             continue
         category = CostCategory.SCREENSHOT if image.source_kind == SourceKind.SCREENSHOT else CostCategory.CHART
         values.append(CandidateAsset(

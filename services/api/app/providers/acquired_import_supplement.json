@@ -1,0 +1,36 @@
+{
+  "recipe": "omnivoice-acquired-import-supplement-v1",
+  "version": 1,
+  "base_descriptor_sha256": "77cdd3b3438e4f90ef1d6780a39be6df9a7066b1815e977adb398af22e49941f",
+  "record": {
+    "name": "v77b30-m4-c3t2-envelope-result.json",
+    "sha256": "ddd7a2122d49b5053847d812de78874995db5c9067dac63f877254aeaf4775f4"
+  },
+  "catalog_record": {
+    "name": "v77b30-m4-c4a-catalog-result.json",
+    "sha256": "e430601a56b6443bc174e24fd93432602ea39295e0e21b4d64a47e9716240281"
+  },
+  "source": {
+    "slot": "Lib/site-packages/numpy.libs/libscipy_openblas64_-ed4f167a5330424524f45258e7ca2c8d.dll",
+    "size_bytes": 20589056,
+    "sha256": "ed4f167a5330424524f45258e7ca2c8d7f03c0cba1f30ee4985553ac1f88ecf8"
+  },
+  "dependencies": [
+    "api-ms-win-crt-conio-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-environment-l1-1-0.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-private-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "api-ms-win-crt-utility-l1-1-0.dll",
+    "kernel32.dll"
+  ],
+  "evidence_level": "retained_source_bound_import_envelope_not_current_fd",
+  "dispatch_authorized": false
+}

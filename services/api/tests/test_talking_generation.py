@@ -13,11 +13,42 @@ from app.db import AssetRepository, AudioAssetRepository, BudgetPolicyRepository
 from app.domain.models import Asset, AudioAsset, BudgetPolicy, Clip, ConsentRecord, GazeDirection, IPProfile, Job, JobStatus, JobType, Project, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TranscriptSegment
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import TalkingGenerationJobHandler, _resolve_local_asset_source_path
+from app.jobs.runner import JobExecutionError
 from app.main import create_app
 from app.media.ffprobe import ProbeMetadata
 from app.providers.talking import TalkingExecutionOptions, TalkingReference, TalkingSynthesisResult
 from app.talking import select_talking_reference
 from app.talking_qa import TalkingHumanReview, TalkingQaError, TalkingQaReport, apply_talking_human_review, apply_talking_qa, verify_talking_output
+
+
+@pytest.fixture(autouse=True)
+def legacy_talking_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONTENT_OS_ALLOW_LEGACY_TALKING_EVALUATION", "1")
+
+
+def test_preexisting_direct_talking_job_is_blocked_by_default_before_provider_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONTENT_OS_ALLOW_LEGACY_TALKING_EVALUATION")
+    with Database(tmp_path / "legacy-disabled.sqlite") as db:
+        now = datetime.now(timezone.utc)
+        project_id = uuid4()
+        job = Job(
+            project_id=project_id, type=JobType.GENERATE_TALKING, status=JobStatus.RUNNING,
+            idempotency_key="previously-queued", created_at=now, updated_at=now,
+            payload=TalkingGenerationJobPayload(
+                project_id=project_id, talking_profile_id=uuid4(), reference_clip_id=uuid4(),
+                narration_audio_id=uuid4(), authorization_reference="caller-asserted",
+            ),
+        )
+        handler = TalkingGenerationJobHandler(
+            TalkingProfileRepository(db), AudioAssetRepository(db), AssetRepository(db),
+            object(), object(), tmp_path / "generated", ProviderCallLedger(db),  # type: ignore[arg-type]
+        )
+        with pytest.raises(JobExecutionError, match="explicit local evaluation mode") as error:
+            handler(job)
+        assert error.value.code == "legacy_talking_evaluation_disabled"
+        assert ProviderCallRepository(db).list_for_project(job.project_id) == []
 
 
 def test_talking_job_requires_verified_new_narration_and_persists_video_provenance(tmp_path: Path) -> None:
@@ -111,7 +142,7 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
             def __init__(self, root: Path) -> None:
                 self.data_root = root
 
-            def import_path(self, source: Path, authorization_reference: str, *, source_kind: SourceKind) -> Asset:
+            def import_path(self, source: Path, authorization_reference: str, *, source_kind: SourceKind, generated_job=None) -> Asset:
                 assert source.is_file() and authorization_reference == "talking-consent-1" and source_kind is SourceKind.AI_VIDEO
                 value = Asset(
                     source_kind=source_kind, source_file=str(source), content_hash="b" * 64, duration_ms=1_000,
@@ -562,6 +593,12 @@ def test_talking_output_qa_requires_real_playable_video_audio_and_matching_narra
     assert updated.metadata["talking_generation"]["qa"]["copy_coverage"] == 1.0
     assert updated.metadata["talking_generation"]["qa"]["missing_token_count"] == 0
     assert updated.metadata["talking_generation"]["qa"]["duplicate_token_count"] == 0
+    longer_master = narration.model_copy(update={"duration_ms": 5_000})
+    assert not verify_talking_output(asset, longer_master, Probe(), evidence_reference="qa:full-master").automated_verified
+    slice_report = verify_talking_output(
+        asset, longer_master, Probe(), evidence_reference="qa:planned-slice", expected_duration_ms=1_000,
+    )
+    assert slice_report.automated_verified and slice_report.duration_drift_ms == 20
 
     class BadProbe(Probe):
         def probe(self, path: Path) -> ProbeMetadata:

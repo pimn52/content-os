@@ -24,16 +24,25 @@ from app.domain.models import (
     CandidateAsset,
     Clip,
     CostCategory,
+    EditPlan,
+    EditPlanFallback,
+    EditPlanScene,
+    EditVisualRole,
+    GraphicTreatment,
     ImageAsset,
+    PortraitPresentation,
     Project,
     RationalFps,
     ScenePlan,
     SourceKind,
+    SubtitleTreatment,
     TranscriptSegment,
     UsageCost,
     VideoSpec,
+    VerticalReframeMode,
     VisualIntent,
 )
+from app.talking.admission import talking_visual_blocker
 
 
 NOW = datetime(2026, 9, 8, tzinfo=timezone.utc)
@@ -180,7 +189,7 @@ def test_assembler_builds_local_typography_fallback_without_media(tmp_path: Path
         db.close()
 
 
-def test_assembler_requires_verified_talking_qa_before_using_generated_talking_video(tmp_path: Path) -> None:
+def test_assembler_requires_admitted_talking_run_not_just_child_qa(tmp_path: Path, admit_talking_run) -> None:
     db, assembler, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
     try:
         source = tmp_path / "talking.mp4"
@@ -193,13 +202,13 @@ def test_assembler_requires_verified_talking_qa_before_using_generated_talking_v
         )
         AssetRepository(db).create(asset)
         clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=1_000, asset_duration_ms=1_000))
-        scene = _scene(project, 0, duration_ms=800)
+        scene = _scene(project, 0, duration_ms=1_000)
         candidate = CandidateAsset(
             scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
             match_score=1.0, why=["authorized generated Talking"], recommended=True,
             estimated_cost=UsageCost(category=CostCategory.TALKING, amount=Decimal("0"), currency="USD"),
         )
-        with pytest.raises(InvalidCandidateSelection, match="verified automated QA"):
+        with pytest.raises(InvalidCandidateSelection, match="generated_talking_qa_not_verified"):
             assembler.assemble(project, [scene], {scene.id: candidate})
         metadata = dict(asset.metadata)
         metadata["talking_generation"] = {
@@ -208,10 +217,127 @@ def test_assembler_requires_verified_talking_qa_before_using_generated_talking_v
             "job_id": str(uuid4()),
         }
         AssetRepository(db).update(asset.model_copy(update={"metadata": metadata}))
+        with pytest.raises(InvalidCandidateSelection, match="generated_talking_human_review_not_approved"):
+            assembler.assemble(project, [scene], {scene.id: candidate})
+        metadata["talking_generation"]["human_review_state"] = "approved"
+        asset = AssetRepository(db).update(asset.model_copy(update={"metadata": metadata}))
+        with pytest.raises(InvalidCandidateSelection, match="generated_talking_run_admission_required"):
+            assembler.assemble(project, [scene], {scene.id: candidate})
+        asset, _, _ = admit_talking_run(db, project.id, asset, clip, scene.voice_text)
         spec = assembler.assemble(project, [scene], {scene.id: candidate})
+        assert talking_visual_blocker(
+            asset, clip, AssetRepository(db), project_id=project.id,
+            copy=scene.voice_text, master_audio_id=uuid4(),
+        ) == "talking_run_master_mismatch"
         assert spec.scenes[0].visual.source_kind is SourceKind.AI_VIDEO
-        assert spec.scenes[0].visual.source_bottom_crop_ratio == 0.18
-        assert spec.scenes[0].visual.vertical_reframe_evidence_reference.startswith("talking-generation:")
+        assert spec.scenes[0].visual.vertical_reframe_mode is VerticalReframeMode.CONTAIN
+        assert spec.scenes[0].visual.source_bottom_crop_ratio == 0
+        assert spec.scenes[0].visual.vertical_reframe_evidence_reference is None
+        too_short = scene.model_copy(update={"duration_target_ms": 800})
+        with pytest.raises(InvalidCandidateSelection, match="talking_run_speech_would_be_cut"):
+            assembler.assemble(project, [too_short], {scene.id: candidate})
+        wrong_copy = scene.model_copy(update={"voice_text": "Different unreviewed speech"})
+        with pytest.raises(InvalidCandidateSelection, match="talking_run_copy_mismatch"):
+            assembler.assemble(project, [wrong_copy], {scene.id: candidate})
+        other_project = project.model_copy(update={"id": uuid4()})
+        other_scene = scene.model_copy(update={"project_id": other_project.id})
+        with pytest.raises(InvalidCandidateSelection, match="talking_run_project_mismatch"):
+            assembler.assemble(other_project, [other_scene], {scene.id: candidate})
+        for key, value in (("admission_state", "pending"), ("continuity_review_state", "rejected")):
+            invalid = dict(asset.metadata)
+            invalid["talking_run"] = {**invalid["talking_run"], key: value}
+            AssetRepository(db).update(asset.model_copy(update={"metadata": invalid}))
+            with pytest.raises(InvalidCandidateSelection, match="talking_run_not_admitted"):
+                assembler.assemble(project, [scene], {scene.id: candidate})
+        missing = dict(asset.metadata)
+        missing["talking_run"] = {**missing["talking_run"], "run_id": str(uuid4())}
+        AssetRepository(db).update(asset.model_copy(update={"metadata": missing}))
+        with pytest.raises(InvalidCandidateSelection, match="talking_run_record_mismatch"):
+            assembler.assemble(project, [scene], {scene.id: candidate})
+        AssetRepository(db).update(asset.model_copy(update={"metadata": {}}))
+        with pytest.raises(InvalidCandidateSelection, match="generated_talking_provenance_missing"):
+            assembler.assemble(project, [scene], {scene.id: candidate})
+    finally:
+        db.close()
+
+
+def test_edit_plan_requires_full_interval_crop_evidence_and_rejects_duplicate_caption_text(tmp_path: Path, admit_talking_run) -> None:
+    db, assembler, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        source = tmp_path / "talking.mp4"
+        source.write_bytes(b"talking")
+        asset = Asset(
+            source_kind=SourceKind.AI_VIDEO, source_file=str(source), content_hash="u" * 64,
+            duration_ms=1_000, width=720, height=1_280, fps=RationalFps(numerator=30, denominator=1),
+            authorization_reference="talking-consent", imported_at=NOW,
+            metadata={"talking_generation": {"provider": "musetalk", "qa_state": "verified"}},
+        )
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=1_000, asset_duration_ms=1_000))
+        scene = _scene(project, 0, duration_ms=1_000)
+        admit_talking_run(db, project.id, asset, clip, scene.voice_text)
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
+            match_score=1.0, why=["authorized generated Talking"], recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TALKING, amount=Decimal("0"), currency="USD"),
+        )
+
+        def plan(*, end_ms: int, graphic_text: str | None = None) -> EditPlan:
+            return EditPlan(project_id=project.id, scenes=[EditPlanScene(
+                scene_plan_id=scene.id, scene_id=scene.scene_id, visual_role=EditVisualRole.TALKING,
+                selected_source_kind=SourceKind.AI_VIDEO, selected_asset_id=asset.id, selected_clip_id=clip.id,
+                framing_policy="verified_static_crop", crop_safety_evidence_reference="review:full-run",
+                crop_safety_start_ms=0, crop_safety_end_ms=end_ms,
+                graphic_treatment=GraphicTreatment.KEY_POINT if graphic_text else GraphicTreatment.NONE,
+                graphic_text=graphic_text,
+                fallback=EditPlanFallback(graphic_treatment=GraphicTreatment.KEY_POINT, text="Creator point"),
+            )])
+
+        accepted = assembler.assemble(project, [scene], {scene.id: candidate}, edit_plan=plan(end_ms=1_000))
+        assert accepted.scenes[0].visual.vertical_reframe_mode is VerticalReframeMode.CENTER_CROP
+        assert accepted.scenes[0].visual.vertical_reframe_evidence_reference == "review:full-run"
+        with pytest.raises(InvalidCandidateSelection, match="does not cover the full selected interval"):
+            assembler.assemble(project, [scene], {scene.id: candidate}, edit_plan=plan(end_ms=999))
+        with pytest.raises(InvalidCandidateSelection, match="duplicates the full timed-caption paragraph"):
+            assembler.assemble(project, [scene], {scene.id: candidate}, edit_plan=plan(end_ms=1_000, graphic_text=scene.voice_text))
+    finally:
+        db.close()
+
+
+def test_edit_plan_compiles_a_source_preserving_portrait_panel_without_a_crop(tmp_path: Path, admit_talking_run) -> None:
+    db, assembler, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        source = tmp_path / "talking-panel.mp4"
+        source.write_bytes(b"talking")
+        asset = Asset(
+            source_kind=SourceKind.AI_VIDEO, source_file=str(source), content_hash="p" * 64,
+            duration_ms=1_000, width=1_920, height=1_080, fps=RationalFps(numerator=30, denominator=1),
+            authorization_reference="talking-consent", imported_at=NOW,
+            metadata={"talking_generation": {"provider": "musetalk", "qa_state": "verified"}},
+        )
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=1_000, asset_duration_ms=1_000))
+        scene = _scene(project, 0, duration_ms=1_000)
+        admit_talking_run(db, project.id, asset, clip, scene.voice_text)
+        candidate = CandidateAsset(
+            scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
+            match_score=1.0, why=["authorized generated Talking"], recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TALKING, amount=Decimal("0"), currency="USD"),
+        )
+        plan = EditPlan(project_id=project.id, scenes=[EditPlanScene(
+            scene_plan_id=scene.id, scene_id=scene.scene_id, visual_role=EditVisualRole.TALKING,
+            selected_source_kind=SourceKind.AI_VIDEO, selected_asset_id=asset.id, selected_clip_id=clip.id,
+            portrait_presentation=PortraitPresentation.PORTRAIT_PANEL, burned_in_subtitles="present",
+            subtitle_treatment=SubtitleTreatment.NONE, graphic_treatment=GraphicTreatment.HEADLINE,
+            graphic_text="Keep the full context",
+            fallback=EditPlanFallback(graphic_treatment=GraphicTreatment.HEADLINE, text="Context first"),
+        )])
+        spec = assembler.assemble(project, [scene], {scene.id: candidate}, edit_plan=plan)
+        output = spec.scenes[0]
+        assert output.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL
+        assert output.visual.vertical_reframe_mode is VerticalReframeMode.CONTAIN
+        assert output.subtitle_treatment is SubtitleTreatment.NONE
+        assert output.graphic_text == "Keep the full context"
     finally:
         db.close()
 
@@ -381,7 +507,7 @@ def test_master_narration_rejects_audio_without_actual_timing(tmp_path: Path) ->
         db.close()
 
 
-def test_master_talking_default_preserves_the_selected_face_visual_through_audio_end(tmp_path: Path) -> None:
+def test_master_talking_default_preserves_the_selected_face_visual_through_audio_end(tmp_path: Path, admit_talking_run) -> None:
     db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=25, denominator=1))
     source = tmp_path / "talking.mp4"
     source.write_bytes(b"talking")
@@ -404,6 +530,7 @@ def test_master_talking_default_preserves_the_selected_face_visual_through_audio
         AssetRepository(db).create(talking)
         clip = ClipRepository(db).create(Clip(asset_id=talking.id, start_ms=0, end_ms=5_120, asset_duration_ms=5_120))
         scene = scenes[0].model_copy(update={"voice_text": "Any final language or word", "duration_target_ms": 5_120})
+        admit_talking_run(db, project.id, talking, clip, scene.voice_text, audio=audio)
         candidate = CandidateAsset(
             scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=talking.id, clip_id=clip.id,
             match_score=1.0, why=["verified Talking"], recommended=True,
@@ -421,7 +548,7 @@ def test_master_talking_default_preserves_the_selected_face_visual_through_audio
         db.close()
 
 
-def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_speech(tmp_path: Path) -> None:
+def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_speech(tmp_path: Path, admit_talking_run) -> None:
     db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=25, denominator=1))
     source = tmp_path / "talking-terminal.mp4"
     source.write_bytes(b"talking")
@@ -444,6 +571,7 @@ def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_spe
         AssetRepository(db).create(talking)
         clip = ClipRepository(db).create(Clip(asset_id=talking.id, start_ms=0, end_ms=5_120, asset_duration_ms=5_120))
         scene = scenes[0].model_copy(update={"voice_text": "Terminal copy in any language", "duration_target_ms": 5_120})
+        admit_talking_run(db, project.id, talking, clip, scene.voice_text, audio=audio)
         candidate = CandidateAsset(
             scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=talking.id, clip_id=clip.id,
             match_score=1.0, why=["verified Talking"], recommended=True,
