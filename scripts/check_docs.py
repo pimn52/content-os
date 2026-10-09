@@ -67,6 +67,7 @@ IMPLEMENTATION_TIER_TERMS = re.compile(r"\b(?:Luna|Terra|Sol|Astra)\b", re.IGNOR
 
 MAX_LINES = {
     "STATUS.md": 220,
+    "docs/implementation/ROADMAP.md": 180,
     "CONTENT_OS_EXECUTION_SPEC.md": 260,
     "DECISIONS.md": 220,
     "START_HERE.md": 180,
@@ -126,6 +127,8 @@ def main() -> int:
             errors.append("STATUS.md must not retain completed/blocked package history")
         if status.count("## Active work package") != 1:
             errors.append("STATUS.md must contain exactly one active work package")
+        if re.search(r"^## (?:Recent work package|Active experiment package)", status, flags=re.MULTILINE):
+            errors.append("STATUS.md must not hold multiple recent experimental package narratives")
         if len(status.splitlines()) > MAX_LINES["STATUS.md"]:
             errors.append(
                 f"STATUS.md exceeds {MAX_LINES['STATUS.md']} lines; move history to Git/evaluation evidence and current behavior to module specs"
