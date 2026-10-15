@@ -4,6 +4,17 @@ Read START_HERE.md first.
 
 This file owns implementation behavior only. Product scope belongs in the product specification/module docs; current work belongs in STATUS.
 
+## Recovery override — 2026-10-15
+
+**Applies only on `recovery/stoploss-20261015`. This section overrides section 5(2/7), section 8's automatic next-package wording, and all of section 9 wherever they suggest continuous execution.**
+
+- Recovery is **owner-gated**. Finish the currently expressly approved recovery step and stop. Never infer permission for a following audit, deletion, experiment, migration or production task from old R1 authorization, current queue state or the instruction to continue.
+- Until the owner separately authorizes an exact cleanup slice: **read-only technical review only**. No code deletion, provider/model call, render, external download, dependency install, license/consent/QA workaround, DB/data mutation or automatic next task.
+- Preserve source commit `f32677d13fbba8a6dbdbac48030eaa5ea4f49907`, golden media and review evidence. A Git branch is not a backup of local media/database; arrange local backups before any destructive step.
+- Classify every cleanup candidate by real callers and runtime evidence as KEEP / MERGE / ISOLATE / DELETE-CANDIDATE. Suspected bloat is not proof of safe deletion.
+- Do not invent a new recovery framework, extra policy layer, loader, state machine or large implementation document. Work from `STATUS.md` and return a brief owner decision table.
+- No modifications to `master` from the recovery branch unless the owner has approved a reviewed change and a defined rollback/quality regression plan.
+
 ## 1. Engineering invariants
 
 - Preserve provider-neutral Core contracts.
