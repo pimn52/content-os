@@ -1,0 +1,273 @@
+{
+  "baseline": "bd5ba63",
+  "evidence": "synthetic fixtures; no native runtime",
+  "cases": [
+    {
+      "input": {
+        "schema_version": 1,
+        "capability": "voice",
+        "mode": "local",
+        "provider": "synthetic",
+        "model": "synthetic-model",
+        "runtime": "synthetic-runtime",
+        "machine_id": "synthetic-machine",
+        "observation_recipe": "synthetic-only",
+        "observation_version": 1,
+        "model_artifacts": [
+          {
+            "role": "weights",
+            "name": "model/weights.bin",
+            "size_bytes": 1,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "role": "tokenizer",
+            "name": "model/tokenizer.json",
+            "size_bytes": 1,
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "machine": {
+          "installation_id": "12345678-1234-4234-8234-123456789abc",
+          "host_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "device_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "parameters": {
+          "device": "cpu",
+          "precision": "float16",
+          "seed": 0
+        },
+        "runtime_artifacts": [
+          {
+            "role": "interpreter",
+            "name": "python.exe",
+            "size_bytes": 100,
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          {
+            "role": "entrypoint",
+            "name": "infer.py",
+            "size_bytes": 100,
+            "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+            "role": "dependency",
+            "name": "runtime/module.py",
+            "size_bytes": 100,
+            "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ]
+      },
+      "serialized": "{\"schema_version\":1,\"capability\":\"voice\",\"mode\":\"local\",\"provider\":\"synthetic\",\"model\":\"synthetic-model\",\"runtime\":\"synthetic-runtime\",\"machine_id\":\"synthetic-machine\",\"observation_recipe\":\"synthetic-only\",\"observation_version\":1,\"model_artifacts\":[{\"role\":\"weights\",\"name\":\"model/weights.bin\",\"size_bytes\":1,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"role\":\"tokenizer\",\"name\":\"model/tokenizer.json\",\"size_bytes\":1,\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}],\"runtime_artifacts\":[{\"role\":\"interpreter\",\"name\":\"python.exe\",\"size_bytes\":100,\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"role\":\"entrypoint\",\"name\":\"infer.py\",\"size_bytes\":100,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},{\"role\":\"dependency\",\"name\":\"runtime/module.py\",\"size_bytes\":100,\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}],\"machine\":{\"installation_id\":\"12345678-1234-4234-8234-123456789abc\",\"host_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"device_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"parameters\":{\"device\":\"cpu\",\"precision\":\"float16\",\"seed\":0}}",
+      "execution_sha256": "a9ce342d75fababf683e47d03dc6dea02324450bd3334a8451c7ca75eb2039bb",
+      "model_artifact_sha256": "c709ecc927922b5da345fdb3e330ea72b2f5cec320f3b081062d96ceedf4be95"
+    },
+    {
+      "input": {
+        "schema_version": 2,
+        "capability": "voice",
+        "mode": "local",
+        "provider": "synthetic",
+        "model": "synthetic-model",
+        "runtime": "synthetic-runtime",
+        "machine_id": "synthetic-machine",
+        "observation_recipe": "synthetic-only",
+        "observation_version": 1,
+        "model_artifacts": [
+          {
+            "role": "weights",
+            "name": "model/weights.bin",
+            "size_bytes": 1,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "role": "tokenizer",
+            "name": "model/tokenizer.json",
+            "size_bytes": 1,
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "runtime_inventory": {
+          "inventory_version": 1,
+          "sha256": "1b4279b1597f7c2a135f3a98bdc09c2d52395426b9bcef0c90643a99dab9f2e7",
+          "size_bytes": 624,
+          "file_count": 4,
+          "directory_count": 2,
+          "total_file_bytes": 30
+        },
+        "host_runtime": {
+          "observation_recipe": "synthetic-windows-host",
+          "observation_version": 1,
+          "trust_recipe": "windows-os-selected-driver-v1",
+          "os_family": "windows",
+          "architecture": "amd64",
+          "build": 26100,
+          "revision": 1,
+          "device": {
+            "kind": "cpu"
+          }
+        },
+        "machine": {
+          "installation_id": "12345678-1234-4234-8234-123456789abc",
+          "host_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "device_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "parameters": {
+          "device": "cpu",
+          "precision": "float16",
+          "seed": 0
+        }
+      },
+      "serialized": "{\"schema_version\":2,\"capability\":\"voice\",\"mode\":\"local\",\"provider\":\"synthetic\",\"model\":\"synthetic-model\",\"runtime\":\"synthetic-runtime\",\"machine_id\":\"synthetic-machine\",\"observation_recipe\":\"synthetic-only\",\"observation_version\":1,\"model_artifacts\":[{\"role\":\"weights\",\"name\":\"model/weights.bin\",\"size_bytes\":1,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"role\":\"tokenizer\",\"name\":\"model/tokenizer.json\",\"size_bytes\":1,\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}],\"runtime_inventory\":{\"inventory_version\":1,\"sha256\":\"1b4279b1597f7c2a135f3a98bdc09c2d52395426b9bcef0c90643a99dab9f2e7\",\"size_bytes\":624,\"file_count\":4,\"directory_count\":2,\"total_file_bytes\":30},\"host_runtime\":{\"observation_recipe\":\"synthetic-windows-host\",\"observation_version\":1,\"trust_recipe\":\"windows-os-selected-driver-v1\",\"os_family\":\"windows\",\"architecture\":\"amd64\",\"build\":26100,\"revision\":1,\"device\":{\"kind\":\"cpu\"}},\"machine\":{\"installation_id\":\"12345678-1234-4234-8234-123456789abc\",\"host_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"device_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"parameters\":{\"device\":\"cpu\",\"precision\":\"float16\",\"seed\":0}}",
+      "execution_sha256": "3a2f5c2ac3e8f520a4ba1e47dc57b94634c4232c26d6aca1876f7bcfb2e4c8a2",
+      "model_artifact_sha256": "c709ecc927922b5da345fdb3e330ea72b2f5cec320f3b081062d96ceedf4be95"
+    },
+    {
+      "input": {
+        "schema_version": 3,
+        "capability": "voice",
+        "mode": "local",
+        "provider": "synthetic",
+        "model": "synthetic-model",
+        "runtime": "synthetic-runtime",
+        "machine_id": "synthetic-machine",
+        "observation_recipe": "synthetic-only",
+        "observation_version": 1,
+        "model_artifacts": [
+          {
+            "role": "weights",
+            "name": "model/weights.bin",
+            "size_bytes": 1,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "role": "tokenizer",
+            "name": "model/tokenizer.json",
+            "size_bytes": 1,
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "runtime_inventory": {
+          "inventory_version": 1,
+          "sha256": "1b4279b1597f7c2a135f3a98bdc09c2d52395426b9bcef0c90643a99dab9f2e7",
+          "size_bytes": 624,
+          "file_count": 4,
+          "directory_count": 2,
+          "total_file_bytes": 30
+        },
+        "host_runtime": {
+          "observation_recipe": "windows-platform-ubr-component-bindings",
+          "observation_version": 3,
+          "trust_recipe": "windows-os-component-bindings-v3",
+          "os_family": "windows",
+          "architecture": "amd64",
+          "build": 26100,
+          "revision": 9457,
+          "device": {
+            "kind": "cpu"
+          },
+          "component_policy_version": 2,
+          "component_policy_sha256": "dbcb69f57ced3b2e2b16307f69e6c8c2a6aaa3f53270404fb37497ce5d324883",
+          "binding": {
+            "component_policy_version": 2,
+            "component_policy_sha256": "dbcb69f57ced3b2e2b16307f69e6c8c2a6aaa3f53270404fb37497ce5d324883",
+            "manifest_contract_sha256": "bd76c737191489222cc219b605648fee50ae2721a7d1af7ebd756b429dee7ec2",
+            "source_sha256": "e831b0485c133f06aae9e326ab211f2b8094c823ed554babdea70f128c203c5d",
+            "source_role": "dll",
+            "query_role": "created",
+            "root_flags": 17,
+            "context_flags": 0,
+            "root_path_types": [
+              2,
+              1,
+              2
+            ],
+            "common_controls": {
+              "identity": {
+                "name": "Microsoft.Windows.Common-Controls",
+                "token": "6595b64144ccf1df",
+                "architecture": "amd64",
+                "version": "6.0.26100.9278",
+                "language": "neutral",
+                "encoded_language": null
+              },
+              "directory": "WinSxS/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201",
+              "file": {
+                "windows_relative_path": "WinSxS/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201/comctl32.dll",
+                "size_bytes": 4096,
+                "sha256": "30b8fa006be1274c0c66294e79d6a9f8d53f427a45623ff51fab13f281d47bde"
+              },
+              "manifest": {
+                "windows_relative_path": "WinSxS/Manifests/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201.manifest",
+                "size_bytes": 530,
+                "sha256": "8c67cd2b542c9eb45e4c1f24c5d1ebaacdaf0f90662d28a0ee7d78e37d6a414c"
+              },
+              "flags": 0,
+              "metadata_versions": [
+                1,
+                0,
+                0,
+                0
+              ],
+              "path_types": [
+                2,
+                1
+              ],
+              "data": null
+            },
+            "resource": {
+              "identity": {
+                "name": "Microsoft.Windows.Common-Controls.Resources",
+                "token": "6595b64144ccf1df",
+                "architecture": "amd64",
+                "version": "6.0.26100.8117",
+                "language": "en-us",
+                "encoded_language": "en-us"
+              },
+              "directory": "WinSxS/amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.26100.8117_en-us_541277d80fdbb4cb",
+              "file": {
+                "windows_relative_path": "WinSxS/amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.26100.8117_en-us_541277d80fdbb4cb/comctl32.dll.mui",
+                "size_bytes": 4096,
+                "sha256": "f31584af818c2bef43623a06ca63d4fea25768c32b74f7643c5389c000d841e8"
+              },
+              "manifest": {
+                "windows_relative_path": "WinSxS/Manifests/amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.26100.8117_en-us_541277d80fdbb4cb.manifest",
+                "size_bytes": 304,
+                "sha256": "6cfebedca18a31996929bcf7580765165673471ede0a04cee17d68b7cd291eed"
+              },
+              "flags": 0,
+              "metadata_versions": [
+                1,
+                0,
+                0,
+                0
+              ],
+              "path_types": [
+                2,
+                1
+              ],
+              "data": {
+                "machine": "0x14c",
+                "optional_magic": "0x10b",
+                "leaf_count": 1
+              }
+            }
+          }
+        },
+        "machine": {
+          "installation_id": "12345678-1234-4234-8234-123456789abc",
+          "host_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "device_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "parameters": {
+          "device": "cpu",
+          "precision": "float16",
+          "seed": 0
+        }
+      },
+      "serialized": "{\"schema_version\":3,\"capability\":\"voice\",\"mode\":\"local\",\"provider\":\"synthetic\",\"model\":\"synthetic-model\",\"runtime\":\"synthetic-runtime\",\"machine_id\":\"synthetic-machine\",\"observation_recipe\":\"synthetic-only\",\"observation_version\":1,\"model_artifacts\":[{\"role\":\"weights\",\"name\":\"model/weights.bin\",\"size_bytes\":1,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"role\":\"tokenizer\",\"name\":\"model/tokenizer.json\",\"size_bytes\":1,\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}],\"runtime_inventory\":{\"inventory_version\":1,\"sha256\":\"1b4279b1597f7c2a135f3a98bdc09c2d52395426b9bcef0c90643a99dab9f2e7\",\"size_bytes\":624,\"file_count\":4,\"directory_count\":2,\"total_file_bytes\":30},\"host_runtime\":{\"observation_recipe\":\"windows-platform-ubr-component-bindings\",\"observation_version\":3,\"trust_recipe\":\"windows-os-component-bindings-v3\",\"os_family\":\"windows\",\"architecture\":\"amd64\",\"build\":26100,\"revision\":9457,\"device\":{\"kind\":\"cpu\"},\"component_policy_version\":2,\"component_policy_sha256\":\"dbcb69f57ced3b2e2b16307f69e6c8c2a6aaa3f53270404fb37497ce5d324883\",\"binding\":{\"component_policy_version\":2,\"component_policy_sha256\":\"dbcb69f57ced3b2e2b16307f69e6c8c2a6aaa3f53270404fb37497ce5d324883\",\"manifest_contract_sha256\":\"bd76c737191489222cc219b605648fee50ae2721a7d1af7ebd756b429dee7ec2\",\"source_sha256\":\"e831b0485c133f06aae9e326ab211f2b8094c823ed554babdea70f128c203c5d\",\"source_role\":\"dll\",\"query_role\":\"created\",\"root_flags\":17,\"context_flags\":0,\"root_path_types\":[2,1,2],\"common_controls\":{\"identity\":{\"name\":\"Microsoft.Windows.Common-Controls\",\"token\":\"6595b64144ccf1df\",\"architecture\":\"amd64\",\"version\":\"6.0.26100.9278\",\"language\":\"neutral\",\"encoded_language\":null},\"directory\":\"WinSxS/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201\",\"file\":{\"windows_relative_path\":\"WinSxS/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201/comctl32.dll\",\"size_bytes\":4096,\"sha256\":\"30b8fa006be1274c0c66294e79d6a9f8d53f427a45623ff51fab13f281d47bde\"},\"manifest\":{\"windows_relative_path\":\"WinSxS/Manifests/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9278_none_3e0d1ba8e3303201.manifest\",\"size_bytes\":530,\"sha256\":\"8c67cd2b542c9eb45e4c1f24c5d1ebaacdaf0f90662d28a0ee7d78e37d6a414c\"},\"flags\":0,\"metadata_versions\":[1,0,0,0],\"path_types\":[2,1],\"data\":null},\"resource\":{\"identity\":{\"name\":\"Microsoft.Windows.Common-Controls.Resources\",\"token\":\"6595b64144ccf1df\",\"architecture\":\"amd64\",\"version\":\"6.0.26100.8117\",\"language\":\"en-us\",\"encoded_language\":\"en-us\"},\"directory\":\"WinSxS/amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.26100.8117_en-us_541277d80fdbb4cb\",\"file\":{\"windows_relative_path\":\"WinSxS/amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.26100.8117_en-us_541277d80fdbb4cb/comctl32.dll.mui\",\"size_bytes\":4096,\"sha256\":\"f31584af818c2bef43623a06ca63d4fea25768c32b74f7643c5389c000d841e8\"},\"manifest\":{\"windows_relative_path\":\"WinSxS/Manifests/amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.26100.8117_en-us_541277d80fdbb4cb.manifest\",\"size_bytes\":304,\"sha256\":\"6cfebedca18a31996929bcf7580765165673471ede0a04cee17d68b7cd291eed\"},\"flags\":0,\"metadata_versions\":[1,0,0,0],\"path_types\":[2,1],\"data\":{\"machine\":\"0x14c\",\"optional_magic\":\"0x10b\",\"leaf_count\":1}}}},\"machine\":{\"installation_id\":\"12345678-1234-4234-8234-123456789abc\",\"host_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"device_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"parameters\":{\"device\":\"cpu\",\"precision\":\"float16\",\"seed\":0}}",
+      "execution_sha256": "cddf9a3bc6ab0daddf509b292f688ddcf93c35d95d7dbfccffa8aaf57dd5c4d8",
+      "model_artifact_sha256": "c709ecc927922b5da345fdb3e330ea72b2f5cec320f3b081062d96ceedf4be95"
+    }
+  ]
+}

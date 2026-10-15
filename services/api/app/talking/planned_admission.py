@@ -214,12 +214,12 @@ class PlannedTalkingAdmissionService:
 
     def register_concern(self, series, *, preview_asset_id, preview_sha256, finding,
                          evidence_reference, idempotency_key):
-        with self.db.transaction(immediate=True):
+        with (nullcontext() if self.db.connection.in_transaction else self.db.transaction(immediate=True)):
             preview = self._concern_subject(series, preview_asset_id, preview_sha256)
             return self.policy.register(series, preview, finding, evidence_reference, idempotency_key)
 
     def answer_concerns(self, series, *, preview_asset_id, preview_sha256, answers):
-        with self.db.transaction(immediate=True):
+        with (nullcontext() if self.db.connection.in_transaction else self.db.transaction(immediate=True)):
             preview = self._concern_subject(series, preview_asset_id, preview_sha256)
             self.policy.record_answers(series.project_id, preview, answers)
             return self.review_status(series)
@@ -256,49 +256,8 @@ class PlannedTalkingAdmissionService:
                 return existing
             if binding.talking_run_id is not None or self.clips.list_by_asset(preview.id) or "talking_run" in preview.metadata:
                 raise PlannedTalkingAdmissionError("planned preview is already linked to another admission")
-            generated = self.jobs.get(origin.generation_job_id)
-            if generated is None or not isinstance(generated.payload, TalkingGenerationJobPayload):
-                raise PlannedTalkingAdmissionError("planned generation child is missing")
-            generation = self.assets.get(origin.output_asset_id).metadata["talking_generation"]
-            child = TalkingRunChildEvidence(
-                series_index=0, job_id=generated.id, output_asset_id=origin.output_asset_id,
-                master_start_ms=origin.master_start_ms, master_end_ms=origin.master_end_ms,
-                reference_window_start_ms=origin.source_start_ms, reference_window_end_ms=origin.source_end_ms,
-                provider=generation["provider"], model=generation["model"],
-                provider_version=generation.get("provider_version") if isinstance(generation.get("provider_version"), str) else None,
-            )
-            clip = Clip(asset_id=preview.id, start_ms=0, end_ms=preview.duration_ms,
-                        asset_duration_ms=preview.duration_ms, talking_candidate=True)
-            run = TalkingRun(
-                project_id=current.project_id, series_id=current.id,
-                master_narration_audio_id=origin.master_audio_id,
-                master_start_ms=origin.master_start_ms, master_end_ms=origin.master_end_ms,
-                authorized_reference_clip_id=origin.source_clip_id, child_evidence=[child],
-                continuity_review_id=review.id, assembled_asset_id=preview.id,
-                assembled_clip_id=clip.id, automated_qa_state="verified", admission_state="admitted",
-                planned_origin_sha256=review.planned_origin_sha256,
-                reviewed_preview_sha256=preview.content_hash,
-                created_at=datetime.now(timezone.utc),
-                review_policy_version=origin.version,
-            )
-            metadata = dict(preview.metadata)
-            preview_report = dict(metadata["talking_run_preview"])
-            preview_report["state"] = "promoted"
-            metadata["talking_run_preview"] = preview_report
-            metadata["talking_run"] = {
-                "run_id": str(run.id), "series_id": str(current.id),
-                "master_narration_audio_id": str(origin.master_audio_id),
-                "master_start_ms": origin.master_start_ms, "master_end_ms": origin.master_end_ms,
-                "authorized_reference_clip_id": str(origin.source_clip_id),
-                "automated_qa_state": "verified", "continuity_review_id": str(review.id),
-                "continuity_review_state": "approved", "admission_state": "admitted",
-                "child_job_ids": [str(origin.generation_job_id)],
-                "planned_origin_sha256": review.planned_origin_sha256,
-                "reviewed_preview_sha256": preview.content_hash,
-            }
-            if origin.version == 2:
-                metadata["talking_run"]["review_policy_version"] = 2
-            self.assets.update(preview.model_copy(update={"metadata": metadata}))
+            run, clip, promoted = self._build_admission(current, preview, review)
+            self.assets.update(promoted)
             self.clips.create(clip)
             persisted = self.runs.create(run)
             if persisted.id != run.id:
@@ -316,9 +275,56 @@ class PlannedTalkingAdmissionService:
             )
             return persisted
 
+    def _build_admission(self, current, preview, review):
+        """Shared one-child Run/Clip/projection construction, no persistence."""
+        origin = current.planned_origin
+        generated = self.jobs.get(origin.generation_job_id)
+        if generated is None or not isinstance(generated.payload, TalkingGenerationJobPayload):
+            raise PlannedTalkingAdmissionError("planned generation child is missing")
+        generation = self.assets.get(origin.output_asset_id).metadata["talking_generation"]
+        child = TalkingRunChildEvidence(
+            series_index=0, job_id=generated.id, output_asset_id=origin.output_asset_id,
+            master_start_ms=origin.master_start_ms, master_end_ms=origin.master_end_ms,
+            reference_window_start_ms=origin.source_start_ms, reference_window_end_ms=origin.source_end_ms,
+            provider=generation["provider"], model=generation["model"],
+            provider_version=generation.get("provider_version") if isinstance(generation.get("provider_version"), str) else None,
+        )
+        clip = Clip(asset_id=preview.id, start_ms=0, end_ms=preview.duration_ms,
+                    asset_duration_ms=preview.duration_ms, talking_candidate=True)
+        run = TalkingRun(
+            project_id=current.project_id, series_id=current.id,
+            master_narration_audio_id=origin.master_audio_id,
+            master_start_ms=origin.master_start_ms, master_end_ms=origin.master_end_ms,
+            authorized_reference_clip_id=origin.source_clip_id, child_evidence=[child],
+            continuity_review_id=review.id, assembled_asset_id=preview.id,
+            assembled_clip_id=clip.id, automated_qa_state="verified", admission_state="admitted",
+            planned_origin_sha256=review.planned_origin_sha256,
+            reviewed_preview_sha256=preview.content_hash,
+            created_at=datetime.now(timezone.utc),
+            review_policy_version=origin.version,
+        )
+        metadata = dict(preview.metadata)
+        preview_report = dict(metadata["talking_run_preview"])
+        preview_report["state"] = "promoted"
+        metadata["talking_run_preview"] = preview_report
+        metadata["talking_run"] = {
+            "run_id": str(run.id), "series_id": str(current.id),
+            "master_narration_audio_id": str(origin.master_audio_id),
+            "master_start_ms": origin.master_start_ms, "master_end_ms": origin.master_end_ms,
+            "authorized_reference_clip_id": str(origin.source_clip_id),
+            "automated_qa_state": "verified", "continuity_review_id": str(review.id),
+            "continuity_review_state": "approved", "admission_state": "admitted",
+            "child_job_ids": [str(origin.generation_job_id)],
+            "planned_origin_sha256": review.planned_origin_sha256,
+            "reviewed_preview_sha256": preview.content_hash,
+        }
+        if origin.version == 2:
+            metadata["talking_run"]["review_policy_version"] = 2
+        return run, clip, preview.model_copy(update={"metadata": metadata})
+
     def _require_existing_admission(
         self, run: TalkingRun, series: TalkingSliceSeries, preview: Asset,
-        review: TalkingSliceSeriesContinuityReview, binding: TalkingSourceBinding,
+        review: TalkingSliceSeriesContinuityReview, binding: TalkingSourceBinding | None,
     ) -> None:
         origin = series.planned_origin
         self.policy.require_admitted_review(series, preview, review, run)
@@ -333,7 +339,7 @@ class PlannedTalkingAdmissionService:
             or run.continuity_review_id != review.id or run.assembled_asset_id != preview.id
             or run.planned_origin_sha256 != review.planned_origin_sha256
             or run.reviewed_preview_sha256 != preview.content_hash
-            or binding.talking_run_id != run.id
+            or (binding is not None and binding.talking_run_id != run.id)
             or clip is None or clip.asset_id != preview.id or clip.start_ms != 0
             or clip.end_ms != preview.duration_ms or clip.asset_duration_ms != preview.duration_ms
             or not isinstance(metadata, dict) or metadata.get("run_id") != str(run.id)

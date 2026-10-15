@@ -148,13 +148,15 @@ class ProductionRun(BaseModel):
     waiting_stop_reasons: tuple[str, ...] = ()
     created_at: AwareDatetime
     status: Literal[
-        "awaiting_approved_master", "awaiting_talking_dependencies", "voice_pending", "voice_running", "voice_failed", "voice_completed_awaiting_qa",
+        "evaluation_master_bound", "evaluation_master_blocked", "awaiting_approved_master", "awaiting_talking_dependencies", "voice_pending", "voice_running", "voice_failed", "voice_completed_awaiting_qa",
         "voice_qa_pending", "voice_qa_running", "voice_qa_failed", "awaiting_u_voice_review",
         "u_voice_rejected", "approved_master_ready_to_resume",
         "render_pending", "render_running",
         "render_failed", "render_completed_awaiting_review", "cancelled",
     ]
     talking_review_policy_version: Literal[1, 2] = 1
+    evaluation_master: dict | None = None
+    evaluation_composition: dict | None = None
 
 
 class TalkingSourceContext(BaseModel):
@@ -383,6 +385,19 @@ class ProductionRunService:
         self.data_root = Path(data_root).resolve()
 
     def get(self, project_id: UUID, run_id: UUID) -> ProductionRun | None:
+        from app.evaluation_composition import is_composition, EvaluationCompositionService
+        if is_composition(self.db,run_id=run_id):
+            value = EvaluationCompositionService(self.db,self.data_root).get(project_id,run_id)
+            row = self.db.connection.execute("SELECT * FROM production_runs WHERE id=?",(str(run_id),)).fetchone()
+            state = value["state"]
+            status = {"pending":"render_pending","running":"render_running","failed":"render_failed",
+                "awaiting_u_product":"render_completed_awaiting_review","cancelled":"cancelled"}.get(state,"render_failed")
+            return ProductionRun(id=run_id,project_id=project_id,idempotency_key=row["idempotency_key"],
+                preflight_fingerprint=row["preflight_fingerprint"],render_job_id=UUID(value["render_job_id"]),
+                created_at=row["created_at"],status=status,talking_review_policy_version=2,evaluation_composition=value)
+        from app.evaluation_master import EvaluationMasterService, is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            return EvaluationMasterService(self.db, self.data_root).get(project_id, run_id)
         row = self.db.connection.execute(
             "SELECT * FROM production_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id)),
         ).fetchone()
@@ -391,6 +406,9 @@ class ProductionRunService:
     def talking_source_context(
         self, project_id: UUID, run_id: UUID, *, scene_plan_id: UUID,
     ) -> TalkingSourceContext | None:
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         row = self.db.connection.execute(
             "SELECT * FROM production_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id)),
         ).fetchone()
@@ -528,6 +546,9 @@ class ProductionRunService:
         _new_inference: bool = True,
     ) -> ProductionRun | None:
         """Retain an exact candidate, not full-interval suitability or dispatch admission."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         if not authorization_reference.strip():
             raise ProductionRunNotReady(("talking_authorization_reference_required",))
         if master_start_ms < 0 or master_end_ms <= master_start_ms:
@@ -697,6 +718,9 @@ class ProductionRunService:
         self, project_id: UUID, run_id: UUID, *, scene_plan_id: UUID, admission_id: UUID,
     ) -> ProductionRun | None:
         """Atomically enqueue one bounded planned Talking Job, never a ProviderCall."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         with self.db.transaction(immediate=True):
             run = self.get(project_id, run_id)
             if run is None:
@@ -848,6 +872,9 @@ class ProductionRunService:
 
     def advance_talking_qa(self, project_id: UUID, run_id: UUID, *, scene_plan_id: UUID) -> ProductionRun | None:
         """Bind one completed planned output to a durable local technical QA Job."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         with self.db.transaction(immediate=True):
             run = self.get(project_id, run_id)
             if run is None:
@@ -944,6 +971,9 @@ class ProductionRunService:
         *, expected: PlannedTalkingRunOrigin | None = None,
     ) -> PlannedTalkingRunOrigin:
         """Revalidate an already generated child without asking for a new inference budget."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         with (nullcontext() if self.db.connection.in_transaction else self.db.transaction(immediate=True)):
             run = self.get(project_id, run_id)
             if run is None or run.status not in {"awaiting_talking_dependencies", "render_pending", "render_running", "render_failed", "render_completed_awaiting_review"}:
@@ -1095,6 +1125,9 @@ class ProductionRunService:
         self, project_id: UUID, run_id: UUID, *, scene_plan_id: UUID,
     ) -> ProductionRun | None:
         """Create a one-child evidence collection and local review-preview Job atomically."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         with self.db.transaction(immediate=True):
             run = self.get(project_id, run_id)
             if run is None:
@@ -1203,6 +1236,9 @@ class ProductionRunService:
         self, project_id: UUID, run_id: UUID, *, scene_plan_id: UUID, assessment_id: UUID,
     ) -> ProductionRun | None:
         """Consume exact review evidence on a bound candidate, without dispatch."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         run = self.get(project_id, run_id)
         if run is None:
             return None
@@ -1266,6 +1302,9 @@ class ProductionRunService:
             return self.get(project_id, run_id)
 
     def cancel(self, project_id: UUID, run_id: UUID) -> ProductionRun | None:
+        from app.evaluation_master import EvaluationMasterService, is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            return EvaluationMasterService(self.db, self.data_root).cancel(project_id, run_id)
         with self.db.transaction(immediate=True):
             row = self.db.connection.execute(
                 "SELECT * FROM production_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id)),
@@ -1352,6 +1391,9 @@ class ProductionRunService:
 
     def resume(self, project_id: UUID, run_id: UUID) -> ProductionRun | None:
         """After U-Voice admission, recheck the saved draft and dispatch once."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         with self.db.transaction(immediate=True):
             row = self.db.connection.execute(
                 "SELECT * FROM production_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id)),
@@ -1529,6 +1571,9 @@ class ProductionRunService:
 
     def advance_voice_qa(self, project_id: UUID, run_id: UUID) -> ProductionRun | None:
         """Find the one generated take and schedule its existing independent QA."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         with self.db.transaction(immediate=True):
             row = self.db.connection.execute(
                 "SELECT * FROM production_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id)),
@@ -1639,6 +1684,9 @@ class ProductionRunService:
         capability_profile_id: UUID, authorization_reference: str,
     ) -> ProductionRun | None:
         """Link one authorized existing Voice Job; never invoke a provider here."""
+        from app.evaluation_master import is_evaluation_master_run
+        if is_evaluation_master_run(self.db, run_id):
+            raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         if not authorization_reference.strip():
             raise ProductionRunNotReady(("voice_authorization_reference_required",))
         with self.db.transaction(immediate=True):

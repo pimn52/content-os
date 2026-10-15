@@ -98,10 +98,15 @@ def _preflight(
         if scene.graphic_plan is not None:
             if scene.graphic_plan.kind == "unsupported":
                 raise EditPlanPreflightError("graphic_realization_unsupported")
-            if (entry.fallback.text != "\n".join(scene.graphic_plan.points)
+            if scene.graphic_plan.kind == "none":
+                if candidate.source_kind is SourceKind.TYPOGRAPHY:
+                    raise EditPlanPreflightError("no_graphics_requires_media")
+                if entry.graphic_treatment is not GraphicTreatment.NONE or entry.graphic_text is not None:
+                    raise EditPlanPreflightError("no_graphics_presentation_changed")
+            elif (entry.fallback.text != "\n".join(scene.graphic_plan.points)
                     or entry.fallback.graphic_treatment.value != scene.graphic_plan.treatment):
                 raise EditPlanPreflightError("graphic_card_points_or_treatment_changed")
-            if candidate.source_kind is SourceKind.TYPOGRAPHY and (
+            if scene.graphic_plan.kind == "text_card" and candidate.source_kind is SourceKind.TYPOGRAPHY and (
                 entry.graphic_text != "\n".join(scene.graphic_plan.points)
                 or entry.graphic_treatment.value != scene.graphic_plan.treatment
             ):

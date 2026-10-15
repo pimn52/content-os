@@ -47,6 +47,22 @@ def test_runner_completes_one_job_and_returns_none_when_empty(tmp_path: Path) ->
     db.close()
 
 
+def test_runner_targets_one_job_without_consuming_backlog(tmp_path: Path) -> None:
+    db = Database(tmp_path / "targeted.sqlite")
+    store = JobStore(db)
+    older = store.enqueue(make_job("older"))
+    target = store.enqueue(make_job("target"))
+    seen = []
+    runner = make_runner(store, {JobType.ANALYZE_ASSET: seen.append})
+    completed = runner.run_once(job_id=target.id)
+    assert completed is not None and completed.id == target.id and completed.status is JobStatus.COMPLETED
+    assert [job.id for job in seen] == [target.id]
+    assert store.get(older.id) == older
+    assert runner.run_once(job_id=target.id) is None
+    assert store.get(older.id) == older
+    db.close()
+
+
 def test_runner_handler_executes_outside_claim_write_transaction(tmp_path: Path) -> None:
     db = Database(tmp_path / "jobs.sqlite")
     store = JobStore(db)

@@ -256,6 +256,7 @@ class FasterWhisperASRProvider:
         word_timestamps: bool = False,
         download_root: str | Path | None = None,
         model_factory: Callable[..., object] | None = None,
+        local_only: bool = False,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
             raise ASRConfigurationError("local ASR model must not be empty")
@@ -269,6 +270,21 @@ class FasterWhisperASRProvider:
             raise ASRConfigurationError("local ASR word_timestamps must be a boolean")
         if download_root is not None and not isinstance(download_root, (str, Path)):
             raise ASRConfigurationError("local ASR model directory is invalid")
+        if type(local_only) is not bool:
+            raise ASRConfigurationError("local ASR local_only must be a boolean")
+        if local_only:
+            from app.domain.asr_recipe import ASR_MODEL_FILES, validate_local_features
+            candidate = Path(model)
+            if (not candidate.is_absolute() or not candidate.is_dir() or candidate.resolve() != candidate
+                or device != "cpu" or compute_type != "int8" or vad_filter or not word_timestamps
+                or download_root is not None
+                or any(not (candidate / name).is_file() or (candidate / name).resolve().parent != candidate for name in ASR_MODEL_FILES)):
+                raise ASRConfigurationError("strict local ASR requires exact CPU model and all local assets")
+            try:
+                validate_local_features(candidate)
+            except ValueError as exc:
+                raise ASRConfigurationError(str(exc)) from exc
+        self.local_only = local_only
         self.model = model.strip()
         self.device = device.strip()
         self.compute_type = compute_type.strip()
@@ -288,6 +304,8 @@ class FasterWhisperASRProvider:
         path = _validate_audio_path(audio_path)
         language_value = _validate_optional_text(language, "language")
         prompt_value = _validate_optional_text(prompt, "prompt")
+        if self.local_only and prompt is not None:
+            raise ASRInputError("independent ASR forbids a prompt")
         model = self._loaded_model()
         try:
             transcribe_kwargs: dict[str, object] = {
@@ -297,6 +315,9 @@ class FasterWhisperASRProvider:
             }
             if self.word_timestamps:
                 transcribe_kwargs["word_timestamps"] = True
+            if self.local_only:
+                from app.domain.asr_recipe import ASR_DECODE
+                transcribe_kwargs = {**ASR_DECODE, "language": language_value}
             raw_segments, info = model.transcribe(str(path), **transcribe_kwargs)
             segments: list[TranscriptionSegment] = []
             words: list[TranscriptionWord] = []
@@ -328,6 +349,8 @@ class FasterWhisperASRProvider:
                 start_ms = _start_ms(start)
                 end_ms = _end_ms(end)
                 if end_ms <= start_ms:
+                    if self.local_only:
+                        raise ASRProviderResponseError("strict local ASR returned invalid interval")
                     continue
                 segments.append(TranscriptionSegment(start_ms, end_ms, text.strip()))
         except ASRError:
@@ -337,6 +360,8 @@ class FasterWhisperASRProvider:
         except Exception:
             raise ASRConnectionError("local ASR inference failed") from None
 
+        if self.local_only and not words_valid:
+            raise ASRProviderResponseError("strict local ASR returned invalid word timing")
         detected_language = getattr(info, "language", None)
         if not isinstance(detected_language, str) or not detected_language.strip():
             detected_language = None
@@ -363,6 +388,9 @@ class FasterWhisperASRProvider:
             "device": self.device,
             "compute_type": self.compute_type,
         }
+        if self.local_only:
+            from app.domain.asr_recipe import ASR_LOAD
+            kwargs = dict(ASR_LOAD)
         if self.download_root is not None:
             kwargs["download_root"] = str(self.download_root)
         try:

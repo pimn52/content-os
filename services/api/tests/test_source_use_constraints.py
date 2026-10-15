@@ -202,12 +202,14 @@ def test_additive_migration_41_preserves_existing_profiles_and_rows(tmp_path):
     path = tmp_path / "migration.sqlite"
     with Database(path) as db:
         profile = IPProfileRepository(db).create(IPProfile(creator_name="retained creator"))
+        original_versions = {row[0] for row in db.connection.execute("SELECT version FROM schema_migrations")}
         for table in ("render_use_constraint_snapshots", "source_use_constraint_requests", "source_use_constraint_versions", "source_use_constraints"):
             db.connection.execute(f"DROP TABLE {table}")
         db.connection.execute("DELETE FROM schema_migrations WHERE version=42")
         previous = db.connection.execute("SELECT payload FROM ip_profiles WHERE id=?", (str(profile.id),)).fetchone()[0]
     with Database(path) as db:
-        assert db.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 42
+        assert {row[0] for row in db.connection.execute("SELECT version FROM schema_migrations")} == original_versions
+        assert 42 in original_versions
         assert db.connection.execute("SELECT payload FROM ip_profiles WHERE id=?", (str(profile.id),)).fetchone()[0] == previous
         assert IPProfileRepository(db).revisions(profile.id)[-1][0] == 1
         assert db.connection.execute("SELECT COUNT(*) FROM source_use_constraints").fetchone()[0] == 0

@@ -40,6 +40,8 @@ def _facts(service, job, scope):
         setting = service.db.connection.execute(
             'SELECT * FROM provider_machine_settings WHERE scope_key=?', (profile['scope_key'],)).fetchone()
         rows.extend((tuple(receipt), tuple(profile), None if setting is None else tuple(setting)))
+    from .voice_calibration import require_claim
+    rows.extend(require_claim(service.db, current, actual))
     return tuple(rows)
 
 

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 from urllib.parse import urlsplit
+from app.media.local_paths import resolve_local_media_path
 from uuid import UUID, uuid4
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, ImageAssetRepository, TalkingRunRepository
@@ -134,18 +135,45 @@ class RemotionRenderer:
         self.runner = runner or SubprocessRenderCommandRunner()
 
     def render(self, spec: VideoSpec, output_path: str | Path) -> Path:
+        return self._render(spec, output_path)
+
+    def render_composition(self, job_id: UUID, output_path: str | Path) -> Path:
+        """Named owned entry: reconstruct permission from persisted authority."""
+        from app.evaluation_composition import EvaluationCompositionService
+        from app.db import JobRepository, ProviderCallRepository
+        from app.domain.models import JobStatus
+        service = EvaluationCompositionService(self.assets.db,self.data_root)
+        job = JobRepository(self.assets.db).get(job_id)
+        context = service.require_current_job(job)
+        _,owner,_ = service.require_job_identity(job)
+        call = ProviderCallRepository(self.assets.db).get_by_idempotency_key(f"composition:{owner['batch_id']}:render")
+        if job.status != JobStatus.RUNNING or job.attempt != 1 or call is None or call.status != "running":
+            raise UnauthorizedVisualError("composition_owned_once_call_required")
+        expected = service.output_path(owner).with_name("staged.mp4")
+        if not expected.resolve().is_relative_to(self.data_root) or Path(output_path).resolve() != expected.resolve():
+            raise UnauthorizedVisualError("composition_private_output_required")
+        with self.assets.db.transaction(immediate=True):
+            service._fence(context["token"])
+            if service.records.get("launch",owner["run_id"]) is not None:
+                raise UnauthorizedVisualError("composition_render_already_launched")
+            service.records.save("launch",owner["run_id"],dict(project_id=str(job.project_id),
+                job_id=str(job.id),call_id=str(call.id),job_sha256=owner["job_sha256"]))
+        return self._render(context["spec"],expected,composition_job_id=job_id)
+
+    def _render(self, spec: VideoSpec, output_path: str | Path, *, composition_job_id: UUID | None = None) -> Path:
         if not isinstance(spec, VideoSpec):
             raise RenderInputError("renderer requires a VideoSpec contract")
         if spec.format != ProjectFormat.VERTICAL or spec.width * 16 != spec.height * 9:
             raise RenderInputError("minimal renderer accepts only 9:16 vertical VideoSpecs")
         output = _output_path(output_path)
         _renderer_project(self.renderer_dir)
-        master_narration = self._validate_master_narration(spec, spec.fps)
+        master_narration = self._validate_master_narration(spec, spec.fps, composition_job_id=composition_job_id)
         prepared = {
             scene.scene_id: self._validate_scene(
                 scene, spec.fps, project_id=spec.project_id,
                 master_audio_id=None if spec.master_narration is None else spec.master_narration.audio_asset_id,
                 validate_scene_narration=master_narration is None,
+                composition_job_id=composition_job_id,
             )
             for scene in spec.scenes
         }
@@ -192,24 +220,29 @@ class RemotionRenderer:
         project_id: UUID,
         master_audio_id: UUID | None,
         validate_scene_narration: bool = True,
+        composition_job_id: UUID | None = None,
     ) -> _PreparedVisual:
         visual = scene.visual
         if scene.transition != "cut":
             raise RenderInputError("minimal renderer supports only cut transitions")
         if scene.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL and (
-            visual.source_kind is not SourceKind.AI_VIDEO or visual.vertical_reframe_mode is not VerticalReframeMode.CONTAIN
+            visual.source_kind is not SourceKind.AI_VIDEO or visual.vertical_reframe_mode not in {
+                VerticalReframeMode.CONTAIN, VerticalReframeMode.BOTTOM_CROP_CONTAIN,
+            }
         ):
-            raise RenderInputError("portrait_panel requires an uncropped Talking visual")
+            raise RenderInputError("portrait_panel requires a complete-width Talking visual")
         narration_source, narration_start_frame = (
             self._validate_narration(scene, composition_fps) if validate_scene_narration else (None, 0)
         )
         if visual.source_kind == SourceKind.TYPOGRAPHY:
             if any(value is not None for value in (visual.asset_id, visual.clip_id, visual.clip_start_ms, visual.clip_end_ms, visual.source_duration_ms)):
                 raise RenderInputError("typography visual must not reference a media Clip")
+            neutral = (scene.graphic_treatment.value == "none" and not scene.graphic_text
+                and not scene.caption and not scene.captions and scene.subtitle_treatment.value == "none")
             return _PreparedVisual(
                 source=None, trim_before=0, trim_after=0, kind="typography",
                 narration_source=narration_source, narration_start_frame=narration_start_frame,
-                graphic_treatment="key_point" if scene.graphic_treatment.value == "none" else scene.graphic_treatment.value,
+                graphic_treatment="none" if neutral else "key_point" if scene.graphic_treatment.value == "none" else scene.graphic_treatment.value,
                 graphic_text=scene.graphic_text,
                 style_tokens=scene.style_tokens.model_dump(),
             )
@@ -231,7 +264,7 @@ class RemotionRenderer:
         clip = self.clips.get(visual.clip_id)
         if asset is None or clip is None:
             raise LocalResourceError("referenced local media is unavailable")
-        self._require_commercial_content(asset)
+        self._require_commercial_content(asset, composition_job_id=composition_job_id)
         if (
             clip.asset_id != asset.id
             or asset.source_kind != visual.source_kind
@@ -244,7 +277,7 @@ class RemotionRenderer:
             or clip.end_ms > asset.duration_ms
         ):
             raise UnauthorizedVisualError("VideoSpec visual does not match the authorized stored Clip")
-        if asset.source_kind is SourceKind.AI_VIDEO:
+        if asset.source_kind is SourceKind.AI_VIDEO and composition_job_id is None:
             blocker = talking_visual_blocker(
                 asset, clip, self.assets, project_id=project_id, copy=scene.caption or "",
                 master_audio_id=master_audio_id or scene.narration_asset_id,
@@ -286,7 +319,11 @@ class RemotionRenderer:
             style_tokens=scene.style_tokens.model_dump(),
         )
 
-    def _require_commercial_content(self, asset) -> None:
+    def _require_commercial_content(self, asset, *, composition_job_id: UUID | None = None) -> None:
+        if composition_job_id is not None:
+            from app.evaluation_composition import EvaluationCompositionService
+            EvaluationCompositionService(self.assets.db,self.data_root).require_media_identity(composition_job_id,asset)
+            return
         from app.execution_scope import commercial_content_blocker
         blocker = commercial_content_blocker(self.assets.db, asset.content_hash)
         if blocker is not None:
@@ -310,7 +347,7 @@ class RemotionRenderer:
             raise RenderInputError("narration interval is shorter than the scene")
         return _local_existing_audio(audio, self.data_root), _ceil_frames(start_ms, composition_fps)
 
-    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps) -> _PreparedMasterNarration | None:
+    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps, *, composition_job_id: UUID | None = None) -> _PreparedMasterNarration | None:
         master = spec.master_narration
         if master is None:
             return None
@@ -319,7 +356,7 @@ class RemotionRenderer:
         audio = self.audios.get(master.audio_asset_id)
         if audio is None:
             raise LocalResourceError("referenced master narration audio is unavailable")
-        self._require_commercial_content(audio)
+        self._require_commercial_content(audio, composition_job_id=composition_job_id)
         if master.end_ms > audio.duration_ms:
             raise RenderInputError("master narration interval exceeds audio duration")
         return _PreparedMasterNarration(
@@ -335,7 +372,7 @@ class RemotionRenderer:
         run_id: str,
         master_narration: _PreparedMasterNarration | None,
     ) -> dict[str, object]:
-        staged_by_source: dict[Path, str] = {}
+        staged_by_source: dict[tuple[Path, float], str] = {}
         staged_by_audio: dict[Path, str] = {}
         scene_sources: dict[str, dict[str, object]] = {}
         for scene in spec.scenes:
@@ -344,7 +381,7 @@ class RemotionRenderer:
             if visual.narration_source is not None:
                 narration_relative = staged_by_audio.get(visual.narration_source)
                 if narration_relative is None:
-                    filename = f"narration-{len(staged_by_audio):03d}-{visual.narration_source.name}"
+                    filename = f"narration-{len(staged_by_audio):03d}{visual.narration_source.suffix}"
                     destination = staging / filename
                     shutil.copy2(visual.narration_source, destination)
                     narration_relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
@@ -352,7 +389,7 @@ class RemotionRenderer:
             if visual.source is None:
                 scene_sources[scene.scene_id] = {
                     "kind": "typography",
-                    "text": visual.graphic_text or scene.caption or scene.scene_id,
+                    "text": "" if visual.graphic_treatment == "none" else visual.graphic_text or scene.caption or scene.scene_id,
                     "graphicTreatment": visual.graphic_treatment,
                     "styleTokens": visual.style_tokens or scene.style_tokens.model_dump(),
                 }
@@ -360,13 +397,30 @@ class RemotionRenderer:
                     scene_sources[scene.scene_id]["narrationSrc"] = narration_relative
                     scene_sources[scene.scene_id]["narrationStartFrame"] = visual.narration_start_frame
                 continue
-            relative = staged_by_source.get(visual.source)
+            bottom_crop = visual.source_bottom_crop_ratio if visual.vertical_reframe_mode == "bottom_crop_contain" else 0
+            source_key = (visual.source, bottom_crop)
+            relative = staged_by_source.get(source_key)
             if relative is None:
-                filename = f"{len(staged_by_source):03d}-{visual.source.name}"
+                filename = f"source-{len(staged_by_source):03d}{visual.source.suffix}"
                 destination = staging / filename
-                shutil.copy2(visual.source, destination)
+                if bottom_crop:
+                    from app.runtime import resolve_local_executable
+
+                    destination = destination.with_suffix(".mp4")
+                    filename = destination.name
+                    # Crop only the evidenced bottom strip; retain all horizontal
+                    # motion, timestamps and source audio. Never alter the asset.
+                    argv = [resolve_local_executable("ffmpeg"), "-nostdin", "-y", "-v", "error",
+                            "-i", str(visual.source), "-vf", f"crop=iw:trunc(ih*(1-{bottom_crop})/2)*2:0:0",
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "copy",
+                            "-movflags", "+faststart", str(destination)]
+                    completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
+                    if completed.returncode != 0 or not destination.is_file() or destination.stat().st_size == 0:
+                        raise RenderProcessError(completed.returncode or -1)
+                else:
+                    shutil.copy2(visual.source, destination)
                 relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
-                staged_by_source[visual.source] = relative
+                staged_by_source[source_key] = relative
             scene_sources[scene.scene_id] = {
                 "kind": visual.kind,
                 "src": relative,
@@ -374,7 +428,7 @@ class RemotionRenderer:
                 "trimAfter": visual.trim_after,
                 "verticalReframeMode": visual.vertical_reframe_mode,
                 "portraitPresentation": visual.portrait_presentation,
-                "sourceBottomCropRatio": visual.source_bottom_crop_ratio,
+                "sourceBottomCropRatio": 0 if bottom_crop else visual.source_bottom_crop_ratio,
                 "graphicText": visual.graphic_text,
                 "graphicTreatment": visual.graphic_treatment,
                 "styleTokens": visual.style_tokens or scene.style_tokens.model_dump(),
@@ -386,7 +440,7 @@ class RemotionRenderer:
         if master_narration is not None:
             master_relative = staged_by_audio.get(master_narration.source)
             if master_relative is None:
-                filename = f"master-narration-{len(staged_by_audio):03d}-{master_narration.source.name}"
+                filename = f"master-{len(staged_by_audio):03d}{master_narration.source.suffix}"
                 destination = staging / filename
                 shutil.copy2(master_narration.source, destination)
                 master_relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
@@ -428,16 +482,10 @@ def _local_existing_file(asset: Asset, data_root: Path | None = None) -> Path:
 
 
 def _resolve_local_media_path(raw: str, data_root: Path | None) -> Path:
-    value = Path(raw).expanduser()
-    if not value.is_absolute() and data_root is not None:
-        parts = value.parts
-        path = (data_root.parent / value if parts and parts[0].casefold() == data_root.name.casefold()
-                else data_root / value).resolve()
-        if not path.is_relative_to(data_root):
-            raise LocalResourceError("relative media path escapes configured data root")
-    else:
-        path = value.resolve()
-    return path
+    try:
+        return resolve_local_media_path(raw, data_root)
+    except ValueError as exc:
+        raise LocalResourceError(str(exc)) from exc
 
 
 def _local_existing_image(asset: ImageAsset, data_root: Path | None = None) -> Path:

@@ -12,7 +12,7 @@ from typing import BinaryIO, Iterator, Protocol
 from uuid import uuid4
 
 from app.db import AudioAssetRepository, Database
-from app.domain.models import AudioAsset, Job, SourceKind
+from app.domain.models import AudioAsset, Job, JobType, SourceKind
 from app.execution_scope import register_generated_import_scope
 
 from .ffprobe import AudioProbeMetadata, FFProbeAdapter, ProbeError
@@ -42,6 +42,7 @@ class AudioImporter:
         source_kind: SourceKind = SourceKind.USER_ASSET,
         language: str | None = None,
         generated_job: Job | None = None,
+        generated_metadata: dict | None = None,
     ) -> AudioAsset:
         path = Path(source)
         if not path.is_file():
@@ -49,7 +50,7 @@ class AudioImporter:
         with path.open("rb") as stream:
             return self.import_stream(
                 stream, path.name, authorization_reference, source_kind=source_kind,
-                language=language, generated_job=generated_job,
+                language=language, generated_job=generated_job, generated_metadata=generated_metadata,
             )
 
     def import_stream(
@@ -61,9 +62,20 @@ class AudioImporter:
         source_kind: SourceKind = SourceKind.USER_ASSET,
         language: str | None = None,
         generated_job: Job | None = None,
+        generated_metadata: dict | None = None,
     ) -> AudioAsset:
         if source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}:
             raise AudioImportError("audio source_kind must be user_asset or historical_asset")
+        if generated_metadata is not None and generated_job is None:
+            raise AudioImportError("generated metadata requires its persisted Job")
+        if generated_metadata is not None:
+            event = generated_metadata.get("voice_generation")
+            if (set(generated_metadata) != {"voice_generation"} or generated_job.type != JobType.GENERATE_VOICE
+                or not isinstance(event, dict) or event.get("job_id") != str(generated_job.id)
+                or event.get("project_id") != str(generated_job.project_id) or event.get("qa_state") != "pending"
+                or generated_job.payload is None or event.get("target_text") != generated_job.payload.text
+                or event.get("voice_profile_id") != str(generated_job.payload.voice_profile_id)):
+                raise AudioImportError("generated Voice provenance must match its Job and remain QA pending")
         temp = self.originals / f".import-{secrets.token_hex(12)}.tmp"
         digest = hashlib.sha256()
         try:
@@ -92,7 +104,7 @@ class AudioImporter:
                 id=uuid4(), source_kind=source_kind, source_file=str(destination), content_hash=content_hash,
                 duration_ms=metadata.duration_ms, sample_rate=metadata.sample_rate, channels=metadata.channels,
                 language=language or metadata.language, authorization_reference=authorization_reference,
-                imported_at=datetime.now(timezone.utc), metadata={"filename": filename},
+                imported_at=datetime.now(timezone.utc), metadata={"filename": filename, **(generated_metadata or {})},
             )
             placed = False
             try:

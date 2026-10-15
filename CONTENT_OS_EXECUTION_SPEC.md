@@ -14,6 +14,16 @@ The primary durable object is the creator/brand workspace, not an isolated video
 
 The core product objective is to maximize repeatable automatic creation, then extend toward authorized operations. Progress is measured by publishable outcomes with less manual planning, dispatch, repair and repeated review—not by the number of successful provider experiments.
 
+Within admitted capability, optimize output for the actual input rather than
+forcing a single source aspect or substituting text for usable footage. Support
+comfortable source proportions inside the final canvas and explain constrained
+quality, alternatives and unknowns so the user can choose an appropriate outcome.
+Suitable full-screen portrait footage remains the preferred result; square or
+wider viewports are disclosed compromises for limited input, not the universal
+output target.
+Accepting a useful limited result does not claim that it passed the R1
+publishability/normal-workflow gate; sufficient-input trials must still prove it.
+
 ## 2. Product system
 
     Workspace / Creator / Brand

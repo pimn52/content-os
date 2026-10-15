@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import math
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -26,6 +27,7 @@ from app.jobs.worker import JobWorker
 from app.media.extraction import FFmpegExtractionService
 from app.media.ffprobe import FFProbeAdapter
 from app.media.audio_importer import AudioImporter
+from app.media.voice_reference import reference_extraction_command
 from app.media.importer import MediaImporter
 from app.media.pipeline import MediaAnalysisPipeline
 from app.media.segmentation import FFmpegSceneDetector
@@ -215,23 +217,36 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             ),
             config.data_root / "renders",
         )
+        render_policy = os.environ.get("CONTENT_OS_RENDER_EXECUTION_POLICY","commercial_production").strip()
+        if render_policy == "evaluation-composition-v1":
+            from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
+            handlers[JobType.RENDER] = EvaluationCompositionHandler(db,config.data_root,
+                RemotionRenderer(AssetRepository(db),ClipRepository(db),images=ImageAssetRepository(db),
+                    audios=AudioAssetRepository(db),renderer_dir=renderer_dir))
+        elif render_policy != "commercial_production":
+            raise ValueError("composition_render_policy_unsupported")
     if JobType.GENERATE_VOICE in config.job_types:
-        provider = _build_voice_provider(config, db)
-        handlers[JobType.GENERATE_VOICE] = VoiceGenerationJobHandler(
-            VoiceProfileRepository(db),
-            AudioAssetRepository(db),
-            AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
-            provider,
-            config.data_root / "generated",
-            ProviderCallLedger(db),
-        )
+        if os.environ.get("CONTENT_OS_VOICE_PROVIDER", "").strip().lower() == "omnivoice-maintained":
+            from app.jobs.voice_draft_handler import configured_voice_draft_handler
+            handlers[JobType.GENERATE_VOICE] = configured_voice_draft_handler(config, db, os.environ)
+        else:
+            provider = _build_voice_provider(config, db)
+            handlers[JobType.GENERATE_VOICE] = VoiceGenerationJobHandler(
+                VoiceProfileRepository(db), AudioAssetRepository(db),
+                AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
+                provider, config.data_root / "generated", ProviderCallLedger(db),
+            )
     if JobType.CREATE_VOICE_PACE_CANDIDATE in config.job_types:
         handlers[JobType.CREATE_VOICE_PACE_CANDIDATE] = VoicePaceCandidateJobHandler(
             AudioAssetRepository(db), JobRepository(db),
             AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
             config.data_root, config.ffmpeg,
         )
-    if JobType.VERIFY_VOICE in config.job_types or JobType.ALIGN_VOICE_BOUNDARIES in config.job_types:
+    evaluation_qa = os.environ.get("CONTENT_OS_VOICE_QA_POLICY", "") == "voice-evaluation-qa-v1"
+    if JobType.VERIFY_VOICE in config.job_types and evaluation_qa:
+        from app.jobs.voice_evaluation_qa_handler import configured_voice_evaluation_qa_handler
+        handlers[JobType.VERIFY_VOICE] = configured_voice_evaluation_qa_handler(config, db, os.environ)
+    if (JobType.VERIFY_VOICE in config.job_types and not evaluation_qa) or JobType.ALIGN_VOICE_BOUNDARIES in config.job_types:
         qa_model = os.environ.get("CONTENT_OS_VOICE_QA_ASR_MODEL", "").strip()
         if not qa_model or not Path(qa_model).exists():
             raise ASRConfigurationError("CONTENT_OS_VOICE_QA_ASR_MODEL must point to a local ASR model directory")
@@ -242,7 +257,7 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             vad_filter=False,
             word_timestamps=True,
         )
-        if JobType.VERIFY_VOICE in config.job_types:
+        if JobType.VERIFY_VOICE in config.job_types and not evaluation_qa:
             handlers[JobType.VERIFY_VOICE] = VoiceQaJobHandler(
                 AudioAssetRepository(db), qa_provider, ProviderCallLedger(db),
                 provider_name="faster-whisper", provider_model=qa_model,
@@ -262,7 +277,14 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
                 AudioAssetRepository(db), JobRepository(db), qa_provider, ProviderCallLedger(db),
                 data_root=config.data_root, provider_model=qa_model,
             )
-    if JobType.GENERATE_TALKING in config.job_types:
+    talking_policy = os.environ.get("CONTENT_OS_TALKING_EXECUTION_POLICY", "")
+    if talking_policy not in ("", "evaluation-talking-run-v1", "evaluation-talking-calibration-v1"):
+        raise TalkingConfigurationError("talking_execution_policy_unsupported")
+    evaluation_talking = talking_policy in ("evaluation-talking-run-v1", "evaluation-talking-calibration-v1")
+    if JobType.GENERATE_TALKING in config.job_types and evaluation_talking:
+        from app.jobs.evaluation_talking_handler import configured_evaluation_talking_handler
+        handlers[JobType.GENERATE_TALKING] = configured_evaluation_talking_handler(config, db, os.environ)
+    if JobType.GENERATE_TALKING in config.job_types and not evaluation_talking:
         provider = _build_talking_provider(config)
         handlers[JobType.GENERATE_TALKING] = TalkingGenerationJobHandler(
             TalkingProfileRepository(db),
@@ -276,11 +298,18 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             execution_runtime=os.environ.get("CONTENT_OS_TALKING_RUNTIME_ID"),
             execution_machine_id=os.environ.get("CONTENT_OS_TALKING_MACHINE_ID"),
         )
-    if JobType.VERIFY_TALKING in config.job_types:
+    if JobType.VERIFY_TALKING in config.job_types and evaluation_talking:
+        from app.jobs.evaluation_talking_qa_handler import EvaluationTalkingQaHandler
+        handlers[JobType.VERIFY_TALKING] = EvaluationTalkingQaHandler(db, config.data_root, probe=FFProbeAdapter(config.ffprobe),policy=talking_policy)
+    if JobType.VERIFY_TALKING in config.job_types and not evaluation_talking:
         handlers[JobType.VERIFY_TALKING] = TalkingQaJobHandler(
             AssetRepository(db), data_root=config.data_root, probe=FFProbeAdapter(config.ffprobe),
         )
-    if JobType.PREPARE_TALKING_RUN_PREVIEW in config.job_types:
+    if JobType.PREPARE_TALKING_RUN_PREVIEW in config.job_types and evaluation_talking:
+        from app.jobs.evaluation_talking_preview_handler import EvaluationTalkingPreviewHandler
+        handlers[JobType.PREPARE_TALKING_RUN_PREVIEW] = EvaluationTalkingPreviewHandler(
+            db, config.data_root, ffmpeg_command=config.ffmpeg, probe=FFProbeAdapter(config.ffprobe),policy=talking_policy)
+    if JobType.PREPARE_TALKING_RUN_PREVIEW in config.job_types and not evaluation_talking:
         handlers[JobType.PREPARE_TALKING_RUN_PREVIEW] = TalkingRunPreviewJobHandler(
             db, config.data_root, ffmpeg_command=config.ffmpeg, probe=FFProbeAdapter(config.ffprobe),
         )
@@ -332,6 +361,22 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         raise VoiceConfigurationError("OmniVoice step, speed and timeout settings must be numeric") from exc
     if num_step < 1 or not math.isfinite(speed) or speed <= 0 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise VoiceConfigurationError("OmniVoice step, speed and timeout settings must be positive")
+    # Freeze effective configuration before reservation. Later ambient env
+    # edits must not change the actual command behind its execution receipt.
+    device = os.environ.get("CONTENT_OS_OMNIVOICE_DEVICE", "cpu").strip()
+    if not re.fullmatch(r"cpu|cuda(?::[0-9]+)?", device):
+        raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_DEVICE must be an explicit CPU or CUDA device")
+    reference_policy = os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment").strip().lower()
+    if reference_policy not in {"first_segment", "best_window"}:
+        raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY must be first_segment or best_window")
+    reference_window_index = 0
+    if reference_policy == "best_window":
+        try:
+            reference_window_index = int(os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "0").strip())
+        except ValueError as exc:
+            raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX must be a non-negative integer") from exc
+        if reference_window_index < 0:
+            raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX must be a non-negative integer")
 
     clips = ClipRepository(db)
     assets = AssetRepository(db)
@@ -374,22 +419,14 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         available = [item for item in referenced if item is not None]
         if not available:
             raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
-        policy = os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment").strip().lower()
-        if policy == "best_window":
+        if reference_policy == "best_window":
             resolved_assets = {asset.id: asset for asset in (assets.get(clip.asset_id) for clip in available) if asset is not None}
             windows = select_voice_reference_windows(available, resolved_assets, data_root=config.data_root)
             if windows:
-                raw_index = os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "0").strip()
-                try:
-                    window_index = int(raw_index)
-                except ValueError as exc:
-                    raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX must be a non-negative integer") from exc
-                if window_index < 0 or window_index >= len(windows):
+                if reference_window_index >= len(windows):
                     raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX is outside available authorized windows")
-                window = windows[window_index]
+                window = windows[reference_window_index]
                 return Path(window.source_file), window.start_ms, window.end_ms, window.transcript
-        elif policy != "first_segment":
-            raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY must be first_segment or best_window")
         clip = available[0]
         asset = assets.get(clip.asset_id)
         if asset is None:
@@ -434,11 +471,7 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
             reference_audio = Path(temporary) / "reference.wav"
             try:
                 extraction = subprocess.run(
-                    [
-                        str(ffmpeg), "-y", "-ss", f"{reference_start_ms / 1000:.3f}", "-i", str(source_path),
-                        "-t", f"{(reference_end_ms - reference_start_ms) / 1000:.3f}", "-vn", "-ac", "1", "-ar", "24000",
-                        "-c:a", "pcm_s16le", str(reference_audio),
-                    ],
+                    reference_extraction_command(ffmpeg, source_path, reference_audio, reference_start_ms, reference_end_ms),
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -452,7 +485,7 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
                 str(runtime), "-m", "omnivoice.cli.infer", "--model", str(model), "--text", text,
                 "--ref_audio", str(reference_audio), "--ref_text", reference_text, "--output", str(target),
                 "--language", resolved_language or "Chinese", "--num_step", str(num_step),
-                "--speed", str(speed), "--device", os.environ.get("CONTENT_OS_OMNIVOICE_DEVICE", "cpu"),
+                "--speed", str(speed), "--device", device,
             ]
             try:
                 completed = subprocess.run(
@@ -473,7 +506,8 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
     provider = OmniVoiceProvider(model=str(model), synthesizer=synthesize, reference_synthesizer=synthesize)
     provider.repair_execution = {"runtime": os.environ.get("CONTENT_OS_VOICE_RUNTIME_ID"),
         "machine_id": os.environ.get("CONTENT_OS_VOICE_MACHINE_ID"),
-        "parameters": {"runtime_python": str(runtime), "num_step": num_step, "speed": speed, "timeout_seconds": timeout_seconds}}
+        "parameters": {"runtime_python": str(runtime), "num_step": num_step, "speed": speed, "timeout_seconds": timeout_seconds,
+            "device": device, "reference_policy": reference_policy, "reference_window_index": reference_window_index}}
     return provider
 
 

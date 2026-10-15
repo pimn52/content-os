@@ -10,6 +10,8 @@ export type ProductionPlan = {
 export type ProductionRun = {
   id: string; project_id: string; status: string; preflight_fingerprint: string; render_job_id: string | null;
   talking_review_policy_version?: 1 | 2;
+  created_at?: string;
+  evaluation_master?: { current_eligible: boolean; whole_run_ready: false; audio_id?: string; audio_sha256?: string; duration_ms?: number; copy?: string } | null;
   voice_job_id: string | null; voice_audio_id: string | null; voice_qa_job_id: string | null;
   waiting_stop_reasons: string[];
   voice_qa_auto_stop_reasons: string[];
@@ -22,6 +24,9 @@ export type ProductionRun = {
 export function productionKey(projectId: string) { return `content-os-production:${projectId}`; }
 export function startBody(plan: ProductionPlan, talkingReviewPolicyVersion: 1 | 2 = 2) {
   return { idempotency_key: `web-production:${plan.project_id}:${plan.fingerprint}`, expected_fingerprint: plan.fingerprint, talking_review_policy_version: talkingReviewPolicyVersion };
+}
+export function presentationStyle(choice: "default" | "subject_first") {
+  return choice === "subject_first" ? { name: "content-os-subject-first", background_color: "#f3efe5", foreground_color: "#172033", accent_color: "#ca4c2c" } : {};
 }
 export function talkingRepairKey(projectId: string, runId: string, scenePlanId: string, fingerprint: string) {
   return `web-talking-repair:${projectId}:${runId}:${scenePlanId}:${fingerprint}`;

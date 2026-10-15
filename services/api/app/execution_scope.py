@@ -400,10 +400,31 @@ def _job_owner_scopes(db: Database, job: Job) -> tuple[ExecutionUseScope, ...]:
 
 
 def read_job_scope(db: Database, job: Job) -> ExecutionUseScope | None:
+    from .evaluation_composition import is_composition, EvaluationCompositionService
+    if is_composition(db,job_id=job.id):
+        # Named retained consumer authenticates all origins, not a single
+        # calibration execution receipt. Generic report5 rules stay intact.
+        return EvaluationCompositionService(db,getattr(db,"data_root",Path(db.path).parent)).require_job_identity(job)[2]
+    from .evaluation_talking import is_evaluation_talking_job
+    if is_evaluation_talking_job(db, job):
+        # Role checks do not append the original Master/Voice scope to the
+        # new execution Job, and remain strict if any marker is removed.
+        from .evaluation_talking import EvaluationTalkingService
+        EvaluationTalkingService(db, getattr(db, "data_root", ".")).require_job_identity(job)
     scope = read_subject_scope(db, "job", job.id)
+    if scope is not None:
+        from .domain.models import ProviderUseLicenseReviewV5
+        for binding in scope.bindings:
+            receipt = ProviderUseAdmissionService(db, getattr(db,"data_root",".")).get(job.project_id,binding.admission_id)
+            if receipt is not None and type(receipt.review) is ProviderUseLicenseReviewV5:
+                from .evaluation_talking import EvaluationTalkingService
+                from .domain.evaluation_talking import CALIBRATION_POLICY
+                operation = EvaluationTalkingService(db,getattr(db,"data_root",".")).require_job_identity(job)
+                if operation.policy != CALIBRATION_POLICY or operation.selection.execution_admission_id != receipt.id:
+                    raise UseAdmissionError("talking_calibration_job_scope_changed")
     owner_scopes = _job_owner_scopes(db, job)
     if scope is None:
-        if owner_scopes:
+        if owner_scopes or db.connection.execute("SELECT 1 FROM voice_draft_jobs WHERE job_id=?", (str(job.id),)).fetchone():
             raise UseAdmissionError("execution_use_job_scope_missing")
         return None
     row = db.connection.execute(
@@ -414,6 +435,8 @@ def read_job_scope(db: Database, job: Job) -> ExecutionUseScope | None:
         if (owner.project_id != scope.project_id or owner.purpose != scope.purpose
             or not set(b.admission_id for b in owner.bindings).issubset(b.admission_id for b in scope.bindings)):
             raise UseAdmissionError("execution_use_ancestor_dropped")
+    from .voice_calibration import require_claim
+    require_claim(db, job, scope)
     return scope
 
 
@@ -576,6 +599,10 @@ def inherit_generated_media_scope(db: Database, kind: Literal["audio", "asset"],
         except (KeyError, TypeError, ValueError):
             continue  # Preserve legacy evidence formats; do not grant rights.
         job = JobRepository(db).get(job_id)
+        if job is not None:
+            from app.evaluation_talking import is_evaluation_talking_job
+            if is_evaluation_talking_job(db, job):
+                raise UseAdmissionError("evaluation_talking_owned_output_writer_required")
         if job is not None and (scope := read_job_scope(db, job)) is not None:
             expected = {"voice_generation": ("audio", JobType.GENERATE_VOICE),
                 "talking_generation": ("asset", JobType.GENERATE_TALKING),

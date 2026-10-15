@@ -28,6 +28,8 @@ def card():
     {"kind": "text_card", "treatment": "key_point", "points": ["a\nb"]},
     {"kind": "unsupported"},
     {"kind": "unsupported", "reason": "diagram", "points": ["point"]},
+    {"kind": "none", "reason": " "},
+    {"kind": "none", "reason": "Keep footage", "treatment": "headline"},
 ])
 def test_incomplete_or_over_capacity_cards_are_rejected(values):
     with pytest.raises(ValidationError):
@@ -98,3 +100,62 @@ def test_normal_draft_preflight_exposes_supported_card_or_stops_unsupported_need
         assert "voice_capability_not_verified" in body["stop_reasons"]
         assert body["dispatch_performed"] is False
         assert client.get(root + "/provider-calls").json() == []
+
+
+def test_no_graphics_survives_media_resolution_and_cannot_be_overridden():
+    from uuid import uuid4
+    owner = project()
+    value = scene(voice_text="Keep the actual demonstration.").model_copy(update={
+        "project_id": owner.id, "graphic_plan": GraphicCardPlan(kind="none", reason="Show the evidence")})
+    candidate = CandidateAsset(scene_plan_id=value.id, source_kind=SourceKind.USER_ASSET,
+        asset_id=uuid4(), clip_id=uuid4(), match_score=1, why=["actual footage"],
+        estimated_cost=UsageCost(category=CostCategory.RENDER))
+    selected = {value.id: candidate}
+    plan = resolve_edit_plan(owner, [value], selected, clip_intervals={}, supplied=None)
+    entry = plan.scenes[0]
+    assert entry.graphic_text is None and entry.graphic_treatment.value == "none"
+    changed = plan.model_copy(update={"scenes": [entry.model_copy(update={"graphic_text": "Decoration", "graphic_treatment": "headline"})]})
+    with pytest.raises(EditPlanPreflightError, match="no_graphics_presentation_changed"):
+        resolve_edit_plan(owner, [value], selected, clip_intervals={}, supplied=changed)
+
+
+@pytest.mark.parametrize("requirement", ["creator_speaking", "action_evidence", "explanatory"])
+def test_normal_editorial_save_reload_invalidates_old_choices_and_reports_missing_media(tmp_path, requirement):
+    from test_project_draft_revisions import _scene, _route
+    with TestClient(create_app(tmp_path / "editorial.sqlite")) as client:
+        project_id = client.post("/projects", json={"title": requirement, "topic": "Evidence"}).json()["id"]
+        value = _scene(UUID(project_id))
+        candidate, route = _route(value)
+        body = {"script": value.voice_text, "topic": "Evidence", "scenes": [value.model_dump(mode="json")],
+            "routes": [route.model_dump(mode="json")], "confirmed": [candidate.model_dump(mode="json")]}
+        root = f"/projects/{project_id}"
+        initial = client.put(root + "/draft", json=body).json()
+        old_preflight = client.post(root + "/production-preflight", json={}).json()
+        value = value.model_copy(update={"visual_requirement": requirement,
+            "visual_requirement_reason": "Content must preserve its evidence", "evidence_refs": ["source:declared-evidence"],
+            "graphic_plan": GraphicCardPlan(kind="none", reason="Preserve the main visual")})
+        body["scenes"] = [value.model_dump(mode="json")]
+        changed = client.put(root + "/draft", json=body)
+        assert changed.status_code == 200, changed.text
+        saved = changed.json()
+        assert saved["routes"] == saved["confirmed"] == [] and saved["video_spec"] is None
+        assert saved["script_revision"] == initial["script_revision"] + 1
+        assert saved["scenes"][0] == value.model_dump(mode="json")
+        assert client.get(root + "/draft").json()["scenes"] == saved["scenes"]
+        preflight = client.post(root + "/production-preflight", json={}).json()
+        assert preflight["fingerprint"] != old_preflight["fingerprint"]
+        assert preflight["status"] == "blocked" and not preflight["dispatch_performed"]
+        assert preflight["preliminary_edit_plan"] is None
+        if requirement == "explanatory":
+            assert f"no_graphics_requires_media:{value.scene_id}" in preflight["stop_reasons"]
+        assert client.get(root + "/provider-calls").json() == []
+
+
+def test_explicit_no_graphics_rejects_selected_typography():
+    owner = project()
+    value = scene(voice_text="Original content").model_copy(update={
+        "project_id": owner.id, "graphic_plan": GraphicCardPlan(kind="none", reason="Keep footage")})
+    candidate = CandidateAsset(scene_plan_id=value.id, source_kind=SourceKind.TYPOGRAPHY,
+        match_score=1, why=["legacy fallback"], estimated_cost=UsageCost(category=CostCategory.TYPOGRAPHY))
+    with pytest.raises(EditPlanPreflightError, match="no_graphics_requires_media"):
+        resolve_edit_plan(owner, [value], {value.id: candidate}, clip_intervals={}, supplied=None)

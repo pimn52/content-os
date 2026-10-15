@@ -7,12 +7,14 @@ from enum import StrEnum
 import hashlib
 import json
 from math import isfinite
+from pathlib import PureWindowsPath
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Discriminator, Field, JsonValue, Tag, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from .execution_runtime import HostRuntimeObservation, HostRuntimeObservationV3Policy2, RuntimeInventoryDescriptor
+from .maintained_runtime import MaintainedRuntimeInventoryDescriptor, MaintainedEvidenceReference, MaintainedHostObservation
 
 SCHEMA_VERSION = "0.1"
 
@@ -293,7 +295,7 @@ class VerifiedVerticalDerivationEvidence(ContractModel):
 
 
 class VerifiedVerticalDerivationRequest(ContractModel):
-    """A bounded, evidence-backed transform from one horizontal Clip to 9:16 media.
+    """A bounded crop to portrait media, independent of the final canvas.
 
     This deliberately accepts a fixed crop only. It does not claim face
     tracking, subtitle removal, or a general approval for the parent Asset.
@@ -305,6 +307,8 @@ class VerifiedVerticalDerivationRequest(ContractModel):
     start_ms: NonNegativeMs
     end_ms: PositiveFrames
     crop_window: SourceCropWindow
+    output_height: int = Field(default=1920, ge=1080, le=1920, multiple_of=2, strict=True,
+                               description="1080-wide portrait viewport; default9:16, e.g.1440 for9:12. Not the final canvas.")
     source_subtitle_state: Literal["known_burned_in", "not_observed"]
     known_subtitle_regions: list[SourceCropWindow] = Field(default_factory=list, max_length=100)
     evidence: VerifiedVerticalDerivationEvidence
@@ -559,16 +563,16 @@ class VisualIntent(ContractModel):
 class GraphicCardPlan(ContractModel):
     """Explicit executable text card, or a named unsupported visual need."""
 
-    kind: Literal["text_card", "unsupported"]
+    kind: Literal["text_card", "unsupported", "none"]
     treatment: Literal["headline", "key_point", "contrast"] | None = None
     points: list[str] = Field(default_factory=list, max_length=4)
     reason: str | None = Field(default=None, min_length=1, max_length=1000)
 
     @model_validator(mode="after")
     def bounded_realization(self) -> "GraphicCardPlan":
-        if self.kind == "unsupported":
-            if self.reason is None or self.treatment is not None or self.points:
-                raise ValueError("unsupported graphics require a reason and no executable card")
+        if self.kind in {"unsupported", "none"}:
+            if not (self.reason or "").strip() or self.treatment is not None or self.points:
+                raise ValueError("unsupported or omitted graphics require a reason and no executable card")
         else:
             if self.reason is not None or self.treatment is None or not self.points or any(
                 not point.strip() or len(point) > 24 or "\n" in point or "\r" in point for point in self.points
@@ -777,7 +781,7 @@ class ExecutionArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     role: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=500)
-    size_bytes: int = Field(gt=0)
+    size_bytes: int = Field(ge=0)
     sha256: Sha256
 
     @field_validator("role", "name")
@@ -787,6 +791,16 @@ class ExecutionArtifact(BaseModel):
             or any(part in ("", ".", "..") for part in value.split("/"))):
             raise ValueError("execution_artifact_name_invalid")
         return value
+
+    @model_validator(mode="after")
+    def valid_empty_file(self):
+        # Match RuntimeInventoryFile: empty package files/markers are still
+        # dependencies with exact identity, never executable or weight evidence.
+        if self.size_bytes == 0 and (
+            self.role != "dependency" or self.sha256 != hashlib.sha256(b"").hexdigest()
+        ):
+            raise ValueError("execution_empty_artifact_invalid")
+        return self
 
 
 def execution_canonical_sha256(value: object) -> str:
@@ -956,6 +970,263 @@ class ExecutionSpecificationV3(BaseModel):
     identity = ExecutionSpecification.identity
 
 
+def _runtime_inventory_version(value):
+    version = value.get("inventory_version") if isinstance(value, dict) else getattr(value, "inventory_version", None)
+    return version if type(version) is int else None
+
+
+class ExecutionSpecificationV4(BaseModel):
+    """Explicit maintained-process identity; old native policies are not inferred."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[4]
+    trust_policy: Literal["maintained-local-process-v1"]
+    capability: Literal["voice"]
+    mode: Literal["local"]
+    provider: Literal["omnivoice"]
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    observation_recipe: Literal["omnivoice-maintained-import-pcm"]
+    observation_version: Literal[1]
+    model_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=1, max_length=512)
+    runtime_inventory: Annotated[Annotated[RuntimeInventoryDescriptor, Tag(1)]
+        | Annotated[MaintainedRuntimeInventoryDescriptor, Tag(2)], Discriminator(_runtime_inventory_version)]
+    runtime_origin: MaintainedEvidenceReference
+    host_runtime: MaintainedHostObservation
+    machine: ExecutionMachineObservation
+    parameters: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
+
+    _version = field_validator("schema_version", "observation_version", mode="before")(
+        ExecutionSpecification.exact_schema_version.__func__)
+    _labels = field_validator("model", "runtime", "machine_id")(
+        ExecutionSpecification.exact_identity_label.__func__)
+    _parameters = field_validator("parameters", mode="before")(
+        ExecutionSpecification.exact_scalar_parameters.__func__)
+
+    @model_validator(mode="after")
+    def valid_configuration(self):
+        keys = [(item.role, item.name) for item in self.model_artifacts]
+        if len(keys) != len(set(keys)) or not any(item.role == "weights" for item in self.model_artifacts):
+            raise ValueError("execution_manifest_invalid")
+        if self.parameters.get("device") != self.host_runtime.device:
+            raise ValueError("execution_host_device_mismatch")
+        if (self.machine.host_sha256 != self.host_runtime.host_sha256
+            or self.machine.device_sha256 != execution_canonical_sha256(self.host_runtime.model_dump(mode="json"))):
+            raise ValueError("maintained_machine_observation_mismatch")
+        if self.parameters.get("precision") not in ("float16", "float32") or self.parameters.get("audio_tokenizer_precision") != "float32":
+            raise ValueError("maintained_component_precision_required")
+        return self
+
+    def canonical(self) -> dict:
+        value = self.model_dump(mode="json")
+        value["model_artifacts"].sort(key=lambda item: (item["role"], item["name"]))
+        return value
+
+    execution_sha256 = ExecutionSpecification.execution_sha256
+    model_artifact_sha256 = ExecutionSpecification.model_artifact_sha256
+    identity = ExecutionSpecification.identity
+
+
+class ExecutionSpecificationV5(ExecutionSpecificationV4):
+    """Maintained Voice recipe source identity; not an executable-child grant."""
+    schema_version: Literal[5]
+    observation_recipe: Literal["omnivoice-maintained-clone-identity"]
+
+
+class ExecutionSpecificationV6(ExecutionSpecificationV5):
+    """Fixed maintained Voice child/application bundle; never permission."""
+    schema_version: Literal[6]
+    observation_recipe: Literal["omnivoice-maintained-clone-child"]
+    runtime_inventory: MaintainedRuntimeInventoryDescriptor
+    invocation_policy: Literal["isolated-zip-voice-v1"]
+    timeout_seconds: int = Field(ge=1, le=3600)
+
+
+class ExecutionSpecificationV7(BaseModel):
+    """Standalone CPU ASR child identity; never accepted as a Voice recipe."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[7]
+    trust_policy: Literal["maintained-local-process-v1"]
+    capability: Literal["asr"]
+    mode: Literal["local"]
+    provider: Literal["faster-whisper"]
+    model: str = Field(min_length=1, max_length=200)
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    observation_recipe: Literal["faster-whisper-maintained-qa-child"]
+    observation_version: Literal[1]
+    invocation_policy: Literal["isolated-zip-asr-v1"]
+    timeout_seconds: int = Field(ge=1, le=3600)
+    model_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=4, max_length=512)
+    runtime_inventory: MaintainedRuntimeInventoryDescriptor
+    runtime_origin: MaintainedEvidenceReference
+    host_runtime: MaintainedHostObservation
+    machine: ExecutionMachineObservation
+    parameters: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
+
+    _version = field_validator("schema_version", "observation_version", "timeout_seconds", mode="before")(
+        ExecutionSpecification.exact_schema_version.__func__)
+    _labels = field_validator("model", "runtime", "machine_id")(ExecutionSpecification.exact_identity_label.__func__)
+    _parameters = field_validator("parameters", mode="before")(ExecutionSpecification.exact_scalar_parameters.__func__)
+
+    @model_validator(mode="after")
+    def fixed_recipe(self):
+        from .asr_recipe import ASR_PARAMETERS, ASR_MODEL_FILES
+        if (self.parameters != ASR_PARAMETERS or self.host_runtime.device != "cpu"
+            or any(type(self.parameters[k]) is not type(v) for k, v in ASR_PARAMETERS.items())):
+            raise ValueError("maintained_asr_recipe_invalid")
+        names = [item.name for item in self.model_artifacts]
+        if (len(names) != len(set(names)) or not set(ASR_MODEL_FILES).issubset(names)
+            or not any(item.role == "weights" and item.name == "model.bin" for item in self.model_artifacts)):
+            raise ValueError("maintained_asr_model_manifest_invalid")
+        if (self.machine.host_sha256 != self.host_runtime.host_sha256
+            or self.machine.device_sha256 != execution_canonical_sha256(self.host_runtime.model_dump(mode="json"))):
+            raise ValueError("maintained_machine_observation_mismatch")
+        return self
+
+    canonical = ExecutionSpecificationV4.canonical
+    execution_sha256 = ExecutionSpecification.execution_sha256
+    model_artifact_sha256 = ExecutionSpecification.model_artifact_sha256
+    identity = ExecutionSpecification.identity
+
+
+class ASRNoSiteStartup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    policy: Literal["cpython312-no-site-v1"]
+    environment_root: str = Field(min_length=1, max_length=1000)
+    base_root: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("environment_root", "base_root")
+    @classmethod
+    def exact_root(cls, value):
+        path = PureWindowsPath(value)
+        if (not path.is_absolute() or str(path) != value or path.drive.startswith("\\\\")
+            or any(part in (".", "..") for part in path.parts) or value.rstrip(" ") != value):
+            raise ValueError("maintained_asr_startup_root_invalid")
+        return value
+
+    @model_validator(mode="after")
+    def disjoint_roots(self):
+        env, base = PureWindowsPath(self.environment_root), PureWindowsPath(self.base_root)
+        if env.is_relative_to(base) or base.is_relative_to(env):
+            raise ValueError("maintained_asr_startup_root_invalid")
+        return self
+
+
+class ExecutionSpecificationV8(ExecutionSpecificationV7):
+    """Explicit no-site ASR recipe; schema7/v1 retains its old meaning."""
+    schema_version: Literal[8]
+    observation_version: Literal[2]
+    invocation_policy: Literal["isolated-zip-asr-v2"]
+    startup: ASRNoSiteStartup
+
+
+class ExecutionSpecificationV9(BaseModel):
+    """Explicit maintained vendor-CLI Talking identity; no generation authority."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[9]
+    trust_policy: Literal["maintained-local-process-v1"]
+    capability: Literal["talking"]
+    mode: Literal["local"]
+    provider: Literal["latentsync"]
+    model: Literal["LatentSync-1.5"]
+    runtime: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    observation_recipe: Literal["latentsync-maintained-talking-cli"]
+    observation_version: Literal[1]
+    invocation_policy: Literal["maintained-latentsync-cli-v1"]
+    timeout_seconds: int = Field(ge=1, le=3600)
+    model_artifacts: tuple[ExecutionArtifact, ...] = Field(min_length=8, max_length=512)
+    runtime_inventory: MaintainedRuntimeInventoryDescriptor
+    runtime_origin: MaintainedEvidenceReference
+    host_runtime: MaintainedHostObservation
+    machine: ExecutionMachineObservation
+    parameters: dict[str, str | int | float | bool] = Field(min_length=1, max_length=100)
+
+    _version = field_validator("schema_version", "observation_version", "timeout_seconds", mode="before")(
+        ExecutionSpecification.exact_schema_version.__func__)
+    _labels = field_validator("runtime", "machine_id")(ExecutionSpecification.exact_identity_label.__func__)
+    _parameters = field_validator("parameters", mode="before")(ExecutionSpecification.exact_scalar_parameters.__func__)
+
+    @model_validator(mode="after")
+    def fixed_recipe(self):
+        from .talking_recipe import validate_parameters, REQUIRED_TALKING_ARTIFACTS
+        validate_parameters(self.parameters)
+        names = [item.name for item in self.model_artifacts]
+        if (len(names) != len(set(names)) or not REQUIRED_TALKING_ARTIFACTS.issubset(names)
+            or self.host_runtime.device != "cuda:0" or self.parameters["device"] != self.host_runtime.device
+            or not any(item.role == "weights" and item.name == "checkpoint/model.pt" for item in self.model_artifacts)):
+            raise ValueError("maintained_talking_manifest_invalid")
+        if (self.machine.host_sha256 != self.host_runtime.host_sha256
+            or self.machine.device_sha256 != execution_canonical_sha256(self.host_runtime.model_dump(mode="json"))):
+            raise ValueError("maintained_machine_observation_mismatch")
+        return self
+
+    canonical = ExecutionSpecificationV4.canonical
+    execution_sha256 = ExecutionSpecification.execution_sha256
+    model_artifact_sha256 = ExecutionSpecification.model_artifact_sha256
+    identity = ExecutionSpecification.identity
+
+
+class DualTalkingStartup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    policy: Literal["latentsync-dual-no-site-v1"]
+    environment_root: str = Field(min_length=1, max_length=1000)
+    base_root: str = Field(min_length=1, max_length=1000)
+    engine_root: str = Field(min_length=1, max_length=1000)
+    vendor_root: str = Field(min_length=1, max_length=1000)
+    hf_root: str = Field(min_length=1, max_length=1000)
+    torch_root: str = Field(min_length=1, max_length=1000)
+    tools_root: str = Field(min_length=1, max_length=1000)
+
+
+class DualTalkingResourceCopy(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    source_name: str
+    destination: str
+
+    @field_validator("source_name", "destination")
+    @classmethod
+    def portable_name(cls, value):
+        from .execution_runtime import runtime_path
+        return runtime_path(value)
+
+
+class ExecutionSpecificationV10(ExecutionSpecificationV9):
+    """Two explicit maintained processes, preserving the single-runtime v9."""
+    schema_version: Literal[10]
+    observation_recipe: Literal["latentsync-maintained-dual-runtime"]
+    invocation_policy: Literal["maintained-latentsync-dual-runtime-v1"]
+    engine_inventory: MaintainedRuntimeInventoryDescriptor
+    startup: DualTalkingStartup
+    resource_copies: tuple[DualTalkingResourceCopy, ...] = Field(min_length=4, max_length=512)
+
+    @model_validator(mode="after")
+    def fixed_recipe(self):
+        from .talking_recipe import validate_parameters
+        values = dict(self.parameters)
+        if (values.pop("attention_policy", None) != "latentsync-retained-explicit-math-v1"
+            or values.pop("allocator", None) != "expandable_segments:True"):
+            raise ValueError("maintained_talking_compatibility_required")
+        validate_parameters(values)
+        original = self.model_dump(mode="json")
+        expected = {r.name:r.name.removeprefix("vendor/") for r in self.model_artifacts
+            if r.name.startswith("vendor/configs/") or r.name in {"vendor/checkpoints/whisper/tiny.pt", "vendor/latentsync/utils/mask.png"}}
+        declared = {r.source_name:r.destination for r in self.resource_copies}
+        if len(declared) != len(self.resource_copies) or declared != expected:
+            raise ValueError("maintained_resource_mapping_invalid")
+        for key in ("engine_inventory", "startup", "resource_copies"):
+            original.pop(key)
+        original.update(schema_version=9, observation_recipe="latentsync-maintained-talking-cli",
+            invocation_policy="maintained-latentsync-cli-v1", parameters=values)
+        ExecutionSpecificationV9.model_validate_json(json.dumps(original))
+        pair = (self.runtime_inventory, self.engine_inventory)
+        if (sum(d.file_count for d in pair) > 100_000 or sum(d.directory_count for d in pair) > 20_000
+            or sum(d.size_bytes for d in pair) > 16*1024**2 or sum(d.total_file_bytes for d in pair) > 64*1024**3):
+            raise ValueError("maintained_dual_inventory_limit")
+        return self
+
+
 def _execution_specification_version(value):
     version = value.get("schema_version") if isinstance(value, dict) else getattr(value, "schema_version", None)
     return version if type(version) is int else None
@@ -963,7 +1234,10 @@ def _execution_specification_version(value):
 
 ExecutionSpecificationRecord = Annotated[
     Annotated[ExecutionSpecification, Tag(1)] | Annotated[ExecutionSpecificationV2, Tag(2)]
-    | Annotated[ExecutionSpecificationV3, Tag(3)],
+    | Annotated[ExecutionSpecificationV3, Tag(3)] | Annotated[ExecutionSpecificationV4, Tag(4)]
+    | Annotated[ExecutionSpecificationV5, Tag(5)] | Annotated[ExecutionSpecificationV6, Tag(6)] | Annotated[ExecutionSpecificationV7, Tag(7)]
+    | Annotated[ExecutionSpecificationV8, Tag(8)] | Annotated[ExecutionSpecificationV9, Tag(9)]
+    | Annotated[ExecutionSpecificationV10, Tag(10)],
     Discriminator(_execution_specification_version)]
 
 
@@ -987,13 +1261,96 @@ class ProviderUseLicenseReviewV2(ProviderUseLicenseReview):
         return self
 
 
+class ProviderUseLicenseReviewV3(ProviderUseLicenseReviewV2):
+    """One exact first-validation request; not verified capability/quality."""
+    policy_version: Literal[3]
+    admission_policy: Literal["voice-calibration-v1"]
+    request_sha256: Sha256
+    max_provider_calls: Literal[1]
+
+    @field_validator("max_provider_calls", mode="before")
+    @classmethod
+    def one_call(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("voice_calibration_single_call_required")
+        return value
+
+    @model_validator(mode="after")
+    def calibration_boundary(self):
+        spec = self.execution_specification
+        if (type(spec) is not ExecutionSpecificationV6 or spec.capability != "voice"
+            or spec.provider != "omnivoice" or spec.mode != "local"
+            or set(self.permitted_operations) != {"generation", "review"}):
+            raise ValueError("voice_calibration_scope_unsupported")
+        return self
+
+
+class VoiceQAInputBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    audio_id: UUID
+    audio_sha256: Sha256
+    producer_job_id: UUID
+    producer_job_sha256: Sha256
+    producer_metadata_sha256: Sha256
+    original_scope_fingerprint: Sha256
+    original_admissions: tuple[tuple[UUID, Sha256], ...] = Field(min_length=1, max_length=100)
+    target_text_sha256: Sha256
+    language: str = Field(min_length=1, max_length=30)
+
+    @model_validator(mode="after")
+    def unique_origins(self):
+        ids = [str(row[0]) for row in self.original_admissions]
+        if ids != sorted(set(ids)):
+            raise ValueError("voice_qa_input_admissions_invalid")
+        return self
+
+
+class ProviderUseLicenseReviewV4(ProviderUseLicenseReviewV2):
+    """Exact independent evaluation QA grant; not a calibration receipt."""
+    policy_version: Literal[4]
+    admission_policy: Literal["voice-evaluation-qa-v1"]
+    input_binding: VoiceQAInputBinding
+    max_provider_calls: Literal[1]
+
+    _one = field_validator("max_provider_calls", mode="before")(ProviderUseLicenseReviewV3.one_call.__func__)
+
+    @model_validator(mode="after")
+    def independent_qa_boundary(self):
+        if (type(self.execution_specification) not in (ExecutionSpecificationV7, ExecutionSpecificationV8)
+            or set(self.permitted_operations) != {"generation", "review"}):
+            raise ValueError("voice_evaluation_qa_scope_unsupported")
+        return self
+
+
+class ProviderUseLicenseReviewV5(ProviderUseLicenseReviewV2):
+    """One exact Talking trial; its envelope is authorization, not capability."""
+    policy_version: Literal[5]
+    admission_policy: Literal["evaluation-talking-calibration-v1"]
+    trial_input_sha256: Sha256
+    trial_duration_limit_ms: int = Field(strict=True, gt=0)
+    trial_processing_limit_ms: int = Field(strict=True, gt=0)
+    max_provider_calls: Literal[1]
+
+    _one = field_validator("max_provider_calls", mode="before")(ProviderUseLicenseReviewV3.one_call.__func__)
+
+    @model_validator(mode="after")
+    def talking_trial_boundary(self):
+        spec = self.execution_specification
+        if (type(spec) is not ExecutionSpecificationV10 or spec.capability != "talking"
+            or spec.provider != "latentsync" or spec.mode != "local"
+            or set(self.permitted_operations) != {"generation", "review"}
+            or self.trial_processing_limit_ms < self.trial_duration_limit_ms):
+            raise ValueError("talking_calibration_scope_unsupported")
+        return self
+
+
 class ProviderUseAdmission(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=500)
     review_reference: str = Field(min_length=1, max_length=1000)
     review_sha256: Sha256
-    review: ProviderUseLicenseReview | ProviderUseLicenseReviewV2
+    review: ProviderUseLicenseReview | ProviderUseLicenseReviewV2 | ProviderUseLicenseReviewV3 | ProviderUseLicenseReviewV4 | ProviderUseLicenseReviewV5
     actor_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,100}$")
     created_at: AwareDatetime
     revoked_at: AwareDatetime | None = None
@@ -1167,6 +1524,7 @@ class VerticalReframeMode(StrEnum):
 
     CONTAIN = "contain"
     CENTER_CROP = "center_crop"
+    BOTTOM_CROP_CONTAIN = "bottom_crop_contain"
 
 
 class VideoVisual(ContractModel):
@@ -1200,6 +1558,14 @@ class VideoVisual(ContractModel):
             raise ValueError("vertical reframe evidence is only valid for an explicit center crop")
         if self.source_bottom_crop_ratio and not self.vertical_reframe_evidence_reference:
             raise ValueError("bottom source crop requires a reviewable vertical reframe evidence reference")
+        if self.vertical_reframe_mode is VerticalReframeMode.BOTTOM_CROP_CONTAIN and (
+            not self.source_bottom_crop_ratio or not (self.vertical_reframe_evidence_reference or "").strip()
+        ):
+            raise ValueError("bottom_crop_contain requires a positive bottom crop and reviewable evidence")
+        if self.vertical_reframe_mode is VerticalReframeMode.BOTTOM_CROP_CONTAIN and self.source_kind not in {
+            SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO,
+        }:
+            raise ValueError("bottom_crop_contain requires local video media")
         return self
 
 

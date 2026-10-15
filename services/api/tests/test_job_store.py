@@ -89,6 +89,27 @@ def test_live_lease_cannot_be_reclaimed(tmp_path: Path) -> None:
     db.close()
 
 
+def test_targeted_claim_preserves_other_jobs_type_and_resource_guards(tmp_path: Path) -> None:
+    from uuid import uuid4
+    db = Database(tmp_path / "targeted.sqlite")
+    store = JobStore(db)
+    older = store.enqueue(make_gpu_job("older"))
+    target = store.enqueue(make_gpu_job("target", created_at=NOW + timedelta(seconds=1)))
+    common = dict(max_attempts=MAX_ATTEMPTS, resource_keys_by_type=GPU_TYPES, now=NOW)
+    assert store.claim("missing", timedelta(minutes=1), job_id=uuid4(), **common) is None
+    assert store.claim("wrong-type", timedelta(minutes=1), job_id=target.id,
+        allowed_types=[JobType.ANALYZE_ASSET], **common) is None
+    claimed = store.claim("target-owner", timedelta(minutes=1), job_id=target.id, **common)
+    assert claimed is not None and claimed.id == target.id
+    assert store.get(older.id) == older
+    assert store.claim("busy", timedelta(minutes=1), job_id=older.id, **common) is None
+    assert store.get(older.id) == older
+    assert store.claim("other-owner", timedelta(minutes=1), job_id=target.id, **common) is None
+    with pytest.raises(ValueError, match="UUID"):
+        store.claim("bad", timedelta(minutes=1), job_id=str(target.id), **common)
+    db.close()
+
+
 def test_expired_running_job_recovers_after_reopen_and_reclaims(tmp_path: Path) -> None:
     path = tmp_path / "jobs.sqlite"
     db = Database(path)

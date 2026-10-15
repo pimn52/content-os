@@ -80,11 +80,16 @@ from app.narration_performance import NarrationPerformancePlanError, build_narra
 from app.search import ClipEmbeddingIndexer, ClipTextSearchService, EmbeddingIndexError, IndexError
 from app.routing import AssetRouter, CapabilityFeature, CapabilityProfile, CapabilityReadiness, CommercialStatus, EvidenceProvenance, EvidenceStatus, ExecutionOverride, ExecutionSafetyContext, FeatureSupport, OperatingBound, ResolutionSource, RoutingConfigurationError, RoutingInputError, find_provider_settings_schema, find_unique_provider_settings_schema, list_provider_settings_schemas, resolve_execution, resolve_feature_support, resolve_verified_operating_limit, validate_schema_values
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
+from app.media.local_paths import existing_local_media_file
+from app.media.viewport_feasibility import ViewportFeasibility, ViewportFeasibilityRequest, inspect_viewport
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable
 from app.talking import TalkingRunAssembler, TalkingRunAssemblyError, TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
 from app.talking.source_suitability import TalkingSourceSuitabilityAssessment, TalkingSourceSuitabilityRepository
 from app.talking.source_admission import TalkingSourceAdmission, TalkingSourceAdmissionRepository, configured_review_actor, legacy_talking_evaluation_enabled
 from app.execution_admission import ProviderUseAdmissionService, UseAdmissionError, ProviderUseDecision
+from app.media.audio_access import AudioAccess, require_ordinary_media
+from app.voice_plan import SavedVoicePlanSource
+from app.voice_draft import VoiceDraftService
 from app.domain.models import ExecutionPurpose, ExecutionUseIdentity, ProviderUseAdmission, ProviderUseOperation
 from app.talking.source_review import ManagedTalkingSourceReviewRequest, SourceReviewChoice, SourceReviewResult, TalkingSourceReviewService
 from app.talking_qa import TalkingHumanReview, TalkingQaError, apply_talking_human_review
@@ -93,6 +98,8 @@ from app.voice_takes import VoiceTakeComposer
 from app.voice_observation import VoiceObservationError, observe_voice_performance
 from app.voice_boundary_alignment import voice_asset_project_id
 from app.voice_qa import VoiceQaError, apply_voice_human_review, voice_human_review_status
+from app.domain.voice_evaluation_review import EvaluationVoiceReviewInput, EvaluationVoiceReviewRecord
+from app.voice_evaluation_review import EvaluationVoiceReviewService, require_legacy_human_review
 
 
 class JobEnqueueRequest(BaseModel):
@@ -676,7 +683,12 @@ class VoiceGenerationJobRequest(BaseModel):
     authorization_reference: str = Field(min_length=1, max_length=500)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     use_draft_performance_plan: bool = False
+    draft_policy: Literal["voice-draft-v1", "voice-calibration-v1"] = "voice-draft-v1"
     reference_window: VoiceReferenceWindowSelection | None = None
+    purpose: Literal["commercial_production", "internal_evaluation"] = "commercial_production"
+    use_admission_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    execution_capability_profile_id: UUID | None = None
+    saved_plan_source: SavedVoicePlanSource | None = None
 
 
 class NarrationPerformancePlanRequest(BaseModel):
@@ -697,6 +709,9 @@ class VoiceQaJobRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     narration_audio_id: UUID
     target_text: str = Field(min_length=1, max_length=100_000)
+    qa_policy: Literal["voice-evaluation-qa-v1"] | None = None
+    purpose: Literal["internal_evaluation", "commercial_production"] = "commercial_production"
+    use_admission_id: UUID | None = None
 
 
 class VoicePaceCandidateJobRequest(BaseModel):
@@ -1104,6 +1119,12 @@ def create_app(
             application.state.database_closed = True
 
     application = FastAPI(title="Content OS API", version="0.1.0", description="Local-first API scaffold for Content OS.", lifespan=lifespan)
+    from app.evaluation_master_api import router as evaluation_master_router
+    application.include_router(evaluation_master_router)
+    from app.evaluation_talking_api import router as evaluation_talking_router
+    application.include_router(evaluation_talking_router)
+    from app.evaluation_composition_api import router as evaluation_composition_router
+    application.include_router(evaluation_composition_router)
 
     @application.middleware("http")
     async def optional_private_access(request: Request, call_next: Callable[..., Any]) -> Any:
@@ -1119,6 +1140,19 @@ def create_app(
                     content={"detail": "private access token required"},
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+        # A named completed-output Run cannot reach legacy repair/admission actions.
+        # Keep this after private-access authentication and before route execution.
+        parts = request.url.path.strip("/").split("/")
+        if (len(parts) >= 4 and parts[0] == "projects" and parts[2] == "production-runs"
+            and request.method not in ("GET", "HEAD", "OPTIONS")
+            and not (len(parts) == 5 and parts[4] == "cancel")):
+            from app.evaluation_master import is_evaluation_master_run
+            try:
+                identity = UUID(parts[3])
+                if is_evaluation_master_run(request.app.state.database, identity):
+                    return JSONResponse(status_code=409, content={"detail": "evaluation_master_downstream_operation_not_supported"})
+            except ValueError:
+                return JSONResponse(status_code=409, content={"detail": "evaluation_master_scope_invalid"})
         return await call_next(request)
 
     application.state.embedding_provider = embedding_provider
@@ -1169,6 +1203,15 @@ def create_app(
 
     def _use_admission_error(exc: UseAdmissionError) -> HTTPException:
         return HTTPException(status_code=403 if str(exc) == "execution_admission_operator_required" else 409, detail=str(exc))
+
+    def _ordinary_media(path, kind, subject_id, content_hash=None):
+        try:
+            require_ordinary_media(application.state.database, application.state.data_root,
+                path, kind=kind, subject_id=subject_id, content_hash=content_hash)
+        except UseAdmissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (ValueError, OSError):
+            raise HTTPException(status_code=403, detail="media_source_invalid") from None
 
     @application.get("/projects/{project_id}/provider-use-admissions", response_model=list[ProviderUseAdmission], tags=["execution-settings"])
     async def list_provider_use_admissions(project_id: UUID, request: Request):
@@ -2628,9 +2671,20 @@ def create_app(
             raise HTTPException(status_code=404, detail="asset not found")
         return ClipRepository(db).list_by_asset(asset_id)
 
+    @application.post("/assets/{asset_id}/viewport-feasibility", response_model=ViewportFeasibility, tags=["assets"])
+    async def viewport_feasibility(asset_id: UUID, payload: ViewportFeasibilityRequest, request: Request) -> ViewportFeasibility:
+        if payload.proposal.source_asset_id != asset_id:
+            raise HTTPException(status_code=422, detail="viewport source identity mismatch")
+        try:
+            return inspect_viewport(request.app.state.database, request.app.state.data_root, payload)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="asset not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @application.post("/assets/vertical-derivations", response_model=VerticalDerivationResponse, status_code=201, tags=["assets"])
     async def derive_vertical_asset(payload: VerifiedVerticalDerivationRequest, request: Request) -> VerticalDerivationResponse:
-        """Create one verified 9:16 source interval without mutating its parent Asset."""
+        """Create one verified portrait viewport without mutating its parent Asset."""
         db: Database = request.app.state.database
         service = request.app.state.vertical_derivation_factory(
             db, request.app.state.data_root,
@@ -2686,9 +2740,13 @@ def create_app(
             raise HTTPException(status_code=422, detail="start_ms and end_ms must be a valid pair")
         if end_ms is not None and end_ms > asset.duration_ms:
             raise HTTPException(status_code=422, detail="media interval exceeds asset duration")
-        source = Path(asset.source_file).expanduser().resolve()
-        if not source.is_file():
-            raise HTTPException(status_code=404, detail="asset source file not found")
+        try:
+            source = existing_local_media_file(asset.source_file, application.state.data_root)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="asset source file not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="asset source path is not a supported local path") from exc
+        _ordinary_media(source, "asset", asset.id, asset.content_hash)
         return FileResponse(source)
 
     @application.patch("/assets/{asset_id}/usage", response_model=Asset, tags=["assets"])
@@ -2929,9 +2987,11 @@ def create_app(
         image = ImageAssetRepository(request.app.state.database).get(image_id)
         if image is None:
             raise HTTPException(status_code=404, detail="image asset not found")
-        source = Path(image.source_file).expanduser().resolve()
-        if not source.is_file():
+        try:
+            source = existing_local_media_file(image.source_file, request.app.state.data_root)
+        except (FileNotFoundError, ValueError):
             raise HTTPException(status_code=404, detail="image source file not found")
+        _ordinary_media(source, "image", image.id, image.content_hash)
         return FileResponse(source)
 
     @application.post("/image-imports", response_model=list[ImageAsset], status_code=201, tags=["assets"])
@@ -3023,15 +3083,26 @@ def create_app(
             audios.update(audio.model_copy(update={"metadata": metadata}))
         return observation
 
-    @application.get("/audio-assets/{audio_id}/media", tags=["audio"])
-    async def audio_asset_media(audio_id: UUID, request: Request) -> FileResponse:
+    @application.get("/audio-assets/{audio_id}/access", tags=["audio"])
+    async def audio_asset_access(audio_id: UUID, request: Request, project_id: UUID | None = None, purpose: str | None = None, operation: str = "review") -> dict:
         audio = AudioAssetRepository(request.app.state.database).get(audio_id)
         if audio is None:
             raise HTTPException(status_code=404, detail="audio asset not found")
-        source = Path(audio.source_file).expanduser().resolve()
-        if not source.is_file():
-            raise HTTPException(status_code=404, detail="audio source file not found")
-        return FileResponse(source)
+        status, _ = AudioAccess(request.app.state.database, request.app.state.data_root).inspect(
+            audio, project_id=project_id, purpose=purpose, operation=operation)
+        return status
+
+    @application.get("/audio-assets/{audio_id}/media", tags=["audio"])
+    async def audio_asset_media(audio_id: UUID, request: Request, project_id: UUID | None = None, purpose: str | None = None, operation: str = "review") -> FileResponse:
+        audio = AudioAssetRepository(request.app.state.database).get(audio_id)
+        if audio is None:
+            raise HTTPException(status_code=404, detail="audio asset not found")
+        status, source = AudioAccess(request.app.state.database, request.app.state.data_root).inspect(
+            audio, project_id=project_id, purpose=purpose, operation=operation)
+        if source is None:
+            raise HTTPException(status_code=404 if status["reasons"][0] == "audio_source_missing" else 403,
+                detail=status["reasons"][0])
+        return FileResponse(source, headers={"Cache-Control": "no-store"} if status["restricted"] else None)
 
     @application.post("/audio-imports", response_model=list[AudioAsset], status_code=201, tags=["audio"])
     async def import_local_audio(payload: AudioImportRequest, request: Request) -> list[AudioAsset]:
@@ -3268,6 +3339,15 @@ def create_app(
                 resolve_authorized_voice_reference_choice(payload.reference_window, choices)
             except VoicePerformancePlanningError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if payload.purpose == "internal_evaluation":
+            try:
+                return _job_response(db, VoiceDraftService(db, request.app.state.data_root).enqueue(project_id, payload))
+            except UseAdmissionError as exc:
+                raise _use_admission_error(exc) from exc
+        if payload.saved_plan_source is not None:
+            raise HTTPException(status_code=422, detail="saved plan Voice entry requires explicit internal_evaluation purpose")
+        if payload.use_admission_ids or payload.execution_capability_profile_id is not None or payload.draft_policy != "voice-draft-v1":
+            raise HTTPException(status_code=422, detail="evaluation fields require explicit internal_evaluation purpose")
         performance_plan = None
         if payload.use_draft_performance_plan:
             draft = ProjectDraftRepository(db).get(project_id)
@@ -3300,6 +3380,20 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
+
+    @application.get("/projects/{project_id}/voice-draft-jobs", tags=["voice"])
+    async def list_saved_voice_drafts(project_id: UUID, request: Request):
+        db = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return VoiceDraftService(db, request.app.state.data_root).list_saved(project_id)
+
+    @application.get("/projects/{project_id}/voice-draft-jobs/{job_id}", tags=["voice"])
+    async def get_voice_draft_status(project_id: UUID, job_id: UUID, request: Request):
+        job = JobRepository(request.app.state.database).get(job_id)
+        if job is None or job.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Voice draft job not found")
+        return VoiceDraftService(request.app.state.database, request.app.state.data_root).status(project_id, job)
 
     @application.post("/projects/{project_id}/voice-pace-candidate-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
     async def enqueue_voice_pace_candidate(project_id: UUID, payload: VoicePaceCandidateJobRequest, request: Request) -> dict[str, Any]:
@@ -3339,16 +3433,37 @@ def create_app(
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 
+    @application.get("/projects/{project_id}/audio-assets/{audio_id}/evaluation-qa", tags=["voice"])
+    async def evaluation_voice_qa_status(project_id: UUID, audio_id: UUID, request: Request):
+        from app.voice_evaluation_qa import VoiceEvaluationQAService
+        if ProjectRepository(request.app.state.database).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return VoiceEvaluationQAService(request.app.state.database, request.app.state.data_root).status(project_id, audio_id)
+
     @application.post("/projects/{project_id}/voice-qa-jobs", response_model=JobResponse, status_code=201, tags=["voice"])
     async def enqueue_voice_qa(project_id: UUID, payload: VoiceQaJobRequest, request: Request) -> dict[str, Any]:
         """Persist one local real-ASR QA request for a generated narration."""
         db: Database = request.app.state.database
         if ProjectRepository(db).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
+        if payload.qa_policy is not None:
+            from app.voice_evaluation_qa import VoiceEvaluationQAService
+            try:
+                return _job_response(db, VoiceEvaluationQAService(db, request.app.state.data_root).enqueue(project_id, payload))
+            except UseAdmissionError as exc:
+                raise _use_admission_error(exc) from exc
+        if payload.purpose != "commercial_production" or payload.use_admission_id is not None:
+            raise HTTPException(status_code=422, detail="explicit evaluation QA policy required")
         narration = AudioAssetRepository(db).get(payload.narration_audio_id)
         generation = None if narration is None else narration.metadata.get("voice_generation")
         if narration is None:
             raise HTTPException(status_code=404, detail="narration audio not found")
+        from app.execution_scope import ExecutionScopeService
+        try:
+            ExecutionScopeService(db, request.app.state.data_root).require_content(
+                narration.content_hash, project_id=project_id, operation="review")
+        except UseAdmissionError as exc:
+            raise _use_admission_error(exc) from exc
         if not isinstance(generation, dict):
             raise HTTPException(status_code=422, detail="voice QA requires a generated narration asset")
         expected_text = generation.get("target_text")
@@ -3418,6 +3533,23 @@ def create_app(
             raise HTTPException(status_code=409, detail="idempotency key is already used for a different job")
         return _job_response(db, persisted)
 
+    @application.get("/projects/{project_id}/voice-assets/{audio_id}/evaluation-human-review", tags=["voice"])
+    async def evaluation_voice_human_review_status(
+        project_id: UUID, audio_id: UUID, purpose: Literal["internal_evaluation"], request: Request,
+    ) -> dict:
+        return EvaluationVoiceReviewService(request.app.state.database, request.app.state.data_root).status(project_id, audio_id)
+
+    @application.post("/projects/{project_id}/voice-assets/{audio_id}/evaluation-human-review",
+        response_model=EvaluationVoiceReviewRecord, tags=["voice"])
+    async def record_evaluation_voice_human_review(
+        project_id: UUID, audio_id: UUID, payload: EvaluationVoiceReviewInput, request: Request,
+    ) -> EvaluationVoiceReviewRecord:
+        try:
+            return EvaluationVoiceReviewService(request.app.state.database, request.app.state.data_root).record(project_id, audio_id, payload)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "voice_human_review_evidence_invalid"
+            raise HTTPException(status_code=409 if reason == "voice_human_review_immutable_conflict" else 422, detail=reason) from exc
+
     @application.post(
         "/projects/{project_id}/voice-assets/{audio_id}/human-review",
         response_model=AudioAsset,
@@ -3438,6 +3570,7 @@ def create_app(
         if not _voice_audio_belongs_to_project(db, audio, project_id):
             raise HTTPException(status_code=422, detail="narration audio does not belong to the requested project")
         try:
+            require_legacy_human_review(db, request.app.state.data_root, audio)
             updated = apply_voice_human_review(
                 audio,
                 payload.review(reviewed_at=datetime.now(timezone.utc)),
@@ -4536,6 +4669,7 @@ def create_app(
         output = render_output_path(request.app.state.render_output_root, project_id, render_id)
         if not output.is_file():
             raise HTTPException(status_code=404, detail="rendered video not found")
+        _ordinary_media(output, "render", render_id)
         return FileResponse(output, media_type="video/mp4", filename=output.name)
 
     @application.head("/projects/{project_id}/renders/{render_id}", include_in_schema=False)
@@ -4546,6 +4680,7 @@ def create_app(
         output = render_output_path(request.app.state.render_output_root, project_id, render_id)
         if not output.is_file():
             raise HTTPException(status_code=404, detail="rendered video not found")
+        _ordinary_media(output, "render", render_id)
         return Response(
             status_code=200,
             headers={
@@ -4571,9 +4706,13 @@ def create_app(
         asset = AssetRepository(db).get(clip.asset_id)
         if asset is None:
             raise HTTPException(status_code=404, detail="asset not found")
-        source = Path(asset.source_file).expanduser().resolve()
-        if not source.is_file():
-            raise HTTPException(status_code=404, detail="asset source file not found")
+        try:
+            source = existing_local_media_file(asset.source_file, application.state.data_root)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="asset source file not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="asset source path is not a supported local path") from exc
+        _ordinary_media(source, "asset", asset.id, asset.content_hash)
         return FileResponse(source)
 
     return application

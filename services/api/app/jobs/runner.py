@@ -170,13 +170,14 @@ class JobRunner:
         """Make expired leases visible before a polling worker starts."""
         return self._store.recover_expired(max_attempts=self._max_attempts)
 
-    def run_once(self, *, allowed_types: Collection[JobType] | None = None) -> Job | None:
+    def run_once(self, *, allowed_types: Collection[JobType] | None = None, job_id: UUID | None = None) -> Job | None:
         """Execute one claimed job, or return ``None`` when no work is eligible.
 
         An ownership failure after the handler returns raises :class:`LeaseLost`
         rather than claiming a completion/failure that was not persisted.
         ``BaseException`` subclasses intentionally propagate unchanged; a
         process interruption leaves its running lease for crash recovery.
+        Supplying job_id leaves all unrelated backlog untouched.
         """
         job = self._store.claim(
             self._worker_id,
@@ -184,6 +185,7 @@ class JobRunner:
             max_attempts=self._max_attempts,
             allowed_types=allowed_types,
             resource_keys_by_type=self._resource_keys_by_type,
+            **({"job_id": job_id} if job_id is not None else {}),
         )
         if job is None:
             return None
@@ -196,10 +198,44 @@ class JobRunner:
                 from app.execution_scope import require_evaluation_lane_closed
                 from app.execution_admission import UseAdmissionError
                 try:
-                    require_evaluation_lane_closed(self._store.db, job)
+                    from app.jobs.voice_draft_handler import MaintainedVoiceDraftHandler
+                    from app.jobs.voice_evaluation_qa_handler import MaintainedVoiceEvaluationQAHandler
+                    from app.jobs.evaluation_talking_handler import MaintainedEvaluationTalkingHandler
+                    from app.jobs.evaluation_talking_qa_handler import EvaluationTalkingQaHandler
+                    from app.jobs.evaluation_talking_preview_handler import EvaluationTalkingPreviewHandler
+                    from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
+                    owned_types = {
+                        MaintainedVoiceDraftHandler: "voice_draft_handler_unsupported",
+                        MaintainedVoiceEvaluationQAHandler: "voice_qa_handler_unsupported",
+                        MaintainedEvaluationTalkingHandler: "evaluation_talking_handler_unsupported",
+                        EvaluationTalkingQaHandler: "evaluation_talking_handler_unsupported",
+                        EvaluationTalkingPreviewHandler: "evaluation_talking_handler_unsupported",
+                        EvaluationCompositionHandler: "composition_handler_unsupported",
+                    }
+                    if type(handler) in owned_types:
+                        if handler.db is not self._store.db:
+                            raise UseAdmissionError(owned_types[type(handler)])
+                        if type(handler) in (MaintainedEvaluationTalkingHandler, EvaluationTalkingQaHandler, EvaluationTalkingPreviewHandler):
+                            from app.provider_execution import ProviderExecutionInProgress, ProviderExecutionRecordedFailure
+                            from app.evaluation_talking_access import public_reason
+                            try:
+                                handler.require_dispatch(job)
+                            except (ProviderExecutionInProgress, ProviderExecutionRecordedFailure):
+                                raise JobExecutionError("provider_call_reconciliation_required",
+                                    "已有 Talking 调用需要核对，不会重复生成", retryable=False) from None
+                            except Exception as exc:
+                                code = public_reason(exc)
+                                raise JobExecutionError(code, code, retryable=False) from None
+                        else:
+                            handler.require_dispatch(job)
+                    else:
+                        require_evaluation_lane_closed(self._store.db, job)
                 except UseAdmissionError as exc:
                     raise JobExecutionError(str(exc), str(exc), retryable=False) from None
-                handler(job)
+                from .lease_fence import owned_job_lease
+                with owned_job_lease(self._store, job, self._worker_id, heartbeat,
+                        self._resource_keys_by_type.get(job.type)):
+                    handler(job)
             except JobExecutionError as error:
                 handler_error: JobExecutionError | None = error
             except Exception:

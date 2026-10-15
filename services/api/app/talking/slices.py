@@ -226,6 +226,7 @@ def extract_talking_audio_slice(
     *,
     ffmpeg_command: str | Path = "ffmpeg",
     timeout_seconds: float = 120.0,
+    command_runner=None,
 ) -> AudioAsset:
     """Materialize a plan as local PCM without touching the master asset.
 
@@ -248,7 +249,8 @@ def extract_talking_audio_slice(
         "-c:a", "pcm_s16le", str(output),
     ]
     try:
-        completed = subprocess.run(command, shell=False, capture_output=True, text=True, timeout=float(timeout_seconds), check=False)
+        runner = subprocess.run if command_runner is None else command_runner
+        completed = runner(command, shell=False, capture_output=True, text=True, timeout=float(timeout_seconds), check=False)
     except FileNotFoundError as exc:
         raise TalkingSliceExtractionError("Talking slice FFmpeg executable is unavailable") from exc
     except subprocess.TimeoutExpired as exc:

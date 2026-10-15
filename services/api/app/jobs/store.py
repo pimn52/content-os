@@ -42,17 +42,22 @@ class JobStore:
         allowed_types: Collection[JobType] | None = None,
         resource_keys_by_type: Mapping[JobType, str] | None = None,
         now: datetime | None = None,
+        job_id: UUID | None = None,
     ) -> Job | None:
         """Atomically claim one pending or expired-running job.
 
         The transaction prevents two processes from observing and claiming the
         same row.  An expired lease is intentionally eligible for direct
         reclaim, which is the crash-recovery path after reopening a database.
+        A job_id selects only that row; type, series, attempt and resource
+        eligibility still apply, and no execution authority is granted here.
         """
         worker = _valid_worker(worker_id)
         maximum = _valid_max_attempts(max_attempts)
         allowed = _valid_allowed_types(allowed_types)
         resource_keys = _valid_resource_keys(resource_keys_by_type)
+        if job_id is not None and not isinstance(job_id, UUID):
+            raise ValueError("target job_id must be a UUID")
         if allowed is not None and not allowed:
             return None
         timestamp, expiry = _lease_times(now, lease_duration)
@@ -62,6 +67,7 @@ class JobStore:
             while True:
                 type_clause = "" if allowed is None else f" AND json_extract(payload, '$.type') IN ({','.join('?' for _ in allowed)})"
                 skipped_clause = "" if not skipped else f" AND id NOT IN ({','.join('?' for _ in skipped)})"
+                target_clause = "" if job_id is None else " AND id = ?"
                 row = self.db.connection.execute(
                     f"""SELECT * FROM jobs
                        WHERE (status = ?
@@ -76,7 +82,7 @@ class JobStore:
                                    < CAST(json_extract(jobs.payload, '$.payload.slice_series_index') AS INTEGER)
                                AND preceding.status <> ?
                            )
-                         ){type_clause}{skipped_clause}
+                         ){type_clause}{target_clause}{skipped_clause}
                        ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, created_at, id
                        LIMIT 1""",
                     (
@@ -85,6 +91,7 @@ class JobStore:
                         timestamp_text,
                         JobStatus.COMPLETED.value,
                         *(item.value for item in allowed or ()),
+                        *(() if job_id is None else (str(job_id),)),
                         *skipped,
                         JobStatus.PENDING.value,
                     ),
@@ -139,11 +146,12 @@ class JobStore:
         allowed_types: Collection[JobType] | None = None,
         resource_keys_by_type: Mapping[JobType, str] | None = None,
         now: datetime | None = None,
+        job_id: UUID | None = None,
     ) -> Job | None:
         """Compatibility-friendly name for a runner's next-job operation."""
         return self.claim(
             worker_id, lease_duration, max_attempts=max_attempts,
-            allowed_types=allowed_types, resource_keys_by_type=resource_keys_by_type, now=now,
+            allowed_types=allowed_types, resource_keys_by_type=resource_keys_by_type, now=now, job_id=job_id,
         )
 
     def heartbeat(

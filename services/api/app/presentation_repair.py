@@ -288,38 +288,41 @@ class PresentationRepairService:
 
     def verify_output(self, job):
         """Measured technical evidence only; never creates a U-Product approval."""
-        from app.media.ffprobe import FFProbeAdapter
-        from app.runtime import resolve_local_executable
+        self._hash_render(job)
         output = self.render_root / str(job.project_id) / f"{job.payload.render_id}.mp4"
-        probe = FFProbeAdapter(command=resolve_local_executable("ffprobe")).probe(output)
-        spec = job.payload.video_spec
-        frames = max(scene.start_frame + scene.duration_frames for scene in spec.scenes)
-        expected_ms = frames * 1000 * spec.fps.denominator / spec.fps.numerator
-        frame_ms = 1000 * spec.fps.denominator / spec.fps.numerator
-        video = next(stream for stream in probe.metadata["streams"] if stream.get("codec_type") == "video")
-        audio = next((stream for stream in probe.metadata["streams"] if stream.get("codec_type") == "audio"), None)
-        video_ms = float(video.get("duration", "nan")) * 1000
-        audio_ms = float(audio.get("duration", "nan")) * 1000 if audio else float("nan")
-        # Remotion AAC adds encoder/container padding. Check exact video frames
-        # separately; permit at most three AAC sample frames, not arbitrary drift.
-        audio_padding_ms = max(frame_ms, 3 * 1024 * 1000 / int(audio["sample_rate"])) if audio and audio.get("codec_name") == "aac" else frame_ms
-        if (probe.width != spec.width or probe.height != spec.height or probe.fps != spec.fps
-            or not probe.has_audio or int(video.get("nb_frames", -1)) != frames
-            or not abs(video_ms - expected_ms) <= frame_ms
-            or not expected_ms - frame_ms <= audio_ms <= expected_ms + audio_padding_ms
-            or not expected_ms - frame_ms <= probe.duration_ms <= expected_ms + audio_padding_ms + 1):
-            raise ProductionRunNotReady(("presentation_output_technical_qa_failed",))
-        decoded = subprocess.run([resolve_local_executable("ffmpeg"), "-v", "error", "-xerror", "-i", str(output),
-            "-c:v", "rawvideo", "-c:a", "pcm_s16le", "-f", "null", "-"], shell=False, capture_output=True, timeout=60, check=False)
-        if decoded.returncode:
-            raise ProductionRunNotReady(("presentation_output_decode_failed",))
-        evidence = {"state": "verified", "sha256": self._hash_render(job), "width": probe.width, "height": probe.height,
-                    "duration_ms": probe.duration_ms, "fps": probe.fps.model_dump(mode="json"), "has_audio": True,
-                    "video_duration_ms": video_ms, "video_frames": frames, "audio_duration_ms": audio_ms,
-                    "audio_padding_tolerance_ms": audio_padding_ms,
-                    "decode": "pass", "scope": "technical_only_final_u_product_required"}
+        evidence = measure_render_output(output,job.payload.video_spec)
         with self.db.transaction(immediate=True):
             self.require_current_repair(job)
             self.db.connection.execute("UPDATE presentation_repairs SET technical_qa=? WHERE replacement_job_id=? AND technical_qa IS NULL",
                 (json.dumps(evidence), str(job.id)))
         return evidence
+
+
+def measure_render_output(output, spec):
+    """Shared probe/full-decode measurement; writes no admission or review."""
+    from app.media.ffprobe import FFProbeAdapter
+    from app.runtime import resolve_local_executable
+    probe = FFProbeAdapter(command=resolve_local_executable("ffprobe")).probe(output)
+    frames = max(scene.start_frame + scene.duration_frames for scene in spec.scenes)
+    expected_ms = frames * 1000 * spec.fps.denominator / spec.fps.numerator
+    frame_ms = 1000 * spec.fps.denominator / spec.fps.numerator
+    video = next(stream for stream in probe.metadata["streams"] if stream.get("codec_type") == "video")
+    audio = next((stream for stream in probe.metadata["streams"] if stream.get("codec_type") == "audio"),None)
+    video_ms = float(video.get("duration","nan"))*1000
+    audio_ms = float(audio.get("duration","nan"))*1000 if audio else float("nan")
+    audio_padding_ms = max(frame_ms,3*1024*1000/int(audio["sample_rate"])) if audio and audio.get("codec_name") == "aac" else frame_ms
+    if (probe.width != spec.width or probe.height != spec.height or probe.fps != spec.fps
+        or not probe.has_audio or int(video.get("nb_frames",-1)) != frames
+        or not abs(video_ms-expected_ms) <= frame_ms
+        or not expected_ms-frame_ms <= audio_ms <= expected_ms+audio_padding_ms
+        or not expected_ms-frame_ms <= probe.duration_ms <= expected_ms+audio_padding_ms+1):
+        raise ProductionRunNotReady(("presentation_output_technical_qa_failed",))
+    decoded = subprocess.run([resolve_local_executable("ffmpeg"),"-v","error","-xerror","-i",str(output),
+        "-c:v","rawvideo","-c:a","pcm_s16le","-f","null","-"],shell=False,capture_output=True,timeout=60,check=False)
+    if decoded.returncode:
+        raise ProductionRunNotReady(("presentation_output_decode_failed",))
+    with Path(output).open("rb") as stream:
+        sha = hashlib.file_digest(stream,"sha256").hexdigest()
+    return dict(state="verified",sha256=sha,width=probe.width,height=probe.height,duration_ms=probe.duration_ms,
+        fps=probe.fps.model_dump(mode="json"),has_audio=True,video_duration_ms=video_ms,video_frames=frames,
+        audio_duration_ms=audio_ms,audio_padding_tolerance_ms=audio_padding_ms,decode="pass",scope="technical_only_final_u_product_required")

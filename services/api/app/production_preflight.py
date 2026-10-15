@@ -22,9 +22,9 @@ from app.db import (
     ProviderMachineSettingRepository,
 )
 from app.domain.models import (
-    Asset, AudioAsset, CandidateAsset, CostCategory, CostEstimate, EditPlan, EditVisualRole, ImageAsset,
+    Asset, AudioAsset, CandidateAsset, CostCategory, CostEstimate, EditPlan, EditPlanScene, EditVisualRole, ImageAsset,
     GraphicTreatment, Project, ProjectDraft, ScenePlan, SourceKind,
-    SubtitleTreatment, UsageCost, VisualStyleTokens,
+    PortraitPresentation, SubtitleTreatment, TalkingFramingPolicy, UsageCost, VisualStyleTokens,
 )
 from app.media.crop_assessment import CropAssessmentRepository, CropProposal
 from app.routing import AssetRouter
@@ -89,6 +89,16 @@ class ProductionPreflight(BaseModel):
     estimated_user_active_minutes: int | None = None
     estimated_local_runtime_ms: int | None = None
     dispatch_performed: Literal[False] = False
+
+
+def _presentation_for_style(entry: EditPlanScene, style: VisualStyleTokens) -> EditPlanScene:
+    """Select an existing contain layout, without granting media eligibility."""
+    if (style.name == "content-os-subject-first"
+            and entry.selected_source_kind is SourceKind.AI_VIDEO
+            and entry.visual_role is EditVisualRole.TALKING
+            and entry.framing_policy is TalkingFramingPolicy.FACE_SAFE_CONTAIN):
+        return EditPlanScene.model_validate({**entry.model_dump(), "portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})
+    return entry
 
 
 def build_production_preflight(
@@ -196,6 +206,7 @@ def build_production_preflight(
                 "burned_in_subtitles": burned_state,
                 "subtitle_treatment": SubtitleTreatment.NONE if burned_state == "present" else SubtitleTreatment.TIMED_CAPTIONS,
             })
+            entry = _presentation_for_style(entry, style_tokens)
             matches = use_service.evaluate(item, presentation(entry, width=project.resolution_width,
                 height=project.resolution_height, style=style_tokens), use_records)
             if matches:
@@ -278,12 +289,17 @@ def build_production_preflight(
             if burned == "unknown":
                 reasons.append("subtitle state remains unknown; no new caption overlay is authorized")
         unsupported_graphic = scene.graphic_plan is not None and scene.graphic_plan.kind == "unsupported"
+        no_graphics = scene.graphic_plan is not None and scene.graphic_plan.kind == "none"
+        if no_graphics:
+            reasons.append(f"no additional graphics requested: {scene.graphic_plan.reason}")
+            if kind is SourceKind.TYPOGRAPHY:
+                stop.append(f"no_graphics_requires_media:{scene.scene_id}")
         if unsupported_graphic:
             stop.append(f"graphic_realization_unsupported:{scene.scene_id}")
             reasons.append("declared graphic requires unsupported realization; typography cannot silently replace it")
         elif kind is SourceKind.TYPOGRAPHY and scene.graphic_plan is None:
             reasons.append("legacy graphic realization is undeclared; intended effect coverage remains unverified")
-        suitability = "unknown" if unsupported_graphic else "known_deterministic" if kind is SourceKind.TYPOGRAPHY else "reviewed_native_planned_run" if reviewed_native else "unknown"
+        suitability = "unknown" if unsupported_graphic or no_graphics and kind is SourceKind.TYPOGRAPHY else "known_deterministic" if kind is SourceKind.TYPOGRAPHY else "reviewed_native_planned_run" if reviewed_native else "unknown"
         visual_identity_payload = {
             "source_kind": kind.value, "asset_id": None if source is None else str(source.id),
             "asset_hash": None if source is None else source.content_hash,
@@ -300,7 +316,7 @@ def build_production_preflight(
             source_authorization_reference=None if source is None else source.authorization_reference,
             production_need=need, suitability=suitability,
             subtitle_treatment=subtitle, burned_in_subtitles=burned,
-            graphic_treatment=GraphicTreatment.HEADLINE if role is EditVisualRole.GRAPHIC and scene.order == 0 else GraphicTreatment.KEY_POINT if role is EditVisualRole.GRAPHIC else GraphicTreatment.NONE,
+            graphic_treatment=GraphicTreatment.NONE if no_graphics or role is not EditVisualRole.GRAPHIC else GraphicTreatment(scene.graphic_plan.treatment) if scene.graphic_plan is not None and scene.graphic_plan.kind == "text_card" else GraphicTreatment.HEADLINE if scene.order == 0 else GraphicTreatment.KEY_POINT,
             reasons=tuple(reasons), excluded_uses=tuple(excluded), visual_dependency_fingerprint=visual_identity,
         ))
 
@@ -342,10 +358,10 @@ def build_production_preflight(
             by_scene = {decision.scene_plan_id: decision for decision in decisions}
             preliminary_edit_plan = EditPlan(
                 project_id=project.id, style_tokens=style_tokens,
-                scenes=[entry.model_copy(update={
+                scenes=[_presentation_for_style(entry.model_copy(update={
                     "subtitle_treatment": by_scene[entry.scene_plan_id].subtitle_treatment,
                     "burned_in_subtitles": by_scene[entry.scene_plan_id].burned_in_subtitles,
-                }) for entry in base_plan.scenes],
+                }), style_tokens) for entry in base_plan.scenes],
             )
             resolve_edit_plan(project, scenes, selections, clip_intervals=intervals, supplied=preliminary_edit_plan)
         except (EditPlanPreflightError, ValueError):

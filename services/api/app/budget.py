@@ -128,6 +128,15 @@ class ProviderCallLedger:
     def __init__(self, db: object) -> None:
         self.db = db
 
+    def check_reservation(self, *, project_id: UUID, estimated_cost: UsageCost) -> None:
+        """Observe normal global/project limits without claiming or spending.
+
+        Callers inserting work must repeat this inside their own DB write fence;
+        actual execution still reserves atomically through reserve_execution.
+        """
+        from app.db import ProviderCallRepository
+        self._enforce_scopes(ProviderCallRepository(self.db), project_id, estimated_cost, False)
+
     def reserve(
         self,
         *,
@@ -254,9 +263,12 @@ class ProviderCallLedger:
         price_date: date | None = None,
         error_code: str | None = None,
         result_payload: dict[str, object] | None = None,
+        persist_result: Callable[[], None] | None = None,
     ) -> ProviderCallRecord:
         from app.db import ProviderCallRepository
 
+        if persist_result is not None and status != "completed":
+            raise ProviderCallError("result persistence requires completed accounting")
         if actual_cost is not None and not isinstance(actual_cost, UsageCost):
             actual_cost = UsageCost.model_validate(actual_cost)
         repository = ProviderCallRepository(self.db)  # type: ignore[arg-type]
@@ -285,6 +297,8 @@ class ProviderCallLedger:
                 "result_payload": result_payload,
                 "completed_at": datetime.now(timezone.utc),
             })
+            if persist_result is not None:
+                persist_result()
             repository.update(value)
         return value
 

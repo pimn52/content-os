@@ -522,6 +522,9 @@ class VideoSpecAssembler:
                 edit_plan=edit_plan,
             )]
 
+        if scene.graphic_plan is not None and scene.graphic_plan.kind == "none":
+            raise InsufficientSourceDuration("no_graphics_requires_full_media_coverage")
+
         # The source Clip remains a first-class visual for as long as it has
         # real frames. The tail is an explicit local typography fallback rather
         # than a frozen final source frame or an unauthorized extension.

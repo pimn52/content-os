@@ -16,6 +16,45 @@ from app.domain.models import (
     VisualIntent,
 )
 from app.main import create_app
+from app.production_preflight import _presentation_for_style
+
+
+def test_subject_first_selects_only_supported_talking_panel_and_preserves_default():
+    from app.assembly.edit_plan import _default_edit_plan
+    from app.domain.models import CandidateAsset, CostCategory, Project, UsageCost, VisualStyleTokens
+    project = Project(title="Style", topic="Style", ip_profile_id=uuid4(), fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc))
+    scene = _scene(str(project.id))
+    # This is presentation geometry only, not asset admission.
+    for kind, expected in ((SourceKind.AI_VIDEO, "portrait_panel"), (SourceKind.USER_ASSET, "full_canvas"), (SourceKind.TYPOGRAPHY, "full_canvas")):
+        candidate = CandidateAsset(scene_plan_id=scene.id, source_kind=kind,
+            asset_id=uuid4() if kind is not SourceKind.TYPOGRAPHY else None,
+            clip_id=uuid4() if kind is not SourceKind.TYPOGRAPHY else None,
+            match_score=1, why=["fixture"], estimated_cost=UsageCost(category=CostCategory.RENDER, amount=None))
+        entry = _default_edit_plan(project, [scene], {scene.id: candidate}).scenes[0]
+        assert _presentation_for_style(entry, VisualStyleTokens()).model_dump() == entry.model_dump()
+        chosen = _presentation_for_style(entry, VisualStyleTokens(name="content-os-subject-first"))
+        assert chosen.portrait_presentation.value == expected
+        assert chosen.selected_asset_id == entry.selected_asset_id
+        assert chosen.selected_clip_id == entry.selected_clip_id
+        assert chosen.framing_policy == entry.framing_policy
+        assert chosen.graphic_text == entry.graphic_text
+
+
+def test_normal_preflight_retains_selected_style_and_invalidates_default_fingerprint(tmp_path):
+    with TestClient(create_app(tmp_path / "subject-style.sqlite")) as client:
+        project_id, scene = _create_draft(client)
+        graphic = scene.model_copy(update={"preferred_sources": [SourceKind.TYPOGRAPHY]})
+        client.put(f"/projects/{project_id}/draft", json={"script": scene.voice_text, "topic": "New topic", "scenes": [graphic.model_dump(mode="json")]}).raise_for_status()
+        default = client.post(f"/projects/{project_id}/production-preflight", json={}).json()
+        selected = client.post(f"/projects/{project_id}/production-preflight", json={"style_tokens": {"name": "content-os-subject-first"}})
+        selected.raise_for_status()
+        result = selected.json()
+        assert result["preliminary_edit_plan"]["style_tokens"]["name"] == "content-os-subject-first"
+        assert result["fingerprint"] != default["fingerprint"]
+        assert result["stop_reasons"] == default["stop_reasons"]
+        stale = client.post(f"/projects/{project_id}/production-preflight", json={"style_tokens": {"name": "content-os-subject-first"}, "expected_fingerprint": default["fingerprint"]})
+        assert stale.status_code == 409
+        assert client.get(f"/projects/{project_id}/provider-calls").json() == []
 
 
 def _scene(project_id, *, talking: bool = False, text: str = "A fresh creator point.") -> ScenePlan:

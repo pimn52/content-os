@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -32,17 +31,20 @@ from app.domain.models import (
     VisualIntent,
 )
 from app.main import create_app
-from app.media import FFProbeAdapter, MediaImporter, ProbeMetadata, VerticalDerivationConflict, VerticalDerivationValidationError, VerticalSourceDerivationService
+from app.media import FFProbeAdapter, MediaImporter, ProbeMetadata, VerticalDerivationConflict, VerticalDerivationProcessError, VerticalDerivationValidationError, VerticalSourceDerivationService
 from app.media.crop_assessment import CropAssessment, CropAssessmentRepository, CropProposal, FaceBoxObservation
 from app.runtime import resolve_local_executable
 
 
 class _OutputProbe:
+    def __init__(self, height: int = 1920) -> None:
+        self.height = height
+
     def probe(self, path: Path) -> ProbeMetadata:
         return ProbeMetadata(
             duration_ms=15_000,
             width=1080,
-            height=1920,
+            height=self.height,
             fps=RationalFps(numerator=30, denominator=1),
             has_audio=False,
             metadata={"format": {"format_name": "mp4"}, "streams": [{"codec_type": "video"}]},
@@ -108,6 +110,88 @@ def _service(db: Database, root: Path, runner: _WritingRunner) -> VerticalSource
     )
 
 
+def _portrait_request(asset: Asset, clip: Clip, height: int = 1440) -> VerifiedVerticalDerivationRequest:
+    crop = SourceCropWindow(x=600, y=0, width=720, height=960) if height == 1440 else SourceCropWindow(x=600, y=0, width=630, height=980)
+    base = _request(asset, clip)
+    return VerifiedVerticalDerivationRequest.model_validate({**base.model_dump(), "output_height": height,
+        "crop_window": crop, "evidence": base.evidence.model_copy(update={"crop_window": crop})})
+
+
+def test_shorter_portrait_viewport_retains_provenance_replay_and_guards(tmp_path: Path) -> None:
+    with Database(tmp_path / "portrait.sqlite") as db:
+        asset, clip = _source(db, tmp_path)
+        runner = _WritingRunner()
+        service = VerticalSourceDerivationService(db, tmp_path / "data", MediaImporter(db, tmp_path / "data", _OutputProbe(1440)), command="fake-ffmpeg", runner=runner)
+        request = _portrait_request(asset, clip)
+        result = service.derive(request)
+        assert (result.asset.width, result.asset.height) == (1080, 1440)
+        assert runner.argv[runner.argv.index("-vf") + 1].startswith("crop=720:960:600:0,scale=1080:1440:flags=lanczos")
+        provenance = result.asset.metadata["source_derivation"]
+        assert provenance["kind"] == "verified_portrait_crop_v1"
+        assert provenance["presentation_output"] == {"width": 1080, "height": 1440}
+        assert provenance["source_content_hash"] == asset.content_hash
+        assert provenance["evidence"] == request.evidence.model_dump(mode="json")
+        profile = IPProfile(creator_name="Creator")
+        project = Project(ip_profile_id=profile.id, title="Flexible source", topic="Aspect", fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc))
+        scene = ScenePlan(project_id=project.id, scene_id="flexible-source", order=0, purpose="point", voice_text="A supported source interval.", duration_target_ms=900,
+            visual_intent=VisualIntent(subject="creator"), preferred_sources=[SourceKind.USER_ASSET], fallback_sources=[SourceKind.TYPOGRAPHY])
+        candidate = CandidateAsset(scene_plan_id=scene.id, source_kind=SourceKind.USER_ASSET,
+            asset_id=result.asset.id, clip_id=result.clip.id, match_score=1.0, why=["evidenced viewport"], recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.USER_ASSET, amount=Decimal("0"), currency="USD"))
+        with db.transaction():
+            IPProfileRepository(db).create(profile)
+            ProjectRepository(db).create(project)
+        spec = VideoSpecAssembler(AssetRepository(db), ClipRepository(db)).assemble(project, [scene], {scene.id: candidate})
+        assert (spec.width, spec.height) == (1080, 1920)
+        assert spec.scenes[0].visual.asset_id == result.asset.id
+        assert service.derive(request).asset.id == result.asset.id
+        with pytest.raises(VerticalDerivationConflict):
+            service.derive(_portrait_request(asset, clip, 1680))
+        assert runner.calls == 1
+        # Geometry is not authority: retain full-interval and subtitle checks.
+        with pytest.raises(VerticalDerivationValidationError, match="full-interval"):
+            service.derive(request.model_copy(update={"evidence": request.evidence.model_copy(update={"coverage": None})}))
+        with pytest.raises(VerticalDerivationValidationError, match="burned-in"):
+            service.derive(request.model_copy(update={"known_subtitle_regions": [SourceCropWindow(x=600, y=900, width=720, height=100)]}))
+        with pytest.raises(VerticalDerivationValidationError, match="aspect ratio"):
+            service.derive(request.model_copy(update={"output_height": 1920}))
+        assert runner.calls == 1
+
+
+def test_shorter_portrait_rejects_incorrect_actual_output_dimensions(tmp_path: Path) -> None:
+    with Database(tmp_path / "wrong-size.sqlite") as db:
+        asset, clip = _source(db, tmp_path)
+        runner = _WritingRunner()
+        with pytest.raises(VerticalDerivationProcessError, match="dimensions"):
+            _service(db, tmp_path / "data", runner).derive(_portrait_request(asset, clip))
+        assert len(AssetRepository(db).list()) == 1
+
+
+@pytest.mark.parametrize("height", [1078, 1922, 1441, True, "1440"])
+def test_portrait_viewport_rejects_out_of_range_odd_or_noninteger_dimensions(tmp_path: Path, height) -> None:
+    with Database(tmp_path / "dimensions.sqlite") as db:
+        asset, clip = _source(db, tmp_path)
+        value = _request(asset, clip).model_dump()
+        value["output_height"] = height
+        with pytest.raises(ValueError) as caught:
+            VerifiedVerticalDerivationRequest.model_validate(value)
+        assert all(error["loc"] == ("output_height",) for error in caught.value.errors())
+
+
+def test_default_portrait_identity_retains_legacy_provenance(tmp_path: Path) -> None:
+    with Database(tmp_path / "legacy.sqlite") as db:
+        asset, clip = _source(db, tmp_path)
+        request = _request(asset, clip)
+        identity = VerticalSourceDerivationService._request_identity(request)
+        assert request.output_height == 1920
+        assert set(identity) == {"idempotency_key", "source_asset_id", "source_clip_id", "source_interval",
+            "crop_window", "evidence", "source_subtitle_state", "known_subtitle_regions"}
+        # Old clients omitting the optional field retain identical identity.
+        value = request.model_dump()
+        del value["output_height"]
+        assert VerticalSourceDerivationService._request_identity(VerifiedVerticalDerivationRequest.model_validate(value)) == identity
+
+
 def test_known_bad_exact_crop_blocks_derivation_before_ffmpeg(tmp_path: Path) -> None:
     with Database(tmp_path / "negative.sqlite") as db:
         source, clip = _source(db, tmp_path)
@@ -168,6 +252,43 @@ def test_verified_vertical_derivation_persists_provenance_and_is_consumable(tmp_
         assert runner.calls == 1
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("offset_ms", [0, 40])
+def test_real_derivation_aligns_leading_frame_but_never_pads_missing_end(tmp_path: Path, offset_ms: int) -> None:
+    if os.environ.get("CONTENT_OS_REAL_MEDIA_TESTS") != "1":
+        pytest.skip("requires explicitly configured local FFmpeg")
+    ffmpeg = resolve_local_executable("ffmpeg")
+    ffprobe = resolve_local_executable("ffprobe")
+    source_path = tmp_path / "offset-source.mp4"
+    subprocess.run([ffmpeg, "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=1",
+        "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono:d=1.04", "-filter_complex", f"[0:v]setpts=PTS+{offset_ms / 1000}/TB[v]",
+        "-map", "[v]", "-map", "1:a", "-fps_mode", "passthrough", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(source_path)],
+        check=True, capture_output=True, timeout=30)
+    probe = FFProbeAdapter(ffprobe)
+    assert probe.probe(source_path).duration_ms == 1040
+    with Database(tmp_path / "offset.sqlite") as db:
+        asset = Asset(source_file=str(source_path), content_hash=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            duration_ms=1040, width=320, height=180, fps=RationalFps(numerator=25, denominator=1),
+            authorization_reference="synthetic-offset-fixture", imported_at=datetime.now(timezone.utc))
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=1040, asset_duration_ms=1040)
+        AssetRepository(db).create(asset); ClipRepository(db).create(clip)
+        crop = SourceCropWindow(x=60, y=0, width=180, height=180)
+        request = _request(asset, clip, start_ms=0, end_ms=1040)
+        request = VerifiedVerticalDerivationRequest.model_validate(request.model_copy(update={"output_height":1080,
+            "crop_window":crop, "evidence":request.evidence.model_copy(update={"crop_window":crop})}).model_dump())
+        service = VerticalSourceDerivationService(db, tmp_path / "data", MediaImporter(db, tmp_path / "data", probe), command=ffmpeg)
+        if offset_ms == 0:
+            with pytest.raises(VerticalDerivationProcessError, match="shorter than"):
+                service.derive(request)
+            assert len(AssetRepository(db).list()) == 1
+        else:
+            result = service.derive(request)
+            measured = probe.probe(result.asset.source_file)
+            assert measured.duration_ms == 1040 and measured.has_audio is False
+            stream = measured.metadata["streams"][0]
+            assert stream["start_time"] == "0.000000" and int(stream["nb_frames"]) == 26
+            assert result.asset.metadata["source_derivation"]["transform"]["timing"] == "native_fps_first_frame_to_zero"
 
 
 def test_vertical_derivation_rejects_subtitle_overlap_before_ffmpeg(tmp_path: Path) -> None:
@@ -305,7 +426,8 @@ def test_vertical_derivation_contract_rejects_incomplete_temporal_evidence() -> 
         )
 
 
-def test_vertical_derivation_api_exposes_the_normal_contract(tmp_path: Path) -> None:
+@pytest.mark.parametrize("height", [1920, 1440])
+def test_vertical_derivation_api_exposes_the_normal_contract(tmp_path: Path, height: int) -> None:
     database_path = tmp_path / "api.sqlite"
     db = Database(database_path)
     source, clip = _source(db, tmp_path)
@@ -313,29 +435,30 @@ def test_vertical_derivation_api_exposes_the_normal_contract(tmp_path: Path) -> 
     runner = _WritingRunner()
 
     def factory(open_db: Database, root: Path) -> VerticalSourceDerivationService:
-        return _service(open_db, root, runner)
+        return VerticalSourceDerivationService(open_db, root, MediaImporter(open_db, root, _OutputProbe(height)), command="fake-ffmpeg", runner=runner)
 
     app = create_app(database_path, vertical_derivation_factory=factory)
     with TestClient(app) as client:
-        response = client.post("/assets/vertical-derivations", json=_request(source, clip).model_dump(mode="json"))
+        request = _request(source, clip) if height == 1920 else _portrait_request(source, clip)
+        response = client.post("/assets/vertical-derivations", json=request.model_dump(mode="json"))
     assert response.status_code == 201
     body = response.json()
     assert body["asset"]["metadata"]["source_derivation"]["source_clip_id"] == str(clip.id)
     assert body["clip"]["asset_id"] == body["asset"]["id"]
+    assert body["asset"]["height"] == height
 
 
-def test_real_ffmpeg_vertical_derivation_has_a_verified_1080x1920_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize("height", [1920, 1440])
+def test_real_ffmpeg_vertical_derivation_has_a_verified_portrait_output(tmp_path: Path, height: int) -> None:
     if os.environ.get("CONTENT_OS_REAL_MEDIA_TESTS") != "1":
         pytest.skip("set CONTENT_OS_REAL_MEDIA_TESTS=1 to run the 1080x1920 real-media integration test")
     ffmpeg = shutil.which("ffmpeg") or resolve_local_executable("ffmpeg")
     ffprobe = shutil.which("ffprobe") or resolve_local_executable("ffprobe")
     if not Path(ffmpeg).is_file() or not Path(ffprobe).is_file():
         pytest.skip("real ffmpeg/ffprobe binaries are unavailable")
-    pixel_path = tmp_path / "source pixel.png"
-    pixel_path.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9J7XIAAAAASUVORK5CYII="))
     source_path = tmp_path / "real horizontal.mp4"
     subprocess.run(
-        [ffmpeg, "-y", "-loop", "1", "-framerate", "1", "-i", str(pixel_path), "-frames:v", "1", "-vf", "scale=1920:1080", "-an", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(source_path)],
+        [ffmpeg, "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30", "-frames:v", "30", "-an", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(source_path)],
         check=True, capture_output=True, timeout=30,
     )
     db = Database(tmp_path / "real.sqlite")
@@ -349,12 +472,15 @@ def test_real_ffmpeg_vertical_derivation_has_a_verified_1080x1920_output(tmp_pat
             AssetRepository(db).create(asset)
             ClipRepository(db).create(clip)
         request = _request(asset, clip, start_ms=0, end_ms=500).model_copy(update={"idempotency_key": "real-vertical-source"})
+        if height == 1440:
+            crop = SourceCropWindow(x=600, y=0, width=720, height=960)
+            request = request.model_copy(update={"output_height": height, "crop_window": crop, "evidence": request.evidence.model_copy(update={"crop_window": crop})})
         service = VerticalSourceDerivationService(
             db, tmp_path / "data", MediaImporter(db, tmp_path / "data", FFProbeAdapter(ffprobe)), command=ffmpeg, timeout_seconds=30,
         )
         result = service.derive(request)
-        assert (result.asset.width, result.asset.height) == (1080, 1920)
-        assert result.asset.duration_ms >= 450
+        assert (result.asset.width, result.asset.height) == (1080, height)
+        assert result.asset.duration_ms == 500
         assert Path(result.asset.source_file).is_file()
     finally:
         db.close()

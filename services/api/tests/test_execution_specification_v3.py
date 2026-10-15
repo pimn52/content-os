@@ -75,15 +75,22 @@ def test_exact_pairing_cannot_relabel_old_or_incomplete_evidence(raw_spec, probl
 
 @pytest.mark.parametrize('carrier', [ExecutionUseBindingV2, WorkerExecutionUseSnapshotV2,
     ProviderUseLicenseReviewV2])
-def test_authority_carriers_refuse_unknown_nested_version(carrier, raw_spec):
+@pytest.mark.parametrize('version', [5, 6, 7, 9, 97])
+def test_authority_carriers_refuse_mixed_or_unknown_nested_version(carrier, raw_spec, version):
     spec = parse(raw_spec)
     # Other required fields may be absent: specifically assert rejection at
     # the specification discriminator, not an unrelated missing-field error.
     unknown = spec.model_dump(mode='json')
-    unknown['schema_version'] = 4
-    for value in (spec.model_copy(update={'schema_version':4}), unknown):
+    unknown['schema_version'] = version
+    for value in (spec.model_copy(update={'schema_version':version}), unknown):
         with pytest.raises(ValidationError) as caught:
             carrier.model_validate(dict(execution_specification=value,
                 execution_sha256=spec.execution_sha256, identity=spec.identity))
-        assert any(error['loc'] == ('execution_specification',)
-            and error['type'] == 'union_tag_invalid' for error in caught.value.errors())
+        if version == 97:
+            assert any(error['loc'] == ('execution_specification',)
+                and error['type'] == 'union_tag_invalid' for error in caught.value.errors())
+        else:
+            # Known maintained versions cannot accept relabeled schema3
+            # native evidence.97 is deliberately unknown as versions evolve.
+            assert any(error['loc'][:2] == ('execution_specification', version)
+                and error['type'] != 'missing' for error in caught.value.errors())

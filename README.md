@@ -42,6 +42,20 @@ From the repository root:
     .\.venv\Scripts\python.exe -m pip install -e ".[test]"
     .\scripts\start.ps1
 
+The normal product website is http://127.0.0.1:8000/app/ while the API
+service is running. The API serves the existing web build directly; a separate
+Vite server is not required. Use `scripts/start.ps1 -NoWorker` to open the
+workspace without processing queued jobs. Temporary browser fixture servers
+are test-only and are not the normal product entry.
+
+The evaluation Master panel reuses complete, reviewed narration through a
+separate operator-adopted exact-use receipt. It requires a matching saved
+copy/plan and retains current media authority checks. It does not dispatch
+Talking or rendering. Code includes schema49; consult STATUS for live activation
+and evidence before migrating an existing evaluation database. The Voice draft
+panel can also select saved full-plan text; source selection does not grant a
+new generation allowance or imply Master/Talking readiness.
+
 Run tests:
 
     .\.venv\Scripts\python.exe -m pytest -q
@@ -97,7 +111,7 @@ fixed categories, not untrusted field names, values or validation tracebacks.
 No keys, prompts, URLs, response/error text or reasoning text are logged.
 This is non-streaming diagnostic support, not persisted usage/billing evidence.
 
-Local provider runtimes are opt-in and do not change Core product semantics. Content OS does not install/download a runtime on startup. However, the legacy upstream inference loaders may resolve missing auxiliary models through caches/Hub/URLs: a local primary checkpoint does not prove offline or complete execution. The purpose-scoped evaluation lane remains disabled until an audited local-only loader, complete artifact/runtime selection and downstream scope enforcement are available. Do not treat these benchmark commands as a hermetic execution or license guarantee.
+Local provider runtimes are opt-in and do not change Core product semantics. Content OS does not install/download a runtime on startup. However, the legacy upstream inference loaders may resolve missing auxiliary models through caches/Hub/URLs: a local primary checkpoint does not prove offline or complete execution. Legacy and whole-production evaluation dispatch remains disabled. The separately configured maintained Voice draft module has its own exact evidence, accounting and downstream review boundary described below. Do not treat these benchmark commands as a hermetic execution or license guarantee.
 
 ### Local ASR
 
@@ -105,6 +119,42 @@ Local provider runtimes are opt-in and do not change Core product semantics. Con
     $env:CONTENT_OS_ASR_LOCAL_MODEL = "small"
     $env:CONTENT_OS_ASR_DEVICE = "cpu"
     $env:CONTENT_OS_ASR_COMPUTE_TYPE = "int8"
+
+### Maintained evaluation Talking
+
+The normal evaluation Talking panel consumes an eligible saved Master and an
+operator-adopted exact input/output-use combination. The generation receipt,
+current verified capability/source/consent and budget remain independent gates.
+Technical QA, exact scoped preview, six-dimensional review and TalkingRun
+admission are explicit stages; this does not authorize render or publication.
+
+Select the dedicated Worker policy explicitly:
+
+```powershell
+$env:CONTENT_OS_TALKING_EXECUTION_POLICY = "evaluation-talking-run-v1"
+$env:CONTENT_OS_MAINTAINED_TALKING_CONFIG = "C:\path\to\talking-config.json"
+$env:CONTENT_OS_MAINTAINED_TALKING_OPERATOR_KEY = "<configured operator key>"
+python -m app.worker_cli --job-type generate_talking --job-type verify_talking --job-type prepare_talking_run_preview
+```
+
+Config version1 retains the schema9/origin4 single-venv recipe. Config version2
+explicitly selects schema10/origin5 with `runtime_options.engine` pointing to
+the separate Conda Python3.10 root and `invocation_policy` set to
+`maintained-latentsync-dual-runtime-v1`. Its application environment/base remain
+Python3.12; no Conda activation or automatic version fallback occurs. Parameters
+also require `attention_policy: latentsync-retained-explicit-math-v1` and
+`allocator: expandable_segments:True`. Both complete runtime inventories, the
+role-specific origin, current host/device, resource/cache/tool identities and
+the exact configuration-quality evidence must be adopted independently.
+The selected vendor/resources/tools roots must fit the declared disjoint layout;
+an existing legacy command or installation path alone does not satisfy it.
+The owned application stages media and verified resources in private scratch;
+the engine receives safe relative media operands and fixed no-site startup.
+Configuration does not install/download packages or grant execution permission.
+Invalid configuration does not fall back to legacy generation. Completed calls
+recover saved output; failed/unknown calls require reconciliation. Current
+implementation evidence is synthetic integration and isolated browser playback;
+real Talking activation requires its own eligible runtime, inputs and grant.
 
 ### LatentSync benchmark Talking
 
@@ -126,6 +176,16 @@ particular, do not infer that `cuda` is usable merely because it appears below.
     $env:CONTENT_OS_OMNIVOICE_MODEL = "C:\path\to\model-snapshot"
     $env:CONTENT_OS_OMNIVOICE_DEVICE = "cuda"
     $env:CONTENT_OS_VOICE_QA_ASR_MODEL = "C:\path\to\faster-whisper-snapshot"
+
+### Maintained evaluation Voice drafts
+
+The normal Voice draft panel supports bounded evaluation paths. `voice-draft-v1` requires an exact verified schema6 capability; explicitly selected `voice-calibration-v1` may use a configured candidate with unknown quality only with a separately adopted report-policy3 receipt bound to the exact request and one atomic Job claim. Both require an existing consented OmniVoice profile/reference, current license/runtime/source admission and an explicit finite call budget allowing unknown local cost. Missing prerequisites block submission; diagnostic import/PCM evidence is not generation permission. First-validation execution does not promote quality, and failed/unknown calls require reconciliation rather than automatic retry. QA, Talking and complete ProductionRun admission remain separate.
+
+An operator can configure the owned Worker factory with `CONTENT_OS_VOICE_PROVIDER=omnivoice-maintained`, `CONTENT_OS_MAINTAINED_VOICE_CONFIG` pointing to a local JSON file, and `CONTENT_OS_MAINTAINED_VOICE_OPERATOR_KEY` supplied separately in the environment. The JSON has exactly `config_version: 1` and `runtime_options`. Required options are absolute `environment`, `base`, `model_root` paths, typed `origin_reference` (`reference` and `sha256`), exact `parameters`, `installation_id`, `runtime_label` and `machine_id`; optional options are `gpu_uuid`, `max_bytes` and `timeout_seconds`. Their values must come from current verified evidence; this is not a template license/configuration grant. JSON cannot supply the operator key, a command, request input or replay authority. Default benchmark selection is unchanged.
+
+Independent evaluation QA is an explicit separate lane. Set `CONTENT_OS_VOICE_QA_POLICY=voice-evaluation-qa-v1`, `CONTENT_OS_MAINTAINED_ASR_CONFIG` and separately `CONTENT_OS_MAINTAINED_ASR_OPERATOR_KEY`, then select the `verify_voice` Worker type. ASR JSON uses `config_version: 1` and `runtime_options` with absolute `environment`, `base`, `model_root`, typed `origin_reference`, `installation_id`, `runtime_label`, `machine_id`, optional `max_bytes`/`timeout_seconds`; it cannot supply commands, audio/text, prompts or an operator key. Schema7/v1 fixes CPU/int8, local-only model/tokenizer, all decode defaults and QA thresholds. Explicit `config_version: 2` requires `invocation_policy: "isolated-zip-asr-v2"` in runtime_options and selects schema8: owned CPython3.12 `-I -S -B` startup, fixed inventoried environment package root after ZIP/stdlib, and exact startup/invocation binding. It rejects `._pth`; ordinary hooks remain inventoried but are not automatically initialized. Config/version mismatch is denied; existing v1 startup checks and records retain their meaning. This is maintained operator/vendor/OS trust, not system-level network isolation. A current transcription-specific origin and report4 must bind the exact existing audio/producer/target and one call; old Voice/import acceptance is insufficient. The normal saved-draft panel selects an eligible QA receipt and explicitly submits once. Failure/unknown accounting never permits another recognition; a committed result can reconcile the same Job without inference. The default commercial QA handler remains unchanged. Code and fake-child tests do not authorize a real ASR call or establish U-Voice/production quality.
+
+Use the ordinary API/UI to enqueue and inspect drafts. The owned handler rechecks authorization before dispatch and commits generated AudioAssets as QA-pending. Interrupted or failed provider calls require explicit accounting reconciliation; the UI does not automatically retry them. This configuration guide does not authorize running a model, installing dependencies or publishing. Current implementation tests use synthetic subprocess/audio fixtures, not real generation.
 
 These benchmark providers have separate source/model-weight license considerations. See docs/DEPENDENCIES.md and docs/product/VOICE_TALKING.md.
 
@@ -151,3 +211,7 @@ The separate ProductionRun Talking-dispatch action can link one scene-bounded Jo
 The active documentation hierarchy is intentional. Do not create parallel root PRDs, review reports, freezes or handoff documents for normal work.
 
 Completed product behavior belongs in the relevant current module spec. Implementation history belongs in Git/evaluation evidence.
+
+The fixed evaluation ASR recipe reuses a local FasterWhisper directory with `model.bin`, `config.json`, `tokenizer.json` and `vocabulary.txt`. Optional `preprocessor_config.json` must preserve the pinned feature defaults; absence uses installed-package defaults bound by the recipe and inventory. No model-name/download fallback is allowed.
+
+Saved evaluation drafts expose separate six-dimensional U-Voice records after verified terminal QA. The normal panel uses the explicit evaluation-human-review GET/POST action and current QA fingerprint; exact replay preserves the immutable record, while conflicting decisions and legacy evaluation metadata mutations are rejected. This does not grant Master/Talking/production eligibility or another provider call.

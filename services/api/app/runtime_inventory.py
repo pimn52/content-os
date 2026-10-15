@@ -7,6 +7,8 @@ from pathlib import Path
 import stat
 from tempfile import NamedTemporaryFile
 
+from app.domain.maintained_runtime import MaintainedRuntimeInventory, MaintainedRuntimeInventoryDescriptor
+
 from app.domain.execution_runtime import (MAX_RUNTIME_MANIFEST_BYTES, OS_POLICY_SLOT, OS_POLICY_LIMIT, RuntimeInventory,
     RuntimeInventoryDescriptor, HostRuntimeObservation, HostRuntimeObservationV3Policy2)
 
@@ -79,14 +81,19 @@ class RuntimeInventoryStore:
             raise RuntimeInventoryError("execution_runtime_inventory_path_invalid") from None
 
     @staticmethod
-    def _descriptor(value):
+    def _descriptor(value, descriptor_type=RuntimeInventoryDescriptor):
         try:
-            return RuntimeInventoryDescriptor.model_validate_json(value.model_dump_json())
+            return descriptor_type.model_validate_json(value.model_dump_json())
         except (ValueError, TypeError, AttributeError):
             raise RuntimeInventoryError("execution_runtime_inventory_invalid") from None
 
     def read(self, descriptor: RuntimeInventoryDescriptor) -> RuntimeInventory:
-        descriptor = self._descriptor(descriptor)
+        return self._read(self._descriptor(descriptor), RuntimeInventory)
+
+    def read_v2(self, descriptor: MaintainedRuntimeInventoryDescriptor) -> MaintainedRuntimeInventory:
+        return self._read(self._descriptor(descriptor, MaintainedRuntimeInventoryDescriptor), MaintainedRuntimeInventory)
+
+    def _read(self, descriptor, inventory_type):
         path = self._path(descriptor)
         try:
             if not stat.S_ISREG(path.lstat().st_mode):
@@ -98,7 +105,7 @@ class RuntimeInventoryStore:
         if len(raw) != descriptor.size_bytes or hashlib.sha256(raw).hexdigest() != descriptor.sha256:
             raise RuntimeInventoryError("execution_runtime_inventory_changed")
         try:
-            inventory = RuntimeInventory.model_validate_json(raw)
+            inventory = inventory_type.model_validate_json(raw)
             # Also rejects duplicate JSON keys, noncanonical numbers/whitespace
             # and traversal order variants on disk. Producers canonicalize once.
             if inventory.canonical_bytes() != raw or inventory.descriptor != descriptor:
@@ -113,8 +120,14 @@ class RuntimeInventoryStore:
         This local application extension has no HTTP write route. It adopts no
         license, selects no dependency, and never repairs conflicting bytes.
         """
+        return self._install(inventory, RuntimeInventory, self.read)
+
+    def install_v2(self, inventory: MaintainedRuntimeInventory) -> MaintainedRuntimeInventoryDescriptor:
+        return self._install(inventory, MaintainedRuntimeInventory, self.read_v2)
+
+    def _install(self, inventory, inventory_type, reader):
         try:
-            inventory = RuntimeInventory.model_validate_json(inventory.model_dump_json())
+            inventory = inventory_type.model_validate_json(inventory.model_dump_json())
             raw = inventory.canonical_bytes()
             descriptor = inventory.descriptor
         except (ValueError, TypeError, AttributeError):
@@ -133,7 +146,7 @@ class RuntimeInventoryStore:
                 os.link(temporary, path)  # atomic exclusive publication, same directory/volume
             except FileExistsError:
                 pass
-            self.read(descriptor)  # concurrent/existing content must match too
+            reader(descriptor)  # concurrent/existing content must match too
             return descriptor
         except RuntimeInventoryError:
             raise

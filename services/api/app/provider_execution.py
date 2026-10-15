@@ -99,6 +99,7 @@ class ProviderExecutionService:
         reservation_guard: Callable[[], None] | None = None,
         before_action: Callable[[], None] | None = None,
         before_replay: Callable[[], None] | None = None,
+        persist_result: Callable[[ResultT], None] | None = None,
     ) -> ResultT:
         """Execute once, then persist a replayable result beside the ledger row.
 
@@ -170,6 +171,7 @@ class ProviderExecutionService:
                 status="completed",
                 usage_observable=False,
                 result_payload=payload,
+                persist_result=None if persist_result is None else lambda: persist_result(result),
             )
         except ProviderCallError as exc:
             raise ProviderExecutionAccountingFailure("provider call result could not be reconciled") from exc
@@ -178,7 +180,9 @@ class ProviderExecutionService:
     def execute_prepared_voice(self, *, frozen, idempotency_key: str,
             input_source: str, input_document: object, action: Callable[[object], ResultT],
             encode_result: Callable[[ResultT], object], decode_result: Callable[[object], ResultT],
-            error_code: Callable[[Exception], str | None]) -> ResultT:
+            error_code: Callable[[Exception], str | None],
+            reservation_source_guard: Callable[[], None] | None = None,
+            before_source_use: Callable[[], None] | None = None) -> ResultT:
         """Application-only accounting seam, NOT normal Voice admission.
 
         The caller must preserve all Worker/purpose/source/consent/QA and native
@@ -194,13 +198,22 @@ class ProviderExecutionService:
         job, snapshot = frozen.job, frozen.snapshot
         if job.type.value != 'generate_voice' or snapshot.identity.capability != 'voice' or snapshot.identity.mode != 'local':
             raise UseAdmissionError('execution_prepared_voice_required')
+        def guard():
+            frozen.reservation_guard()
+            if reservation_source_guard is not None: reservation_source_guard()
+        def before_action():
+            frozen.verify_before_launch()
+            if before_source_use is not None: before_source_use()
+        def before_replay():
+            frozen.verify_for_replay()
+            if before_source_use is not None: before_source_use()
         return self.execute(project_id=job.project_id, idempotency_key=idempotency_key,
             operation='tts', provider=RuntimeProviderIdentity(snapshot.identity.provider, snapshot.identity.model),
             input_source=input_source, category=CostCategory.VOICE,
             input_document={'job_id': str(job.id), 'scope_fingerprint': frozen.scope_fingerprint,
                 'execution_sha256': snapshot.execution_sha256, 'input': input_document},
-            reservation_guard=frozen.reservation_guard, before_action=frozen.verify_before_launch,
-            before_replay=frozen.verify_for_replay,
+            reservation_guard=guard, before_action=before_action,
+            before_replay=before_replay,
             action=lambda: action(frozen.prepared), encode_result=encode_result,
             decode_result=decode_result, error_code=error_code)
 

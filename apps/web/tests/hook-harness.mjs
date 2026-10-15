@@ -31,7 +31,7 @@ export function componentHarness(file, name, props, environment = {}) {
   runInNewContext(productionCode, { module: production, exports: production.exports, crypto: webcrypto, TextEncoder, Uint8Array, ...environment });
   const componentModule = { exports: {} };
   runInNewContext(code, { module: componentModule, exports: componentModule.exports,
-    require: id => id === 'react' ? hooks : id === 'react/jsx-runtime' ? { jsx, jsxs: jsx } : id === './production' ? production.exports : (() => { throw new Error(id); })(),
+    require: id => id === 'react' ? hooks : id === 'react/jsx-runtime' ? { jsx, jsxs: jsx } : id === './production' ? production.exports : environment.modules?.[id] ?? (() => { throw new Error(id); })(),
     crypto: webcrypto, TextEncoder, Uint8Array, Headers, Blob, Response, Error,
     FormData: class { constructor(form) { this.fields = form.fields; } get(name) { return this.fields[name] ?? null; } },
     URL: { createObjectURL: () => 'blob:isolated-fixture', revokeObjectURL() {} },

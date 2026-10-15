@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 44
+CURRENT_SCHEMA_VERSION = 53
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -540,6 +540,154 @@ _MIGRATIONS += ((44, (
         PRIMARY KEY(content_hash, subject_kind, subject_id),
         FOREIGN KEY(subject_kind, subject_id)
             REFERENCES execution_use_scopes(subject_kind, subject_id)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((45, (
+    """CREATE TABLE voice_draft_jobs (
+        job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        policy TEXT NOT NULL CHECK(policy='voice-draft-v1'),
+        job_sha256 TEXT NOT NULL,
+        scope_fingerprint TEXT NOT NULL
+    )""",
+)),)
+
+
+_MIGRATIONS += ((46, (
+    "ALTER TABLE voice_draft_jobs RENAME TO voice_draft_jobs_v45",
+    """CREATE TABLE voice_draft_jobs (
+        job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        policy TEXT NOT NULL CHECK(policy IN ('voice-draft-v1','voice-calibration-v1')),
+        job_sha256 TEXT NOT NULL, scope_fingerprint TEXT NOT NULL
+    )""",
+    "INSERT INTO voice_draft_jobs SELECT * FROM voice_draft_jobs_v45",
+    "DROP TABLE voice_draft_jobs_v45",
+    """CREATE TABLE voice_calibration_claims (
+        admission_id TEXT PRIMARY KEY REFERENCES provider_use_admissions(id),
+        job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+        request_sha256 TEXT NOT NULL, job_sha256 TEXT NOT NULL, scope_fingerprint TEXT NOT NULL
+    )""",
+)),)
+
+
+_MIGRATIONS += ((47, (
+    """CREATE TABLE voice_evaluation_qa_claims (
+        admission_id TEXT PRIMARY KEY REFERENCES provider_use_admissions(id),
+        job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+        audio_id TEXT NOT NULL UNIQUE REFERENCES audio_assets(id),
+        request_sha256 TEXT NOT NULL, job_sha256 TEXT NOT NULL,
+        scope_fingerprint TEXT NOT NULL, payload TEXT NOT NULL
+    )""",
+)),)
+
+
+_MIGRATIONS += ((48, (
+    """CREATE TABLE voice_evaluation_human_reviews (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        audio_id TEXT NOT NULL UNIQUE REFERENCES audio_assets(id),
+        qa_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+        payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL
+    )""",
+)),)
+
+
+_MIGRATIONS += ((49, (
+    """CREATE TABLE evaluation_master_use_admissions (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        idempotency_key TEXT NOT NULL, payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(project_id,idempotency_key)
+    )""",
+    """CREATE TABLE evaluation_run_master_bindings (
+        run_id TEXT PRIMARY KEY NOT NULL REFERENCES production_runs(id),
+        project_id TEXT NOT NULL REFERENCES projects(id), request_sha256 TEXT NOT NULL,
+        admission_id TEXT NOT NULL REFERENCES evaluation_master_use_admissions(id),
+        payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(project_id,request_sha256)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((50, (
+    """CREATE TABLE evaluation_talking_use_admissions (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        idempotency_key TEXT NOT NULL, payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(project_id,idempotency_key)
+    )""",
+    """CREATE TABLE evaluation_talking_operations (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        master_run_id TEXT NOT NULL REFERENCES production_runs(id), idempotency_key TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL, inference_sha256 TEXT NOT NULL,
+        admission_id TEXT NOT NULL UNIQUE REFERENCES evaluation_talking_use_admissions(id),
+        generation_job_id TEXT NOT NULL UNIQUE, qa_job_id TEXT NOT NULL UNIQUE,
+        preview_job_id TEXT NOT NULL UNIQUE, series_id TEXT NOT NULL UNIQUE,
+        payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(project_id,idempotency_key), UNIQUE(project_id,inference_sha256)
+    )""",
+    # A second durable ownership index deliberately survives removal of the
+    # operation row; stripped authority cannot become an ordinary legacy Job.
+    """CREATE TABLE evaluation_talking_owned_jobs (
+        job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id), operation_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('generation','qa','preview')),
+        job_sha256 TEXT NOT NULL, scope_fingerprint TEXT NOT NULL,
+        UNIQUE(operation_id,role)
+    )""",
+    """CREATE TABLE evaluation_talking_results (
+        operation_id TEXT NOT NULL REFERENCES evaluation_talking_operations(id),
+        role TEXT NOT NULL CHECK(role IN ('generation','qa','preview','admission','cancellation','quarantine')),
+        payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
+        PRIMARY KEY(operation_id,role)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((51, (
+    """CREATE TABLE evaluation_talking_calibration_claims (
+        execution_admission_id TEXT PRIMARY KEY NOT NULL REFERENCES provider_use_admissions(id),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        semantic_trial_sha256 TEXT NOT NULL, trial_input_sha256 TEXT NOT NULL,
+        operation_id TEXT NOT NULL UNIQUE REFERENCES evaluation_talking_operations(id),
+        generation_job_id TEXT NOT NULL UNIQUE,
+        UNIQUE(project_id,semantic_trial_sha256)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((52, (
+    """CREATE TABLE evaluation_composition_records (
+        kind TEXT NOT NULL CHECK(kind IN ('batch','selection','admission','binding','result','launch')),
+        id TEXT NOT NULL, payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL,
+        PRIMARY KEY(kind,id)
+    )""",
+    """CREATE TABLE evaluation_composition_batches (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        master_run_id TEXT NOT NULL REFERENCES production_runs(id), authorization_sha256 TEXT NOT NULL UNIQUE,
+        UNIQUE(project_id,master_run_id)
+    )""",
+    """CREATE TABLE evaluation_composition_owners (
+        run_id TEXT PRIMARY KEY NOT NULL REFERENCES production_runs(id),
+        project_id TEXT NOT NULL REFERENCES projects(id), job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+        render_id TEXT NOT NULL UNIQUE, batch_id TEXT NOT NULL REFERENCES evaluation_composition_batches(id),
+        request_sha256 TEXT NOT NULL, job_sha256 TEXT NOT NULL, scope_fingerprint TEXT NOT NULL
+    )""",
+    """CREATE TABLE evaluation_composition_slots (
+        batch_id TEXT NOT NULL REFERENCES evaluation_composition_batches(id), slot TEXT NOT NULL,
+        operation_id TEXT NOT NULL UNIQUE, PRIMARY KEY(batch_id,slot)
+    )""",
+)),)
+
+
+_MIGRATIONS += ((53, (
+    """CREATE TABLE evaluation_talking_recoveries (
+        predecessor_id TEXT PRIMARY KEY NOT NULL REFERENCES evaluation_talking_operations(id),
+        successor_id TEXT NOT NULL UNIQUE REFERENCES evaluation_talking_operations(id),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        batch_id TEXT NOT NULL REFERENCES evaluation_composition_batches(id),
+        slot TEXT NOT NULL, payload_sha256 TEXT NOT NULL, payload TEXT NOT NULL,
+        UNIQUE(batch_id,slot)
     )""",
 )),)
 

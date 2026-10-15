@@ -1,0 +1,62 @@
+{
+  "evidence_class": "synthetic_pre_inventory_v2_golden",
+  "input": {
+    "schema_version": 4,
+    "capability": "voice",
+    "mode": "local",
+    "provider": "omnivoice",
+    "model": "synthetic-model",
+    "runtime": "synthetic-runtime",
+    "machine_id": "synthetic-machine",
+    "observation_recipe": "omnivoice-maintained-import-pcm",
+    "observation_version": 1,
+    "model_artifacts": [
+      {
+        "role": "weights",
+        "name": "model/weights.bin",
+        "size_bytes": 1,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "role": "tokenizer",
+        "name": "model/tokenizer.json",
+        "size_bytes": 1,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "runtime_inventory": {
+      "inventory_version": 1,
+      "sha256": "1b4279b1597f7c2a135f3a98bdc09c2d52395426b9bcef0c90643a99dab9f2e7",
+      "size_bytes": 624,
+      "file_count": 4,
+      "directory_count": 2,
+      "total_file_bytes": 30
+    },
+    "host_runtime": {
+      "os_family": "windows",
+      "architecture": "amd64",
+      "os_version": "synthetic-review",
+      "host_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "layout_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "device": "cpu"
+    },
+    "machine": {
+      "installation_id": "12345678-1234-4234-8234-123456789abc",
+      "host_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "device_sha256": "b83fcab03b35ab143575b02ad0647e335d888068f2f941b7fa021c69995cb296"
+    },
+    "parameters": {
+      "device": "cpu",
+      "precision": "float16",
+      "audio_tokenizer_precision": "float32"
+    },
+    "trust_policy": "maintained-local-process-v1",
+    "runtime_origin": {
+      "reference": "synthetic/origin.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  },
+  "serialized": "{\"schema_version\":4,\"trust_policy\":\"maintained-local-process-v1\",\"capability\":\"voice\",\"mode\":\"local\",\"provider\":\"omnivoice\",\"model\":\"synthetic-model\",\"runtime\":\"synthetic-runtime\",\"machine_id\":\"synthetic-machine\",\"observation_recipe\":\"omnivoice-maintained-import-pcm\",\"observation_version\":1,\"model_artifacts\":[{\"role\":\"weights\",\"name\":\"model/weights.bin\",\"size_bytes\":1,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"role\":\"tokenizer\",\"name\":\"model/tokenizer.json\",\"size_bytes\":1,\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}],\"runtime_inventory\":{\"inventory_version\":1,\"sha256\":\"1b4279b1597f7c2a135f3a98bdc09c2d52395426b9bcef0c90643a99dab9f2e7\",\"size_bytes\":624,\"file_count\":4,\"directory_count\":2,\"total_file_bytes\":30},\"runtime_origin\":{\"reference\":\"synthetic/origin.json\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"host_runtime\":{\"os_family\":\"windows\",\"architecture\":\"amd64\",\"os_version\":\"synthetic-review\",\"host_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"layout_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"device\":\"cpu\",\"gpu_uuid\":null,\"driver_version\":null,\"driver_probe_sha256\":null},\"machine\":{\"installation_id\":\"12345678-1234-4234-8234-123456789abc\",\"host_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"device_sha256\":\"b83fcab03b35ab143575b02ad0647e335d888068f2f941b7fa021c69995cb296\"},\"parameters\":{\"device\":\"cpu\",\"precision\":\"float16\",\"audio_tokenizer_precision\":\"float32\"}}",
+  "execution_sha256": "a1191c964fed33d703dd8fc4e4826a6f9fbfba50b9e39bb366af2249f5ce3a87",
+  "model_artifact_sha256": "c709ecc927922b5da345fdb3e330ea72b2f5cec320f3b081062d96ceedf4be95"
+}

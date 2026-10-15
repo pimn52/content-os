@@ -46,18 +46,40 @@ class MediaImporter:
     def import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
         return self._import_stream(stream, filename, authorization_reference, source_kind)
 
+    def prepare_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind) -> PreparedMediaImport:
+        """Observe/copy media outside a writer lock; grant no scope or DB row.
+
+        The application must retain the result inside its own transaction and
+        atomically write its producer provenance and scope there. This is not a
+        replacement for the normal guarded import entry point.
+        """
+        if self.db.connection.in_transaction:
+            raise MediaImportError("media_preparation_inside_transaction")
+        source_path = Path(source)
+        temp = self.originals / f".import-{secrets.token_hex(12)}.tmp"
+        try:
+            with source_path.open("rb") as stream:
+                content_hash = self._copy_stream(stream, temp)
+            metadata = self.probe.probe(temp)
+            destination = self.originals / f"{content_hash}.media"
+            value = self._asset(destination, content_hash, authorization_reference, source_kind, metadata)
+            return PreparedMediaImport(self, temp, value)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+
+    def _copy_stream(self, stream: BinaryIO, temp: Path) -> str:
+        digest = hashlib.sha256()
+        with temp.open("xb") as target:
+            while chunk := stream.read(self.chunk_size):
+                digest.update(chunk)
+                target.write(chunk)
+        return digest.hexdigest()
+
     def _import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, source_kind: SourceKind, generated_job: Job | None = None) -> Asset:
         temp = self.originals / f".import-{secrets.token_hex(12)}.tmp"
-        digest = hashlib.sha256()
         try:
-            with temp.open("xb") as target:
-                while True:
-                    chunk = stream.read(self.chunk_size)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    target.write(chunk)
-            content_hash = digest.hexdigest()
+            content_hash = self._copy_stream(stream, temp)
             repository = AssetRepository(self.db)
             existing = repository.get_by_content_hash(content_hash)
             if existing is not None:
@@ -164,3 +186,106 @@ class MediaImporter:
     @staticmethod
     def _asset(path: Path, content_hash: str, authorization_reference: str, source_kind: SourceKind, metadata: ProbeMetadata) -> Asset:
         return Asset(id=uuid4(), source_kind=source_kind, source_file=str(path), content_hash=content_hash, duration_ms=metadata.duration_ms, width=metadata.width, height=metadata.height, fps=metadata.fps, has_audio=metadata.has_audio, authorization_reference=authorization_reference, imported_at=datetime.now(timezone.utc), metadata=metadata.metadata)
+
+
+class PreparedMediaImport:
+    """Private, single-use media staging owned through a ledger transaction.
+
+    Hash aliases are deliberately rejected here: only the owning application
+    can authenticate an existing result, rather than laundering old metadata
+    or grants through ordinary importer deduplication.
+    """
+    def __init__(self, importer: MediaImporter, temp: Path, asset: Asset):
+        self._importer, self._temp = importer, temp
+        self._asset_json = asset.model_dump_json()
+        self._state, self._placed = "prepared", False
+        self._verified_stat = None
+
+    @property
+    def asset(self) -> Asset:
+        return Asset.model_validate_json(self._asset_json)
+
+    def verify(self) -> None:
+        if self._state not in ("prepared", "verified"):
+            raise MediaImportError("media_preparation_consumed")
+        if self._importer.db.connection.in_transaction:
+            raise MediaImportError("media_observation_inside_transaction")
+        self._importer._verify_content_hash(self._temp, self.asset.content_hash)
+        self._verified_stat = self._temp.stat()
+        self._state = "verified"
+
+    def _claim_retention(self, metadata: dict) -> Asset:
+        if self._state != "verified":
+            raise MediaImportError("media_preparation_consumed")
+        db = self._importer.db
+        if not db.connection.in_transaction:
+            raise MediaImportError("media_retention_transaction_required")
+        self._state = "consumed"
+        if self._temp.stat() != self._verified_stat:
+            raise MediaImportError("media_preparation_changed")
+        value = self.asset.model_copy(update={"metadata": dict(metadata)})
+        repository = AssetRepository(db)
+        if repository.get_by_content_hash(value.content_hash) is not None:
+            raise MediaImportError("media_retention_hash_alias_requires_replay")
+        return value
+
+    def _place_retained(self, value: Asset) -> Asset:
+        self._placed = self._importer._place(self._temp, Path(value.source_file))
+        if not self._placed:
+            raise MediaImportError("media_retention_path_conflict")
+        return value
+
+    def _retain(self, metadata: dict) -> Asset:
+        """Internal ordinary row/file primitive; normal repository guards apply."""
+        value = self._claim_retention(metadata)
+        AssetRepository(self._importer.db).create(value)
+        return self._place_retained(value)
+
+    def _retain_evaluation_talking(self, service, operation, job, context, metadata: dict) -> Asset:
+        """Named role writer; never a callback/permission flag on generic import."""
+        from app.evaluation_talking import EvaluationTalkingService
+        if type(service) is not EvaluationTalkingService or service.db is not self._importer.db:
+            raise MediaImportError("media_retention_owned_service_required")
+        value = self._claim_retention(metadata)
+        service._pin_output(operation,job,context,value)
+        # Ordinary repository writes intentionally invoke the generic producer
+        # guard. This exact application writer has different authority roles.
+        self._importer.db.connection.execute("INSERT INTO assets(id,duration_ms,content_hash,payload) VALUES (?,?,?,?)",
+            (str(value.id),value.duration_ms,value.content_hash,value.model_dump_json()))
+        return self._place_retained(value)
+
+    def close(self) -> None:
+        # Close after the owning transaction ends: rolled-back bytes must not
+        # survive, while a successfully committed original must remain intact.
+        if self._importer.db.connection.in_transaction:
+            raise MediaImportError("media_cleanup_inside_transaction")
+        self._temp.unlink(missing_ok=True)
+        if self._placed:
+            value = self.asset
+            retained = AssetRepository(self._importer.db).get_by_content_hash(value.content_hash)
+            if retained is None:
+                self._importer._cleanup_created(Path(value.source_file))
+        self._state = "closed"
+
+    def quarantine(self, directory: Path) -> Path:
+        """Retain unadmitted bytes privately after a failed outer commit."""
+        if self._importer.db.connection.in_transaction:
+            raise MediaImportError("media_cleanup_inside_transaction")
+        value = self.asset
+        if AssetRepository(self._importer.db).get(value.id) is not None:
+            raise MediaImportError("media_quarantine_committed_asset")
+        source = Path(value.source_file) if self._placed else self._temp
+        self._importer._verify_content_hash(source, value.content_hash)
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"{value.id}.quarantine"
+        if not self._importer._place(source, destination):
+            raise MediaImportError("media_quarantine_path_conflict")
+        self._placed = False
+        self._state = "quarantined"
+        return destination
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

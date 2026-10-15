@@ -89,8 +89,8 @@ class VerticalSourceDerivationService:
                 measured = self.importer.probe.probe(temp)
             except (ProbeError, OSError) as exc:
                 raise VerticalDerivationProcessError(f"derived media probe failed: {exc}") from exc
-            if (measured.width, measured.height) != (1080, 1920):
-                raise VerticalDerivationProcessError("derived media is not 1080x1920")
+            if (measured.width, measured.height) != (1080, request.output_height):
+                raise VerticalDerivationProcessError("derived media dimensions do not match the requested portrait viewport")
             if measured.duration_ms < request.end_ms - request.start_ms:
                 raise VerticalDerivationProcessError("derived media is shorter than the requested source interval")
             try:
@@ -169,7 +169,7 @@ class VerticalSourceDerivationService:
         )) == "unusable":
             raise VerticalDerivationValidationError("proposed interval/crop has persisted face-boundary failure")
         self._validate_generated_talking_admission(asset)
-        self._validate_crop(request.crop_window, asset)
+        self._validate_crop(request.crop_window, asset, request.output_height)
         if any(self._overlap(request.crop_window, subtitle) for subtitle in request.known_subtitle_regions):
             raise VerticalDerivationValidationError("vertical crop intersects known burned-in subtitles")
         return asset, clip, source_path
@@ -213,11 +213,11 @@ class VerticalSourceDerivationService:
             raise VerticalDerivationValidationError("rejected generated Talking source cannot be derived")
 
     @staticmethod
-    def _validate_crop(crop: SourceCropWindow, asset: Asset) -> None:
+    def _validate_crop(crop: SourceCropWindow, asset: Asset, output_height: int = 1920) -> None:
         if crop.x + crop.width > asset.width or crop.y + crop.height > asset.height:
             raise VerticalDerivationValidationError("vertical crop exceeds source dimensions")
-        if crop.width * 16 != crop.height * 9:
-            raise VerticalDerivationValidationError("vertical crop must have an exact 9:16 aspect ratio")
+        if crop.width * output_height != crop.height * 1080:
+            raise VerticalDerivationValidationError("vertical crop must match the requested portrait aspect ratio")
 
     @staticmethod
     def _overlap(first: SourceCropWindow, second: SourceCropWindow) -> bool:
@@ -230,8 +230,8 @@ class VerticalSourceDerivationService:
         *,
         create: bool = True,
     ) -> VerticalDerivationResult:
-        if (asset.width, asset.height) != (1080, 1920):
-            raise VerticalDerivationProcessError("derived Asset is not 1080x1920")
+        if (asset.width, asset.height) != (1080, request.output_height):
+            raise VerticalDerivationProcessError("derived Asset dimensions do not match the requested portrait viewport")
         provenance = asset.metadata.get("source_derivation")
         if not isinstance(provenance, dict):
             raise VerticalDerivationConflict("derived Asset is missing source derivation provenance")
@@ -252,7 +252,11 @@ class VerticalSourceDerivationService:
         crop = request.crop_window
         start_seconds = f"{request.start_ms / 1000:.3f}"
         duration_seconds = f"{(request.end_ms - request.start_ms) / 1000:.3f}"
-        filters = f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y},scale=1080:1920:flags=lanczos"
+        # A video track can start after the container origin (e.g.40ms with
+        # audio starting at0). Excluding audio otherwise loses that leading
+        # interval. FFmpeg's native-rate fps filter extends the first frame
+        # to zero; -t still bounds output. It never pads a missing ending.
+        filters = f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y},scale=1080:{request.output_height}:flags=lanczos,fps=fps=source_fps:start_time=0"
         return [
             *self.command, "-y", "-v", "error", "-ss", start_seconds, "-i", str(source_path),
             "-t", duration_seconds, "-map", "0:v:0", "-vf", filters, "-an", "-c:v", "libx264", "-preset", "ultrafast",
@@ -281,7 +285,7 @@ class VerticalSourceDerivationService:
 
     @staticmethod
     def _request_identity(request: VerifiedVerticalDerivationRequest) -> dict[str, object]:
-        return {
+        identity = {
             "idempotency_key": request.idempotency_key,
             "source_asset_id": str(request.source_asset_id),
             "source_clip_id": str(request.source_clip_id),
@@ -291,6 +295,11 @@ class VerticalSourceDerivationService:
             "source_subtitle_state": request.source_subtitle_state,
             "known_subtitle_regions": [item.model_dump(mode="json") for item in request.known_subtitle_regions],
         }
+        # Preserve existing default request identities/legacy provenance. A
+        # changed viewport is explicitly distinct, never an old receipt upgrade.
+        if request.output_height != 1920:
+            identity["presentation_output"] = {"width": 1080, "height": request.output_height}
+        return identity
 
     @staticmethod
     def _inherited_admission_metadata(source: Asset) -> dict[str, object]:
@@ -305,7 +314,7 @@ class VerticalSourceDerivationService:
 
     def _provenance(self, source: Asset, source_clip: Clip, request: VerifiedVerticalDerivationRequest) -> dict[str, object]:
         return {
-            "kind": "verified_vertical_crop_v1",
+            "kind": "verified_vertical_crop_v1" if request.output_height == 1920 else "verified_portrait_crop_v1",
             **self._request_identity(request),
             "source_content_hash": source.content_hash,
             "source_authorization_reference": source.authorization_reference,
@@ -313,5 +322,5 @@ class VerticalSourceDerivationService:
             "source_subtitle_state": request.source_subtitle_state,
             "known_subtitle_regions": [item.model_dump(mode="json") for item in request.known_subtitle_regions],
             "evidence": request.evidence.model_dump(mode="json"),
-            "transform": {"output_width": 1080, "output_height": 1920, "audio": "excluded", "filter": "fixed_crop_then_scale"},
+            "transform": {"output_width": 1080, "output_height": request.output_height, "audio": "excluded", "filter": "fixed_crop_then_scale", "timing": "native_fps_first_frame_to_zero"},
         }

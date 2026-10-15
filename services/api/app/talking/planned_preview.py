@@ -28,6 +28,25 @@ def _source_path(value: str, data_root: Path) -> Path:
     return resolved
 
 
+def prepare_master_audio_preview(*, video_path: Path, master_path: Path, stage: Path,
+                                 start_ms: int, end_ms: int, ffmpeg_command, probe):
+    """Shared bounded mux and technical check for ordinary/owned previews."""
+    if isinstance(start_ms,bool) or isinstance(end_ms,bool) or not 0 <= start_ms < end_ms:
+        raise TalkingPreviewError("Master-audio preview interval is invalid")
+    duration = (end_ms-start_ms)/1000
+    command = [str(ffmpeg_command), "-nostdin", "-y", "-i", str(video_path),
+               "-ss", f"{start_ms/1000:.3f}", "-t", f"{duration:.3f}",
+               "-i", str(master_path), "-map", "0:v:0", "-map", "1:a:0",
+               "-t", f"{duration:.3f}", "-c:v", "libx264", "-c:a", "aac", str(stage)]
+    completed = subprocess.run(command,shell=False,capture_output=True,text=True,timeout=300,check=False)
+    if completed.returncode != 0 or not stage.is_file() or stage.stat().st_size == 0:
+        raise TalkingPreviewError("Master-audio preview FFmpeg preparation failed")
+    metadata = probe.probe(stage)
+    if not metadata.has_audio or abs(metadata.duration_ms-(end_ms-start_ms)) > 80:
+        raise TalkingPreviewError("Master-audio preview stream or duration QA failed")
+    return metadata
+
+
 class TalkingRunPreviewJobHandler:
     def __init__(self, db: Database, data_root: str | Path, *, ffmpeg_command: str | Path, probe: FFProbeAdapter):
         self.db = db
@@ -87,17 +106,8 @@ class TalkingRunPreviewJobHandler:
             folder = self.data_root / "generated" / "talking-previews"
             folder.mkdir(parents=True, exist_ok=True)
             stage = folder / f"{job.id}-{job.attempt}.tmp.mp4"
-            duration = (origin.master_end_ms - origin.master_start_ms) / 1000
-            command = [self.ffmpeg_command, "-nostdin", "-y", "-i", str(video_path),
-                       "-ss", f"{origin.master_start_ms / 1000:.3f}", "-t", f"{duration:.3f}",
-                       "-i", str(master_path), "-map", "0:v:0", "-map", "1:a:0",
-                       "-t", f"{duration:.3f}", "-c:v", "libx264", "-c:a", "aac", str(stage)]
-            completed = subprocess.run(command, shell=False, capture_output=True, text=True, timeout=300, check=False)
-            if completed.returncode != 0 or not stage.is_file() or stage.stat().st_size == 0:
-                raise TalkingPreviewError("Master-audio preview FFmpeg preparation failed")
-            probe = self.probe.probe(stage)
-            if not probe.has_audio or abs(probe.duration_ms - round(duration * 1000)) > 80:
-                raise TalkingPreviewError("Master-audio preview stream or duration QA failed")
+            probe = prepare_master_audio_preview(video_path=video_path,master_path=master_path,stage=stage,
+                start_ms=origin.master_start_ms,end_ms=origin.master_end_ms,ffmpeg_command=self.ffmpeg_command,probe=self.probe)
             with stage.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
             final = folder / f"{job.id}-{digest}.mp4"

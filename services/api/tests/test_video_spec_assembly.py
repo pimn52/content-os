@@ -437,8 +437,9 @@ def test_legacy_single_scene_narration_uses_measured_audio_duration(tmp_path: Pa
 
 
 @pytest.mark.parametrize("fps", [RationalFps(numerator=30, denominator=1), RationalFps(numerator=30_000, denominator=1_001)])
+@pytest.mark.parametrize("no_graphics", [False, True])
 def test_master_narration_uses_one_aligned_audio_for_multiple_scenes_and_fills_short_visual(
-    tmp_path: Path, fps: RationalFps
+    tmp_path: Path, fps: RationalFps, no_graphics: bool
 ) -> None:
     db, _, project, scenes, assets, clips = _setup(tmp_path, fps)
     audio_source = tmp_path / "full-narration.wav"
@@ -457,6 +458,14 @@ def test_master_narration_uses_one_aligned_audio_for_multiple_scenes_and_fills_s
         assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
         first = scenes[0].model_copy(update={"voice_text": "First new line."})
         second = scenes[1].model_copy(update={"voice_text": "Second new line."})
+        if no_graphics:
+            from app.domain.models import GraphicCardPlan
+            second = second.model_copy(update={"graphic_plan": GraphicCardPlan(kind="none", reason="Keep actual footage")})
+            with pytest.raises(InsufficientSourceDuration, match="no_graphics_requires_full_media_coverage"):
+                assembler.assemble(project, [first, second],
+                    {first.id: _candidate(first, assets[0], clips[0]), second.id: _candidate(second, assets[1], clips[1])},
+                    master_narration_asset_id=audio.id, narration_required=True)
+            return
         spec = assembler.assemble(
             project,
             [first, second],

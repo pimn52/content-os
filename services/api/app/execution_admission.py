@@ -14,8 +14,8 @@ from uuid import UUID
 from pydantic import TypeAdapter, ValidationError
 
 from app.db import Database, ProjectRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository
-from app.domain.models import (ContractModel, ExecutionPurpose, ExecutionUseIdentity, ExecutionSpecificationV2, ExecutionSpecificationV3,
-    ProviderMachineCapabilityProfile, ProviderUseAdmission, ProviderUseLicenseReview, ProviderUseLicenseReviewV2, ProviderUseOperation)
+from app.domain.models import (ContractModel, ExecutionPurpose, ExecutionUseIdentity, ExecutionSpecificationV2, ExecutionSpecificationV3, ExecutionSpecificationV4, ExecutionSpecificationV5, ExecutionSpecificationV6,
+    ExecutionSpecificationV9, ExecutionSpecificationV10, ProviderMachineCapabilityProfile, ProviderUseAdmission, ProviderUseLicenseReview, ProviderUseLicenseReviewV2, ProviderUseLicenseReviewV3, ProviderUseLicenseReviewV4, ProviderUseLicenseReviewV5, ProviderUseOperation)
 from app.runtime_inventory import RuntimeInventoryError, RuntimeInventoryStore, require_host_policy_inventory
 
 
@@ -75,7 +75,12 @@ def resolve_provider_use(*, project_id: UUID, capability: ProviderMachineCapabil
         reasons.append("provider_use_operation_unsupported")
     if any(p not in ("commercial_production", "internal_evaluation") for p in dependency_purposes):
         reasons.append("dependency_use_scope_unknown")
-    if capability is None or capability.readiness != "verified" or capability.quality_status != "verified" or not capability.evidence_reference:
+    calibration = (purpose == "internal_evaluation" and admission is not None
+        and type(admission.review) in (ProviderUseLicenseReviewV3, ProviderUseLicenseReviewV4, ProviderUseLicenseReviewV5))
+    if calibration:
+        if capability is None or capability.readiness not in ("configured", "available", "verified") or not capability.evidence_reference:
+            reasons.append("talking_calibration_configuration_missing" if type(admission.review) is ProviderUseLicenseReviewV5 else "voice_calibration_configuration_missing")
+    elif capability is None or capability.readiness != "verified" or capability.quality_status != "verified" or not capability.evidence_reference:
         reasons.append("exact_capability_not_verified")
     if capability and identity and not _identity_matches(capability, identity):
         reasons.append("execution_identity_mismatch")
@@ -146,10 +151,68 @@ class ProviderUseAdmissionService:
         if hashlib.sha256(raw).hexdigest() != digest:
             raise UseAdmissionError("provider_use_review_hash_changed")
         try:
-            report = TypeAdapter(ProviderUseLicenseReview | ProviderUseLicenseReviewV2).validate_json(raw)
+            report = TypeAdapter(ProviderUseLicenseReview | ProviderUseLicenseReviewV2 | ProviderUseLicenseReviewV3 | ProviderUseLicenseReviewV4 | ProviderUseLicenseReviewV5).validate_json(raw)
         except ValidationError:
             raise UseAdmissionError("provider_use_review_invalid") from None
-        if isinstance(report, ProviderUseLicenseReviewV2) and isinstance(
+        if type(report) in (ProviderUseLicenseReviewV2, ProviderUseLicenseReviewV5) and type(report.execution_specification) is ExecutionSpecificationV10:
+            from .providers.maintained_talking_dual import require_dual_origin
+            from .providers.prepared import ExecutionPreparationError
+            try:
+                spec = report.execution_specification
+                store = RuntimeInventoryStore(self.root)
+                require_dual_origin(self.root, spec.runtime_origin, store.read_v2(spec.runtime_inventory), store.read_v2(spec.engine_inventory))
+            except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
+                raise UseAdmissionError("maintained_talking_child_evidence_invalid") from None
+        elif type(report) is ProviderUseLicenseReviewV2 and type(report.execution_specification) is ExecutionSpecificationV9:
+            from .providers.maintained_talking_execution import require_talking_origin
+            from .providers.prepared import ExecutionPreparationError
+            try:
+                spec = report.execution_specification
+                inventory = RuntimeInventoryStore(self.root).read_v2(spec.runtime_inventory)
+                require_talking_origin(self.root, spec.runtime_origin, inventory)
+            except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
+                raise UseAdmissionError("maintained_talking_child_evidence_invalid") from None
+        elif type(report) is ProviderUseLicenseReviewV4:
+            from .providers.maintained_asr_execution import require_asr_origin
+            from .providers.prepared import ExecutionPreparationError
+            try:
+                spec = report.execution_specification
+                inventory = RuntimeInventoryStore(self.root).read_v2(spec.runtime_inventory)
+                require_asr_origin(self.root, spec.runtime_origin, inventory, spec.invocation_policy)
+            except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
+                raise UseAdmissionError("maintained_asr_child_evidence_invalid") from None
+        elif isinstance(report, ProviderUseLicenseReviewV2) and type(report.execution_specification) is ExecutionSpecificationV6:
+            from .providers.maintained_voice_execution import require_child_origin
+            from .providers.maintained_voice_prepared import require_voice_specification
+            from .providers.prepared import ExecutionPreparationError
+            try:
+                spec = report.execution_specification
+                require_voice_specification(spec)
+                inventory = RuntimeInventoryStore(self.root).read_v2(spec.runtime_inventory)
+                require_child_origin(self.root, spec.runtime_origin, inventory)
+            except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
+                raise UseAdmissionError("maintained_voice_child_evidence_invalid") from None
+        elif isinstance(report, ProviderUseLicenseReviewV2) and type(report.execution_specification) is ExecutionSpecificationV5:
+            from .providers.maintained_voice_prepared import require_voice_origin, require_voice_specification
+            from .providers.prepared import ExecutionPreparationError
+            try:
+                spec = report.execution_specification
+                require_voice_specification(spec)
+                inventory = RuntimeInventoryStore(self.root).read_v2(spec.runtime_inventory)
+                require_voice_origin(self.root, spec.runtime_origin, inventory)
+            except (RuntimeInventoryError, ExecutionPreparationError, ValidationError) as error:
+                raise UseAdmissionError("maintained_voice_evidence_invalid") from None
+        elif isinstance(report, ProviderUseLicenseReviewV2) and type(report.execution_specification) is ExecutionSpecificationV4:
+            from .providers.maintained_runtime import require_maintained_origin
+            try:
+                spec = report.execution_specification
+                store = RuntimeInventoryStore(self.root)
+                inventory = (store.read_v2(spec.runtime_inventory) if spec.runtime_inventory.inventory_version == 2
+                    else store.read(spec.runtime_inventory))
+                require_maintained_origin(self.root, spec.runtime_origin, inventory)
+            except RuntimeInventoryError as error:
+                raise UseAdmissionError(str(error)) from None
+        elif isinstance(report, ProviderUseLicenseReviewV2) and isinstance(
                 report.execution_specification, (ExecutionSpecificationV2, ExecutionSpecificationV3)):
             try:
                 inventory = RuntimeInventoryStore(self.root).read(report.execution_specification.runtime_inventory)
@@ -176,10 +239,15 @@ class ProviderUseAdmissionService:
         actor = configured_admission_actor(operator_key)
         if actor is None:
             raise UseAdmissionError("execution_admission_operator_required")
+        # Complete runtime/origin/terms observation before taking a write
+        # lock. The current profile/configuration is fenced below; execution
+        # still re-observes the prepared carrier before reservation/launch.
+        if self.db.connection.in_transaction:
+            raise UseAdmissionError("execution_observation_inside_transaction")
+        report = self._report(review_reference, review_sha256)
         with self.db.transaction(immediate=True):
             if ProjectRepository(self.db).get(project_id) is None:
                 raise UseAdmissionError("provider_use_project_missing")
-            report = self._report(review_reference, review_sha256)
             if report.project_id != project_id:
                 raise UseAdmissionError("provider_use_project_mismatch")
             profile = ProviderMachineCapabilityProfileRepository(self.db).get(report.capability_profile_id)

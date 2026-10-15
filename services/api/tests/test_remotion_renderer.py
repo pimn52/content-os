@@ -17,6 +17,101 @@ from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError,
 NOW = datetime(2026, 9, 8, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("changes", [
+    {"vertical_reframe_mode": "bottom_crop_contain"},
+    {"vertical_reframe_mode": "bottom_crop_contain", "source_bottom_crop_ratio": .15},
+    {"vertical_reframe_mode": "bottom_crop_contain", "vertical_reframe_evidence_reference": "source-sheet"},
+    {"source_bottom_crop_ratio": .15, "vertical_reframe_evidence_reference": "source-sheet"},
+    {"vertical_reframe_mode": "bottom_crop_contain", "source_bottom_crop_ratio": .15, "vertical_reframe_evidence_reference": " "},
+])
+def test_bottom_crop_requires_explicit_mode_positive_geometry_and_evidence(changes: dict) -> None:
+    with pytest.raises(ValueError):
+        VideoVisual(source_kind=SourceKind.USER_ASSET, asset_id=uuid4(), authorization_reference="rights", **changes)
+
+
+@pytest.mark.parametrize("kind", [SourceKind.TYPOGRAPHY, SourceKind.SCREENSHOT, SourceKind.CHART])
+def test_bottom_crop_cannot_be_silently_ignored_on_non_video(kind: SourceKind) -> None:
+    with pytest.raises(ValueError, match="local video media"):
+        VideoVisual(source_kind=kind, asset_id=uuid4(), authorization_reference="rights",
+                    vertical_reframe_mode="bottom_crop_contain", source_bottom_crop_ratio=.15,
+                    vertical_reframe_evidence_reference="source-sheet")
+
+
+def test_bottom_crop_panel_cannot_bypass_talking_run_clip_identity(tmp_path: Path, admit_talking_run) -> None:
+    db, original, _, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        asset = original.model_copy(update={"source_kind": SourceKind.AI_VIDEO, "metadata": {}})
+        AssetRepository(db).update(asset)
+        full = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=asset.duration_ms, asset_duration_ms=asset.duration_ms))
+        asset, _, _ = admit_talking_run(db, spec.project_id, asset, full, "A local caption", transcript_end_ms=1_000)
+        sub = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=1_001, asset_duration_ms=asset.duration_ms))
+        visual = VideoVisual.model_validate({**spec.scenes[0].visual.model_dump(),
+            "source_kind": "ai_video", "asset_id": asset.id, "clip_id": sub.id,
+            "clip_start_ms": 0, "clip_end_ms": 1_001, "vertical_reframe_mode": "bottom_crop_contain",
+            "source_bottom_crop_ratio": .15, "vertical_reframe_evidence_reference": "sampled-source-sheet"})
+        scene = spec.scenes[0].model_copy(update={"visual": visual, "portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})
+        with pytest.raises(UnauthorizedVisualError, match="talking_run_clip_mismatch"):
+            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner).render(spec.model_copy(update={"scenes": [scene]}), tmp_path / "blocked.mp4")
+        assert runner.calls == []
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("crop_failure", [False, True])
+def test_bottom_crop_stages_separate_complete_width_media_and_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crop_failure: bool) -> None:
+    db, asset, _, spec = _setup(tmp_path)
+    source = Path(asset.source_file)
+    original = source.read_bytes()
+
+    class CropRunner(_Runner):
+        crop_calls: list[list[str]] = []
+
+        def run(self, argv, *, cwd, timeout_seconds):
+            if "-vf" in argv:
+                self.crop_calls.append(argv)
+                if not crop_failure:
+                    Path(argv[-1]).write_bytes(b"cropped-full-width")
+                return subprocess.CompletedProcess(argv, 1 if crop_failure else 0, b"", b"")
+            return super().run(argv, cwd=cwd, timeout_seconds=timeout_seconds)
+
+    runner = CropRunner()
+    monkeypatch.setenv("CONTENT_OS_FFMPEG", "configured-ffmpeg")
+    cropped = spec.scenes[0].model_copy(update={"visual": VideoVisual.model_validate({
+        **spec.scenes[0].visual.model_dump(), "vertical_reframe_mode": "bottom_crop_contain",
+        "source_bottom_crop_ratio": .15, "vertical_reframe_evidence_reference": "exact-source-sheet",
+    })})
+    # Same original with two treatments must not share the transformed bytes.
+    plain = spec.scenes[0].model_copy(update={"scene_id": "plain", "start_frame": 30})
+    spec = spec.model_copy(update={"scenes": [cropped, plain]})
+    try:
+        renderer_root = _renderer_project(tmp_path / "renderer")
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=renderer_root, runner=runner)
+        if crop_failure:
+            with pytest.raises(RenderProcessError):
+                renderer.render(spec, tmp_path / "output.mp4")
+            assert not runner.calls
+        else:
+            renderer.render(spec, tmp_path / "output.mp4")
+            sources = runner.calls[0][3]["sceneSources"]
+            assert sources[cropped.scene_id]["src"] != sources[plain.scene_id]["src"]
+            assert sources[cropped.scene_id]["sourceBottomCropRatio"] == 0
+            assert runner.staged_bytes[sources[cropped.scene_id]["src"]] == b"cropped-full-width"
+            assert runner.staged_bytes[sources[plain.scene_id]["src"]] == original
+            assert sources[cropped.scene_id]["trimBefore"] == sources[plain.scene_id]["trimBefore"]
+            assert sources[cropped.scene_id]["trimAfter"] == sources[plain.scene_id]["trimAfter"]
+        assert len(runner.crop_calls) == 1
+        argv = runner.crop_calls[0]
+        assert argv[0] == "configured-ffmpeg"
+        assert argv[argv.index("-vf") + 1] == "crop=iw:trunc(ih*(1-0.15)/2)*2:0:0"
+        assert argv[argv.index("-i") + 1] == str(source)
+        assert argv[argv.index("-c:a") + 1] == "copy"
+        assert source.read_bytes() == original
+        assert not list((renderer_root / "public" / "content-os-renders").iterdir())
+    finally:
+        db.close()
+
+
 class _Runner:
     def __init__(self, *, returncode: int = 0) -> None:
         self.returncode = returncode

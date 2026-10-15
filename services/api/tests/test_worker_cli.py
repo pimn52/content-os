@@ -15,7 +15,7 @@ from app.providers.talking import TalkingConfigurationError
 from app.providers.vision import VisionConfigurationError
 from app.runtime import resolve_local_executable
 from app.worker_cli import _build_voice_provider, _resolve_omnivoice_reference_path, build_runner, parse_config, run
-from app.providers.voice import VoiceInputError
+from app.providers.voice import VoiceInputError, VoiceConfigurationError
 from app.voice_performance import authorized_voice_reference_choices
 
 
@@ -310,3 +310,94 @@ def test_render_worker_composes_audio_and_image_repositories(tmp_path: Path):
         assert renderer.images is not None
     finally:
         db.close()
+
+
+@pytest.fixture
+def configured_voice(tmp_path, monkeypatch):
+    """Synthetic reference and mocked CLI; never imports or executes OmniVoice."""
+    from types import SimpleNamespace
+    runtime, source = tmp_path / "python.exe", tmp_path / "reference.mp4"
+    runtime.write_bytes(b"synthetic runtime"); source.write_bytes(b"synthetic authorized reference")
+    model = tmp_path / "model"; model.mkdir()
+    monkeypatch.setenv("CONTENT_OS_VOICE_PROVIDER", "omnivoice")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_PYTHON", str(runtime))
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_MODEL", str(model))
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_DEVICE", "cuda:0")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment")
+    calls = []
+    def subprocess_fixture(command, **options):
+        calls.append(command)
+        destination = command[command.index("--output") + 1] if "--output" in command else command[-1]
+        Path(destination).write_bytes(b"synthetic output, not playable media")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr("app.worker_cli.subprocess.run", subprocess_fixture)
+    with Database(tmp_path / "config.sqlite") as db:
+        asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
+            duration_ms=12000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1),
+            authorization_reference="fixture-rights", imported_at=datetime.now(timezone.utc))
+        AssetRepository(db).create(asset)
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=12000, asset_duration_ms=12000,
+            transcript_segments=[{"start_ms": 0, "end_ms": 3000, "text": "original first segment"}])
+        ClipRepository(db).create(clip)
+        profile = VoiceProfile(name="Fixture", provider="omnivoice", provider_profile_id="fixture",
+            reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Fixture", basis="self",
+            confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
+        config = parse_config(["--db", str(tmp_path / "config.sqlite"), "--data-root", str(tmp_path), "--job-type", "generate_voice"])
+        yield SimpleNamespace(db=db, config=config, profile=profile, source=source, calls=calls, output=tmp_path / "output.wav")
+
+
+def test_omnivoice_command_uses_same_frozen_device_and_reference_policy_as_receipt(configured_voice, monkeypatch):
+    c = configured_voice; provider = _build_voice_provider(c.config, c.db)
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_DEVICE", "cpu")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "invalid-after-construction")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_NUM_STEP", "999")
+    provider.synthesize(c.profile, "synthetic requested copy", c.output, language="zh")
+    command = c.calls[-1]; parameters = provider.repair_execution["parameters"]
+    assert command[:3] == [parameters["runtime_python"], "-m", "omnivoice.cli.infer"]
+    assert command[command.index("--device") + 1] == parameters["device"] == "cuda:0"
+    assert command[command.index("--num_step") + 1] == str(parameters["num_step"]) == "32"
+    assert command[command.index("--ref_text") + 1] == "original first segment"
+    assert parameters["reference_policy"] == "first_segment" and parameters["reference_window_index"] == 0
+    assert len(c.calls) == 2
+
+
+def test_omnivoice_best_window_index_is_frozen_before_execution(configured_voice, monkeypatch):
+    from types import SimpleNamespace
+    c = configured_voice
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "best_window")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "1")
+    windows = [SimpleNamespace(source_file=str(c.source), start_ms=i*3000, end_ms=(i+1)*3000, transcript=f"window-{i}") for i in range(2)]
+    monkeypatch.setattr("app.worker_cli.select_voice_reference_windows", lambda *args, **kwargs: windows)
+    provider = _build_voice_provider(c.config, c.db)
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "0")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment")
+    provider.synthesize(c.profile, "synthetic requested copy", c.output)
+    command = c.calls[-1]
+    assert command[command.index("--ref_text") + 1] == "window-1"
+    assert provider.repair_execution["parameters"]["reference_window_index"] == 1
+    assert provider.repair_execution["parameters"]["reference_policy"] == "best_window"
+
+
+@pytest.mark.parametrize("setting,value", [("CONTENT_OS_OMNIVOICE_DEVICE", "auto"),
+    ("CONTENT_OS_OMNIVOICE_DEVICE", ""), ("CONTENT_OS_OMNIVOICE_DEVICE", "cuda:bad"),
+    ("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "unknown"),
+    ("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "-1"),
+    ("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "nan")])
+def test_omnivoice_invalid_configuration_stops_before_any_process(configured_voice, monkeypatch, setting, value):
+    c = configured_voice
+    if setting.endswith("WINDOW_INDEX"):
+        monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "best_window")
+    monkeypatch.setenv(setting, value)
+    with pytest.raises(VoiceConfigurationError): _build_voice_provider(c.config, c.db)
+    assert c.calls == []
+
+
+def test_omnivoice_out_of_range_frozen_window_stops_before_extraction(configured_voice, monkeypatch):
+    c = configured_voice
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "best_window")
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "2")
+    monkeypatch.setattr("app.worker_cli.select_voice_reference_windows", lambda *args, **kwargs: [object()])
+    provider = _build_voice_provider(c.config, c.db)
+    with pytest.raises(VoiceConfigurationError, match="outside available"):
+        provider.synthesize(c.profile, "synthetic requested copy", c.output)
+    assert c.calls == []

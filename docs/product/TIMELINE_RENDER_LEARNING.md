@@ -12,6 +12,78 @@ Scenes and generated Talking runs map to intervals on that timeline. Visual exec
 
 ## EditPlan / Visual Direction
 
+Voice and Talking produce or process audio/person media. A-roll and B-roll are
+editorial roles: the primary content view and supporting footage, respectively.
+An operation demonstration can be A-roll; generated Talking is not the only
+possible primary view. Captions and viewpoint text are graphic treatments,
+not automatically B-roll. EditPlan owns their content purpose and presentation;
+the renderer executes it.
+
+Editorial choices should depend on the declared content task and available
+evidence. Opinion/interview material may retain the speaker and context;
+tutorials may need actual steps/screens/details; cases may need supporting
+evidence; stories may benefit from shot/sound continuity. These are planning
+directions, not implemented automatic classifiers or guaranteed improvement.
+No extra graphic/B-roll is a valid choice. Existing creator/action requirements
+cannot be satisfied by decoration, and suitable full-screen portrait footage
+remains preferred when available.
+
+Presentation reasoning should retain its source, scope and uncertainty.
+[Descript's first-draft workflow](https://help.descript.com/hc/en-us/articles/44651483515917)
+supports scene/layout choices and optional B-roll;
+[OpusClip's B-roll modes](https://www.opus.pro/ai-b-roll) support automated and
+sentence/custom-media selection. These demonstrate product workflows, not
+objective superiority. [W3C caption guidance](https://www.w3.org/WAI/media/av/captions/)
+supports synchronized access to spoken/non-speech information, not decorative
+text density. [Signaling research](https://www.sciencedirect.com/science/article/pii/S1747938X17300581)
+studies learning outcomes; learning retention is not social-video watch-time
+retention and does not prove that large text improves opinion shorts. Claims
+about our own output need declared content/audience/outcome and bounded
+comparisons before becoming a default. These references do not impose a new
+compliance gate or provide evidence of this product's effectiveness.
+
+For limited-input final edits, the renderer supports optional sparse viewpoint
+callouts in the unused upper margin of the assisted square-in-portrait
+composition. The source stays centered at full width; narration and timed
+captions remain unchanged. The assisted helper restricts cue bounds, overlap,
+text size and density, leaving most frames without callout text. These cues
+are evaluation props, not persisted EditPlan fields or normal UI/automatic
+editorial selection. The continuous editorial-panel contract is separate;
+neither layout proves better quality or generalization.
+
+Normal production preflight/start exposes an explicit subject-first style
+choice. It selects the existing larger contain panel only for AI Talking
+entries with the supported face-safe framing policy; other visuals retain
+their existing presentation. The inspected style is sent again at start,
+bound by the preflight fingerprint and persisted on the Run. Exact-use
+avoidance compares that same proposed presentation before selection. Changing
+the UI choice clears its prior preview; it does not alter a previously created
+Run or grant source suitability. This has code/fixture coverage, not a new
+creator render or human publishability approval. Source viewport cropping is
+chosen separately in the ordinary media panel.
+
+The ordinary draft scene editor now exposes existing creator-speaking,
+action-evidence and explanatory requirements, their reasons and source
+references, plus legacy/static-card/unsupported graphic intent. An additive
+`GraphicCardPlan.kind=none` records an explicit reason to omit additional
+graphics while retaining captions. It requires a media main visual: selected
+typography, supplied graphic overrides and automatic typography tails for a
+short continuous source fail explicitly. The legacy null declaration retains
+existing behavior; static cards remain a graphic source/fallback plan, not
+automatic overlays on Talking media. Unsupported diagrams/animation remain
+unsupported. No classifier or universal stylistic default is introduced.
+
+Changes save through the existing draft endpoint and retained revisions;
+server input identity invalidates old routes, choices and VideoSpec. Unsaved
+copy/scene intent disables new production preflight/start/resume, and a saved
+revision requires fresh preflight. Existing Runs keep their inspected inputs
+and source/QA/purpose gates. Requirement/graphic reasons and source references
+are declarations, not independently verified evidence. Component/API tests and
+the built ordinary UI on a production-database copy verify edit/save/reload
+and a real blocked preflight; they do not prove a positive normal render or
+generalized editorial effectiveness. Source/copy/admission readiness remains
+necessary before an actual normal render.
+
 EditPlan is the product-level bridge between editorial ScenePlan / routed assets and deterministic VideoSpec.
 
 It answers **how the selected material should be presented**, without changing what the scene means or which provider generated an asset.
@@ -30,6 +102,23 @@ Per scene it may carry:
 - visual-style tokens/evidence.
 
 For creator Talking footage, unknown crop safety must not silently become a fixed crop. Containment/design is a conservative geometric option, not automatic editorial acceptance; if it fails the quality bar, replan, choose another eligible interval or stop. Motion-aware crop may be added later without changing EditPlan semantics.
+
+Final9:16 output and source/presentation proportions are independent. A person-led
+composition may use an eligible9:12,9:14 or square crop instead of forcing a
+full-height9:16 source. Within supported geometry, prioritize comfortable subject
+scale and useful footage; keep headings compact, captions clear and graphics
+optional. A constrained input should receive the best supported adaptation with
+specific limitations and alternatives for the user's choice. Do not infer that
+the entire source is unusable from one rejected fixed crop or text-heavy panel.
+Normal conditional-choice/automatic layout remains unimplemented; known rights,
+crop suitability and human quality gates remain distinct from aesthetic tradeoffs.
+
+The opt-in `content-os-subject-first` portrait panel gives eligible Talking media
+a larger contain viewport and an optional compact heading, with captions outside
+it. It preserves source aspect rather than stretching or implicitly cropping.
+The existing portrait-panel Talking restriction remains. Wide uncropped footage
+will still be wide: this layout does not supply missing crop evidence, tracking
+or higher effective resolution. Existing profiles retain their former layout.
 
 For authorized horizontal Talking footage with known burned-in subtitles, EditPlan can use a source-preserving `portrait_panel`: the complete, uncropped source sits inside a styled vertical panel, while optional semantic text remains outside its bounds. This is a presentation treatment, not subtitle removal, inpainting or a mutation of the source Asset. Timed captions over that panel remain disallowed when source subtitles are known.
 
@@ -75,6 +164,45 @@ Master Narration captions; repeating the full paragraph as both title and
 subtitles is a visual-QA failure. Neither treatment is automatic evidence of
 publishability: the final rendered video still needs human review.
 
+VideoVisual also supports explicit `bottom_crop_contain`: positive bottom-strip
+geometry and a nonblank evidence reference are required on local video media.
+FFmpeg stages a separate file retaining the full source width; Remotion contains
+that file without applying the crop a second time. Source bytes remain immutable,
+and different treatments of the same source use separate staging entries. This
+can appear in a Talking portrait panel, with all existing Run/Clip/copy/QA and
+content-scope checks unchanged. It is an assisted VideoSpec seam, not normal
+EditPlan selection, automatic subtitle detection or independent face-safety
+verification. The opt-in `content-os-editorial` style profile adds distinct
+headline, process and contrast layouts and a designed caption area; old profiles
+retain their presentation. Compilation/fixture evidence does not confer
+publishability.
+
+An older assisted VideoSpec that references arbitrary sub-Clips of an admitted
+TalkingRun cannot be replayed under current whole-Run identity/copy/speech
+admission. The exact assembled Clip or an eligible provenance-preserving
+derivative is required. Substituting IDs alone does not authorize partial speech;
+replan or use the existing derivation boundary with its actual evidence.
+
+An assisted evaluation can keep an admitted Run as one continuous visual/speech
+scene and attach explicit timed layout cues to the retained Remotion props.
+Headline, process and contrast content changes outside the source panel without
+creating arbitrary sub-Clips or changing its admission/copy/duration. These
+evaluation-only cues are preserved with the exact spec and render evidence;
+they are not yet a persisted normal EditPlan feature or automatic editorial
+decision. A source-short audio tail uses an explicit graphic hold rather than
+extending the approved Clip, while the complete Master and timed captions stay
+intact. Final human quality review remains separate.
+
+Real assisted rendering now proves complete-width source staging, removal of a
+known bottom strip, preserved approved Master/captions, explicit semantic layout
+cues and full MP4 decode/timestamp integrity. That evidence does **not** prove a
+publishable person-led vertical composition: the reviewed text-heavy panel
+output was rejected for billboard-like text and insufficient footage area.
+Complete-width containment can be technically safe while failing this product
+goal. Automatic face-following/reframing, subtitle-region discovery and reliable
+visual suitability selection remain unverified; current evidence cannot label
+the horizontal source intrinsically impossible to adapt.
+
 Fixed center cropping can remove burned-in subtitles yet fail when the
 speaker moves out of the vertical frame. A production edit needs face-safe
 framing over the full selected interval, with an explicit fallback when that
@@ -98,6 +226,15 @@ R1 target:
 - readable typography/subtitles.
 
 ## Review model
+
+The operator primarily supplies hard-defect findings; evidence-backed routine
+presentation choices belong to the implementation/editorial process. Material
+defects include meaning/context loss, missing required evidence, harmful
+framing, subtitle conflicts/readability and audio/video artifacts. A missing
+complaint is not a positive judgment. This collaboration allocation does not
+change current exact-asset Voice/Talking or final U-Product admission, nor
+silently remove naturalness/likeness/continuity/publishability criteria. Any
+runtime review-granularity change needs its own versioned migration/tests.
 
 Evidence should stay fine-grained while user interaction becomes coarse. This is a target, not current uniform behavior.
 
@@ -134,6 +271,24 @@ The regular project feedback panel now lists configured-root retained rejection 
 Feedback records generate next-suggestion text. Exact retained presentation duplication observations can now become explicitly adopted creator-scoped planning preferences with revision/hash guards, version history and disable; see CREATOR_INTELLIGENCE.md. Voice/Talking likeness findings, asset defects and configuration limitations do not become global routing rules. Persisting a review is not learning: the narrow offline next-topic regression is not real quality/repeatability proof. R1 does not claim autonomous growth optimization.
 
 ## Current capability
+
+The explicit internal `evaluation-composition-v1` continuation selects exact
+approved evaluation TalkingRuns against an unchanged approved Master. It saves
+partial selections with missing scenes visible, adopts an exact composition-use
+assessment, and creates a separate owned local render Run under a finite batch.
+It reuses EditPlan/VideoSpec/Remotion/FFmpeg, full continuous audio and captions;
+a non-speaking terminal interval is an explicit neutral background with no text.
+Scoped media access, persisted lineage, once-only accounting and saved-result
+reconciliation are implemented for this lane; ordinary/commercial admission is
+unchanged. Cancellation preserves the original claim and scene slot. A narrow,
+explicitly linked no-dispatch continuation after a genuine owned-application
+identity correction is implemented under D029; real recovery and normal user
+workflow validation remain separate. Any provider reservation or uncertain execution
+still forbids replacement. A missing required speaking scene blocks full-topic composition. Synthetic
+integration, permission/HTTP/recovery/heartbeat tests and
+measured synthetic AV pass. Real full-topic execution, user-operated UI, final U-Product and repeatability
+are not yet proved. This lane currently supports explicit creator-speaking scenes,
+not tutorial/action-evidence replacement or automatic editorial selection.
 
 MasterNarration, VideoSpec, local rendering, subtitles, publication/feedback records and usage evidence exist.
 

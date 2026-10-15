@@ -112,6 +112,7 @@ def test_preflight_and_router_exclude_only_the_proposed_bad_crop(tmp_path: Path,
             voice_text="A fresh creator point.", duration_target_ms=3_000,
             visual_intent=VisualIntent(subject="creator", action="showing a workflow"),
             preferred_sources=[SourceKind.USER_ASSET], fallback_sources=[SourceKind.TYPOGRAPHY],
+            visual_requirement="explanatory", visual_requirement_reason="This fixture explicitly permits a concept card after crop rejection.",
         )
         saved = client.put(f"/projects/{project_id}/draft", json={
             "script": scene.voice_text, "topic": "New", "scenes": [scene.model_dump(mode="json")],
