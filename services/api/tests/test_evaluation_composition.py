@@ -137,13 +137,14 @@ def test_retained_selection_adoption_normal_run_and_default_denials(retained,mon
     monkeypatch.setattr(owned_module,"JobExecutionError",fixture_error)
     completed = JobRunner(JobStore(c.db),{job.type:handler},worker_id="composition-fixture",lease_duration=timedelta(minutes=5),max_attempts=1).run_once(job_id=job.id)
     assert completed.status == JobStatus.COMPLETED,completed.error_message
-    assert len(runner.calls)==1
+    assert len(runner.calls)==2  # One visual render, one direct Master mux.
     props = runner.calls[0][3]
-    assert props["audioMode"] == "master_narration" and props["masterNarration"]
+    assert props["audioMode"] == "master_narration" and "masterNarration" not in props
+    assert "--muted" in runner.calls[0][0]
     assert all("narrationSrc" not in s for s in props["sceneSources"].values())
     assert c.composition.get(c.project,UUID(value["id"]))["state"] == "awaiting_u_product"
     assert c.composition.create(c.project,payload.model_copy(update={"idempotency_key":"after-complete"}))["id"] == value["id"]
-    assert len(runner.calls)==1
+    assert len(runner.calls)==2  # Replay dispatches neither render nor mux.
     path = c.composition.media(c.project,UUID(value["id"]),"internal_evaluation")
     import asyncio,httpx
     from fastapi import FastAPI
@@ -163,7 +164,7 @@ def test_retained_selection_adoption_normal_run_and_default_denials(retained,mon
     # A completed result can repair a lost Job completion without a new render.
     JobRepository(c.db).update(completed.model_copy(update={"status":JobStatus.FAILED}))
     assert c.composition.reconcile(c.project,UUID(value["id"]))["state"] == "awaiting_u_product"
-    assert len(runner.calls)==1
+    assert len(runner.calls)==2
     c.composition.revoke(c.project,payload.admission_id,"Synthetic revocation",OPERATOR_KEY)
     assert not c.composition.get(c.project,UUID(value["id"]))["current_eligible"]
     assert asyncio.run(read(headers={"If-None-Match":full.headers["etag"]})).status_code==403

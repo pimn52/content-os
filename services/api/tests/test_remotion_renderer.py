@@ -119,6 +119,11 @@ class _Runner:
         self.staged_bytes: dict[str, bytes] = {}
 
     def run(self, argv: list[str], *, cwd: Path, timeout_seconds: float) -> subprocess.CompletedProcess[bytes]:
+        if "-map" in argv:
+            self.calls.append((argv, cwd, timeout_seconds, {}))
+            if self.returncode == 0:
+                Path(argv[-1]).write_bytes(b"minimal-muxed-mp4")
+            return subprocess.CompletedProcess(argv, self.returncode, b"", b"")
         props_path = Path(next(value.split("=", 1)[1] for value in argv if value.startswith("--props=")))
         props = json.loads(props_path.read_text(encoding="utf-8"))
         self.calls.append((argv, cwd, timeout_seconds, props))
@@ -225,7 +230,7 @@ def test_remotion_adapter_accepts_authorized_subinterval_inside_clip(tmp_path: P
         )
         source_props = runner.calls[0][3]["sceneSources"]["scene_01"]
         assert source_props["trimBefore"] == 36
-        assert source_props["trimAfter"] == 59
+        assert source_props["trimAfter"] == 60
     finally:
         db.close()
 
@@ -473,7 +478,7 @@ def test_remotion_adapter_mixes_authorized_narration_audio(tmp_path: Path) -> No
         db.close()
 
 
-def test_remotion_adapter_stages_one_master_narration_and_mutes_all_source_audio(tmp_path: Path) -> None:
+def test_remotion_adapter_encodes_master_once_without_intermediate_aac_or_source_audio(tmp_path: Path) -> None:
     db, _, _, spec = _setup(tmp_path)
     audio_source = tmp_path / "full-voice.wav"
     audio_source.write_bytes(b"master-voice-bytes")
@@ -526,9 +531,37 @@ def test_remotion_adapter_stages_one_master_narration_and_mutes_all_source_audio
         )
         props = runner.calls[0][3]
         assert props["audioMode"] == "master_narration"
-        assert props["masterNarration"]["startFrame"] == 0
+        assert "masterNarration" not in props
         assert "narrationSrc" not in props["sceneSources"]["scene_01"]
-        assert runner.staged_bytes[props["masterNarration"]["src"]] == audio_source.read_bytes()
+        assert "--muted" in runner.calls[0][0]
+        assert len(runner.calls) == 2
+        mux = runner.calls[1][0]
+        assert mux[mux.index("-af") + 1] == "atrim=start=0.0:end=2.0,asetpts=PTS-STARTPTS"
+        assert mux[mux.index("-c:v") + 1] == "copy"
+        assert mux.count(str(audio_source)) == 1
+        assert audio_source.read_bytes() == b"master-voice-bytes"
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("start,end", [(0,4900),(4900,9340),(9340,14380),(14380,21680),(21680,26300)])
+def test_contiguous_source_windows_cover_every_timeline_frame(tmp_path: Path, start: int, end: int) -> None:
+    db, asset, _, spec = _setup(tmp_path)
+    try:
+        asset = asset.model_copy(update={"id":uuid4(),"content_hash":"d"*64,"duration_ms": 26320, "fps": RationalFps(numerator=25,denominator=1)})
+        AssetRepository(db).create(asset)
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=0,end_ms=26300,asset_duration_ms=26320))
+        first,last = (start*30+999)//1000,(end*30+999)//1000
+        visual = spec.scenes[0].visual.model_copy(update={"asset_id":asset.id,"clip_id":clip.id,"clip_start_ms":start,"clip_end_ms":end,"source_duration_ms":26320})
+        scene = spec.scenes[0].model_copy(update={"start_frame":first,"duration_frames":last-first,"visual":visual})
+        renderer = RemotionRenderer(AssetRepository(db),ClipRepository(db),renderer_dir=tmp_path)
+        prepared = renderer._validate_scene(scene,RationalFps(numerator=30,denominator=1),project_id=spec.project_id,master_audio_id=None)
+        assert prepared.trim_before == first and prepared.trim_after == last
+        assert prepared.trim_before + scene.duration_frames == prepared.trim_after
+        assert (prepared.trim_after-1)*1000/30 < end
+        with pytest.raises(RenderInputError, match="shorter than the requested scene"):
+            renderer._validate_scene(scene.model_copy(update={"duration_frames":scene.duration_frames+1}),
+                RationalFps(numerator=30,denominator=1),project_id=spec.project_id,master_audio_id=None)
     finally:
         db.close()
 

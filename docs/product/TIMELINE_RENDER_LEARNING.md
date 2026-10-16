@@ -10,6 +10,13 @@ Master Narration is the authoritative continuous audio timeline for a narrated p
 
 Scenes and generated Talking runs map to intervals on that timeline. Visual execution details must not force manual per-scene audio cutting.
 
+The local renderer encodes an admitted Master directly into the final MP4 once,
+using its exact selected interval without imposing48kHz/stereo conversion. It mutes the
+Remotion visual pass instead of sending the Master through intermediate AAC
+mixing/concatenation. Visual trim endpoints use the same frame ceiling as the
+timeline, avoiding empty frames at fractional scene boundaries. These technical
+properties do not replace listening/viewing or final human quality review.
+
 ## EditPlan / Visual Direction
 
 Voice and Talking produce or process audio/person media. A-roll and B-roll are

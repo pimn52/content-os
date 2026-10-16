@@ -1554,21 +1554,14 @@ def test_planned_run_resumes_exact_measured_timeline_and_rechecks_on_restart(
             (renderer_root / "src").mkdir(parents=True)
             (renderer_root / "package.json").write_text("{}", encoding="utf-8")
             (renderer_root / "src" / "index.ts").write_text("export {};", encoding="utf-8")
-            class StagingRunner:
-                calls = 0
-                def run(self, argv, *, cwd, timeout_seconds):
-                    self.calls += 1
-                    props_path = Path(next(value.split("=", 1)[1] for value in argv if value.startswith("--props=")))
-                    props = json.loads(props_path.read_text(encoding="utf-8"))
-                    source = props["sceneSources"]["hook"]["src"]
-                    assert hashlib.sha256((cwd / "public" / source).read_bytes()).hexdigest() == preview.content_hash
-                    Path(argv[7]).write_bytes(b"fixture renderer output")
-                    return subprocess.CompletedProcess(argv, 0, b"", b"")
-            runner = StagingRunner()
+            from test_remotion_renderer import _Runner
+            runner = _Runner()
             renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db),
                                        renderer_dir=renderer_root, runner=runner)
             renderer.render(spec, tmp_path / "fixture-render.mp4")
-            assert runner.calls == 1
+            assert len(runner.calls) == 2
+            source = runner.calls[0][3]["sceneSources"]["hook"]["src"]
+            assert hashlib.sha256(runner.staged_bytes[source]).hexdigest() == preview.content_hash
             if policy_version == 2:
                 concern = client.post(f"{root}/review-concerns", json={
                     "idempotency_key": "late-render-concern", "preview_asset_id": str(preview.id),
@@ -1580,7 +1573,7 @@ def test_planned_run_resumes_exact_measured_timeline_and_rechecks_on_restart(
                 assert client.post(f"/projects/{project_id}/production-preflight", json={}).json()["scenes"][0]["suitability"] != "reviewed_native_planned_run"
                 with pytest.raises(UnauthorizedVisualError):
                     renderer.render(spec, tmp_path / "unresolved-concern-render.mp4")
-                assert runner.calls == 1
+                assert len(runner.calls) == 2
                 resolved = client.post(f"{root}/review-concern-answers", json={
                     "preview_asset_id": str(preview.id), "preview_sha256": preview.content_hash,
                     "answers": [{"concern_id": concern.json()["id"], "approved": True,
@@ -1596,14 +1589,14 @@ def test_planned_run_resumes_exact_measured_timeline_and_rechecks_on_restart(
                 assert client.post(resume).status_code == 409
                 with pytest.raises(UnauthorizedVisualError):
                     renderer.render(spec, tmp_path / "revoked-voice-render.mp4")
-                assert runner.calls == 1
+                assert len(runner.calls) == 2
                 db.connection.execute("UPDATE voice_profiles SET payload = ? WHERE id = ?",
                                       (profile.model_dump_json(), str(profile.id)))
             original_preview = (tmp_path / preview.source_file).read_bytes()
             (tmp_path / preview.source_file).write_bytes(b"changed before worker consumes")
             with pytest.raises(UnauthorizedVisualError):
                 renderer.render(spec, tmp_path / "blocked-render.mp4")
-            assert runner.calls == 1
+            assert len(runner.calls) == 2
             (tmp_path / preview.source_file).write_bytes(original_preview)
     with TestClient(create_app(path)) as client:
         assert client.post(resume).json() == result

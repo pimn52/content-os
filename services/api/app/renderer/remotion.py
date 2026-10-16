@@ -87,12 +87,6 @@ class _PreparedVisual:
     style_tokens: dict[str, str] | None = None
 
 
-@dataclass(frozen=True)
-class _PreparedMasterNarration:
-    source: Path
-    start_frame: int
-
-
 class RemotionRenderer:
     """Render a validated VideoSpec to a local MP4 through ``npm exec remotion``.
 
@@ -178,7 +172,7 @@ class RemotionRenderer:
         }
         input_sources = {visual.source for visual in prepared.values() if visual.source is not None}
         if master_narration is not None:
-            input_sources.add(master_narration.source)
+            input_sources.add(master_narration)
         if output in input_sources:
             raise RenderInputError("render output must not overwrite a source media file")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -193,13 +187,31 @@ class RemotionRenderer:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", prefix="content-os-remotion-", delete=False) as handle:
                 json.dump(props, handle, ensure_ascii=False, separators=(",", ":"))
                 props_path = Path(handle.name)
+            visual_output = staging / "visual.mp4" if master_narration is not None else output
             argv = [
-                self.npm_command, "exec", "--", "remotion", "render", "src/index.ts", "ContentOSVideo", str(output),
+                self.npm_command, "exec", "--", "remotion", "render", "src/index.ts", "ContentOSVideo", str(visual_output),
                 f"--props={props_path}",
             ]
+            if master_narration is not None:
+                argv.append("--muted")
             completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
             if completed.returncode != 0:
                 raise RenderProcessError(completed.returncode)
+            if master_narration is not None:
+                from app.runtime import resolve_local_executable
+
+                # Encode the approved Master once, directly into MP4. Remotion's
+                # intermediate AAC/concat path retains encoder priming as speech
+                # delay; container-duration tolerance cannot detect that error.
+                master = spec.master_narration
+                argv = [resolve_local_executable("ffmpeg"), "-nostdin", "-v", "error",
+                    "-i", str(visual_output), "-i", str(master_narration),
+                    "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                    "-af", f"atrim=start={master.start_ms / 1000}:end={master.end_ms / 1000},asetpts=PTS-STARTPTS",
+                    "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", str(output)]
+                completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
+                if completed.returncode != 0:
+                    raise RenderProcessError(completed.returncode)
             if not output.is_file() or output.stat().st_size == 0:
                 raise RenderProcessError(-1)
             return output
@@ -286,9 +298,10 @@ class RemotionRenderer:
                 raise UnauthorizedVisualError(f"generated Talking visual: {blocker}")
         source = _local_existing_file(asset, self.data_root)
         # Remotion trimBefore/trimAfter are measured in composition frames,
-        # not the source file's native frame rate.
+        # not the source file's native frame rate. Both endpoints use the
+        # timeline's ceiling rule; flooring the end drops a boundary frame.
         trim_before = _ceil_frames(visual.clip_start_ms, composition_fps)
-        trim_after = _floor_frames(visual.clip_end_ms, composition_fps)
+        trim_after = _ceil_frames(visual.clip_end_ms, composition_fps)
         if trim_after <= trim_before:
             raise RenderInputError("Clip interval cannot be represented as positive source frames")
         # Source and composition may use different native frame rates (for
@@ -297,8 +310,8 @@ class RemotionRenderer:
         # last displayed composition frame must instead begin within the
         # authorized millisecond interval; the renderer may repeat a source
         # frame during rate conversion, but never plays past the Clip end.
-        required_last_frame_ms = ((scene.duration_frames - 1) * 1_000 * composition_fps.denominator) / composition_fps.numerator
-        if required_last_frame_ms > visual.clip_end_ms - visual.clip_start_ms:
+        required_last_frame_ms = ((trim_before + scene.duration_frames - 1) * 1_000 * composition_fps.denominator) / composition_fps.numerator
+        if required_last_frame_ms >= visual.clip_end_ms:
             raise RenderInputError("Clip duration is shorter than the requested scene timeline")
         return _PreparedVisual(
             source=source, trim_before=trim_before, trim_after=trim_after, kind="video",
@@ -339,7 +352,7 @@ class RemotionRenderer:
             raise RenderInputError("narration interval is shorter than the scene")
         return _local_existing_audio(audio, self.data_root), _ceil_frames(start_ms, composition_fps)
 
-    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps, *, composition_job_id: UUID | None = None) -> _PreparedMasterNarration | None:
+    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps, *, composition_job_id: UUID | None = None) -> Path | None:
         master = spec.master_narration
         if master is None:
             return None
@@ -351,10 +364,7 @@ class RemotionRenderer:
         self._require_commercial_content(audio, composition_job_id=composition_job_id)
         if master.end_ms > audio.duration_ms:
             raise RenderInputError("master narration interval exceeds audio duration")
-        return _PreparedMasterNarration(
-            source=_local_existing_audio(audio, self.data_root),
-            start_frame=_ceil_frames(master.start_ms, composition_fps),
-        )
+        return _local_existing_audio(audio, self.data_root)
 
     def _stage_props(
         self,
@@ -362,7 +372,7 @@ class RemotionRenderer:
         prepared: Mapping[str, _PreparedVisual],
         staging: Path,
         run_id: str,
-        master_narration: _PreparedMasterNarration | None,
+        master_narration: Path | None,
     ) -> dict[str, object]:
         staged_by_source: dict[tuple[Path, float], str] = {}
         staged_by_audio: dict[Path, str] = {}
@@ -428,21 +438,10 @@ class RemotionRenderer:
             if narration_relative is not None:
                 scene_sources[scene.scene_id]["narrationSrc"] = narration_relative
                 scene_sources[scene.scene_id]["narrationStartFrame"] = visual.narration_start_frame
-        master_props: dict[str, object] | None = None
-        if master_narration is not None:
-            master_relative = staged_by_audio.get(master_narration.source)
-            if master_relative is None:
-                filename = f"master-{len(staged_by_audio):03d}{master_narration.source.suffix}"
-                destination = staging / filename
-                shutil.copy2(master_narration.source, destination)
-                master_relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
-                staged_by_audio[master_narration.source] = master_relative
-            master_props = {"src": master_relative, "startFrame": master_narration.start_frame}
         return {
             "videoSpec": spec.model_dump(mode="json"),
             "sceneSources": scene_sources,
-            "audioMode": "master_narration" if master_props is not None else "narration" if any(value.narration_source is not None for value in prepared.values()) else "source",
-            "masterNarration": master_props,
+            "audioMode": "master_narration" if master_narration is not None else "narration" if any(value.narration_source is not None for value in prepared.values()) else "source",
         }
 
 
@@ -504,10 +503,6 @@ def _ceil_frames(milliseconds: int, fps: RationalFps) -> int:
     numerator = milliseconds * fps.numerator
     denominator = 1_000 * fps.denominator
     return (numerator + denominator - 1) // denominator
-
-
-def _floor_frames(milliseconds: int, fps: RationalFps) -> int:
-    return milliseconds * fps.numerator // (1_000 * fps.denominator)
 
 
 def _is_remote_or_network_path(raw: str) -> bool:
