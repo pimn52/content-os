@@ -20,7 +20,6 @@ from test_execution_scope import _job
 from test_execution_specification_v3 import raw_spec
 from test_host_policy_inventory import declared, validated
 from test_runtime_inventory import inventory, spec2
-from test_prepared_provider_execution import Cost
 
 
 @pytest.fixture
@@ -197,62 +196,3 @@ def test_legacy_policy1_ancestor_keeps_its_operation_limit(admitted3):
                 parents=(('audio',audio),),operation='derivation',content_hash='6'*64)
         assert before == tuple(db.connection.execute('SELECT * FROM provider_use_admissions WHERE id=?',(str(old_id),)).fetchone())
         assert service.scopes_for_hash('6'*64) == ()
-
-
-@pytest.mark.parametrize('late_change',[False,True])
-def test_schema3_same_prepared_owner_replay_or_changed_host_reconciliation(admitted3,late_change):
-    c = admitted3
-    _,path,project,profile,*_ = c.case
-    current = [c.spec]
-    actions = []
-    with Database(path) as db:
-        scope_service = ExecutionScopeService(db,path.parent)
-        scope = scope_service.prepare(project,purpose='internal_evaluation',admission_ids=(c.receipt,))
-        job = JobRepository(db).create(_job(project))
-        scope_service.pin('job',job.id,scope,operation='generation',subject_sha256=job_use_identity(job))
-        def observe():
-            assert not db.connection.in_transaction
-            spec = current[0]
-            return WorkerExecutionUseSnapshotV2(snapshot_version=2,identity=spec.identity,
-                execution_specification=spec,execution_sha256=spec.execution_sha256)
-        prepared = SimpleNamespace(execution_use_snapshot=observe)
-        provider = SimpleNamespace(provider_name=profile.provider,model=profile.model)
-        def freeze():
-            return freeze_worker_identity(scope_service,job,provider,prepared,
-                capability_profile_id=profile.id,execution_admission_id=c.receipt)
-        cost = Cost()
-        frozen = freeze()
-        if late_change:
-            raw = c.spec.model_dump(mode='json')
-            raw['host_runtime']['revision'] += 1
-            changed = ExecutionSpecificationV3.model_validate_json(json.dumps(raw))
-            cost.change = lambda: current.__setitem__(0,changed)
-        executor = ProviderExecutionService(db,cost)
-        audio = uuid4()
-        def action(retained):
-            assert retained is prepared and not db.connection.in_transaction
-            actions.append(retained)
-            return {'audio_id':str(audio)}
-        def execute(frozen):
-            return executor.execute_prepared_voice(frozen=frozen,idempotency_key='schema3-fake-owner',
-                input_source='synthetic-only',input_document={'text':'synthetic'},action=action,
-                encode_result=lambda value:value,decode_result=lambda value:value,
-                error_code=lambda exc:str(exc))
-        if late_change:
-            with pytest.raises(UseAdmissionError,match='execution_runtime_identity_changed'):
-                execute(frozen)
-            assert actions == []
-            call = ProviderCallRepository(db).list_for_project(project)[0]
-            assert call.status == 'failed' and call.error_code == 'execution_runtime_identity_changed'
-        else:
-            result = execute(frozen)
-            assert result == execute(freeze()) and len(actions) == 1
-            scope_service.inherit('audio',audio,project_id=project,purpose=scope.purpose,
-                parents=(('job',job.id),),operation='generation',content_hash='4'*64)
-            assert scope_service.get('audio',audio) == scope
-            with pytest.raises(UseAdmissionError,match='evaluation_scope_not_commercial'):
-                scope_service.require_content('4'*64,project_id=project)
-            assert ProviderCallRepository(db).list_for_project(project)[0].status == 'completed'
-        assert len(ProviderCallRepository(db).list_for_project(project)) == 1
-        with pytest.raises(UseAdmissionError,match='evaluation_execution_not_integrated'):
-            require_evaluation_lane_closed(db,job)

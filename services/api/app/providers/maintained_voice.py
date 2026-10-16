@@ -1,10 +1,4 @@
-"""Owned maintained-process clone recipe; no normal dispatch selects it.
-
-This primitive is not preparation, an authority issuer or a runtime witness.
-Future integration must bind these bytes into a generation-specific origin and
-retain current admission, source/consent, reservation and output lineage gates.
-Schema4 import/PCM preparation deliberately cannot invoke this recipe.
-"""
+"""Existing local clone recipe used by the authorized, accounted Worker child."""
 from pathlib import Path
 import os
 import random
@@ -13,7 +7,6 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
-from .maintained_runtime import _model_artifacts
 from .omnivoice_local import OmniVoiceLocalParameters, _json_object
 from .omnivoice_entry_v2 import LocalCloneInputV2, read_reference
 from .prepared import ExecutionPreparationError
@@ -51,12 +44,10 @@ def _load_runtime():
 
 
 def execute_maintained_clone(*, data_root, model_root, parameters, inputs):
-    """Internal recipe primitive, only for a future reserved generation child.
+    """Offline maintained loader; caller owns authorization and durable accounting.
 
-    No injected loader/command, automatic settings, model downloads or retries.
-    Failed export can leave an unimported file; an existing path is never reused.
-    This function does not claim operator permission or independently hash a
-    complete runtime. The current API/Worker cannot reach it.
+    Installation integrity belongs to deployment. Job-time checks cover bounded
+    config/input/output only; no full dependency or weight hashing occurs here.
     """
     try:
         params = MaintainedVoiceParameters.model_validate(dict(parameters))
@@ -74,7 +65,11 @@ def execute_maintained_clone(*, data_root, model_root, parameters, inputs):
             raise ExecutionPreparationError("maintained_clone_output_conflict")
         if any(os.environ.get(name) != "1" for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")):
             raise ExecutionPreparationError("maintained_clone_offline_environment_required")
-        _model_artifacts(model, 64*1024**3)
+        # Cheap availability/config checks, not installation inventory or weight reads.
+        for name in ("model.safetensors", "audio_tokenizer/model.safetensors", "tokenizer.json"):
+            _exact_path(model / name, directory=False)
+        for name in ("config.json", "tokenizer_config.json", "audio_tokenizer/config.json"):
+            _json_object(model / name)
         rate = _json_object(model / "audio_tokenizer/preprocessor_config.json").get("sampling_rate")
         if type(rate) is not int or not 0 < rate <= 192_000:
             raise ExecutionPreparationError("maintained_clone_rate_invalid")

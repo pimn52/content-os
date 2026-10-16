@@ -27,8 +27,9 @@ from app.voice_performance import authorized_voice_reference_choices, resolve_au
 from test_execution_admission import setup, OPERATOR_KEY
 from test_execution_attestation import adopt_v2
 from test_maintained_runtime import KEY, reference, candidate
-from test_maintained_voice_execution import child_case
-from test_prepared_provider_execution import Cost
+from test_maintained_voice_execution import child_case, command_options
+from app.providers.maintained_voice_prepared import _observe
+from test_provider_execution import Cost
 
 
 @pytest.fixture
@@ -75,8 +76,7 @@ def bound_job(setup, child_case, monkeypatch, request):
             output_path=str(outputs / "voice" / f"{job.id}-attempt-1.wav")))
     monkeypatch.setenv("CONTENT_OS_EXECUTION_ADMISSION_KEY_HASHES", json.dumps({
         "operator": hashlib.sha256(OPERATOR_KEY.encode()).hexdigest(), "test-operator": hashlib.sha256(KEY.encode()).hexdigest()}))
-    with prepare_maintained_voice_child(**options) as prepared:
-        spec = prepared.specification
+    spec = _observe(dict(options, gpu_uuid=options.get("gpu_uuid")), packaged=True, timeout_seconds=options["timeout_seconds"])
     with Database(path) as db:
         capability = setup[3].model_copy(update=dict(id=uuid4(), **{key:getattr(spec,key) for key in ("provider","model","runtime","machine_id")}))
         ProviderMachineCapabilityProfileRepository(db).save(capability)
@@ -117,7 +117,7 @@ def bound_job(setup, child_case, monkeypatch, request):
 
 
 def execute(c, *, replay=False):
-    with prepare_maintained_voice_child(**c.options, replay_only=replay) as prepared:
+    with prepare_maintained_voice_child(**command_options(c.options), replay_only=replay) as prepared:
         return execute_maintained_voice_job(db=c.db, data_root=c.root, output_root=c.outputs, job=c.job,
             prepared=prepared, execution_admission_id=c.receipt, importer=c.importer, cost_estimator=c.cost)
 
@@ -180,7 +180,7 @@ def test_import_failure_rolls_back_visibility_and_marks_call_failed(bound_job, m
 
 def test_readonly_replay_preparation_cannot_launch(bound_job):
     c = bound_job
-    with prepare_maintained_voice_child(**c.options, replay_only=True) as prepared:
+    with prepare_maintained_voice_child(**command_options(c.options), replay_only=True) as prepared:
         from app.providers.prepared import ExecutionPreparationError
         with pytest.raises(ExecutionPreparationError, match="replay_only"): prepared.execute()
     assert c.calls == []
@@ -232,7 +232,7 @@ def test_derived_video_reference_commits_original_and_pcm_provenance_and_replays
     def call(replay):
         with derived_reference(c,monkeypatch) as reference:
             inputs = reference.inputs_snapshot()
-            with prepare_maintained_voice_child(**dict(c.options,inputs=inputs),replay_only=replay) as prepared:
+            with prepare_maintained_voice_child(**command_options(dict(c.options,inputs=inputs)),replay_only=replay) as prepared:
                 return execute_maintained_voice_job(db=c.db,data_root=c.root,output_root=c.outputs,job=c.job,
                     prepared=prepared,execution_admission_id=c.receipt,importer=c.importer,cost_estimator=c.cost,
                     reference=reference)
@@ -254,7 +254,7 @@ def test_derived_source_or_tool_drift_before_call_fails_without_generation(bound
     c = bound_job
     with derived_reference(c,monkeypatch) as reference:
         inputs = reference.inputs_snapshot()
-        with prepare_maintained_voice_child(**dict(c.options,inputs=inputs)) as prepared:
+        with prepare_maintained_voice_child(**command_options(dict(c.options,inputs=inputs))) as prepared:
             path = c.root / "ffmpeg-fixture.exe" if change == "tool" else Path(c.asset.source_file)
             c.cost.change = lambda: path.write_bytes(b"changed")
             from app.providers.prepared import ExecutionPreparationError
@@ -270,7 +270,7 @@ def test_derived_reference_cannot_select_a_second_interval(bound_job,monkeypatch
     c = bound_job
     with derived_reference(c,monkeypatch) as reference:
         inputs = reference.inputs_snapshot().model_copy(update=dict(reference_start_frame=1))
-        with prepare_maintained_voice_child(**dict(c.options,inputs=inputs)) as prepared:
+        with prepare_maintained_voice_child(**command_options(dict(c.options,inputs=inputs))) as prepared:
             from app.providers.prepared import ExecutionPreparationError
             with pytest.raises(ExecutionPreparationError,match="binding_changed"):
                 execute_maintained_voice_job(db=c.db,data_root=c.root,output_root=c.outputs,job=c.job,
@@ -300,7 +300,13 @@ def configured(c,monkeypatch,**updates):
 @pytest.mark.parametrize("bound_job",["video"],indirect=True)
 def test_configured_entry_builds_job_inputs_and_ledger_driven_replay(bound_job,monkeypatch):
     c = bound_job
+    def forbidden(*a, **kw): pytest.fail("full installation scan in normal Voice Job")
+    monkeypatch.setattr("app.providers.maintained_voice_prepared._observe", forbidden)
+    monkeypatch.setattr("app.providers.maintained_runtime._observe_inventory", forbidden)
+    monkeypatch.setattr("app.providers.maintained_runtime._model_artifacts", forbidden)
     audio = configured(c,monkeypatch)
+    assert "execution_sha256" not in audio.metadata["voice_generation"]
+    assert audio.metadata["voice_generation"]["configuration_observation"] == "configured_local_process"
     assert audio.metadata["voice_generation"]["target_text"] == c.job.payload.text
     assert audio.metadata["voice_generation"]["reference_derivation"]["source_sha256"] == c.asset.content_hash
     assert configured(c,monkeypatch).id == audio.id and c.calls == [1]
@@ -352,5 +358,5 @@ def test_configured_entry_cleans_reference_when_child_preparation_fails(bound_jo
     options = {key:value for key,value in c.options.items() if key not in ("data_root","staging_parent","inputs")}
     options["operator_key"] = "invalid fixture operator"
     from app.providers.prepared import ExecutionPreparationError
-    with pytest.raises(ExecutionPreparationError): configured(c,monkeypatch,runtime_options=options)
+    with pytest.raises(UseAdmissionError, match="operator_required"): configured(c,monkeypatch,runtime_options=options)
     assert c.calls == [] and list(c.options["staging_parent"].iterdir()) == []

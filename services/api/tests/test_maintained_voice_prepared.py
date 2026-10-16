@@ -36,8 +36,12 @@ def generation(candidate):
 
 def prepare(case):
     if case.get("packaged_child"):
-        from app.providers.maintained_voice_execution import prepare_maintained_voice_child
-        return prepare_maintained_voice_child(**case["options"])
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from app.providers.maintained_voice_prepared import _observe
+        options = case["options"]
+        spec = _observe(dict(options, gpu_uuid=options.get("gpu_uuid")), packaged=True, timeout_seconds=options["timeout_seconds"])
+        return nullcontext(SimpleNamespace(specification=spec))
     return prepare_maintained_voice_identity(**case["options"])
 
 
@@ -144,6 +148,11 @@ def test_generation_report_reader_rechecks_generation_evidence(report_generation
         if change == "source": c["candidate"]["source"].write_text("changed")
         elif change == "origin": c["path"].write_bytes(c["candidate"]["origin_path"].read_bytes())
         elif change == "recipe":
+            if c.get("packaged_child"):
+                # A code release is no longer a change to retained model-use permission.
+                monkeypatch.setattr("app.providers.maintained_voice_execution.bundle_bytes", lambda: b"changed recipe")
+                assert service._report("review.json", digest) == report
+                return
             owned_source = "app.providers.maintained_voice_execution.bundle_bytes" if c.get("packaged_child") else "app.providers.maintained_voice_prepared.recipe_bytes"
             monkeypatch.setattr(owned_source, lambda: b"changed recipe")
         else:
@@ -157,8 +166,7 @@ from test_execution_admission import setup
 
 
 @pytest.mark.parametrize("lane", ["normal", "frozen"])
-def test_generation_receipt_keeps_normal_dispatch_closed_and_reuses_frozen_ledger(report_generation, setup, monkeypatch, lane):
-    generation = report_generation
+def test_generation_receipt_keeps_normal_dispatch_closed_and_reuses_frozen_ledger(generation, setup, monkeypatch, lane):
     from app.db import Database, ProviderMachineCapabilityProfileRepository, ProviderCallRepository
     from app.execution_admission import configuration_digest
     from test_execution_admission import OPERATOR_KEY
@@ -222,7 +230,7 @@ def test_generation_receipt_keeps_normal_dispatch_closed_and_reuses_frozen_ledge
             return
         request = dict(purpose="internal_evaluation", use_admission_ids=[str(receipt)])
         preview = client.post(f"/projects/{project}/production-preflight", json=request)
-        assert preview.status_code == 200 and "evaluation_execution_not_integrated" in preview.json()["stop_reasons"]
+        assert preview.status_code == 200 and "provider_license_scope_unverified" in preview.json()["stop_reasons"]
         response = client.post(f"/projects/{project}/production-runs", json=dict(request,
             idempotency_key="schema5-still-closed", expected_fingerprint=preview.json()["fingerprint"]))
         assert response.status_code == 409

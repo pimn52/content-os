@@ -15,6 +15,13 @@ from app.domain.models import BudgetPolicy, CostCategory, IPProfile, Project, Ra
 from app.provider_execution import ProviderExecutionInProgress, ProviderExecutionService, RuntimeProviderIdentity
 
 
+class Cost:
+    change = None
+    def estimate(self, **options):
+        if self.change: self.change()
+        return UsageCost(category=options['category'], amount=Decimal('0'), currency='USD')
+
+
 def _project(db: Database) -> Project:
     profile = IPProfile(creator_name="Execution creator")
     IPProfileRepository(db).create(profile)

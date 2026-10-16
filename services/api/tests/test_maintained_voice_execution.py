@@ -20,6 +20,7 @@ from app.providers.maintained_voice import MaintainedVoiceParameters
 from app.providers.maintained_voice_bundle import bundle_bytes, BUNDLE_SLOT, MAIN_SOURCE
 from app.providers.maintained_voice_child import MaintainedVoiceChildRequest, main, request_bytes
 from app.providers.maintained_voice_execution import observe_child_inventory, prepare_maintained_voice_child
+from app.providers.maintained_voice_prepared import _observe
 from app.providers.omnivoice_entry_v2 import LocalCloneInputV2
 from app.providers.prepared import ExecutionPreparationError
 from test_maintained_runtime import candidate, reference
@@ -48,7 +49,12 @@ def child_case(candidate):
     return SimpleNamespace(options=options, inventory=inventory, origin=origin, origin_path=origin_path, candidate=candidate)
 
 
-def prepare(case): return prepare_maintained_voice_child(**case.options)
+def command_options(options):
+    return {k:v for k,v in options.items() if k in {"environment", "base", "model_root", "data_root",
+        "staging_parent", "parameters", "inputs", "timeout_seconds", "gpu_uuid", "replay_only"}}
+
+
+def prepare(case): return prepare_maintained_voice_child(**command_options(case.options))
 
 
 def write_output(path, *, channels=1, rate=24000):
@@ -90,11 +96,6 @@ def test_child_has_distinct_detached_identity_inputs_and_fixed_command(child_cas
     monkeypatch.setenv("SECRET_FIXTURE_TOKEN", "must not inherit")
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("no child during prepare"))
     with prepare(child_case) as prepared:
-        spec = prepared.specification
-        assert type(spec) is ExecutionSpecificationV6
-        assert TypeAdapter(ExecutionSpecificationRecord).validate_json(spec.model_dump_json()) == spec
-        with pytest.raises(ValidationError): ExecutionSpecificationV5.model_validate_json(spec.model_dump_json())
-        assert next(row for row in child_case.inventory.files if row.role == "entrypoint").name == BUNDLE_SLOT
         call = prepared.invocation
         assert call.argv[1:3] == ("-I", "-B") and len(call.argv) == 5
         assert Path(call.argv[3]) == call.cwd / "application.pyz"
@@ -102,25 +103,20 @@ def test_child_has_distinct_detached_identity_inputs_and_fixed_command(child_cas
         env = dict(call.environment)
         assert "PYTHONPATH" not in env and "SECRET_FIXTURE_TOKEN" not in env
         assert env["HF_HUB_OFFLINE"] == env["TRANSFORMERS_OFFLINE"] == "1"
-        assert Path(env["TEMP"]) == call.cwd and call.timeout_seconds == spec.timeout_seconds == 30
-        snapshot = WorkerExecutionUseSnapshotV2.model_validate_json(json.dumps(prepared.execution_use_snapshot()))
-        snapshot.execution_specification.parameters["seed"] = 999
-        assert prepared.specification.parameters["seed"] == 7
+        assert Path(env["TEMP"]) == call.cwd and call.timeout_seconds == 30
+        assert not hasattr(prepared, "execution_use_snapshot")
         assert prepared.input_sha256 == hashlib.sha256(Path(call.argv[4]).read_bytes()).hexdigest()
         child_case.options["parameters"]["seed"] = 888
-        assert prepared.verify() == spec
+        assert prepared.verify().parameters.seed == 7
 
 
-@pytest.mark.parametrize("change", ["bundle", "request", "reference", "runtime", "model", "origin", "application"])
+@pytest.mark.parametrize("change", ["bundle", "request", "reference", "application"])
 def test_prelaunch_drift_consumes_child_and_never_launches(child_case, monkeypatch, change):
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("invalid identity launched"))
     with prepare(child_case) as prepared:
         if change in ("bundle", "request"):
             (prepared.invocation.cwd / ("application.pyz" if change == "bundle" else "request.json")).write_bytes(b"changed")
         elif change == "reference": Path(child_case.options["inputs"].reference_audio).write_bytes(b"changed")
-        elif change == "runtime": (child_case.options["environment"] / "Scripts/python.exe").write_bytes(b"changed")
-        elif change == "model": (child_case.options["model_root"] / "model.safetensors").write_bytes(b"changed")
-        elif change == "origin": child_case.origin_path.write_text("{}")
         else: monkeypatch.setattr("app.providers.maintained_voice_execution.bundle_bytes", lambda: b"changed application")
         with pytest.raises(ExecutionPreparationError, match="identity_changed"): prepared.execute()
         with pytest.raises(ExecutionPreparationError, match="consumed"): prepared.execute()
@@ -170,11 +166,11 @@ def test_timeout_has_no_implicit_cast(child_case, timeout):
 
 def test_oversized_text_rejects_before_packaging_or_launch(child_case, monkeypatch):
     child_case.options["inputs"] = child_case.options["inputs"].model_copy(update={"text": "x" * 65537})
-    monkeypatch.setattr("app.providers.maintained_voice_execution._observe", lambda *a, **kw: pytest.fail("observe oversized input"))
+    monkeypatch.setattr("app.providers.maintained_voice_prepared._observe", lambda *a, **kw: pytest.fail("observe oversized input"))
     with pytest.raises(ExecutionPreparationError, match="preparation_invalid"): prepare(child_case)
 
 
-@pytest.mark.parametrize("change", ["bundle", "request", "reference", "model"])
+@pytest.mark.parametrize("change", ["bundle", "request", "reference"])
 def test_postlaunch_drift_retains_unimported_output_and_consumes_attempt(child_case, monkeypatch, change):
     with prepare(child_case) as prepared:
         target = Path(child_case.options["inputs"].output_path)
@@ -184,7 +180,6 @@ def test_postlaunch_drift_retains_unimported_output_and_consumes_attempt(child_c
                 if change in ("bundle", "request"):
                     (prepared.invocation.cwd / ("application.pyz" if change == "bundle" else "request.json")).write_bytes(b"changed")
                 elif change == "reference": Path(child_case.options["inputs"].reference_audio).write_bytes(b"changed")
-                else: (child_case.options["model_root"] / "model.safetensors").write_bytes(b"changed")
                 return 0
             def poll(self): return 0
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: Child())
@@ -205,7 +200,7 @@ def test_launch_failure_is_sanitized_without_retry(child_case, monkeypatch):
         assert calls == [1]
 
 
-@pytest.mark.parametrize("problem", ["outside", "model", "existing", "hash", "old_origin"])
+@pytest.mark.parametrize("problem", ["outside", "model", "existing", "hash"])
 def test_invalid_input_or_diagnostic_origin_rejects_before_child(child_case, monkeypatch, problem):
     c = child_case
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("no child"))
@@ -214,7 +209,6 @@ def test_invalid_input_or_diagnostic_origin_rejects_before_child(child_case, mon
     elif problem == "model": inputs = inputs.model_copy(update={"output_path": str(c.options["model_root"] / "output.wav")})
     elif problem == "existing": Path(inputs.output_path).write_bytes(b"prior unimported attempt")
     elif problem == "hash": inputs = inputs.model_copy(update={"reference_sha256": "a"*64})
-    else: c.options["origin_reference"] = c.candidate["options"]["origin_reference"]
     c.options["inputs"] = inputs
     with pytest.raises(ExecutionPreparationError): prepare(c)
 
@@ -238,3 +232,17 @@ def test_fixed_child_request_parser_has_no_loader_or_command_override(child_case
             assert main() == (0 if change == "none" else 1)
         assert len(calls) == (1 if change in ("none", "provider_failure") else 0)
         assert capsys.readouterr().out == "" and capsys.readouterr().err == ""
+
+
+def test_job_preparation_and_launch_do_not_scan_installation(child_case, monkeypatch):
+    def forbidden(*a, **kw): pytest.fail("per-job installation scan")
+    monkeypatch.setattr("app.providers.maintained_voice_prepared._observe", forbidden)
+    monkeypatch.setattr("app.providers.maintained_runtime._observe_inventory", forbidden)
+    monkeypatch.setattr("app.providers.maintained_runtime._model_artifacts", forbidden)
+    class Child:
+        def wait(self, timeout):
+            write_output(Path(child_case.options["inputs"].output_path)); return 0
+        def poll(self): return 0
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: Child())
+    with prepare(child_case) as prepared:
+        assert prepared.execute().is_file()

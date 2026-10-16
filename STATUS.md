@@ -1,6 +1,6 @@
 # Content OS — Recovery: product-first structural reduction
 
-Updated: 2026-10-16
+Updated: 2026-10-17
 Working branch: `recovery/stoploss-20261015`
 Protected master baseline: `f32677d13fbba8a6dbdbac48030eaa5ea4f49907`
 
@@ -20,6 +20,11 @@ Protected master baseline: `f32677d13fbba8a6dbdbac48030eaa5ea4f49907`
 - `master` is untouched. Git branch snapshots protect tracked files only.
 
 ## Active work package — P6: one genuinely new-topic production
+
+**Current owner-authorized slice: remove per-generation OmniVoice runtime proof overhead.** Objective: keep normal Voice Job → existing local model child → existing ledger/import/QA, remove full environment/weight/native observations from the generation hot path. Allowed: directly affected Voice child/application/accounting/license-evidence reader and smallest regression tests/product facts. Stable: project, personal consent/reference hash/window, noncommercial terms, finite budget/idempotency, output QA and human review. Class I, current host model/reasoning; exact telemetry unavailable, no agents. No model/cloud/QA inference, new Job, render, Planner/Router/EditPlan changes or next task. Acceptance: real P6 record builds the bounded command without scans; fixture Worker/API/isolation/QA consumers pass; actual deleted code and net count reported. Exit: commit/push recovery and stop for owner review and separate inference approval.
+
+The approved single Voice attempt stopped at its 20-minute limit without WAV; original Job and failed ledger remain unchanged. Current real-record command-only check took2.984s including reference extraction, with scanning and model launch forbidden; copied Job/call/audio counts stayed234/216/83. This proves bounded preparation, not synthesis or U-Voice. Exit: AWAITING_U_REVIEW. Targeted no-model regression cases pass (combined JUnit evidence `.tmp/p6-short-{final,finish,close}.xml`); real historical W51 output remains review_available with its original execution_observed metadata. Removed prepared-only Voice ledger wrapper/tests; per-job runtime snapshots and child weight hashing are gone. No dependency/license change, model inference or new Job. No new generation allowance is inferred.
+
 
 **Current P6 correction (2026-10-16): consumption integration implemented; awaiting owner review, no new inference/render.** Frozen DeepSeek ScenePlan remains five scenes/33s. This bounded correction reuses saved-plan Voice → existing QA/U-Voice → current-project Master → normal ProductionRun/Render Worker, admitting original footage/static graphics through the existing exact-use consumer instead of requiring every scene to have a TalkingRun. Allowed: directly affected consumption/assembly/preflight, focused tests and minimal product facts; stable generation admission, receipts, QA, hash/project isolation and finite allowances. Class I, current host model/reasoning and cost telemetry unknown; no agents, cloud/provider calls, real DB writes, generation or render. Exit: commit/push recovery and stop for owner review; no next package.
 

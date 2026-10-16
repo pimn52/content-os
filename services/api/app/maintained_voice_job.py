@@ -1,21 +1,16 @@
-"""Bind owned maintained child to normal Job/media/accounting objects.
-
-Application-only until the whole evaluation lane is admitted. No route or
-Worker guard removal, receipt issuance or quality grant.
-"""
+"""Bind the configured local Voice child to authorized Jobs, media and accounting."""
 import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import UUID
 import wave
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, JobRepository, ProviderCallRepository, VoiceProfileRepository
-from app.domain.models import JobStatus, JobType, VoiceGenerationJobPayload
-from app.execution_admission import UseAdmissionError
+from app.domain.models import CostCategory, JobStatus, JobType, VoiceGenerationJobPayload
+from app.execution_admission import UseAdmissionError, configured_admission_actor
 from app.execution_scope import ExecutionScopeService, job_use_identity
-from app.frozen_worker import freeze_worker_identity
-from app.provider_execution import ProviderExecutionInProgress, ProviderExecutionRecordedFailure, ProviderExecutionService
+from app.frozen_worker import _facts
+from app.provider_execution import ProviderExecutionInProgress, ProviderExecutionRecordedFailure, ProviderExecutionService, RuntimeProviderIdentity
 from app.providers.maintained_voice_execution import PreparedMaintainedVoiceChild, prepare_maintained_voice_child
 from app.providers.omnivoice_entry_v2 import LocalCloneInputV2
 from app.voice_delivery import validate_voice_delivery_text
@@ -70,9 +65,13 @@ def _bind(db, root, output_root, job, prepared, reference=None):
     profile, window = _selected_job_source(db, root, job)
     if type(prepared) is not PreparedMaintainedVoiceChild:
         raise UseAdmissionError("maintained_voice_child_required")
-    request, spec = prepared.request_snapshot(), prepared.specification
+    request = prepared.request_snapshot()
+    scope = ExecutionScopeService(db, root).require_job_snapshot(job)
+    spec = next(b.execution_specification for b in scope.bindings
+        if b.capability_profile_id == job.payload.execution_capability_profile_id)
     payload = job.payload
-    if payload.expected_provider != spec.provider or payload.expected_model != spec.model:
+    if (payload.expected_provider != spec.provider or payload.expected_model != spec.model
+            or Path(request.model_root).resolve() != Path(spec.model).resolve()):
         raise UseAdmissionError("maintained_voice_execution_pin_required")
     source = Path(window.source_file).resolve()
     target = Path(output_root) / "voice" / f"{job.id}-attempt-{job.attempt}.wav"
@@ -106,6 +105,12 @@ def _bind(db, root, output_root, job, prepared, reference=None):
     # Job identity instead, so regenerated private staging does not invent a call.
     semantic["inputs"].pop("reference_audio")
     semantic["inputs"].pop("output_path")
+    call = prepared.invocation
+    semantic["command"] = dict(python=call.argv[0], timeout_seconds=call.timeout_seconds,
+        environment=dict(call.environment))
+    # Private temporary/cache paths vary; only stable command settings bind replay.
+    for key in ("TEMP", "TMP", "HF_HOME"):
+        semantic["command"]["environment"].pop(key, None)
     semantic.update(job_sha256=job_use_identity(job), voice_profile_sha256=hashlib.sha256(profile.model_dump_json().encode()).hexdigest())
     if derivation is not None: semantic["reference_derivation"] = derivation
     return profile, facts, semantic
@@ -118,33 +123,37 @@ def execute_maintained_voice_job(*, db, data_root, output_root, job, prepared,
         raise UseAdmissionError("execution_frozen_database_mismatch")
     profile, facts, semantic = _bind(db, root, outputs, job, prepared, reference)
     service = ExecutionScopeService(db, root)
-    provider = SimpleNamespace(provider_name=prepared.specification.provider, model=prepared.specification.model)
-    frozen = freeze_worker_identity(service, job, provider, prepared,
-        capability_profile_id=job.payload.execution_capability_profile_id, execution_admission_id=execution_admission_id)
+    scope = service.require_job_snapshot(job)
+    binding = next((b for b in scope.bindings if b.admission_id == execution_admission_id), None)
+    if binding is None or binding.capability_profile_id != job.payload.execution_capability_profile_id:
+        raise UseAdmissionError("execution_admission_binding_mismatch")
+    spec = binding.execution_specification
+    if prepared.request_snapshot().parameters.model_dump() != spec.parameters:
+        raise UseAdmissionError("maintained_voice_configuration_changed")
+    service.require_current(scope, project_id=job.project_id, purpose="internal_evaluation", operation="generation")
+    authority = _facts(service, job, scope)
+    provider = RuntimeProviderIdentity(spec.provider, spec.model)
     def guard():
-        if _source_facts(db, profile.id, job.payload.reference_window) != facts:
+        if (_source_facts(db, profile.id, job.payload.reference_window) != facts
+                or _facts(service, job, scope) != authority):
             raise UseAdmissionError("maintained_voice_source_changed")
     def current():
         guard()
+        service.require_current(scope, project_id=job.project_id, purpose="internal_evaluation", operation="generation")
         if _bind(db, root, outputs, job, prepared, reference)[2] != semantic:
             raise UseAdmissionError("maintained_voice_job_input_mismatch")
     input_sha = hashlib.sha256(json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    event = dict(provider=provider.provider_name, model=provider.model, job_id=str(job.id), project_id=str(job.project_id),
+    event = dict(provider=provider.provider, model=provider.model, job_id=str(job.id), project_id=str(job.project_id),
         attempt=job.attempt, voice_profile_id=str(profile.id), target_text=job.payload.text, qa_state="pending",
-        execution_sha256=frozen.snapshot.execution_sha256, bound_input_sha256=input_sha,
+        bound_input_sha256=input_sha, configuration_observation="configured_local_process",
         reference_window=job.payload.reference_window.model_dump(mode="json"))
     from app.voice_calibration import calibration_receipts, POLICY as CALIBRATION
     if calibration_receipts(db, service.require_job_snapshot(job)):
         event["admission_policy"] = CALIBRATION
-        event["configuration_observation"] = "pending_execution"
     if reference is not None: event["reference_derivation"] = semantic["reference_derivation"]
-    def action(child):
-        path = child.execute()
-        if event.get("admission_policy") == CALIBRATION:
-            event["configuration_observation"] = "execution_observed"
+    def action():
+        path = prepared.execute()
         current()
-        service.require_current(service.require_job_snapshot(job), project_id=job.project_id,
-            purpose="internal_evaluation", operation="generation")
         audio = importer.import_path(path, job.payload.authorization_reference,
             language=job.payload.language or profile.language, generated_job=job,
             generated_metadata={"voice_generation": event})
@@ -158,20 +167,21 @@ def execute_maintained_voice_job(*, db, data_root, output_root, job, prepared,
         if audio is None or audio.content_hash != value.get("content_hash"):
             raise UseAdmissionError("maintained_voice_replay_unavailable")
         provenance = audio.metadata.get("voice_generation", {})
-        if any(provenance.get(key) != event[key] for key in ("job_id", "project_id", "execution_sha256", "bound_input_sha256")):
+        if any(provenance.get(key) != event[key] for key in ("job_id", "project_id", "configuration_observation", "bound_input_sha256")):
             raise UseAdmissionError("maintained_voice_replay_mismatch")
         scope = service.get("audio", audio.id)
         if scope is None: raise UseAdmissionError("maintained_voice_output_scope_missing")
         service.require_current(scope, project_id=job.project_id, purpose="internal_evaluation", operation="generation")
         path = _resolve_source_path(audio.source_file, root).resolve()
         if (not path.is_relative_to(root) or not path.is_file()
-            or path.stat().st_size > frozen.snapshot.execution_specification.parameters["output_max_bytes"]
+            or path.stat().st_size > spec.parameters["output_max_bytes"]
             or hashlib.sha256(path.read_bytes()).hexdigest() != audio.content_hash):
             raise UseAdmissionError("maintained_voice_replay_bytes_changed")
         return audio
-    return ProviderExecutionService(db, cost_estimator).execute_prepared_voice(frozen=frozen,
-        idempotency_key=f"maintained-voice:{job.id}", input_source="maintained-voice-job",
-        input_document=semantic, reservation_source_guard=guard, before_source_use=current,
+    return ProviderExecutionService(db, cost_estimator).execute(project_id=job.project_id,
+        idempotency_key=f"maintained-voice:{job.id}", operation="tts", provider=provider,
+        input_source="maintained-voice-job", category=CostCategory.VOICE,
+        input_document=semantic, reservation_guard=guard, before_action=current, before_replay=current,
         action=action, encode_result=lambda audio: dict(audio_id=str(audio.id), content_hash=audio.content_hash,
             job_id=str(job.id), bound_input_sha256=input_sha), decode_result=decode,
         error_code=lambda error: str(error) if isinstance(error, UseAdmissionError) else "maintained_voice_job_failed")
@@ -181,8 +191,8 @@ def execute_configured_maintained_voice_job(*, db, data_root, output_root, stagi
         job, execution_admission_id, importer, cost_estimator, runtime_options):
     """Server application entry. Job owns media/text; ledger owns replay mode.
 
-    Runtime options are operator configuration, never a request body. This
-    remains inert at ordinary dispatch until its supported lane is admitted.
+    Runtime options are operator configuration, never a request body.
+    Deployment evidence grants use, not a fresh observation of runtime files.
     """
     required = {"environment", "base", "model_root", "origin_reference", "operator_key", "parameters",
         "installation_id", "runtime_label", "machine_id"}
@@ -222,7 +232,21 @@ def execute_configured_maintained_voice_job(*, db, data_root, output_root, stagi
         reference_max_bytes=64*1024**2)
     with prepare_voice_reference(data_root=root,staging_parent=staging,ffmpeg=ffmpeg,window=window,
             selection=job.payload.reference_window,inputs=inputs) as reference:
-        with prepare_maintained_voice_child(**dict(runtime_options),data_root=root,staging_parent=staging,
+        # The admission specification is a deployment/license record, not a fresh V6 observation.
+        spec = binding.execution_specification
+        origin = json.loads(scopes.admissions._file(spec.runtime_origin.reference))
+        if configured_admission_actor(runtime_options["operator_key"]) != origin["actor"]:
+            raise UseAdmissionError("maintained_generation_operator_required")
+        if (Path(runtime_options["model_root"]).resolve() != Path(spec.model).resolve()
+                or runtime_options["parameters"] != spec.parameters
+                or runtime_options.get("gpu_uuid") != spec.host_runtime.gpu_uuid
+                or runtime_options.get("timeout_seconds", 600) != spec.timeout_seconds
+                or str(runtime_options["installation_id"]) != str(spec.machine.installation_id)
+                or runtime_options["runtime_label"] != spec.runtime or runtime_options["machine_id"] != spec.machine_id):
+            raise UseAdmissionError("maintained_voice_configuration_changed")
+        command_options = {k: v for k, v in runtime_options.items()
+            if k in {"environment", "base", "model_root", "parameters", "timeout_seconds", "gpu_uuid"}}
+        with prepare_maintained_voice_child(**command_options,data_root=root,staging_parent=staging,
                 inputs=reference.inputs_snapshot(),replay_only=existing is not None) as prepared:
             return execute_maintained_voice_job(db=db,data_root=root,output_root=outputs,job=job,
                 prepared=prepared,execution_admission_id=execution_admission_id,importer=importer,

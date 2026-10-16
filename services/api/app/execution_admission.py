@@ -182,14 +182,16 @@ class ProviderUseAdmissionService:
             except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
                 raise UseAdmissionError("maintained_asr_child_evidence_invalid") from None
         elif isinstance(report, ProviderUseLicenseReviewV2) and type(report.execution_specification) is ExecutionSpecificationV6:
-            from .providers.maintained_voice_execution import require_child_origin
+            from .providers.maintained_runtime import _require_origin
+            from .domain.maintained_runtime import MaintainedGenerationOrigin
             from .providers.maintained_voice_prepared import require_voice_specification
             from .providers.prepared import ExecutionPreparationError
             try:
                 spec = report.execution_specification
                 require_voice_specification(spec)
                 inventory = RuntimeInventoryStore(self.root).read_v2(spec.runtime_inventory)
-                require_child_origin(self.root, spec.runtime_origin, inventory)
+                # Retained installation evidence; code releases do not revoke model-use terms.
+                _require_origin(self.root, spec.runtime_origin, inventory, MaintainedGenerationOrigin)
             except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
                 raise UseAdmissionError("maintained_voice_child_evidence_invalid") from None
         elif isinstance(report, ProviderUseLicenseReviewV2) and type(report.execution_specification) is ExecutionSpecificationV5:

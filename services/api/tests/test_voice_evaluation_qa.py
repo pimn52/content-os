@@ -31,7 +31,7 @@ from test_maintained_runtime import candidate, reference
 from test_maintained_voice_execution import child_case
 from test_maintained_voice_job import bound_job
 from test_completed_voice_review import complete
-from test_prepared_provider_execution import Cost
+from test_provider_execution import Cost
 
 @pytest.fixture(params=["isolated-zip-asr-v1", "isolated-zip-asr-v2"])
 def qa_case(bound_job, monkeypatch, request):

@@ -1,4 +1,4 @@
-"""Application-only fixed Voice child; never selected by ordinary Worker/API."""
+"""Bounded local Voice child. Installation observations are not per-job proof."""
 import hashlib
 import os
 from pathlib import Path
@@ -6,12 +6,10 @@ import subprocess
 from tempfile import TemporaryDirectory
 import wave
 
-from app.domain.models import ExecutionSpecificationV6
 from .maintained_runtime import _observe_inventory, _require_origin, _system_root, stop_maintained_process_tree
 from app.domain.maintained_runtime import MaintainedGenerationOrigin
 from .maintained_voice_bundle import BUNDLE_SLOT, bundle_bytes
 from .maintained_voice_child import MaintainedVoiceChildRequest, request_bytes
-from .maintained_voice_prepared import _observe
 from .omnivoice_entry_v2 import read_reference
 from .omnivoice_local import _json_object
 from .prepared import ExecutionPreparationError, PendingInvocation
@@ -56,14 +54,14 @@ def _validate_request(request, options):
 
 
 class PreparedMaintainedVoiceChild:
-    """One owned bundle/request and pending invocation, not admission authority.
+    """One private request and fixed command; authorization stays in the Worker.
 
-    Execute belongs after a durable reservation and fresh frozen verification.
-    Current normal dispatch is closed. Same-user process is not an OS sandbox.
+    This does not observe or certify the installed Python environment/weights.
+    Same-user process is not an OS sandbox.
     """
-    def __init__(self, temporary, options, spec, request):
+    def __init__(self, temporary, options, request, timeout_seconds):
         self._temporary, self._options = temporary, options
-        self._spec_json, self._request_raw = spec.model_dump_json(), request_bytes(request)
+        self._request_raw = request_bytes(request)
         self._state = "prepared"
         private = Path(temporary.name)
         system = _system_root()
@@ -75,10 +73,7 @@ class PreparedMaintainedVoiceChild:
             env["CUDA_VISIBLE_DEVICES"] = options["gpu_uuid"]
         self._invocation = PendingInvocation(argv=(str(Path(options["environment"]) / "Scripts/python.exe"),
             "-I", "-B", str(private / "application.pyz"), str(private / "request.json")),
-            cwd=private, environment=tuple(sorted(env.items())), timeout_seconds=spec.timeout_seconds)
-
-    @property
-    def specification(self): return ExecutionSpecificationV6.model_validate_json(self._spec_json)
+            cwd=private, environment=tuple(sorted(env.items())), timeout_seconds=timeout_seconds)
 
     @property
     def invocation(self): return self._invocation
@@ -102,27 +97,18 @@ class PreparedMaintainedVoiceChild:
         if self._state != "prepared":
             raise ExecutionPreparationError("maintained_preparation_consumed")
         try:
-            spec = self.specification
-            current = _observe(self._options, packaged=True, timeout_seconds=spec.timeout_seconds)
             self._verify_owned_files()
             request = MaintainedVoiceChildRequest.model_validate_json(self._request_raw)
             _validate_request(request, self._options)
-            if current != spec:
-                raise ValueError()
-            return current
+            return request
         except Exception:
             self._state = "failed"
             raise ExecutionPreparationError("maintained_voice_child_identity_changed") from None
 
-    def execution_use_snapshot(self):
-        spec = self.verify()
-        return dict(snapshot_version=2, identity=spec.identity.model_dump(mode="json"),
-            execution_specification=spec.model_dump(mode="json"), execution_sha256=spec.execution_sha256)
-
     def execute(self):
         if self._options.get("replay_only", False):
             raise ExecutionPreparationError("maintained_voice_replay_only")
-        spec = self.verify()
+        request = self.verify()
         self._state = "consumed"
         child = None
         try:
@@ -135,18 +121,15 @@ class PreparedMaintainedVoiceChild:
             request = MaintainedVoiceChildRequest.model_validate_json(self._request_raw)
             target = Path(request.inputs.output_path)
             _exact_path(target, directory=False)
-            if not 44 < target.stat().st_size <= spec.parameters["output_max_bytes"]:
+            if not 44 < target.stat().st_size <= request.parameters.output_max_bytes:
                 raise ExecutionPreparationError("maintained_voice_child_output_invalid")
             rate = _json_object(Path(request.model_root) / "audio_tokenizer/preprocessor_config.json")["sampling_rate"]
             with wave.open(str(target), "rb") as audio:
                 frames = audio.getnframes()
                 if (audio.getnchannels() != 1 or audio.getsampwidth() != 2 or audio.getframerate() != rate
-                    or not 0 < frames <= spec.parameters["output_max_frames"]
+                    or not 0 < frames <= request.parameters.output_max_frames
                     or len(audio.readframes(frames)) != frames * 2):
                     raise ExecutionPreparationError("maintained_voice_child_output_invalid")
-            # Current runtime/source/model must also remain unchanged after use.
-            if _observe(self._options, packaged=True, timeout_seconds=spec.timeout_seconds) != spec:
-                raise ExecutionPreparationError("maintained_voice_child_identity_changed")
             self._verify_owned_files()
             read_reference(request.inputs, rate)
             return target
@@ -169,8 +152,7 @@ class PreparedMaintainedVoiceChild:
 
 
 def prepare_maintained_voice_child(*, environment, base, model_root, data_root, staging_parent,
-        origin_reference, operator_key, parameters, installation_id, runtime_label, machine_id,
-        inputs, timeout_seconds=600, gpu_uuid=None, max_bytes=64*1024**3, replay_only=False):
+        parameters, inputs, timeout_seconds=600, gpu_uuid=None, replay_only=False):
     temporary = None
     try:
         if type(replay_only) is not bool:
@@ -180,16 +162,16 @@ def prepare_maintained_voice_child(*, environment, base, model_root, data_root, 
         request = MaintainedVoiceChildRequest.model_validate_json(MaintainedVoiceChildRequest(
             data_root=str(data_root), model_root=str(model_root), parameters=parameters, inputs=inputs).model_dump_json())
         options = dict(environment=environment, base=base, model_root=model_root, data_root=data_root,
-            staging_parent=staging_parent, origin_reference=type(origin_reference).model_validate_json(origin_reference.model_dump_json()),
-            operator_key=operator_key, parameters=request.parameters.model_dump(), installation_id=installation_id,
-            runtime_label=runtime_label, machine_id=machine_id, gpu_uuid=gpu_uuid, max_bytes=max_bytes, replay_only=replay_only)
+            staging_parent=staging_parent, parameters=request.parameters.model_dump(),
+            gpu_uuid=gpu_uuid, replay_only=replay_only)
         _validate_request(request, options)
-        spec = _observe(options, packaged=True, timeout_seconds=timeout_seconds)
+        _exact_path(Path(environment) / "Scripts/python.exe", directory=False)
+        _exact_path(Path(base), directory=True)
         temporary = TemporaryDirectory(prefix="maintained-voice-child-", dir=staging_parent)
         private = Path(temporary.name)
         (private / "application.pyz").write_bytes(bundle_bytes())
         (private / "request.json").write_bytes(request_bytes(request))
-        prepared = PreparedMaintainedVoiceChild(temporary, options, spec, request)
+        prepared = PreparedMaintainedVoiceChild(temporary, options, request, timeout_seconds)
         prepared.verify()
         return prepared
     except Exception as error:

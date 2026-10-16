@@ -131,10 +131,15 @@ def require_completed_review(db, root, audio, job, producer, scopes, *, project_
     call = ProviderCallRepository(db).get_by_idempotency_key(f"maintained-voice:{job.id}")
     generation = audio.metadata.get("voice_generation", {})
     expected = dict(job_id=str(job.id), project_id=str(project_id), attempt=job.attempt,
-        provider=spec.provider, model=spec.model, execution_sha256=spec.execution_sha256,
+        provider=spec.provider, model=spec.model,
         voice_profile_id=str(job.payload.voice_profile_id), target_text=job.payload.text,
         reference_window=job.payload.reference_window.model_dump(mode="json") if job.payload.reference_window else None,
-        configuration_observation="execution_observed")
+        configuration_observation=generation.get("configuration_observation"))
+    if generation.get("configuration_observation") == "execution_observed":
+        expected["execution_sha256"] = spec.execution_sha256
+    elif (generation.get("configuration_observation") != "configured_local_process"
+            or "execution_sha256" in generation):
+        raise UseAdmissionError("voice_calibration_output_unbound")
     if (call.project_id != project_id or call.mode != "runtime" or call.operation != "tts"
             or call.input_source != "maintained-voice-job"
             or call.provider != spec.provider or call.model != spec.model

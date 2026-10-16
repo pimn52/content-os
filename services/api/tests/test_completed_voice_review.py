@@ -28,17 +28,15 @@ def complete(c):
     return audio
 
 
-def test_completed_exact_review_survives_app_drift_but_generation_does_not(bound_job,monkeypatch):
+def test_completed_review_and_model_use_terms_survive_application_release(bound_job,monkeypatch):
     c=bound_job;audio=complete(c)
     original=maintained_voice_execution.bundle_bytes
     monkeypatch.setattr(maintained_voice_execution,'bundle_bytes',lambda:original()+b'changed application')
-    with pytest.raises(UseAdmissionError,match='evidence_not_current'):
-        VoiceDraftService(c.db,c.root).require_job(c.job)
+    VoiceDraftService(c.db,c.root).require_job(c.job)
     admission=ProviderUseAdmissionService(c.db,c.root).get(c.job.project_id,c.receipt)
-    assert not ProviderUseAdmissionService(c.db,c.root).current_evidence(admission)
-    with pytest.raises(UseAdmissionError):
-        ProviderUseAdmissionService(c.db,c.root).adopt(c.job.project_id,idempotency_key='no-upgrade',
-            review_reference=admission.review_reference,review_sha256=admission.review_sha256,operator_key=c.options['operator_key'])
+    assert ProviderUseAdmissionService(c.db,c.root).current_evidence(admission)
+    assert audio.metadata['voice_generation']['configuration_observation']=='configured_local_process'
+    assert 'execution_sha256' not in audio.metadata['voice_generation']
     with TestClient(create_app(c.db.path)) as client:
         context=f'?project_id={c.job.project_id}&purpose=internal_evaluation'
         access=client.get(f'/audio-assets/{audio.id}/access'+context).json()
@@ -50,7 +48,7 @@ def test_completed_exact_review_survives_app_drift_but_generation_does_not(bound
         assert client.get(f'/audio-assets/{audio.id}/media').status_code==403
         status=client.get(f'/projects/{c.job.project_id}/voice-draft-jobs/{c.job.id}').json()
         assert status['state']=='completed' and status['reasons']==[]
-        assert status['generation_eligibility']['state']=='blocked'
+        assert status['generation_eligibility']['state']=='eligible_for_checks'
         assert status['quality_authorized'] is False and status['automatic_retry_authorized'] is False
         qa=status['outputs'][0]['qa_consumption']
         assert qa['state']=='blocked' and qa['purpose']=='commercial_production'
