@@ -173,17 +173,12 @@ class PreparedMaintainedASRChild:
             if not Path(request.audio_path).is_relative_to(Path(self._options["data_root"])):
                 raise ValueError()
             request.verify_audio()
-            current = observe_asr(self._options)
-            if current != self.specification or request.model_root != current.model:
+            if request.model_root != self.specification.model:
                 raise ValueError()
-            return current
+            return self.specification
         except Exception:
             self._state = "failed"
             raise ExecutionPreparationError("maintained_asr_child_identity_changed") from None
-    def execution_use_snapshot(self):
-        spec = self.verify()
-        return dict(snapshot_version=2, identity=spec.identity.model_dump(mode="json"),
-            execution_specification=spec.model_dump(mode="json"), execution_sha256=spec.execution_sha256)
     def execute(self):
         spec = self.verify()
         self._state = "consumed"
@@ -202,8 +197,6 @@ class PreparedMaintainedASRChild:
             result = ASRChildResult.model_validate_json(output.read_bytes())
             result.transcription(self.request_snapshot().verify_audio())
             self._files()
-            if observe_asr(self._options) != spec:
-                raise ExecutionPreparationError("maintained_asr_child_identity_changed")
             return result
         except BaseException as error:
             self._state = "failed"
@@ -221,7 +214,7 @@ class PreparedMaintainedASRChild:
     def __exit__(self, *_args): self.close()
 
 def prepare_maintained_asr_child(*, environment, base, model_root, data_root, staging_parent,
-        origin_reference, operator_key, installation_id, runtime_label, machine_id, request,
+        origin_reference, operator_key, installation_id, runtime_label, machine_id, request, deployment_specification,
         timeout_seconds=600, max_bytes=64*1024**3, invocation_policy="isolated-zip-asr-v1"):
     temporary = None
     try:
@@ -232,7 +225,20 @@ def prepare_maintained_asr_child(*, environment, base, model_root, data_root, st
             staging_parent=staging_parent, origin_reference=type(origin_reference).model_validate_json(origin_reference.model_dump_json()),
             operator_key=operator_key, installation_id=installation_id, runtime_label=runtime_label,
             machine_id=machine_id, timeout_seconds=timeout_seconds, max_bytes=max_bytes, invocation_policy=invocation_policy)
-        spec = observe_asr(options)
+        # Retained deployment/permission facts; this is not a fresh runtime witness.
+        spec = deployment_specification
+        if (type(spec) not in (ExecutionSpecificationV7, ExecutionSpecificationV8)
+            or spec.parameters != ASR_PARAMETERS or spec.invocation_policy != invocation_policy
+            or spec.timeout_seconds != timeout_seconds or spec.runtime != runtime_label
+            or spec.machine_id != machine_id or str(spec.machine.installation_id) != str(installation_id)
+            or spec.model != str(model_root)):
+            raise ExecutionPreparationError("maintained_asr_configuration_changed")
+        if type(spec) is ExecutionSpecificationV8 and (spec.startup.environment_root != str(environment) or spec.startup.base_root != str(base)):
+            raise ExecutionPreparationError("maintained_asr_configuration_changed")
+        for name in ASR_MODEL_FILES:
+            _exact_path(Path(model_root)/name, directory=False)
+        validate_local_features(Path(model_root))
+        _exact_path(Path(environment)/"Scripts/python.exe", directory=False)
         if request.model_root != spec.model or not Path(request.audio_path).is_relative_to(Path(data_root)):
             raise ValueError()
         request.verify_audio()

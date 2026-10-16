@@ -180,7 +180,7 @@ def _job_binding(db, root, claim, *, retained=False):
     return job, scope, receipt
 
 
-def _projection(db, root, claim, raw):
+def _projection(db, root, claim, raw, *, configured=False):
     binding, source = _original_proof(db, root, claim.original_audio, project_id=claim.project_id)
     if binding != claim.input_binding:
         raise UseAdmissionError("voice_qa_original_input_changed")
@@ -194,8 +194,10 @@ def _projection(db, root, claim, raw):
     _, _, receipt = _job_binding(db, root, claim, retained=True)
     spec = receipt.review.execution_specification
     result = apply_voice_qa(claim.original_audio, report, transcript, provider=spec.provider, model=spec.model)
+    execution = (dict(deployment_sha256=claim.execution_sha256, configuration_observation="configured_local_process")
+        if configured else dict(execution_sha256=claim.execution_sha256))
     result = result.model_copy(update={"metadata": {**result.metadata, "voice_evaluation_qa":
-        dict(policy=POLICY, job_id=str(claim.job_id), admission_id=str(claim.admission_id), execution_sha256=claim.execution_sha256)}})
+        dict(policy=POLICY, job_id=str(claim.job_id), admission_id=str(claim.admission_id), **execution)}})
     return result, report.metadata(provider=spec.provider, model=spec.model)
 
 
@@ -232,7 +234,8 @@ def require_completed_qa(db, root, audio, *, project_id, purpose):
         raise UseAdmissionError("voice_qa_result_unbound")
     try:
         raw = ASRChildResult.model_validate_json(json.dumps(value["transcription"], allow_nan=False))
-        projected, report = _projection(db, root, claim, raw)
+        projected, report = _projection(db, root, claim, raw,
+            configured=value.get("configuration_observation") == "configured_local_process")
         if (value.get("report") != report or value.get("projection_sha256") != execution_canonical_sha256(projected.model_dump(mode="json"))
             or audio != projected):
             raise ValueError()
@@ -437,8 +440,7 @@ class VoiceEvaluationQAService:
 
 
 def execute_evaluation_qa(*, db, root, job, prepared, cost_estimator):
-    """Owned prepared object plus frozen ASR and original-audio composite guard."""
-    from app.frozen_worker import freeze_worker_identity
+    """Current audio/permission guard and the existing once-only ASR ledger."""
     from app.providers.maintained_asr_execution import PreparedMaintainedASRChild
     from app.provider_execution import ProviderExecutionService, RuntimeProviderIdentity
     from app.domain.models import CostCategory
@@ -455,8 +457,9 @@ def execute_evaluation_qa(*, db, root, job, prepared, cost_estimator):
     if request != expected:
         raise UseAdmissionError("voice_qa_child_input_changed")
     provider = SimpleNamespace(provider_name=receipt.review.identity.provider, model=receipt.review.identity.model)
-    frozen = freeze_worker_identity(service.scopes, job, provider, prepared,
-        capability_profile_id=receipt.review.capability_profile_id, execution_admission_id=receipt.id)
+    if prepared.specification != receipt.review.execution_specification:
+        raise UseAdmissionError("voice_qa_configuration_changed")
+    prepared.verify()
     facts = service._facts(claim.original_audio, claim)
     def guard():
         active = JobRepository(db).get(job.id)
@@ -468,21 +471,15 @@ def execute_evaluation_qa(*, db, root, job, prepared, cost_estimator):
         guard()
         if service.require_job(job)[0] != claim:
             raise UseAdmissionError("voice_qa_claim_invalid")
-    def reservation_guard():
-        frozen.reservation_guard()
-        guard()
-    def before_action():
-        frozen.verify_before_launch()
-        current()
     def action():
         raw = prepared.execute()
         current()
-        projected, report = _projection(db, root, claim, raw)
+        projected, report = _projection(db, root, claim, raw, configured=True)
         current()
         value = dict(audio_id=str(projected.id), job_id=str(job.id),
             claim_sha256=execution_canonical_sha256(claim.model_dump(mode="json")),
             input_digest=qa_call_digest(claim, receipt), transcription=raw.model_dump(mode="json"),
-            report=report, projection_sha256=execution_canonical_sha256(projected.model_dump(mode="json")))
+            report=report, configuration_observation="configured_local_process", projection_sha256=execution_canonical_sha256(projected.model_dump(mode="json")))
         return projected, value
     def persist(result):
         # The ledger owns this transaction. Original scope/PCM are not rewritten.
@@ -497,13 +494,12 @@ def execute_evaluation_qa(*, db, root, job, prepared, cost_estimator):
         require_completed_qa(db, root, audio, project_id=job.project_id, purpose="internal_evaluation")
         return audio, value
     def before_replay():
-        frozen.verify_for_replay()
         service.require_job(job, retained=True)
     result = ProviderExecutionService(db, cost_estimator).execute(project_id=job.project_id,
         idempotency_key=f"voice-evaluation-qa:{job.id}", operation="asr",
         provider=RuntimeProviderIdentity(provider.provider_name, provider.model), input_source=CALL_SOURCE,
         category=CostCategory.ASR, input_document=qa_input_document(claim, receipt),
-        reservation_guard=reservation_guard, before_action=before_action, before_replay=before_replay,
+        reservation_guard=guard, before_action=current, before_replay=before_replay,
         action=action, encode_result=lambda r:r[1], decode_result=replay, persist_result=persist,
         error_code=lambda e:str(e) if isinstance(e, UseAdmissionError) else "voice_evaluation_qa_failed")
     return result[0]

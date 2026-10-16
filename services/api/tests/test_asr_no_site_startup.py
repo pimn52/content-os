@@ -93,7 +93,7 @@ def test_bad_startup_stops_before_vendor(stub_child, change):
 def prepared(q):
     request = ASRChildRequest(model_root=str(q.options["model_root"]),audio_path=q.audio.source_file,
                              audio_sha256=q.audio.content_hash,language="zh")
-    return execution.prepare_maintained_asr_child(**q.options, request=request)
+    return execution.prepare_maintained_asr_child(**q.options, request=request, deployment_specification=q.spec)
 
 
 def test_explicit_schema_preserves_v1_and_rejects_downgrade(qa_case):

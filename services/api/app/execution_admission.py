@@ -173,12 +173,13 @@ class ProviderUseAdmissionService:
             except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
                 raise UseAdmissionError("maintained_talking_child_evidence_invalid") from None
         elif type(report) is ProviderUseLicenseReviewV4:
-            from .providers.maintained_asr_execution import require_asr_origin
+            from .providers.maintained_runtime import _require_origin
+            from .domain.maintained_runtime import MaintainedASROrigin
             from .providers.prepared import ExecutionPreparationError
             try:
                 spec = report.execution_specification
                 inventory = RuntimeInventoryStore(self.root).read_v2(spec.runtime_inventory)
-                require_asr_origin(self.root, spec.runtime_origin, inventory, spec.invocation_policy)
+                _require_origin(self.root, spec.runtime_origin, inventory, MaintainedASROrigin)
             except (RuntimeInventoryError, ExecutionPreparationError, ValidationError):
                 raise UseAdmissionError("maintained_asr_child_evidence_invalid") from None
         elif isinstance(report, ProviderUseLicenseReviewV2) and type(report.execution_specification) is ExecutionSpecificationV6:

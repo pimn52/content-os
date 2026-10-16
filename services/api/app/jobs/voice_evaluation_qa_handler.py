@@ -6,7 +6,7 @@ from app.costs import UnknownProviderCostEstimator
 from app.domain.asr_child import ASRChildRequest
 from app.domain.maintained_runtime import MaintainedEvidenceReference
 from app.domain.models import JobStatus
-from app.execution_admission import UseAdmissionError
+from app.execution_admission import UseAdmissionError, configured_admission_actor
 from app.provider_execution import ProviderExecutionInProgress, ProviderExecutionRecordedFailure
 from app.providers.maintained_asr_execution import prepare_maintained_asr_child
 from app.providers.prepared import ExecutionPreparationError
@@ -45,11 +45,16 @@ class MaintainedVoiceEvaluationQAHandler:
                 raise UseAdmissionError("maintained_asr_configuration_invalid")
             if str(self.options["model_root"]) != receipt.review.identity.model:
                 raise UseAdmissionError("voice_qa_model_changed")
+            origin = json.loads(VoiceEvaluationQAService(self.db, self.root).scopes.admissions._file(
+                receipt.review.execution_specification.runtime_origin.reference))
+            if configured_admission_actor(self.options["operator_key"]) != origin["actor"]:
+                raise UseAdmissionError("maintained_asr_operator_required")
             staging = self.root/"execution-staging"
             staging.mkdir(exist_ok=True)
             request = ASRChildRequest(model_root=receipt.review.identity.model, audio_path=str(source),
                 audio_sha256=claim.input_binding.audio_sha256, language=claim.input_binding.language)
-            with prepare_maintained_asr_child(**self.options, data_root=self.root, staging_parent=staging, request=request) as prepared:
+            with prepare_maintained_asr_child(**self.options, data_root=self.root, staging_parent=staging, request=request,
+                    deployment_specification=receipt.review.execution_specification) as prepared:
                 return execute_evaluation_qa(db=self.db, root=self.root, job=job, prepared=prepared,
                     cost_estimator=UnknownProviderCostEstimator())
         except UseAdmissionError as exc:

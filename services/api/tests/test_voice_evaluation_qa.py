@@ -55,8 +55,8 @@ def qa_case(bound_job, monkeypatch, request):
     options.update(model_root=model, origin_reference=reference(origin,c.root))
     request = ASRChildRequest(model_root=str(model), audio_path=str(Path(audio.source_file)),
         audio_sha256=audio.content_hash, language="zh")
-    with prepare_maintained_asr_child(**options, request=request) as prepared:
-        spec = prepared.specification
+    from app.providers.maintained_asr_execution import observe_asr
+    spec = observe_asr(dict(options, timeout_seconds=600))
     RuntimeInventoryStore(c.root).install_v2(inventory)
     profile = ProviderMachineCapabilityProfileRepository(c.db).get(c.job.payload.execution_capability_profile_id)
     cap = profile.model_copy(update=dict(id=uuid4(), capability="asr", provider=spec.provider, model=spec.model,
@@ -106,8 +106,11 @@ def run(q):
     job=job.model_copy(update=dict(status=JobStatus.COMPLETED)); JobRepository(q.c.db).update(job)
     return audio,job,handler
 
-def test_normal_submission_owned_child_atomic_result_and_scoped_review(qa_case):
+def test_normal_submission_owned_child_atomic_result_and_scoped_review(qa_case, monkeypatch):
     q=qa_case; c=q.c
+    def forbidden(*a, **kw): pytest.fail("full environment/model observation in QA hot path")
+    monkeypatch.setattr("app.providers.maintained_asr_execution.observe_asr", forbidden)
+    monkeypatch.setattr("app.providers.maintained_asr_execution.observe_asr_inventory", forbidden)
     assert VoiceEvaluationQAService(c.db,c.root).status(c.job.project_id,q.audio.id)["state"]=="ready"
     audio,job,handler=run(q)
     assert audio.id==q.audio.id and audio.content_hash==q.audio.content_hash and q.calls==[1]
@@ -290,7 +293,7 @@ def test_cancel_during_reservation_never_launches_asr(qa_case):
     def cancel():JobRepository(c.db).update(job.model_copy(update=dict(status=JobStatus.CANCELLED)))
     cost.change=cancel
     request=ASRChildRequest(model_root=q.spec.model,audio_path=q.audio.source_file,audio_sha256=q.audio.content_hash,language="zh")
-    with prepare_maintained_asr_child(**q.options,request=request) as prepared:
+    with prepare_maintained_asr_child(**q.options,request=request,deployment_specification=q.spec) as prepared:
         with pytest.raises(UseAdmissionError,match="not_running"):
             execute_evaluation_qa(db=c.db,root=c.root,job=job,prepared=prepared,cost_estimator=cost)
     assert q.calls==[] and len(ProviderCallRepository(c.db).list_all())==1
