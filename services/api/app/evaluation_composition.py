@@ -150,12 +150,48 @@ class EvaluationCompositionService:
         own_audio = self.scopes.get("audio",audio.id)
         if own_audio is not None: values.append(own_audio)
         for scene in ordered:
-            if scene.visual_requirement != "creator_speaking":
-                raise UseAdmissionError("composition_content_type_not_supported")
             interval = _unique_scene_speech_span(audio,ordered,scene.id)
             if interval is None:
                 raise UseAdmissionError("composition_speech_interval_unaligned")
             intervals.append((scene,*interval))
+            if scene.visual_requirement != "creator_speaking":
+                from app.production_preflight import _choose_candidate
+                from app.domain.models import SourceKind
+                candidate, need = _choose_candidate(scene,router.route(scene).candidates,
+                    ClipRepository(self.db),AssetRepository(self.db))
+                if (need != "none" or candidate is None
+                    or candidate.source_kind not in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET,SourceKind.TYPOGRAPHY}):
+                    missing.append(str(scene.id));continue
+                asset = AssetRepository(self.db).get(candidate.asset_id) if candidate.asset_id else None
+                clip = ClipRepository(self.db).get(candidate.clip_id) if candidate.clip_id else None
+                if candidate.source_kind is SourceKind.TYPOGRAPHY:
+                    if scene.visual_requirement == "action_evidence" or scene.graphic_plan is None or scene.graphic_plan.kind != "text_card":
+                        missing.append(str(scene.id));continue
+                else:
+                    if (asset is None or clip is None or clip.asset_id != asset.id
+                        or clip.asset_duration_ms != asset.duration_ms or clip.end_ms > asset.duration_ms
+                        or not asset.authorization_reference.strip() or asset.metadata.get("r1_usage") != "production"
+                        or asset.metadata.get("project_id") not in (None,str(project_id))
+                        or asset.metadata.get("ip_profile_id") not in (None,str(project.ip_profile_id))):
+                        raise UseAdmissionError("composition_source_not_authorized")
+                    if clip.end_ms-clip.start_ms < interval[1]-interval[0]:
+                        missing.append(str(scene.id));continue  # Never fill required evidence with a card.
+                    if file_digest(existing_local_media_file(asset.source_file,self.root)) != asset.content_hash:
+                        raise UseAdmissionError("composition_source_bytes_changed")
+                    if "source_derivation" in asset.metadata:
+                        from app.media import VerticalSourceDerivationService, MediaImporter, FFProbeAdapter
+                        try:
+                            VerticalSourceDerivationService(self.db,self.root,
+                                MediaImporter(self.db,self.root,FFProbeAdapter())).verify_existing(asset,clip)
+                        except (ValueError,RuntimeError,KeyError,OSError):
+                            raise UseAdmissionError("composition_source_derivation_changed") from None
+                    values.extend(self.scopes.scopes_for_hash(asset.content_hash))
+                    dependencies.add("source:"+str(asset.id))
+                inputs[scene.id] = dict(asset=asset,clip=clip,run=None,candidate=candidate)
+                proofs.append(dict(scene_id=str(scene.id),start_ms=interval[0],end_ms=interval[1],
+                    asset=None if asset is None else asset.model_dump(mode="json"),
+                    clip=None if clip is None else clip.model_dump(mode="json")))
+                continue
             run_id = selection.talking_runs.get(scene.id)
             if run_id is None:
                 missing.append(str(scene.id));continue
@@ -202,10 +238,8 @@ class EvaluationCompositionService:
         spec = None if missing else assemble_retained_composition(project,audio,intervals,inputs,style)
         constraints = SourceUseConstraintService(self.db,self.root)
         if spec is not None:
-            from app.domain.models import CandidateAsset, SourceKind
             for entry in spec.edit_plan.scenes:
-                candidate = CandidateAsset(scene_plan_id=entry.scene_plan_id,source_kind=SourceKind.AI_VIDEO,
-                    asset_id=entry.selected_asset_id,clip_id=entry.selected_clip_id,match_score=1,why=["Exact retained selection"],estimated_cost=spec.estimated_cost)
+                candidate = inputs[entry.scene_plan_id]["candidate"]
                 treated = presentation(entry,width=spec.width,height=spec.height,style=spec.edit_plan.style_tokens)
                 if constraints.evaluate(candidate,treated,constraints.records(project_id)):
                     raise UseAdmissionError("composition_source_use_excluded")
@@ -235,6 +269,8 @@ class EvaluationCompositionService:
         assets = AssetRepository(self.db)
         router = AssetRouter(ClipTextSearchService(self.db),assets)
         for scene in ordered:
+            if scene.visual_requirement != "creator_speaking":
+                continue
             interval = _unique_scene_speech_span(audio,ordered,scene.id)
             if interval is None:
                 raise UseAdmissionError("composition_speech_interval_unaligned")
@@ -271,7 +307,7 @@ class EvaluationCompositionService:
         try:
             c = self._context(project_id,selection)
             result.update(fingerprint=c["request_sha256"],proof=c["proof"],missing_scenes=c["missing"],
-                eligible=not c["missing"],reasons=["composition_missing_talking:"+x for x in c["missing"]])
+                eligible=not c["missing"],reasons=["composition_visual_unresolved:"+x for x in c["missing"]])
             if c["spec"] is not None:
                 self._check_render_budget(project_id,c)
         except (ValueError,KeyError,TypeError,OSError) as exc:
@@ -442,7 +478,7 @@ class EvaluationCompositionService:
                 draft_version,script_revision,style_tokens,repair_allowance,stage,render_job_id,created_at,talking_review_policy_version)
                 VALUES (?,?,?,?,?,?,?,0,'evaluation_composition',?,?,?)""",(str(run_id),str(project_id),idempotency_key,c["request_sha256"],
                 c["draft"].version,c["draft"].script_revision,c["spec"].edit_plan.style_tokens.model_dump_json(),str(job_id),now.isoformat(),
-                min(v["run"].review_policy_version for v in c["inputs"].values())))
+                min((v["run"].review_policy_version for v in c["inputs"].values() if v["run"] is not None),default=1)))
             self.db.connection.execute("INSERT INTO evaluation_composition_slots VALUES (?,'render',?)",(batch["id"],str(run_id)))
             self.db.connection.execute("INSERT INTO evaluation_composition_owners VALUES (?,?,?,?,?,?,?,?)",
                 (str(run_id),str(project_id),str(job_id),str(render_id),batch["id"],c["request_sha256"],job_use_identity(job),c["scope"].fingerprint))
@@ -452,10 +488,11 @@ class EvaluationCompositionService:
             for kind,identity,sha in (("run",run_id,c["request_sha256"]),("job",job_id,job_use_identity(job)),("render",render_id,c["request_sha256"])):
                 self.db.connection.execute("INSERT INTO execution_use_scopes(subject_kind,subject_id,project_id,fingerprint,payload,subject_sha256) VALUES (?,?,?,?,?,?)",
                     (kind,str(identity),str(project_id),c["scope"].fingerprint,c["scope"].model_dump_json(),sha))
-            # Retain the selected bytes' internal-only restriction across aliases.
+            # Retain generated media's internal-only restriction across aliases.
+            # Reading an original Clip does not rewrite its own license scope.
             # These are use origins of this real render Run, not fabricated
             # generation parents or mutations of the original asset records.
-            for sha in {c["audio"].content_hash,*(v["asset"].content_hash for v in c["inputs"].values())}:
+            for sha in {c["audio"].content_hash,*(v["asset"].content_hash for v in c["inputs"].values() if v["run"] is not None)}:
                 self.db.connection.execute("INSERT OR IGNORE INTO execution_use_content_origins(content_hash,subject_kind,subject_id) VALUES (?,'run',?)",
                     (sha,str(run_id)))
             from app.source_use_constraints import SourceUseConstraintService

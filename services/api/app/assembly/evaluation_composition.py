@@ -12,14 +12,16 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
     clips = {}
     for value in inputs.values():
         clip = value["clip"]
+        if clip is None:
+            continue
         first,last = clips.get(clip.id,(clip.start_ms,clip.end_ms))
         clips[clip.id] = (min(first,clip.start_ms),max(last,clip.end_ms))
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=None)
     # Retain the reviewed complete frame. Unknown source subtitles never
     # authorize another overlay, even when a legacy source is landscape.
     entries = [presentation_for_style(e.model_copy(update={
-        "subtitle_treatment":SubtitleTreatment.TIMED_CAPTIONS if "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else SubtitleTreatment.NONE,
-        "burned_in_subtitles":"absent" if "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else "unknown"}),style,
+        "subtitle_treatment":SubtitleTreatment.TIMED_CAPTIONS if inputs[e.scene_plan_id]["asset"] is None or "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else SubtitleTreatment.NONE,
+        "burned_in_subtitles":"absent" if inputs[e.scene_plan_id]["asset"] is None or "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else "unknown"}),style,
         inputs[e.scene_plan_id]["asset"]) for e in plan.scenes]
     plan = plan.model_copy(update={"scenes": entries, "style_tokens": style})
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=plan)
@@ -31,12 +33,14 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
         item = inputs[scene.id]
         asset, clip = item["asset"], item["clip"]
         first, last = timeline_frame(start,project.fps), timeline_frame(end,project.fps)
-        if clip.end_ms*project.fps.numerator//(1000*project.fps.denominator) <= timeline_frame(clip.start_ms,project.fps):
+        if clip is not None and clip.end_ms*project.fps.numerator//(1000*project.fps.denominator) <= timeline_frame(clip.start_ms,project.fps):
             raise ValueError("composition_source_has_no_complete_frame")
         scenes.append(VideoScene(scene_id=scene.scene_id, start_frame=first, duration_frames=last-first,
-            visual=VideoVisual(source_kind=SourceKind.AI_VIDEO, authorization_reference=asset.authorization_reference,
-                asset_id=asset.id, clip_id=clip.id, clip_start_ms=clip.start_ms,
-                clip_end_ms=clip.end_ms, source_duration_ms=asset.duration_ms),
+            visual=VideoVisual(source_kind=item["candidate"].source_kind,
+                authorization_reference="local-typography" if asset is None else asset.authorization_reference,
+                asset_id=None if asset is None else asset.id, clip_id=None if clip is None else clip.id,
+                clip_start_ms=None if clip is None else clip.start_ms,
+                clip_end_ms=None if clip is None else clip.end_ms, source_duration_ms=None if asset is None else asset.duration_ms),
             narration_asset_id=audio.id, narration_start_ms=start, narration_end_ms=end,
             caption=scene.voice_text, captions=_audio_captions_for_interval(audio,start,end),
             **_edit_scene_fields(entry,plan)))

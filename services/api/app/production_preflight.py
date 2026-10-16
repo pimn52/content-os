@@ -50,7 +50,7 @@ class PreflightScene(BaseModel):
     selected_candidate: CandidateAsset | None = None
     source_authorization_reference: str | None = None
     production_need: Literal["none", "new_talking", "capture"] = "none"
-    suitability: Literal["known_deterministic", "reviewed_native_planned_run", "reviewed_talking_run", "unknown"]
+    suitability: Literal["known_deterministic", "reviewed_native_planned_run", "reviewed_talking_run", "reviewed_retained_media", "unknown"]
     subtitle_treatment: SubtitleTreatment
     burned_in_subtitles: Literal["unknown", "present", "absent"]
     graphic_treatment: GraphicTreatment
@@ -127,6 +127,7 @@ def build_production_preflight(
     if None in proposal_map or len(proposal_map) != len(crop_proposals) or not set(proposal_map).issubset({scene.id for scene in scenes}):
         raise PreflightInputError("crop proposals require unique current ScenePlan identities")
 
+    retained_blocker = None
     if purpose == "internal_evaluation" and data_root is not None and not use_admission_ids:
         from app.evaluation_composition import EvaluationCompositionService
         from app.execution_admission import UseAdmissionError
@@ -144,7 +145,7 @@ def build_production_preflight(
                 raise PreflightInputError(str(exc)) from None
             # Missing/incompatible media stays an explicit dependency in the
             # existing planner below; this branch never generates a replacement.
-            pass
+            retained_blocker = str(exc)
 
     assets, clips, images = AssetRepository(db), ClipRepository(db), ImageAssetRepository(db)
     voice_copy = draft.script or "\n\n".join(scene.voice_text for scene in scenes)
@@ -424,22 +425,11 @@ def build_production_preflight(
         "crop_outcomes": crop_outcomes,
     })
     if purpose == "internal_evaluation":
-        from app.execution_scope import ExecutionScopeService
-        from app.execution_admission import UseAdmissionError
-        scope_fingerprint = None
-        if data_root is None:
-            stop.append("execution_scope_data_root_required")
-        else:
-            try:
-                scope = ExecutionScopeService(db, data_root).prepare(project.id,
-                    purpose=purpose, admission_ids=use_admission_ids)
-                scope_fingerprint = scope.fingerprint
-            except UseAdmissionError as exc:
-                stop.append(str(exc))
-        # No gate removal until Worker and whole-lane lineage are closed.
-        stop.append("evaluation_execution_not_integrated")
-        identity = _digest({"policy_version": 1, "commercial_plan": identity, "purpose": purpose,
-            "use_admission_ids": sorted(str(value) for value in use_admission_ids), "scope": scope_fingerprint})
+        # Generation uses the existing saved-plan Voice/QA/review entry. A
+        # provider generation receipt is never a media consumption grant.
+        stop.append(retained_blocker or ("execution_scope_data_root_required" if data_root is None else "reviewed_media_consumption_required"))
+        identity = _digest({"plan":identity,"purpose":purpose,
+            "use_admission_ids":sorted(str(value) for value in use_admission_ids)})
     if expected_fingerprint is not None and expected_fingerprint != identity:
         raise StaleProductionPreflight("stale_production_preflight")
     return ProductionPreflight(
@@ -456,8 +446,10 @@ def build_production_preflight(
 def _retained_preflight(consumer,project,draft,context,expected_fingerprint):
     spec = context["spec"]
     stop = []
+    reviewed = False
     try:
         consumer.current_use(project.id,context)
+        reviewed = True
         consumer.retained_batch(project.id,context["selection"])
         consumer._check_render_budget(project.id,context)
     except ValueError as exc:
@@ -470,10 +462,12 @@ def _retained_preflight(consumer,project,draft,context,expected_fingerprint):
         candidate = item["candidate"].model_copy(update={"recommended":True})
         entry = next(e for e in spec.edit_plan.scenes if e.scene_plan_id==scene.id)
         selected.append(candidate)
+        kind = candidate.source_kind
         decisions.append(PreflightScene(scene_plan_id=scene.id,scene_id=scene.scene_id,
-            visual_role=EditVisualRole.TALKING,planned_source_kind=SourceKind.AI_VIDEO,selected_candidate=candidate,
-            source_authorization_reference=item["asset"].authorization_reference,production_need="none",
-            suitability="reviewed_talking_run",subtitle_treatment=entry.subtitle_treatment,burned_in_subtitles=entry.burned_in_subtitles,
+            visual_role=entry.visual_role,planned_source_kind=kind,selected_candidate=candidate,
+            source_authorization_reference=None if item["asset"] is None else item["asset"].authorization_reference,production_need="none",
+            suitability="reviewed_talking_run" if item["run"] is not None else "known_deterministic" if kind is SourceKind.TYPOGRAPHY else "reviewed_retained_media" if reviewed else "unknown",
+            subtitle_treatment=entry.subtitle_treatment,burned_in_subtitles=entry.burned_in_subtitles,
             graphic_treatment=entry.graphic_treatment,reasons=tuple(candidate.why),
             visual_dependency_fingerprint=_digest(next(p for p in context["proof"]["inputs"] if p["scene_id"]==str(scene.id)))))
     actions = (_action("voice",None,False,0,"reuse approved Master without generation",CostCategory.VOICE,Decimal("0"),context["request_sha256"]),

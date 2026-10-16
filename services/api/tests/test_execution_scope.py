@@ -274,7 +274,7 @@ def test_normal_preflight_is_pure_purpose_bound_and_start_fails_closed(scoped):
     assert preview.status_code == 200, preview.text
     plan = preview.json()
     assert plan["fingerprint"] != old["fingerprint"] and plan["status"] == "blocked"
-    assert "evaluation_execution_not_integrated" in plan["stop_reasons"]
+    assert "reviewed_media_consumption_required" in plan["stop_reasons"]
     denied = client.post(f"/projects/{project}/production-runs", json={**request,
         "idempotency_key": "scope-normal", "expected_fingerprint": plan["fingerprint"]})
     assert denied.status_code == 409 and denied.json()["detail"]["reasons"] == ["provider_receipts_are_not_media_use_permission"]

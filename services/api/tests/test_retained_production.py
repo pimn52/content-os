@@ -72,7 +72,9 @@ def use_and_batch(service,pid,context,key):
         return MasterAdoption(review_reference=name,review_sha256=hashlib.sha256(file.read_bytes()).hexdigest(),idempotency_key=name)
     report=dict(policy='evaluation-composition-v1',purpose='internal_evaluation',operation='compose_retained_media_and_review',local_only=True,
         project_id=str(pid),selection=context['selection'].model_dump(mode='json'),request_sha256=context['request_sha256'],proof=context['proof'],
-        intended_activity='Synthetic fixture only',license_evidence=[],findings=['No real rights or quality claims'],
+        intended_activity='Synthetic fixture only',
+        license_evidence=[dict(evidence,admission_id=str(b.admission_id)) for b in context['scope'].bindings],
+        findings=['No real rights or quality claims'],
         dependency_findings=[dict(evidence,dependency=d) for d in ['retained_media_composition','local_renderer_and_tools',*context['proof']['dependencies']]])
     use=service.adopt(pid,save('use.json',report),key)
     service.adopt_batch(pid,save('batch.json',dict(policy='evaluation-composition-v1',project_id=str(pid),master_audio_id=str(context['audio'].id),
@@ -110,6 +112,66 @@ def test_ordinary_retained_preflight_start_no_generation_history_or_new_calls(le
     with pytest.raises(UseAdmissionError):ExecutionScopeService(db,db.data_root).prepare(pid,purpose='internal_evaluation')
     service.revoke(pid,use.id,'Synthetic permission withdrawn',key)
     with pytest.raises(UseAdmissionError):service.require_current_job(job)
+
+
+@pytest.mark.parametrize("footage", [False, True])
+def test_new_narration_consumes_graphics_and_authorized_footage_in_same_worker(legacy,footage):
+    from app.domain.models import GraphicCardPlan, VisualIntent
+    db,pid,_,audio,_,draft,key=legacy
+    scenes=[s.model_copy(update=dict(preferred_sources=[SourceKind.TYPOGRAPHY],fallback_sources=[],
+        visual_requirement="explanatory",visual_requirement_reason="Synthetic concept explanation",
+        graphic_plan=GraphicCardPlan(kind="text_card",treatment="key_point",points=[f"Point {i}"])))
+        for i,s in enumerate(draft.scenes)]
+    source=None
+    if footage:
+        path=db.data_root/'original.media';path.write_bytes(b'SYNTHETIC authorized full-frame footage')
+        source=_asset(2,source_kind='user_asset').model_copy(update=dict(source_file=str(path),duration_ms=5000,
+            content_hash=hashlib.sha256(path.read_bytes()).hexdigest(),metadata={'r1_usage':'production','project_id':str(pid)}))
+        AssetRepository(db).create(source)
+        clip=ClipRepository(db).create(Clip(asset_id=source.id,start_ms=0,end_ms=5000,asset_duration_ms=5000,
+            transcript='word2',visual_description='word2',quality_score=1))
+        scenes[2]=scenes[2].model_copy(update=dict(preferred_sources=[SourceKind.USER_ASSET],
+            visual_requirement='action_evidence',visual_requirement_reason='Synthetic exact source demonstration',
+            visual_intent=VisualIntent(subject='word2',action='word2',description='word2')))
+    draft=draft.model_copy(update={'scenes':scenes,'version':draft.version+1});ProjectDraftRepository(db).save(draft)
+    service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    selection=service.retained_selection(pid,style);assert selection.talking_runs=={}
+    context=service._context(pid,selection);assert context['spec'] is not None and not context['missing']
+    assert all(v['run'] is None for v in context['inputs'].values())
+    if source:
+        assert context['inputs'][scenes[2].id]['asset'].id==source.id
+        assert 'source:'+str(source.id) in context['proof']['dependencies']
+        assert context['spec'].scenes[2].visual.vertical_reframe_mode=='contain'
+    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
+    assert plan.status=='blocked' and 'composition_use_admission_required' in plan.stop_reasons
+    use=use_and_batch(service,pid,context,key)
+    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
+    assert plan.status=='ready_for_authorized_dispatch' and plan.video_spec==context['spec']
+    runs=ProductionRunService(db,db.data_root)
+    result=runs.start(pid,idempotency_key='new-topic',expected_fingerprint=plan.fingerprint,style_tokens=style,purpose='internal_evaluation')
+    job=JobRepository(db).get(result.render_job_id)
+    assert job.payload.video_spec==plan.video_spec and service.require_current_job(job)['spec']==plan.video_spec
+    assert job.type is JobType.RENDER and result.voice_job_id is None
+    assert db.connection.execute('SELECT count(*) FROM jobs WHERE project_id=?',(str(pid),)).fetchone()[0]==2
+    from app.renderer import RemotionRenderer
+    from test_remotion_renderer import _renderer_project
+    renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
+        renderer_dir=_renderer_project(db.data_root/'new-topic-props'))
+    for scene in plan.video_spec.scenes:
+        renderer._validate_scene(scene,plan.video_spec.fps,project_id=pid,master_audio_id=audio.id,
+            validate_scene_narration=False,composition_job_id=job.id)
+    if source:
+        repo=AssetRepository(db)
+        repo.update(source.model_copy(update={'metadata':{**source.metadata,'project_id':str(uuid4())}}))
+        with pytest.raises(UseAdmissionError,match='composition_source_not_authorized'):service.require_current_job(job)
+        repo.update(source.model_copy(update={'metadata':{**source.metadata,'source_derivation':{}}}))
+        with pytest.raises(UseAdmissionError,match='composition_source_derivation_changed'):service.require_current_job(job)
+        repo.update(source)
+        path.write_bytes(b'Changed source')
+        with pytest.raises(UseAdmissionError,match='composition_source_bytes_changed'):service.require_current_job(job)
+    else:
+        service.revoke(pid,use.id,'Synthetic revocation',key)
+        with pytest.raises(UseAdmissionError):service.require_current_job(job)
 
 
 @pytest.mark.parametrize('change',['hash','copy','consent','project','review'])

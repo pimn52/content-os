@@ -300,12 +300,22 @@ mandatory. An operator adopts the existing exact composition-use review and
 one local-render allowance; a purpose label or old provider grant is insufficient.
 Generation admission remains separate and does not accept these consumer grants.
 
+The same consumer also accepts a newly QA-verified and human-approved project
+Master with routed original footage and declared static graphics. It reuses the
+normal Router selection rules, exact speech timing, EditPlan, ProductionRun and
+Render Worker; an intermediate EvaluationMaster Run or a TalkingRun is not
+required for non-speaking scenes. Original footage keeps its complete frame and
+receives no overlay when subtitle status is unknown. Exact source rights/use
+review, source hashes, project isolation, exclusions and the one-render allowance
+remain required; unmatched or too-short evidence footage stays unresolved.
+Saved-plan Voice generation and QA keep their existing separate admission paths.
+
 The ordinary Render Worker executes both ordinary and scoped retained renders
 in `RenderVideoJobHandler`, sharing completion accounting and failure handling;
 there is no second Composition handler or selection/start contract. Private
 output persistence and once-only allowance remain scoped. Normal render GET/HEAD/Range access checks the owned Run, current
 permission, project and actual result hash under explicit internal purpose.
-Selected input/output bytes retain their noncommercial restriction across
+Selected generated input/output bytes retain their noncommercial restriction across
 aliases. Unknown source subtitles receive no added overlay, reviewed full
 frames are contained without a new crop, and a terminal non-speaking interval
 uses an explicit text-free neutral background. Failed execution preserves its
@@ -315,8 +325,8 @@ Run status and playback use normal production/render APIs; separate Composition
 selection/status/reconcile/media actions are removed. The read-only history list
 is retained because normal ProductionRun has no equivalent list. Operator use/allowance
 adoption, its read-only permission preflight, and necessary generation-recovery
-APIs remain. Existing persisted records are retained. This retained creator-speaking
-path does not establish new-topic generation, automatic editorial suitability,
+APIs remain. Existing persisted records are retained. This consumption integration
+does not establish real new-topic generation, automatic editorial suitability,
 user-operated end-to-end acceptance or the30–60s R1/repeatability endpoint.
 
 MasterNarration, VideoSpec, local rendering, subtitles, publication/feedback records and usage evidence exist.

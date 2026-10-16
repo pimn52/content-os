@@ -19,6 +19,52 @@ from test_execution_admission import OPERATOR_KEY
 
 DIMENSIONS = ("likeness", "naturalness", "emphasis", "pace", "pauses", "rhythm")
 
+def test_new_qa_master_enters_normal_production_without_evaluation_master_run(qa_case,monkeypatch):
+    from app.db import ProjectDraftRepository
+    from app.domain.models import ProjectDraft, GraphicCardPlan, SourceKind, VisualStyleTokens
+    from app.domain.asr_child import ASRChildResult
+    from app.evaluation_composition import EvaluationCompositionService
+    from app.production_runs import ProductionRunService
+    from test_production_preflight import _scene
+    from test_retained_production import use_and_batch
+    q=qa_case;c=q.c;pid=c.job.project_id
+    q.set_result(ASRChildResult.model_validate_json(json.dumps(dict(text=c.job.payload.text,language='zh',
+        segments=[dict(start_ms=0,end_ms=q.audio.duration_ms,text=c.job.payload.text)],words=[]))))
+    audio,job,_=run(q)  # Existing fake child + real QA persistence; never model inference.
+    old=ProjectDraftRepository(c.db).get(pid)
+    scene=_scene(str(pid),text=c.job.payload.text).model_copy(update=dict(duration_target_ms=audio.duration_ms,
+        preferred_sources=[SourceKind.TYPOGRAPHY],fallback_sources=[],visual_requirement='explanatory',
+        visual_requirement_reason='Synthetic conceptual explanation',
+        graphic_plan=GraphicCardPlan(kind='text_card',treatment='key_point',points=['Synthetic concept'])))
+    draft=ProjectDraft(project_id=pid,version=old.version+1,script_revision=old.script_revision+1,
+        script=c.job.payload.text,scenes=[scene],updated_at=datetime.now(timezone.utc))
+    ProjectDraftRepository(c.db).save(draft)
+    consumer=EvaluationCompositionService(c.db,c.root);style=VisualStyleTokens()
+    with pytest.raises(UseAdmissionError,match='composition_approved_master_required'):
+        consumer.retained_selection(pid,style)
+    review=EvaluationVoiceReviewService(c.db,c.root)
+    review.record(pid,audio.id,typed(body(review,pid,audio.id)))
+    from app.db import BudgetPolicyRepository
+    budgets=BudgetPolicyRepository(c.db);policy=budgets.get_by_project(pid)
+    budgets.save(policy.model_copy(update={'max_calls':3}))  # Fixture grants one subsequent local render.
+    context=consumer._context(pid,consumer.retained_selection(pid,style))
+    assert context['spec'].master_narration.audio_asset_id==audio.id
+    use_and_batch(consumer,pid,context,OPERATOR_KEY)
+    calls_before=len(ProviderCallRepository(c.db).list_for_project(pid))
+    monkeypatch.setenv('CONTENT_OS_DATA_ROOT',str(c.root))
+    with TestClient(create_app(c.db.path)) as client:
+        response=client.post(f'/projects/{pid}/production-preflight',json={'purpose':'internal_evaluation','repair_allowance':0})
+        assert response.status_code==200,response.text
+        plan=response.json();assert plan['status']=='ready_for_authorized_dispatch',plan['stop_reasons']
+        response=client.post(f'/projects/{pid}/production-runs',json=dict(purpose='internal_evaluation',
+            repair_allowance=0,idempotency_key='new-master',expected_fingerprint=plan['fingerprint']))
+        assert response.status_code==201,response.text
+        run_id=response.json()['id']
+    assert c.db.connection.execute('SELECT count(*) FROM evaluation_run_master_bindings').fetchone()[0]==0
+    assert len(ProviderCallRepository(c.db).list_for_project(pid))==calls_before
+    consumer.require_current_job(JobRepository(c.db).get(ProductionRunService(c.db,c.root).get(pid,run_id).render_job_id))
+
+
 def body(service, project, audio):
     state = service.status(project, audio)
     assert state["state"] == "eligible", state
