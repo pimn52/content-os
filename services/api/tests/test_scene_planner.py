@@ -56,6 +56,36 @@ def _chat_response(scenes: list[dict[str, object]]) -> dict[str, object]:
     return {"choices": [{"message": {"content": json.dumps({"scenes": scenes})}}]}
 
 
+@pytest.mark.parametrize("purpose,duration,error_field", [
+    ("提出问题", 3500, None), ("解释码率原理", 3500, None), ("给出实用建议", 3500, None),
+    ("目" * 100, 3500, None),  # The generation advice does not tighten the existing contract.
+    ("", 3500, "purpose"), ("目" * 101, 3500, "purpose"),
+    (None, 3500, "purpose"), (42, 3500, "purpose"), ({"label": "问题"}, 3500, "purpose"),
+    ("提出问题", 0, "duration_target_ms"),
+])
+def test_purpose_guidance_preserves_scene_validation(purpose, duration, error_field):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+
+    requests = []
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            requests.append(json.loads(body))
+            scene = {**_scene("purpose_check", 0), "purpose": purpose, "duration_target_ms": duration}
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([scene])).encode(), {})
+
+    planner = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport())
+    if error_field is None:
+        assert planner.plan(_project()).scenes[0].purpose == purpose
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as raised:
+            planner.plan(_project())
+        assert raised.value.validation_code == "scene_values" and raised.value.domain_field == error_field
+    assert len(requests) == 1
+    prompt = requests[0]["messages"][0]["content"]
+    assert "short editorial label string" in prompt and "30 Chinese characters" in prompt
+    assert "提出问题" in prompt and "purpose is not full narration" in prompt
+
+
 @pytest.mark.parametrize("requirement", ["unknown", "creator_speaking", "action_evidence", "explanatory"])
 def test_planner_accepts_explicit_visual_requirement_and_requests_it(requirement):
     from app.providers.scene_planner import _PLAN_SCHEMA
