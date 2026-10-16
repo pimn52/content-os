@@ -65,6 +65,12 @@ def admit_talking_run():
             created_at=datetime.now(timezone.utc),
         )
         TalkingRunRepository(db).create(run)
+        from app.db import TalkingSliceSeriesContinuityReviewRepository
+        from app.domain.models import TalkingSliceSeriesContinuityReview
+        TalkingSliceSeriesContinuityReviewRepository(db).create(TalkingSliceSeriesContinuityReview(
+            id=run.continuity_review_id,series_id=series.id,project_id=project_id,
+            child_job_ids=series.child_job_ids,approved=True,evidence_reference="synthetic exact approved preview",
+            findings=["Fixture only"],reviewed_at=datetime.now(timezone.utc)))
         metadata = dict(asset.metadata)
         metadata["talking_run"] = {
             "run_id": str(run.id), "series_id": str(run.series_id),

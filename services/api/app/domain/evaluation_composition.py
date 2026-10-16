@@ -2,7 +2,7 @@
 from typing import Literal
 from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, AwareDatetime, JsonValue, model_validator, field_validator
-from .models import Sha256
+from .models import Sha256, VisualStyleTokens
 from .evaluation_master import MasterAdoption, MasterLicenseEvidence
 from .evaluation_talking import TalkingDependencyFinding
 
@@ -13,10 +13,22 @@ class CompositionSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     policy: Literal["evaluation-composition-v1"] = POLICY
     purpose: Literal["internal_evaluation"] = "internal_evaluation"
-    master_run_id: UUID
+    master_run_id: UUID | None = None
+    master_audio_id: UUID | None = None
+    style_tokens: VisualStyleTokens = Field(default_factory=VisualStyleTokens)
     # Absence is an explicit missing dependency, never permission to generate.
     talking_runs: dict[UUID, UUID] = Field(default_factory=dict, max_length=100)
     tail: Literal["neutral_background"] = "neutral_background"
+
+    @model_validator(mode="after")
+    def one_master(self):
+        if (self.master_run_id is None) == (self.master_audio_id is None):
+            raise ValueError("composition_one_master_required")
+        return self
+
+    @property
+    def parent_id(self):
+        return self.master_run_id or self.master_audio_id
 
 
 class CompositionSave(BaseModel):
@@ -30,7 +42,8 @@ class CompositionBatchReview(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     policy: Literal["evaluation-composition-v1"]
     project_id: UUID
-    master_run_id: UUID
+    master_run_id: UUID | None = None
+    master_audio_id: UUID | None = None
     authorization_reference: str = Field(min_length=1, max_length=1000)
     authorization_sha256: Sha256
     scene_ids: tuple[UUID, ...] = Field(max_length=4)
@@ -46,9 +59,15 @@ class CompositionBatchReview(BaseModel):
 
     @model_validator(mode="after")
     def unique_scenes(self):
+        if (self.master_run_id is None) == (self.master_audio_id is None):
+            raise ValueError("composition_one_master_required")
         if len(set(self.scene_ids)) != len(self.scene_ids) or any(not x.strip() for x in self.findings):
             raise ValueError("composition_batch_invalid")
         return self
+
+    @property
+    def parent_id(self):
+        return self.master_run_id or self.master_audio_id
 
 
 class CompositionUseReview(BaseModel):
@@ -62,7 +81,7 @@ class CompositionUseReview(BaseModel):
     request_sha256: Sha256
     proof: dict[str, JsonValue]
     intended_activity: str = Field(min_length=1, max_length=2000)
-    license_evidence: tuple[MasterLicenseEvidence, ...] = Field(min_length=1, max_length=100)
+    license_evidence: tuple[MasterLicenseEvidence, ...] = Field(default=(), max_length=100)
     dependency_findings: tuple[TalkingDependencyFinding, ...] = Field(min_length=1, max_length=100)
     findings: tuple[str, ...] = Field(min_length=1, max_length=20)
 

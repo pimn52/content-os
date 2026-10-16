@@ -71,3 +71,14 @@ test('late preflight cannot restore changed authority; project changes reset to 
   assert.equal(s.h.nodes(PurposeControl)[0].props.value.purpose, 'commercial_production');
   assert.equal(s.h.nodes(PurposeControl)[0].props.value.use_admission_ids.length, 0);
 });
+
+
+test('approved retained media uses ordinary preflight/start without generation panels',async()=>{
+  const s=setup(()=>({...plan,status:'ready_for_authorized_dispatch',retained_media:{master_audio_id:'A',talking_runs:{S:'T'}}}));
+  await s.h.flush();s.h.nodes(PurposeControl)[0].props.onChange({purpose:'internal_evaluation',use_admission_ids:[]});await s.h.flush();
+  await s.h.click('预检整条方案');assert.equal(s.h.find('button','保存 / 启动').props.disabled,false);
+  await s.h.click('保存 / 启动');assert.equal(s.calls.length,2);
+  assert.match(s.calls[1].path,/production-runs$/);assert.equal(s.calls[1].body.purpose,'internal_evaluation');
+  assert.equal(s.calls.some(c=>/evaluation-master|evaluation-talking|voice-drafts|evaluation-composition/.test(c.path)),false);
+  s.h.unmount();
+});

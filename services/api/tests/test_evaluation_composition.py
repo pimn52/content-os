@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from app.db import JobRepository, ProviderCallRepository
 from app.domain.models import JobStatus, execution_canonical_sha256 as digest
-from app.domain.evaluation_composition import CompositionSelection, CompositionSave, CompositionStart
+from app.domain.evaluation_composition import CompositionSelection, CompositionStart
 from app.domain.evaluation_talking import TalkingCalibrationStart
 from app.evaluation_composition import EvaluationCompositionService
 from app.execution_scope import read_job_scope, require_evaluation_lane_closed
@@ -79,7 +79,7 @@ def adoption(c):
         project_id=str(c.project),selection=c.compose_selection.model_dump(mode="json"),request_sha256=state["fingerprint"],proof=state["proof"],
         intended_activity="Synthetic internal-only composition",findings=["No actual licence or runtime evidence"],
         license_evidence=[dict(evidence,admission_id=b["admission_id"]) for b in state["proof"]["scope"]["bindings"]],
-        dependency_findings=[dict(evidence,dependency=k) for k in ("retained_media_composition","local_renderer_and_tools")])
+        dependency_findings=[dict(evidence,dependency=k) for k in ("retained_media_composition","local_renderer_and_tools",*state["proof"]["dependencies"])])
     use = c.composition.adopt(c.project,save(c.root,"composition-use.json",report),OPERATOR_KEY)
     grant = batch(c)
     return CompositionStart(selection=c.compose_selection,expected_fingerprint=state["fingerprint"],idempotency_key="composition-once",
@@ -95,8 +95,6 @@ def test_retained_selection_adoption_normal_run_and_default_denials(retained,mon
     missing = c.compose_selection.model_copy(update={"talking_runs":{}})
     state = c.composition.preflight(c.project,missing)
     assert not state["eligible"] and len(state["missing_scenes"])==1
-    saved = c.composition.save_selection(c.project,CompositionSave(selection=missing,expected_fingerprint=state["fingerprint"],idempotency_key="partial"))
-    assert c.composition.records.get("selection",saved["id"])["selection"] == missing.model_dump(mode="json")
     payload = adoption(c)
     value = c.composition.create(c.project,payload)
     assert value["current_eligible"],value
@@ -110,7 +108,9 @@ def test_retained_selection_adoption_normal_run_and_default_denials(retained,mon
     assert normal.evaluation_composition["id"] == value["id"]
     assert tuple(c.db.connection.execute("SELECT * FROM production_runs WHERE id=?",(str(c.parent.id),)).fetchone()) == parent
     assert ProviderCallRepository(c.db).list_all() == calls
-    assert list(c.db.connection.execute("SELECT * FROM execution_use_content_origins ORDER BY content_hash,subject_kind,subject_id")) == origins
+    # New real consumer Run retains the selected inputs' noncommercial use
+    # restriction; no original audio/asset/producer payload is reparented.
+    assert len(list(c.db.connection.execute("SELECT * FROM execution_use_content_origins"))) >= len(origins)
     # The exact concrete renderer and owned Worker run; the command runner and
     # measurement are synthetic. Real FFmpeg measurement is covered separately.
     from app.db import AssetRepository, ClipRepository, AudioAssetRepository
@@ -126,7 +126,9 @@ def test_retained_selection_adoption_normal_run_and_default_denials(retained,mon
     def measured(path,spec):
         return dict(state="verified",sha256=hashlib.sha256(path.read_bytes()).hexdigest(),video_frames=sum(s.duration_frames for s in spec.scenes),scope="synthetic_technical_only")
     monkeypatch.setattr(presentation_repair,"measure_render_output",measured)
-    handler = EvaluationCompositionHandler(c.db,c.root,renderer)
+    from app.jobs.handlers import RenderVideoJobHandler
+    from app.db import ProjectRepository
+    handler = RenderVideoJobHandler(ProjectRepository(c.db),renderer,c.root/"renders")
     import app.jobs.evaluation_composition_handler as owned_module
     original_error = owned_module.JobExecutionError
     def fixture_error(code,message,**kw):
@@ -251,15 +253,15 @@ def test_db_fence_tolerates_only_heartbeat_renewal(tmp_path):
         assert service._token()!=before
 
 
-def test_worker_policy_selects_only_named_composition_handler(tmp_path,monkeypatch):
+def test_worker_uses_one_render_handler_independent_of_legacy_policy(tmp_path,monkeypatch):
     from app.db import Database
     from app.worker_cli import parse_config,build_runner
     from app.domain.models import JobType
-    from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
+    from app.jobs.handlers import RenderVideoJobHandler
     cfg=parse_config(['--db',str(tmp_path/'worker.sqlite3'),'--data-root',str(tmp_path),'--once','--job-type','render','--max-attempts','1'])
     monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','evaluation-composition-v1')
     with Database(cfg.db_path) as db:
         runner=build_runner(cfg,db)
-        assert type(runner._handlers[JobType.RENDER]) is EvaluationCompositionHandler
+        assert type(runner._handlers[JobType.RENDER]) is RenderVideoJobHandler
         monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','unknown')
-        with pytest.raises(ValueError,match='policy_unsupported'):build_runner(cfg,db)
+        assert type(build_runner(cfg,db)._handlers[JobType.RENDER]) is RenderVideoJobHandler

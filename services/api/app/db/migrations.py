@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 53
+CURRENT_SCHEMA_VERSION = 54
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -692,6 +692,22 @@ _MIGRATIONS += ((53, (
 )),)
 
 
+# Existing render allowances can bind retained audio directly. No generation
+# Run is manufactured for an imported/historically approved Master.
+_MIGRATIONS += ((54, (
+    """CREATE TABLE evaluation_composition_batches_next (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        master_run_id TEXT REFERENCES production_runs(id), authorization_sha256 TEXT NOT NULL UNIQUE,
+        master_audio_id TEXT REFERENCES audio_assets(id),
+        CHECK((master_run_id IS NULL) != (master_audio_id IS NULL)),
+        UNIQUE(project_id,master_run_id), UNIQUE(project_id,master_audio_id)
+    )""",
+    "INSERT INTO evaluation_composition_batches_next SELECT id,project_id,master_run_id,authorization_sha256,NULL FROM evaluation_composition_batches",
+    "DROP TABLE evaluation_composition_batches",
+    "ALTER TABLE evaluation_composition_batches_next RENAME TO evaluation_composition_batches",
+)),)
+
+
 def apply_migrations(connection: sqlite3.Connection) -> int:
     connection.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY NOT NULL,
@@ -699,14 +715,24 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     )""")
     for version, sql in _MIGRATIONS:
         if connection.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone() is None:
+            foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+            if version == 54:
+                # SQLite's documented table-rebuild sequence: preserve referring
+                # rows, validate the complete graph before committing, restore FK.
+                connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute("BEGIN")
             try:
                 for statement in sql:
                     connection.execute(statement)
+                if version == 54 and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError("retained composition migration has invalid foreign keys")
                 connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
             except BaseException:
                 connection.rollback()
                 raise
             else:
                 connection.commit()
+            finally:
+                if version == 54:
+                    connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
     return CURRENT_SCHEMA_VERSION

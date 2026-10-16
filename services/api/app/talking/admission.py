@@ -1,11 +1,10 @@
 """One read-only production eligibility check for generated Talking visuals."""
 from __future__ import annotations
 
-from pathlib import Path
 from uuid import UUID
 
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, TalkingRunRepository, JobRepository
-from app.domain.models import Asset, AudioAsset, Clip, SourceKind, TalkingRun, TranscriptSegment, TalkingGenerationJobPayload
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, TalkingRunRepository
+from app.domain.models import Asset, AudioAsset, Clip, SourceKind, TalkingRun, TranscriptSegment
 
 
 def talking_visual_blocker(
@@ -17,6 +16,7 @@ def talking_visual_blocker(
     copy: str,
     master_audio_id: UUID | None = None,
     selected_duration_ms: int | None = None,
+    master_interval: tuple[int, int] | None = None,
 ) -> str | None:
     """Return a stable blocker; only an admitted, context-matching Run is eligible.
 
@@ -50,49 +50,37 @@ def talking_visual_blocker(
     run = TalkingRunRepository(assets.db).get(run_id)
     if run is None or not _run_metadata_matches(run, metadata):
         return "talking_run_record_mismatch"
-    planned_child = any((job := JobRepository(assets.db).get(child.job_id)) is not None
-                        and isinstance(job.payload, TalkingGenerationJobPayload) and job.payload.planned_context is not None
-                        for child in run.child_evidence)
-    if run.planned_origin_sha256 is not None or run.review_policy_version == 2 or planned_child:
-        from app.db import TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository
-        from app.production_runs import ProductionRunService, _snapshot_sha256
-        from app.talking.planned_admission import PlannedTalkingAdmissionError, PlannedTalkingAdmissionService
-        from app.talking.review_policy import TalkingReviewPolicyService
-
-        series = TalkingSliceSeriesRepository(assets.db).get(run.series_id)
-        review = TalkingSliceSeriesContinuityReviewRepository(assets.db).get_by_series_id(run.series_id)
-        if series is None or series.planned_origin is None or review is None or not review.approved:
-            return "talking_run_planned_review_missing"
-        data_root = Path(getattr(assets.db, "data_root", Path(assets.db.path).parent)).resolve()
-        production = ProductionRunService(assets.db, data_root).get(series.project_id, series.planned_origin.run_id)
-        if production is None or production.status not in {
-            "awaiting_talking_dependencies", "render_pending", "render_running",
-            "render_failed", "render_completed_awaiting_review",
-        } or not any(
-            item.scene_plan_id == series.planned_origin.scene_plan_id and item.talking_run_id == run.id
-            for item in production.talking_source_bindings
-        ):
-            return "talking_run_planned_binding_mismatch"
-        try:
-            candidate, qa_sha = PlannedTalkingAdmissionService(assets.db, data_root).require_current_candidate(series)
-            TalkingReviewPolicyService(assets.db).require_admitted_review(series, candidate, review, run)
-        except (PlannedTalkingAdmissionError, ValueError, OSError):
-            return "talking_run_planned_origin_stale"
-        if (candidate.id != run.assembled_asset_id
-            or review.id != run.continuity_review_id
-            or review.preview_asset_id != candidate.id
-            or review.preview_sha256 != candidate.content_hash
-            or review.preview_qa_sha256 != qa_sha
-            or review.planned_origin_sha256 != _snapshot_sha256(series.planned_origin.model_dump(mode="json"))
-            or run.planned_origin_sha256 != review.planned_origin_sha256
-            or run.reviewed_preview_sha256 != candidate.content_hash
-            or metadata.get("planned_origin_sha256") != run.planned_origin_sha256
-            or metadata.get("reviewed_preview_sha256") != candidate.content_hash):
-            return "talking_run_planned_review_mismatch"
     if run.project_id != project_id:
         return "talking_run_project_mismatch"
     if master_audio_id is not None and run.master_narration_audio_id != master_audio_id:
         return "talking_run_master_mismatch"
+    from app.db import TalkingSliceSeriesContinuityReviewRepository
+    from app.talking.review_policy import TalkingReviewPolicyService
+
+    from app.db import TalkingSliceSeriesRepository
+    series = TalkingSliceSeriesRepository(assets.db).get(run.series_id)
+    if series is None:
+        return "talking_run_source_missing"
+    if series.planned_origin is not None:
+        from pathlib import Path
+        from app.talking.source_admission import TalkingSourceAdmissionRepository
+        root = getattr(assets.db,"data_root",Path(assets.db.path).parent)
+        permission = TalkingSourceAdmissionRepository(assets.db,root).get(series.planned_origin.source_admission_id)
+        if permission is None or not permission.active:
+            return "talking_source_permission_revoked_or_missing"
+    review = TalkingSliceSeriesContinuityReviewRepository(assets.db).get_by_series_id(run.series_id)
+    if (review is None or review.id != run.continuity_review_id or not review.approved
+        or review.project_id != project_id or review.review_policy_version != run.review_policy_version
+        or review.child_job_ids != [child.job_id for child in run.child_evidence]):
+        return "talking_run_review_mismatch"
+    if run.review_policy_version == 2 and (review.dimensions is None or any(
+        value != "pass" for value in review.dimensions.model_dump(exclude={"schema_version"}).values()
+    )):
+        return "talking_run_review_mismatch"
+    try:
+        TalkingReviewPolicyService(assets.db).require_clear(project_id, asset.content_hash)
+    except ValueError as exc:
+        return str(exc)
     source = assets.get(run.assembled_asset_id)
     source_clip = ClipRepository(assets.db).get(run.assembled_clip_id)
     if (
@@ -106,6 +94,19 @@ def talking_visual_blocker(
         or source.metadata.get("talking_run") != metadata
     ):
         return "talking_run_source_identity_mismatch"
+    if review.preview_sha256 is not None and (review.preview_asset_id != source.id
+        or review.preview_sha256 != source.content_hash):
+        return "talking_run_review_mismatch"
+    if review.preview_sha256 is not None:
+        from pathlib import Path
+        from app.media.audio_access import file_digest
+        from app.media.local_paths import existing_local_media_file
+        root = getattr(assets.db,"data_root",Path(assets.db.path).parent)
+        try:
+            if file_digest(existing_local_media_file(source.source_file,root)) != review.preview_sha256:
+                return "talking_run_reviewed_bytes_changed"
+        except (ValueError,OSError):
+            return "talking_run_reviewed_bytes_changed"
     if asset.id == source.id:
         if clip.id != run.assembled_clip_id:
             return "talking_run_clip_mismatch"
@@ -138,9 +139,16 @@ def talking_visual_blocker(
     audio = AudioAssetRepository(assets.db).get(run.master_narration_audio_id)
     if audio is None:
         return "talking_run_master_missing"
-    voice = audio.metadata.get("voice_generation")
-    if isinstance(voice, dict) and (voice.get("qa_state") != "verified" or _voice_human_review_status(audio) != "approved"):
+    from app.assembly.video_spec import _require_generated_voice_qa
+    try:
+        _require_generated_voice_qa(audio,assets.db)
+    except ValueError:
         return "talking_run_master_not_approved"
+    if master_interval is not None:
+        first, last = master_interval
+        if first < start_ms or last > end_ms or last <= first:
+            return "talking_run_interval_mismatch"
+        start_ms, end_ms = first, last
     if not _matches_interval_copy(copy, audio.transcript_segments, start_ms, end_ms):
         return "talking_run_copy_mismatch"
     if selected_duration_ms is not None and selected_duration_ms < max(
@@ -175,11 +183,6 @@ def _matches_interval_copy(copy: str, segments: list[TranscriptSegment], start_m
     spoken = "".join(comparison_tokens(" ".join(segment.text for segment in covered)))
     return bool(target and spoken and target == spoken)
 
-
-def _voice_human_review_status(audio: AudioAsset) -> str:
-    from app.voice_qa import voice_human_review_status
-
-    return voice_human_review_status(audio)
 
 
 __all__ = ["talking_visual_blocker"]

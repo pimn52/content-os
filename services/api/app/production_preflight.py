@@ -24,7 +24,7 @@ from app.db import (
 from app.domain.models import (
     Asset, AudioAsset, CandidateAsset, CostCategory, CostEstimate, EditPlan, EditPlanScene, EditVisualRole, ImageAsset,
     GraphicTreatment, Project, ProjectDraft, ScenePlan, SourceKind,
-    PortraitPresentation, SubtitleTreatment, TalkingFramingPolicy, UsageCost, VisualStyleTokens,
+    PortraitPresentation, SubtitleTreatment, TalkingFramingPolicy, UsageCost, VisualStyleTokens, VideoSpec,
 )
 from app.media.crop_assessment import CropAssessmentRepository, CropProposal
 from app.routing import AssetRouter
@@ -50,7 +50,7 @@ class PreflightScene(BaseModel):
     selected_candidate: CandidateAsset | None = None
     source_authorization_reference: str | None = None
     production_need: Literal["none", "new_talking", "capture"] = "none"
-    suitability: Literal["known_deterministic", "reviewed_native_planned_run", "unknown"]
+    suitability: Literal["known_deterministic", "reviewed_native_planned_run", "reviewed_talking_run", "unknown"]
     subtitle_treatment: SubtitleTreatment
     burned_in_subtitles: Literal["unknown", "present", "absent"]
     graphic_treatment: GraphicTreatment
@@ -89,6 +89,8 @@ class ProductionPreflight(BaseModel):
     estimated_user_active_minutes: int | None = None
     estimated_local_runtime_ms: int | None = None
     dispatch_performed: Literal[False] = False
+    video_spec: VideoSpec | None = None
+    retained_media: dict | None = None
 
 
 def _presentation_for_style(entry: EditPlanScene, style: VisualStyleTokens) -> EditPlanScene:
@@ -131,6 +133,25 @@ def build_production_preflight(
     proposal_map = {proposal.scene_plan_id: proposal for proposal in crop_proposals}
     if None in proposal_map or len(proposal_map) != len(crop_proposals) or not set(proposal_map).issubset({scene.id for scene in scenes}):
         raise PreflightInputError("crop proposals require unique current ScenePlan identities")
+
+    if purpose == "internal_evaluation" and data_root is not None and not use_admission_ids:
+        from app.evaluation_composition import EvaluationCompositionService
+        from app.execution_admission import UseAdmissionError
+        consumer = EvaluationCompositionService(db,data_root)
+        selection = None
+        try:
+            selection = consumer.retained_selection(project.id,style_tokens)
+            context = consumer._context(project.id,selection)
+            if context["spec"] is not None:
+                return _retained_preflight(consumer,project,draft,context,expected_fingerprint)
+        except StaleProductionPreflight:
+            raise
+        except (UseAdmissionError, ValueError, OSError) as exc:
+            if selection is not None and len(selection.talking_runs) == len(scenes):
+                raise PreflightInputError(str(exc)) from None
+            # Missing/incompatible media stays an explicit dependency in the
+            # existing planner below; this branch never generates a replacement.
+            pass
 
     assets, clips, images = AssetRepository(db), ClipRepository(db), ImageAssetRepository(db)
     voice_copy = draft.script or "\n\n".join(scene.voice_text for scene in scenes)
@@ -438,6 +459,42 @@ def build_production_preflight(
     )
 
 
+def _retained_preflight(consumer,project,draft,context,expected_fingerprint):
+    spec = context["spec"]
+    stop = []
+    try:
+        consumer.current_use(project.id,context)
+        consumer.retained_batch(project.id,context["selection"])
+        consumer._check_render_budget(project.id,context)
+    except ValueError as exc:
+        stop.append(str(exc))
+    if expected_fingerprint is not None and expected_fingerprint != context["request_sha256"]:
+        raise StaleProductionPreflight("stale_production_preflight")
+    selected,decisions = [],[]
+    for scene in sorted(draft.scenes,key=lambda s:s.order):
+        item = context["inputs"][scene.id]
+        candidate = CandidateAsset(scene_plan_id=scene.id,source_kind=SourceKind.AI_VIDEO,
+            asset_id=item["asset"].id,clip_id=item["clip"].id,match_score=1,
+            why=["same-project approved TalkingRun; exact current speech interval"],recommended=True,
+            estimated_cost=UsageCost(category=CostCategory.TALKING,amount=Decimal("0"),currency="USD"))
+        selected.append(candidate)
+        decisions.append(PreflightScene(scene_plan_id=scene.id,scene_id=scene.scene_id,
+            visual_role=EditVisualRole.TALKING,planned_source_kind=SourceKind.AI_VIDEO,selected_candidate=candidate,
+            source_authorization_reference=item["asset"].authorization_reference,production_need="none",
+            suitability="reviewed_talking_run",subtitle_treatment=SubtitleTreatment.NONE,burned_in_subtitles="unknown",
+            graphic_treatment=GraphicTreatment.NONE,reasons=("retain reviewed full frame; no new crop or subtitle overlay",),
+            visual_dependency_fingerprint=_digest(next(p for p in context["proof"]["inputs"] if p["scene_id"]==str(scene.id)))))
+    actions = (_action("voice",None,False,0,"reuse approved Master without generation",CostCategory.VOICE,Decimal("0"),context["request_sha256"]),
+        _action("render",None,True,1,"existing once-only local retained-media render",CostCategory.RENDER,Decimal("0"),context["request_sha256"]))
+    return ProductionPreflight(project_id=project.id,draft_version=draft.version,script_revision=draft.script_revision,
+        reusable_master_audio_id=context["audio"].id,fingerprint=context["request_sha256"],
+        status="blocked" if stop else "ready_for_authorized_dispatch",scenes=tuple(decisions),
+        preliminary_edit_plan=spec.edit_plan,actions=actions,
+        cost_estimate=estimate_whole_production(selected,required_scene_count=len(decisions),actions=actions),
+        stop_reasons=tuple(stop),authorization_needs=("exact local noncommercial composition-use receipt and finite render allowance",),
+        video_spec=spec,retained_media=context["selection"].model_dump(mode="json"))
+
+
 def _reviewed_native_planned(db, project, scene, asset, clip, master):
     if asset is None or clip is None or asset.width >= asset.height:
         return False
@@ -494,8 +551,14 @@ def _approved_master(db: Database, project_id: UUID, copy: str) -> AudioAsset | 
         if (
             not audio.authorization_reference.strip()
             or voice_asset_project_id(audio, JobRepository(db)) != project_id
-            or voice_human_review_status(audio) != "approved"
         ):
+            continue
+        from app.assembly.video_spec import _require_generated_voice_qa
+        if not isinstance(audio.metadata.get("voice_generation"),dict):
+            continue
+        try:
+            _require_generated_voice_qa(audio,db)
+        except ValueError:
             continue
         spoken = "".join(comparison_tokens(" ".join(segment.text for segment in audio.transcript_segments)))
         if target and target == spoken:

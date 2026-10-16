@@ -2,7 +2,7 @@
 from app.assembly.edit_plan import resolve_edit_plan
 from app.assembly.video_spec import _audio_captions_for_interval, _master_offset_to_frames as timeline_frame
 from app.domain.models import (CandidateAsset, CostCategory, MasterNarration, PortraitPresentation,
-    SourceKind, UsageCost, VideoScene, VideoSpec, VideoVisual)
+    SourceKind, SubtitleTreatment, UsageCost, VideoScene, VideoSpec, VideoVisual)
 
 
 def assemble_retained_composition(project, audio, intervals, inputs, style):
@@ -12,10 +12,17 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
         match_score=1, why=["Explicit exact approved TalkingRun"], recommended=False, estimated_cost=cost)
         for scene, _, _ in intervals}
     ordered = [s for s, _, _ in intervals]
-    clips = {v["clip"].id: (v["clip"].start_ms,v["clip"].end_ms) for v in inputs.values()}
+    clips = {}
+    for value in inputs.values():
+        clip = value["clip"]
+        first,last = clips.get(clip.id,(clip.start_ms,clip.end_ms))
+        clips[clip.id] = (min(first,clip.start_ms),max(last,clip.end_ms))
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=None)
-    entries = [e.model_copy(update={"portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})
-        if style.name == "content-os-subject-first" else e for e in plan.scenes]
+    # Retain the reviewed complete frame. Unknown source subtitles never
+    # authorize another overlay, even when a legacy source is landscape.
+    entries = [e.model_copy(update={"subtitle_treatment": SubtitleTreatment.NONE, **(
+        {"portrait_presentation": PortraitPresentation.PORTRAIT_PANEL}
+        if style.name == "content-os-subject-first" else {})}) for e in plan.scenes]
     plan = plan.model_copy(update={"scenes": entries, "style_tokens": style})
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=plan)
     scenes = []

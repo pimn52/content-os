@@ -4662,31 +4662,41 @@ def create_app(
             preview_url=f"/projects/{project_id}/renders/{render_id}",
         )
 
-    @application.get("/projects/{project_id}/renders/{render_id}", tags=["render"])
-    async def get_rendered_video(project_id: UUID, render_id: UUID, request: Request) -> FileResponse:
-        if ProjectRepository(request.app.state.database).get(project_id) is None:
-            raise HTTPException(status_code=404, detail="project not found")
-        output = render_output_path(request.app.state.render_output_root, project_id, render_id)
+    def rendered_media_path(project_id,render_id,request,purpose):
+        db = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404,detail="project not found")
+        from app.evaluation_composition import EvaluationCompositionService
+        consumer = EvaluationCompositionService(db,request.app.state.data_root)
+        owner = consumer.records.owner(render_id=render_id)
+        if owner is not None:
+            try:
+                return consumer.media(project_id,UUID(owner["run_id"]),purpose)
+            except (ValueError,KeyError,TypeError,OSError):
+                raise HTTPException(status_code=403,detail="composition_current_scoped_result_required") from None
+        if purpose == "internal_evaluation":
+            raise HTTPException(status_code=403,detail="composition_run_owner_missing")
+        output = render_output_path(request.app.state.render_output_root,project_id,render_id)
         if not output.is_file():
-            raise HTTPException(status_code=404, detail="rendered video not found")
-        _ordinary_media(output, "render", render_id)
-        return FileResponse(output, media_type="video/mp4", filename=output.name)
+            raise HTTPException(status_code=404,detail="rendered video not found")
+        _ordinary_media(output,"render",render_id)
+        return output
+
+    @application.get("/projects/{project_id}/renders/{render_id}", tags=["render"])
+    async def get_rendered_video(project_id: UUID, render_id: UUID, request: Request, purpose: str | None = None) -> FileResponse:
+        output = rendered_media_path(project_id,render_id,request,purpose)
+        return FileResponse(output,media_type="video/mp4",filename=output.name,headers={"Cache-Control":"no-store"})
 
     @application.head("/projects/{project_id}/renders/{render_id}", include_in_schema=False)
-    async def head_rendered_video(project_id: UUID, render_id: UUID, request: Request) -> Response:
-        """Allow the Web workspace to validate a persisted local preview cheaply."""
-        if ProjectRepository(request.app.state.database).get(project_id) is None:
-            raise HTTPException(status_code=404, detail="project not found")
-        output = render_output_path(request.app.state.render_output_root, project_id, render_id)
-        if not output.is_file():
-            raise HTTPException(status_code=404, detail="rendered video not found")
-        _ordinary_media(output, "render", render_id)
+    async def head_rendered_video(project_id: UUID, render_id: UUID, request: Request, purpose: str | None = None) -> Response:
+        output = rendered_media_path(project_id,render_id,request,purpose)
         return Response(
             status_code=200,
             headers={
                 "content-type": "video/mp4",
                 "content-length": str(output.stat().st_size),
                 "accept-ranges": "bytes",
+                "cache-control": "no-store",
             },
         )
 

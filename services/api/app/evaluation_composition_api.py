@@ -2,7 +2,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import FileResponse
-from app.domain.evaluation_composition import CompositionSelection, CompositionSave, CompositionStart, CompositionAdoption
+from app.domain.evaluation_composition import CompositionSelection, CompositionAdoption
 from app.domain.evaluation_master import MasterRevocation
 from app.evaluation_composition import EvaluationCompositionService
 from app.evaluation_master_api import action
@@ -14,11 +14,6 @@ def service(request):
     return EvaluationCompositionService(request.app.state.database,request.app.state.data_root)
 
 
-@router.get("/candidates")
-async def candidates(project_id: UUID, request: Request):
-    return action(lambda: service(request).candidates(project_id))
-
-
 @router.post("/preflight")
 async def preflight(project_id: UUID, payload: CompositionSelection, request: Request):
     return service(request).preflight(project_id,payload)
@@ -27,11 +22,6 @@ async def preflight(project_id: UUID, payload: CompositionSelection, request: Re
 @router.get("/selections")
 async def selections(project_id: UUID, request: Request):
     return action(lambda: service(request).records.list("selection",project_id))
-
-
-@router.post("/selections",status_code=201)
-async def save(project_id: UUID, payload: CompositionSave, request: Request):
-    return action(lambda: service(request).save_selection(project_id,payload))
 
 
 @router.get("/admissions")
@@ -57,11 +47,6 @@ async def batches(project_id: UUID, request: Request):
 @router.post("/batches",status_code=201)
 async def batch(project_id: UUID, payload: CompositionAdoption, request: Request):
     return action(lambda: service(request).adopt_batch(project_id,payload,request.headers.get("x-content-os-execution-admission-key")))
-
-
-@router.post("/runs",status_code=201)
-async def create(project_id: UUID, payload: CompositionStart, request: Request):
-    return action(lambda: service(request).create(project_id,payload))
 
 
 @router.get("/runs")

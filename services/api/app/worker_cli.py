@@ -217,14 +217,6 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             ),
             config.data_root / "renders",
         )
-        render_policy = os.environ.get("CONTENT_OS_RENDER_EXECUTION_POLICY","commercial_production").strip()
-        if render_policy == "evaluation-composition-v1":
-            from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
-            handlers[JobType.RENDER] = EvaluationCompositionHandler(db,config.data_root,
-                RemotionRenderer(AssetRepository(db),ClipRepository(db),images=ImageAssetRepository(db),
-                    audios=AudioAssetRepository(db),renderer_dir=renderer_dir))
-        elif render_policy != "commercial_production":
-            raise ValueError("composition_render_policy_unsupported")
     if JobType.GENERATE_VOICE in config.job_types:
         if os.environ.get("CONTENT_OS_VOICE_PROVIDER", "").strip().lower() == "omnivoice-maintained":
             from app.jobs.voice_draft_handler import configured_voice_draft_handler

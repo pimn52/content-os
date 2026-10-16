@@ -1,8 +1,9 @@
 """Durable use restrictions, separate from media QA and inference authority.
 
 Sidecars leave legacy canonical payloads unchanged. These application-only
-methods are not an issuance API: scope creation requires current operator
-receipts, and no scope record enables the unfinished evaluation execution lane.
+methods are not an issuance API: inference requires current provider receipts.
+A retained render may carry an empty internal-only restriction; its existing
+Composition media-use receipt, owned Job and finite slot authorize consumption.
 """
 from __future__ import annotations
 
@@ -76,8 +77,6 @@ class ExecutionUseScope(ContractModel):
             raise ValueError("execution_use_bindings_must_be_unique_and_sorted")
         if self.purpose == "commercial_production" and self.bindings:
             raise ValueError("evaluation_scope_not_commercial")
-        if self.purpose == "internal_evaluation" and not self.bindings:
-            raise ValueError("provider_use_admission_missing")
         return self
 
     @property
@@ -184,6 +183,11 @@ class ExecutionScopeService:
             raise UseAdmissionError("evaluation_scope_not_commercial")
         if scope.project_id != project_id:
             raise UseAdmissionError("provider_use_project_mismatch")
+        # A retained Composition may carry only a noncommercial restriction.
+        # Its exact media-use receipt is checked by Composition, not a provider
+        # generation grant. An empty restriction never authorizes these calls.
+        if scope.purpose == "internal_evaluation" and not scope.bindings:
+            raise UseAdmissionError("provider_use_admission_missing")
         for binding in scope.bindings:
             receipt = self.admissions.get(project_id, binding.admission_id)
             if receipt is None:

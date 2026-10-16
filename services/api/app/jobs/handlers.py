@@ -170,6 +170,14 @@ class RenderVideoJobHandler:
         self._renderer = renderer
         self._output_root = Path(output_root).resolve()
 
+    @property
+    def db(self):
+        return getattr(self._projects,"db",None)
+
+    def require_dispatch(self, job):
+        from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
+        EvaluationCompositionHandler(self.db,self._renderer.data_root,self._renderer).require_dispatch(job)
+
     def __call__(self, job: Job) -> None:
         if job.status is not JobStatus.RUNNING:
             raise JobExecutionError("job_not_claimed", "job must be claimed before execution", retryable=False)
@@ -181,6 +189,11 @@ class RenderVideoJobHandler:
         output = render_output_path(self._output_root, payload.project_id, payload.render_id)
         repair_service, call, ledger = None, None, None
         database = getattr(self._projects, "db", None)
+        if database is not None:
+            from app.evaluation_composition import is_composition
+            if is_composition(database,job_id=job.id):
+                from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
+                return EvaluationCompositionHandler(database,self._renderer.data_root,self._renderer)(job)
         _require_closed_evaluation_lane(database, job)
         def require_current_use_constraints():
             if database is not None:

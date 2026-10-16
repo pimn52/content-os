@@ -272,23 +272,30 @@ Feedback records generate next-suggestion text. Exact retained presentation dupl
 
 ## Current capability
 
-The explicit internal `evaluation-composition-v1` continuation selects exact
-approved evaluation TalkingRuns against an unchanged approved Master. It saves
-partial selections with missing scenes visible, adopts an exact composition-use
-assessment, and creates a separate owned local render Run under a finite batch.
-It reuses EditPlan/VideoSpec/Remotion/FFmpeg, full continuous audio and captions;
-a non-speaking terminal interval is an explicit neutral background with no text.
-Scoped media access, persisted lineage, once-only accounting and saved-result
-reconciliation are implemented for this lane; ordinary/commercial admission is
-unchanged. Cancellation preserves the original claim and scene slot. A narrow,
-explicitly linked no-dispatch continuation after a genuine owned-application
-identity correction is implemented under D029; real recovery and normal user
-workflow validation remain separate. Any provider reservation or uncertain execution
-still forbids replacement. A missing required speaking scene blocks full-topic composition. Synthetic
-integration, permission/HTTP/recovery/heartbeat tests and
-measured synthetic AV pass. Real full-topic execution, user-operated UI, final U-Product and repeatability
-are not yet proved. This lane currently supports explicit creator-speaking scenes,
-not tutorial/action-evidence replacement or automatic editorial selection.
+Normal production preflight/start now consumes approved same-project retained
+Voice/Talking through the existing `evaluation-composition-v1` executor. It
+selects an AudioAsset directly, maps exact current scene speech into one or
+more original TalkingRuns, and emits a full-Master VideoSpec. Historical
+EvaluationMaster/child-operation bindings, generation status/runtime versions
+and policy2 generation history are not consumption prerequisites. Current
+consent, retained independent or legacy quality review, original file hashes,
+copy/timing, source-use exclusions and applicable third-party terms remain
+mandatory. An operator adopts the existing exact composition-use review and
+one local-render allowance; a purpose label or old provider grant is insufficient.
+Generation admission remains separate and does not accept these consumer grants.
+
+The ordinary Render Worker delegates to the same once-only private executor;
+no separate Worker policy or second composition selection/save/start UI is
+needed. Normal render GET/HEAD/Range access checks the owned Run, current
+permission, project and actual result hash under explicit internal purpose.
+Selected input/output bytes retain their noncommercial restriction across
+aliases. Unknown source subtitles receive no added overlay, reviewed full
+frames are contained without a new crop, and a terminal non-speaking interval
+uses an explicit text-free neutral background. Failed execution preserves its
+spent slot; saved-result reconciliation performs no new render. Old read-only
+history/operator/recovery APIs remain available. This retained creator-speaking
+path does not establish new-topic generation, automatic editorial suitability,
+user-operated end-to-end acceptance or the30–60s R1/repeatability endpoint.
 
 MasterNarration, VideoSpec, local rendering, subtitles, publication/feedback records and usage evidence exist.
 

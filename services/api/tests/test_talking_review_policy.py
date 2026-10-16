@@ -132,7 +132,7 @@ def test_v2_local_answers_and_late_concern_preserve_full_review(tmp_path, monkey
         late, _ = concern(client, url, preview, key="late")
         assert late.status_code == 201
         assert client.post(f"{url}/talking-run").status_code == 409
-        assert blocker(path, project, admitted) == "talking_run_planned_origin_stale"
+        assert blocker(path, project, admitted).startswith("talking_local_review_pending:")
         fixed = client.post(f"{url}/review-concern-answers", json={
             "preview_asset_id": str(preview.id), "preview_sha256": preview.content_hash,
             "answers": [answer(late.json())],

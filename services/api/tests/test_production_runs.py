@@ -81,7 +81,11 @@ def _generated_voice_output(path: Path, project_id: str, job_id: str, copy: str)
         }},
     )
     with Database(path) as db:
-        AudioAssetRepository(db).create(audio)
+        # Match the existing real generation handler's durable profile identity.
+        # Consumer consent no longer travels through a historical Run binding.
+        origin=JobRepository(db).get(UUID(job_id))
+        generation={**audio.metadata["voice_generation"],"voice_profile_id":str(origin.payload.voice_profile_id)}
+        AudioAssetRepository(db).create(audio.model_copy(update={"metadata":{"voice_generation":generation}}))
     return audio.id
 
 
@@ -1471,7 +1475,7 @@ def test_planned_exact_preview_review_and_admission_promote_same_bytes(
                 master_audio_id=master.id, selected_duration_ms=preview.duration_ms,
             ) is None
             assert ProviderCallRepository(db).list_for_project(UUID(project_id)) == []
-            # A missing product binding must fail before router/origin recursion.
+            # Retained consumption no longer depends on the old generation Run binding.
             row = db.connection.execute(
                 "SELECT talking_source_bindings FROM production_runs WHERE id = ?", (waiting["id"],),
             ).fetchone()
@@ -1483,7 +1487,7 @@ def test_planned_exact_preview_review_and_admission_promote_same_bytes(
             )
             assert talking_visual_blocker(
                 final, clip, AssetRepository(db), project_id=UUID(project_id), copy=copy,
-            ) == "talking_run_planned_binding_mismatch"
+            ) is None
 
 
 @pytest.mark.parametrize("new_voice", [False, True])

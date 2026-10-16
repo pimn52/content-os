@@ -190,7 +190,7 @@ class VideoSpecAssembler:
                 audio = self.audios.get(audio_id)
                 if audio is None:
                     raise CandidateNotFound("selected narration audio does not exist")
-                _require_generated_voice_qa(audio)
+                _require_generated_voice_qa(audio, self.assets.db)
                 narration_audio[scene_id] = audio
         video_scenes: list[VideoScene] = []
         start_frame = 0
@@ -371,7 +371,7 @@ class VideoSpecAssembler:
         audio = self.audios.get(master_audio_id)
         if audio is None:
             raise CandidateNotFound("selected master narration audio does not exist")
-        _require_generated_voice_qa(audio)
+        _require_generated_voice_qa(audio, self.assets.db)
         if not audio.transcript_source or not audio.transcript_segments:
             raise NarrationTimelineError(
                 "master narration requires a persisted actual SRT/VTT or provider timing result before it can drive video scenes"
@@ -614,7 +614,7 @@ class VideoSpecAssembler:
         return image
 
 
-def _require_generated_voice_qa(audio: AudioAsset) -> None:
+def _require_generated_voice_qa(audio: AudioAsset, db=None) -> None:
     """Keep generated narration out of final assembly until both gates pass.
 
     Imported/recorded narration remains an explicit fallback.  Only assets
@@ -622,6 +622,39 @@ def _require_generated_voice_qa(audio: AudioAsset) -> None:
     independent technical QA plus U-Voice decision remain distinct.
     """
 
+    generation = audio.metadata.get("voice_generation")
+    if db is not None:
+        profile_id = generation.get("voice_profile_id") if isinstance(generation,dict) else None
+        if profile_id:
+            from app.db import VoiceProfileRepository
+            try:
+                profile = VoiceProfileRepository(db).get(UUID(profile_id))
+                if profile is None or not profile.consent.confirmed:
+                    raise ValueError()
+            except ValueError:
+                raise GeneratedNarrationQaPending("retained_voice_consent_required") from None
+        from app.voice_evaluation_qa import has_qa_reference, retained_claim
+        if has_qa_reference(db,audio):
+            from app.db import ProviderCallRepository
+            from app.db.voice_evaluation_review import EvaluationVoiceReviewRepository
+            from app.domain.models import execution_canonical_sha256 as digest
+            record = EvaluationVoiceReviewRepository(db).get_by_audio(audio.id)
+            claim = retained_claim(db,audio.id)
+            call = ProviderCallRepository(db).get(record.qa_call_id) if record else None
+            result = (call.result_payload or {}).get("result") if call else None
+            # Validate retained QA/review integrity, without re-admitting the old
+            # ASR/Voice runtime, configuration or generation budget.
+            if (record is None or claim is None or call is None or call.status != "completed"
+                or not record.review.approved or record.audio_sha256 != audio.content_hash
+                or record.project_id != claim.project_id or call.project_id != record.project_id
+                or record.qa_job_id != claim.job_id or record.qa_claim_sha256 != digest(claim.model_dump(mode="json"))
+                or not isinstance(result,dict) or record.qa_result_sha256 != digest(result)
+                or result.get("job_id") != str(claim.job_id) or result.get("audio_id") != str(audio.id)
+                or result.get("claim_sha256") != record.qa_claim_sha256
+                or record.projection_sha256 != digest(audio.model_dump(mode="json"))
+                or result.get("projection_sha256") != record.projection_sha256):
+                raise GeneratedNarrationQaPending("retained_voice_quality_binding_changed")
+            return
     generation = audio.metadata.get("voice_generation")
     if not isinstance(generation, dict):
         return

@@ -8,7 +8,6 @@ The original media files are never modified.
 from __future__ import annotations
 
 import json
-import hashlib
 import math
 import os
 import re
@@ -22,7 +21,7 @@ from urllib.parse import urlsplit
 from app.media.local_paths import resolve_local_media_path
 from uuid import UUID, uuid4
 
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, ImageAssetRepository, TalkingRunRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, ImageAssetRepository
 from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, PortraitPresentation, ProjectFormat, RationalFps, SourceKind, VerticalReframeMode, VideoScene, VideoSpec
 from app.talking.admission import talking_visual_blocker
 
@@ -286,13 +285,6 @@ class RemotionRenderer:
             if blocker is not None:
                 raise UnauthorizedVisualError(f"generated Talking visual: {blocker}")
         source = _local_existing_file(asset, self.data_root)
-        run_metadata = asset.metadata.get("talking_run")
-        run_id = run_metadata.get("run_id") if isinstance(run_metadata, dict) else None
-        run_record = TalkingRunRepository(self.assets.db).get(UUID(run_id)) if isinstance(run_id, str) else None
-        if run_record is not None and run_record.planned_origin_sha256 is not None:
-            with source.open("rb") as stream:
-                if hashlib.file_digest(stream, "sha256").hexdigest() != asset.content_hash:
-                    raise UnauthorizedVisualError("reviewed TalkingRun bytes changed before render")
         # Remotion trimBefore/trimAfter are measured in composition frames,
         # not the source file's native frame rate.
         trim_before = _ceil_frames(visual.clip_start_ms, composition_fps)

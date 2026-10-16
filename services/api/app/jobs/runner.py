@@ -212,6 +212,10 @@ class JobRunner:
                         EvaluationTalkingPreviewHandler: "evaluation_talking_handler_unsupported",
                         EvaluationCompositionHandler: "composition_handler_unsupported",
                     }
+                    from app.jobs.handlers import RenderVideoJobHandler
+                    from app.evaluation_composition import is_composition
+                    if type(handler) is RenderVideoJobHandler and is_composition(self._store.db,job_id=job.id):
+                        owned_types[RenderVideoJobHandler] = "composition_handler_unsupported"
                     if type(handler) in owned_types:
                         if handler.db is not self._store.db:
                             raise UseAdmissionError(owned_types[type(handler)])

@@ -277,7 +277,7 @@ def test_normal_preflight_is_pure_purpose_bound_and_start_fails_closed(scoped):
     assert "evaluation_execution_not_integrated" in plan["stop_reasons"]
     denied = client.post(f"/projects/{project}/production-runs", json={**request,
         "idempotency_key": "scope-normal", "expected_fingerprint": plan["fingerprint"]})
-    assert denied.status_code == 409 and denied.json()["detail"]["reasons"] == ["evaluation_execution_not_integrated"]
+    assert denied.status_code == 409 and denied.json()["detail"]["reasons"] == ["provider_receipts_are_not_media_use_permission"]
     assert client.post(f"/projects/{project}/production-preflight", json={"purpose": "unknown"}).status_code == 422
     assert client.post(f"/projects/{project}/production-runs", json={"purpose": "unknown",
         "idempotency_key": "unknown", "expected_fingerprint": old["fingerprint"]}).status_code == 422

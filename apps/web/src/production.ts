@@ -1,6 +1,7 @@
 export type ProductionPlan = {
   project_id: string; draft_version: number; script_revision: number; fingerprint: string;
   status: string; evidence_level: string;
+  retained_media?: Record<string, unknown> | null;
   cost_estimate: { known_amount: string; currency: string; unknown_cost_count: number };
   estimated_local_runtime_ms: number | null; estimated_user_active_minutes: number | null;
   stop_reasons: string[]; authorization_needs: string[];
@@ -10,6 +11,7 @@ export type ProductionPlan = {
 export type ProductionRun = {
   id: string; project_id: string; status: string; preflight_fingerprint: string; render_job_id: string | null;
   talking_review_policy_version?: 1 | 2;
+  evaluation_composition?: {render_id: string; state: string; current_eligible: boolean; reasons: string[]} | null;
   created_at?: string;
   evaluation_master?: { current_eligible: boolean; whole_run_ready: false; audio_id?: string; audio_sha256?: string; duration_ms?: number; copy?: string } | null;
   voice_job_id: string | null; voice_audio_id: string | null; voice_qa_job_id: string | null;
