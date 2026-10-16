@@ -288,6 +288,9 @@ class OpenAICompatibleScenePlanner:
         if not isinstance(model, str) or not model.strip():
             raise ScenePlannerConfigurationError("scene planner model must not be empty")
         selected_protocol = _validate_protocol(protocol)
+        self._deepseek_chat = selected_protocol == "chat_completions" and normalized_base_url.rstrip("/") in (
+            "https://api.deepseek.com", "https://api.deepseek.com/v1",
+        )
         if chat_output_mode not in ("prompt", "json_schema") or (selected_protocol != "chat_completions" and chat_output_mode != "prompt"):
             raise ScenePlannerConfigurationError("chat output mode requires prompt or chat_completions json_schema")
         if isinstance(timeout_seconds, bool):
@@ -299,9 +302,11 @@ class OpenAICompatibleScenePlanner:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ScenePlannerConfigurationError("scene planner timeout must be finite and positive")
         if reasoning_effort is not None and (
-            selected_protocol != "chat_completions" or reasoning_effort not in ("low", "high", "max")
+            selected_protocol != "chat_completions" or reasoning_effort not in (
+                ("none", "low", "high", "max") if self._deepseek_chat else ("low", "high", "max")
+            )
         ):
-            raise ScenePlannerConfigurationError("reasoning effort requires chat_completions and low/high/max")
+            raise ScenePlannerConfigurationError("reasoning effort requires chat_completions and low/high/max; none requires official DeepSeek")
         if max_output_tokens is not None and (
             isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or max_output_tokens <= 0
         ):
@@ -363,7 +368,10 @@ class OpenAICompatibleScenePlanner:
         if self.reasoning_effort is not None:
             body["reasoning_effort"] = self.reasoning_effort
         if self.max_output_tokens is not None:
-            body["max_output_tokens" if self.protocol == "responses" else "max_completion_tokens"] = self.max_output_tokens
+            limit_field = "max_output_tokens" if self.protocol == "responses" else (
+                "max_tokens" if self._deepseek_chat else "max_completion_tokens"
+            )
+            body[limit_field] = self.max_output_tokens
         encoded_body = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         started = time.monotonic()
         stage = "transport"

@@ -384,6 +384,39 @@ def test_explicit_output_limit_and_effort(protocol, field, caplog):
     assert "private-key" not in caplog.text and "private-script" not in caplog.text
 
 
+@pytest.mark.parametrize("base_url", ["https://api.deepseek.com", "https://api.deepseek.com/v1/"])
+def test_official_deepseek_chat_controls_and_parsing(base_url):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+
+    calls = []
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            calls.append((url, json.loads(body), timeout_seconds))
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([_scene("planned", 0)])).encode(), {})
+
+    result = OpenAICompatibleScenePlanner("runtime-key", base_url=base_url, model="deepseek-flash",
+        protocol="chat_completions", reasoning_effort="none", max_output_tokens=4096,
+        timeout_seconds=90, transport=Transport()).plan(_project())
+    assert len(calls) == 1 and calls[0][0] == base_url.rstrip("/") + "/chat/completions"
+    body = calls[0][1]
+    assert body["max_tokens"] == 4096 and body["reasoning_effort"] == "none"
+    assert "max_completion_tokens" not in body and "max_output_tokens" not in body
+    assert body["model"] == "deepseek-flash" and calls[0][2] == 90
+    assert "Required output JSON Schema" in body["messages"][0]["content"]
+    assert result.scenes[0].scene_id == "planned"
+
+
+@pytest.mark.parametrize("base_url,protocol", [
+    ("https://api.openai.com/v1", "chat_completions"),
+    ("https://api.moonshot.cn/v1", "chat_completions"),
+    ("https://api.deepseek.com.example/v1", "chat_completions"),
+    ("https://api.deepseek.com", "responses"),
+])
+def test_reasoning_none_does_not_change_other_endpoints(base_url, protocol):
+    with pytest.raises(ScenePlannerConfigurationError):
+        OpenAICompatibleScenePlanner("key", base_url=base_url, protocol=protocol, reasoning_effort="none")
+
+
 @pytest.mark.parametrize("options", [
     {"max_output_tokens": True}, {"max_output_tokens": 0}, {"max_output_tokens": -1},
     {"max_output_tokens": "4096"}, {"max_output_tokens": 1.5},
