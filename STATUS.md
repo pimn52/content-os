@@ -1,48 +1,41 @@
-# Content OS — Recovery Status (STOP-LOSS)
+# Content OS — Recovery Status
 
-Updated: 2026-10-15
-Working branch: `recovery/stoploss-20261015`
-Frozen source commit: `f32677d13fbba8a6dbdbac48030eaa5ea4f49907`
+Updated: 2026-10-16
+Branch: `recovery/stoploss-20261015`
+Frozen `master` source: `f32677d13fbba8a6dbdbac48030eaa5ea4f49907`
 
-## Recovery decision — effective immediately on this branch
+## Current truth
 
-**STOP all feature implementation and unattended package chaining.** The former R1-W53 and other queued packages are suspended. Their historic authority does not authorize new Voice/Talking calls, render attempts, provider/runtime research, code changes, dependency installation or new architecture on this branch.
+- Content OS is internal Alpha. No normal UI-to-publishable 30–60s new-topic + second-topic repeatability PASS has been shown.
+- The Windows operator reports that V55 (26.320s TalkingRun), V60 (32.560s Master) and V64 (32.400s TalkingRun) have been matched to persisted DB/reviews and SHA-256/ffprobe evidence; 24 associated media files passed checks. No new inference/render ran. Local audit reports, not GitHub source, carry these byte-level claims.
+- Backup reported at `C:\Users\ASUS\Documents\ContentOS-stoploss-backup-20261016-0055`: 20.652 GiB archive, 233,852 per-file hash matches, 5,947 SQLite consistent snapshots, 3 golden recovery probes. The backup is **on the same C: drive**; 20 access-denied historical directories were excluded. This is sufficient to start **reversible Git-tracked source cleanup**, not to delete the original local media, databases, weights, environments or denied directories.
+- Source/docs/tests are ~7.11 MiB; ~38.08 GiB of local occupied space is primarily data, test databases, model weights and multiple environments. Code reduction targets maintenance/correctness, not immediate GB savings.
+- Normal source-backed Voice/Talking generation previously worked, but later evaluation/production/attestation layers have grown and fresh media quality regressed. No product quality claim comes from fixture tests alone.
+- Existing model-use restrictions, consent, project/source identity, private files, cost/budget, QA and original golden evidence remain binding. The old R1-W53 authority is suspended on this branch.
+- Do not merge to `master` automatically. The recovery branch is not a backup of untracked user assets.
 
-This is **not** a product PASS or a finding that the old code is safe to delete. The next work is evidence-based simplification, approved in steps.
+## Active work package — C1: retire unused historical experiment scripts
 
-## Current verified/reported truth
+**State: READY. Owner approved staged cleanup after verified local backup.**
 
-- Content OS is internal Alpha. Normal UI-to-publishable-video and second-topic repeatability have not been demonstrated.
-- Prior user-approved media must be preserved: V55 (2026-09-25, reported 26.32s / 9 Talking pieces), V60 (32.560s MasterNarration) and V64 (32.400s TalkingRun). These descriptions come from retained project/review records; **the local media bytes, hashes, database bindings, consent and review artifacts must be rechecked before claiming a runnable golden regression**.
-- Newer approximately 23.2s Voice and regressed Talking output are **not** permitted to overwrite those baselines.
-- The 2026-10-15 master introduced broad production/evaluation/runtime changes while no new publishable full-video U-Product PASS was established. Contract, fixture and code checks cannot substitute for user-assessed real-media quality.
-- The current implementation contains large potentially redundant native-loader/attestation, evaluation-script and multi-entry orchestration regions. These are **audit candidates only**, not yet proven unreachable/deletable.
-- Existing privacy, authorization, model-license, consent, provider costs, asset provenance and real quality gates stay in effect. Recovery is not a bypass.
+**Objective:** make one real, reversible deletion-only source cleanup without affecting current runtime, golden-media reproducibility or permissions.
 
-## One active work item — A0: preserve baseline and produce deletion-impact map
+**Allowed deletion candidates:** `scripts/evaluate_v21*.py` through `scripts/evaluate_v54*.py`, plus narrowly associated `scripts/diagnose_v*.py` in the same old experiment range. These are **candidates**, not an automatic filename-based delete list.
 
-**State: AWAITING_U_REVIEW** — only the recovery-branch document freeze is authorized in this step. Do not auto-execute A0 before the owner approves the next read-only audit.
+**Must first prove:** for each selected script, enumerate source/test/build/CLI/docs callers using repo-wide `rg`, and check any dynamic script-name dispatch/config/readme references. If the script is used to reproduce V55/V60/V64 evidence, remains an active CI/CLI command, or has an unresolved caller, **keep it**. Historical source is preserved in frozen Git commit; do not migrate dead scripts into another active folder.
 
-### A0 scope, after owner confirmation
+**Change cap:** at most 15 individually proven inactive files in this batch; `git rm` tracked source only. No library/DB/media/weight deletion, no refactor/replacement implementation, no changes to provider/worker/frontend/runtime/rights rules, no newly generated files outside an ordinary short result. Do not delete tests for still-supported functionality. A zero-deletion result is permitted when the call graph does not justify deletion.
 
-1. Have the owner protect the local `content-os-data` media/DB/evidence externally, without placing personal media, secrets or model weights in Git.
-2. Verify exact retained golden paths, hashes, IDs, human review and execution configuration; record missing artifacts honestly.
-3. Trace from normal UI/API/worker/render entrypoints to modules. Classify candidate code as **KEEP / MERGE / ISOLATE / DELETE-CANDIDATE**, with real callers, test evidence, expected net simplification and rollback conditions.
-4. Identify the minimum viable production flow and compare it with the last approved golden path; distinguish a code-level pass from an actual media/U-Product pass.
-5. Return a **bounded review table** to the owner. No deletions or implementation changes in A0.
+**Validation:** before/after `git diff --stat`, `git diff --check`, `git status`, script entry references and the smallest relevant unit/import tests. Run `python scripts/check_docs.py`; if unrelated existing doc governance checks fail, identify exact baseline, do not open an unrelated repair task. Explicitly compare V55/V60/V64 reference paths/scripts and ensure no golden source/evidence was touched. State exact delete count and net lines removed, not generic 'cleanup PASS'.
 
-### Prohibited until a separately approved cleanup slice
+**Exit:** `READY` → `RUNNING` → `PASS`, `BLOCKED` or `FAIL`; stop for owner review after one local committed cleanup change (push only this recovery branch). No next package, no model call, no render.
 
-- no model inference, regeneration, provider shopping or render;
-- no Git history rewrite or destructive repository/file/DB actions;
-- no additional native loader, attestation, defense framework, state machine or governance framework;
-- no automatic next package when an audit ends;
-- no relaxing rights, consent, license, privacy, billing or quality checks to get a green status.
+## Short queue (not execution authority)
 
-## Gate to subsequent steps
+- C2: remove redundant native/PE source-attestation implementation **only after** the retained production adapter has one compatible maintained-process path and rights/security constraints are explicitly mapped, tested and approved.
+- C3: consolidate Evaluation/Production entrypoints into one normal user workflow; then slim API and web integration based on measured call graphs.
+- C4: second-topic real-media product acceptance after approved restructuring.
 
-After A0, owner explicitly accepts a per-module change list (files to keep/change/delete, impact, precise tests and rollback). Then implement **one bounded deletion/merge slice at a time**, compare golden outputs, report net code/dependency reduction and stop for approval again.
+## Recovery rule
 
-## Execution handoff
-
-Read `AGENTS.md` recovery override first, then this STATUS and only the relevant code. The old `docs/implementation/ROADMAP.md` and R1-W53 instructions are retained as historical context **but are not execution authority during recovery**. If local media/DB or authorizations are unavailable, mark that fact `BLOCKED`; do not invent a new task to work around it.
+Do not promote code/test/schema success to video quality PASS. Preserve golden output. Protect untracked private media separately. All later cleanup slices require owner review of changed files and rollback plan.
