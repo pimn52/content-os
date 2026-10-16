@@ -69,10 +69,12 @@ def test_scene_planning_context_includes_active_opportunity_evidence(tmp_path: P
         opportunity_id = created.json()["id"]
     db = Database(path)
     try:
-        context, refs = _scene_planning_context(db, project)
+        context, refs = _scene_planning_context(db, project, topic="A sourced topic")
         assert f"opportunity:{opportunity_id}" in refs
         assert "note:user:idea:1" in refs
         assert context["opportunities"][0]["title"] == "A sourced topic"
+        unrelated, _ = _scene_planning_context(db, project, topic="Backpack packing")
+        assert unrelated["opportunities"] == []
     finally:
         db.close()
 

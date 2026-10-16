@@ -26,6 +26,16 @@ A creator should be able to upload/confirm their own information once, then repe
 
 Stores confirmed creator context and evidence. Drafts retain the IP-profile version used so later changes can invalidate stale downstream outputs.
 
+ScenePlanner receives a small positioning brief instead of creator identity,
+private knowledge or arbitrary profile metadata; contact URLs/email/phone text
+is redacted. Existing boundaries and adopted planning/use constraints remain.
+The server supplies at most three short, locally retrieved visual summaries
+for the requested topic, with Clip/source references and an explicit gap when
+none is confirmed. Full transcripts stay local to the existing Router/search;
+lexical hints do not grant rights, quality or visual suitability. Unrelated
+opportunities are omitted. ScenePlan schema, generation admission and budgets
+are unchanged.
+
 ### Topic / Opportunity intake
 
 R1 supports explicit, sourced inputs such as:

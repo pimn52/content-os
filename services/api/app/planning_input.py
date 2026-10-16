@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import re
 
-from app.domain.models import Project, ScenePlan
+from app.domain.models import IPProfile, Project, ScenePlan
 
 
 SEMANTIC_EMPHASIS_RULE = "semantic_graphic_not_full_copy_v1"
@@ -17,6 +17,19 @@ _WORKFLOW_PHRASES = ("退回正常预检", "缺短句→预检", "missingalterna
 
 def _compact(text: str) -> str:
     return re.sub(r"\s+", "", text).casefold()
+
+
+def creator_planning_brief(profile: IPProfile) -> dict[str, object]:
+    """Positioning only: omit identity, private knowledge and arbitrary metadata."""
+    def text(value: str) -> str:
+        return re.sub(r"https?://\S+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|(?<!\d)\+?\d[\d -]{9,}\d(?!\d)", "[redacted]", value)
+    return {
+        "domains": [text(v)[:80] for v in profile.domains[:5]],
+        "audience": text(profile.audience or "")[:200],
+        "style_notes": [text(v)[:160] for v in profile.style_notes[:5]],
+        "boundaries": [text(v) for v in profile.boundaries],
+        "avoided_expressions": [text(v) for v in profile.avoided_expressions],
+    }
 
 
 def planning_request(project: Project, *, topic: str, script: str | None,

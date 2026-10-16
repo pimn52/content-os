@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import json
 import pytest
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +10,67 @@ from app.db import Database, IPProfileRepository, ProjectRepository
 from app.domain.models import IPProfile, Project, RationalFps, ScenePlan, SourceKind, VisualIntent
 from app.main import _scene_planner_from_env, create_app
 from app.providers.scene_planner import OpenAICompatibleScenePlanner, ScenePlanResult, ScenePlannerHTTPResponse
+
+
+def test_normal_api_sends_small_topic_brief_and_router_keeps_full_local_clips(tmp_path):
+    from app.db import AssetRepository, ClipRepository
+    from app.domain.models import Asset, Clip
+    from app.routing import AssetRouter
+    from app.search import ClipTextSearchService
+    from app.main import _scene_planning_context
+    path = tmp_path / 'small-context.sqlite'
+    project = _project(path)
+    private = 'PRIVATE_FULL_TRANSCRIPT ' * 3000
+    stored_clips = []
+    with Database(path) as db:
+        profile = IPProfileRepository(db).get(project.ip_profile_id)
+        IPProfileRepository(db).update(profile.model_copy(update={
+            'creator_name':'PRIVATE_NAME','knowledge':[private], 'metadata':{'secret':'PRIVATE_KEY'},
+            'audience':'builders contact me@example.com', 'style_notes':['call +8613812345678']}))
+        for i in range(12):
+            metadata = {'r1_usage':'production'}
+            if i == 10: metadata['project_id'] = str(uuid4())
+            if i == 11: metadata['r1_usage'] = 'unknown'
+            asset = Asset(source_file=f'local-{i}.mp4',content_hash=f'{i:064x}',duration_ms=10000,
+                width=1280,height=720,fps=project.fps,authorization_reference='synthetic approved source',
+                imported_at=project.created_at,metadata=metadata)
+            AssetRepository(db).create(asset)
+            clip = Clip(asset_id=asset.id,start_ms=0,end_ms=10000,asset_duration_ms=10000,
+                visual_description='Backpack balance demonstration' if i < 4 or i >= 10 else 'Unrelated kitchen cooking video',
+                transcript=private)
+            ClipRepository(db).create(clip)
+            stored_clips.append(clip)
+            gap,_ = _scene_planning_context(db,project,topic='video quasar spectroscopy')
+        assert gap['materials'] == [] and gap['material_gap']
+    bodies = []
+    class Transport:
+        def post(self,url,headers,body,timeout_seconds):
+            bodies.append(body)
+            return _runtime_plan_response()
+    planner = OpenAICompatibleScenePlanner('fixture-key',transport=Transport())
+    with TestClient(create_app(path,scene_planner=planner)) as client:
+        client.put(f'/projects/{project.id}/budget',json={'max_calls':1,'allow_unknown_cost':True}).raise_for_status()
+        response = client.post(f'/projects/{project.id}/scene-plan',json={
+            'topic':'Backpack balance。Unrelated kitchen cooking is not a substitute.','persist':True})
+        assert response.status_code == 200 and response.json()['draft']['scenes']
+    text = json.loads(bodies[0])['input'][0]['content'][0]['text']
+    assert len(bodies[0]) < 16000
+    assert all(v not in text for v in ['PRIVATE_NAME','PRIVATE_KEY','PRIVATE_FULL_TRANSCRIPT','me@example.com','13812345678'])
+    sent_context = json.loads(text.split('Project request:\n',1)[1])['background_evidence']
+    assert all('Unrelated kitchen' not in m['summary'] for m in sent_context['materials'])
+    assert '[redacted]' in text and 'lexical_hint_not_source_admission' in text
+    with Database(path) as db:
+        context,refs = _scene_planning_context(db,project,topic='Backpack balance')
+        assert len(context['materials']) == 3 and context['material_gap'] is None
+        assert all(len(m['summary']) <= 240 and 'transcript' not in m for m in context['materials'])
+        assert all(f"clip:{m['clip_id']}" in refs for m in context['materials'])
+        assert all(ClipRepository(db).get(c.id) == c for c in stored_clips)
+        assert all(AssetRepository(db).get(UUID(m['asset_id'])).metadata.get('project_id') is None
+                   for m in context['materials'])
+        scene = ScenePlan(project_id=project.id,scene_id='packing',order=0,purpose='demonstrate',voice_text='Backpack balance',
+            duration_target_ms=3000,visual_intent=VisualIntent(subject='backpack',action='balance'),preferred_sources=[SourceKind.USER_ASSET])
+        route = AssetRouter(ClipTextSearchService(db),AssetRepository(db)).route(scene)
+        assert route.candidates[0].source_kind == SourceKind.USER_ASSET
 
 
 def _project(path: Path) -> Project:

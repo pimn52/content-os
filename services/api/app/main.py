@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import hashlib
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -20,6 +21,9 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.planning_feasibility import planning_feasibility, planning_identity_context
+from app.planning_input import creator_planning_brief
+from app.search.index import _lexical_terms
+from app.execution_scope import commercial_content_blocker
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
 from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingRunRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
 from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, EditPlan, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, TalkingSliceSeriesRecovery, UsageCost, VerifiedVerticalDerivationRequest, VideoSpec, VisualStyleTokens, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceHumanReview, VoicePaceCandidateJobPayload, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
@@ -1466,7 +1470,7 @@ def create_app(
                 draft = ProjectDraftRepository(db).get(project.id)
                 if draft is None:
                     continue
-                _, evidence_refs = _scene_planning_context(db, project)
+                _, evidence_refs = _scene_planning_context(db, project, topic=draft.topic)
                 persist_project_draft(
                     db,
                     project,
@@ -1521,7 +1525,7 @@ def create_app(
             raise HTTPException(status_code=422, detail="draft VideoSpec must belong to the requested project")
         project = ProjectRepository(db).get(project_id)
         assert project is not None  # checked above; narrows the local contract.
-        _, evidence_refs = _scene_planning_context(db, project)
+        _, evidence_refs = _scene_planning_context(db, project, topic=payload.topic)
         with db.transaction():
             draft = persist_project_draft(
                 db,
@@ -4439,7 +4443,7 @@ def create_app(
         project = ProjectRepository(db).get(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        planning_context, evidence_refs = _scene_planning_context(db, project)
+        planning_context, evidence_refs = _scene_planning_context(db, project, topic=payload.topic)
 
         def plan_response(planner: ScenePlanner, *, include_context: bool) -> ScenePlanResponse:
             result = planner.plan(
@@ -4491,7 +4495,7 @@ def create_app(
                                        script=payload.script, context=planning_context)
             # A preference changed while the provider was planning: preserve
             # its accounted result, but never save stale policy as current.
-            _, current_refs = _scene_planning_context(db, project)
+            _, current_refs = _scene_planning_context(db, project, topic=payload.topic)
             if current_refs != evidence_refs:
                 raise HTTPException(status_code=409, detail="planning_context_changed_replan")
             if payload.persist:
@@ -4835,8 +4839,8 @@ def _embedding_provider_from_env() -> OpenAICompatibleEmbeddingProvider:
     )
 
 
-def _scene_planning_context(db: Database, project: Project) -> tuple[dict[str, object], tuple[str, ...]]:
-    """Build bounded IP/material/opportunity context and traceable refs."""
+def _scene_planning_context(db: Database, project: Project, *, topic: str | None = None) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Small local hints; full retrieval/admission remains the Router's job."""
     profile = IPProfileRepository(db).get(project.ip_profile_id)
     refs: list[str] = []
     context: dict[str, object] = {}
@@ -4847,37 +4851,47 @@ def _scene_planning_context(db: Database, project: Project) -> tuple[dict[str, o
         refs.append(f"ip_profile:{profile.id}:v{profile_version}")
         context.update({
             "ip_profile_version": profile_version,
-            "ip_profile": profile.model_dump(mode="json"),
+            "ip_profile": creator_planning_brief(profile),
         })
     materials: list[dict[str, object]] = []
-    for asset in AssetRepository(db).list():
-        metadata = asset.metadata
-        analysis = metadata.get("r1_analysis")
+    # Retrieval hints follow the topic, not appended workflow instructions.
+    query = re.split(r"[。？！?!\n]", topic or project.topic, maxsplit=1)[0][:10000]
+    anchors = {t for t in _lexical_terms(query) if len(t) > 1} - {
+        "视频", "画面", "素材", "内容", "什么", "为什么", "如何", "怎么", "不是",
+        "video", "footage", "content",
+    }
+    assets = AssetRepository(db)
+    hits = ClipTextSearchService(db).search(query, top_k=20) if anchors else []
+    for hit in hits:
+        clip, asset = hit.clip, assets.get(hit.clip.asset_id)
+        summary = " ".join(v for v in (clip.visual_description, clip.action) if v)
+        if (asset is None or asset.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                or asset.metadata.get("r1_usage") != "production"
+                or asset.metadata.get("project_id") not in (None, str(project.id))
+                or asset.metadata.get("ip_profile_id") not in (None, str(project.ip_profile_id))
+                or commercial_content_blocker(db, asset.content_hash) is not None
+                or not anchors.intersection(_lexical_terms(summary))):
+            continue
+        materials.append({"asset_id": str(asset.id), "clip_id": str(clip.id),
+            "source_kind": asset.source_kind.value, "start_ms": clip.start_ms, "end_ms": clip.end_ms,
+            "summary": summary[:240], "evidence_level": "lexical_hint_not_source_admission"})
+        refs.append(f"clip:{clip.id}")
+        analysis = asset.metadata.get("r1_analysis")
         if isinstance(analysis, dict) and isinstance(analysis.get("bundle_id"), str):
             refs.append(f"analysis_bundle:{analysis['bundle_id']}")
-        clips = []
-        for clip in ClipRepository(db).list_by_asset(asset.id)[:20]:
-            clips.append({
-                "clip_id": str(clip.id),
-                "start_ms": clip.start_ms,
-                "end_ms": clip.end_ms,
-                "transcript": clip.transcript,
-                "visual_description": clip.visual_description,
-                "action": clip.action,
-            })
-        materials.append({
-            "asset_id": str(asset.id),
-            "source_kind": asset.source_kind.value,
-            "usage": metadata.get("r1_usage", "unknown"),
-            "identity": metadata.get("r1_identity", "unknown"),
-            "clips": clips,
-        })
+        if len(materials) == 3:
+            break
     opportunities = ContentOpportunityRepository(db).list_for_planning()
     opportunity_context: list[dict[str, object]] = []
     for opportunity in opportunities:
+        if not query or (opportunity.title not in query and query not in opportunity.title):
+            continue
         refs.append(f"opportunity:{opportunity.id}")
         refs.extend(opportunity.evidence_refs)
-        opportunity_context.append(opportunity.model_dump(mode="json"))
+        opportunity_context.append({"id": str(opportunity.id), "title": opportunity.title,
+            "angle": opportunity.angle[:240], "uncertainty": (opportunity.uncertainty or "")[:240]})
+        if len(opportunity_context) == 3:
+            break
     # Adopted feedback is a fresh-planning input, not a grant of rights or QA.
     render_root = getattr(db, "render_output_root", Path(db.path).parent / "renders")
     preferences = FeedbackLearningService(db, render_root).active(project.id)
@@ -4902,6 +4916,7 @@ def _scene_planning_context(db: Database, project: Project) -> tuple[dict[str, o
     context.update({
         "evidence_refs": list(unique_refs),
         "materials": materials,
+        "material_gap": None if materials else "No related authorized visual summary confirmed; normal Router must find eligible media or report a capture gap.",
         "opportunities": opportunity_context,
     })
     return context, unique_refs
