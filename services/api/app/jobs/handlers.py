@@ -11,7 +11,7 @@ from typing import Callable, Literal, Protocol, Sequence
 from uuid import UUID
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
-from app.db import AssetRepository, AudioAssetRepository, ClipRepository, JobRepository, ProviderMachineCapabilityProfileRepository, TalkingProfileRepository, VoiceProfileRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, JobRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, TalkingProfileRepository, VoiceProfileRepository
 from app.execution_scope import require_evaluation_lane_closed
 from app.execution_admission import UseAdmissionError
 from app.domain.models import Asset, AudioAsset, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, TalkingQaJobPayload, UsageCost, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceQaJobPayload
@@ -175,8 +175,12 @@ class RenderVideoJobHandler:
         return getattr(self._projects,"db",None)
 
     def require_dispatch(self, job):
-        from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
-        EvaluationCompositionHandler(self.db,self._renderer.data_root,self._renderer).require_dispatch(job)
+        from app.evaluation_composition import EvaluationCompositionService
+        if type(self._renderer) is not RemotionRenderer or self._renderer.assets.db is not self.db:
+            raise UseAdmissionError("composition_renderer_ownership_invalid")
+        if job.status != JobStatus.RUNNING or job.attempt != 1:
+            raise UseAdmissionError("composition_once_only_job_required")
+        return EvaluationCompositionService(self.db,self._renderer.data_root).require_current_job(job)
 
     def __call__(self, job: Job) -> None:
         if job.status is not JobStatus.RUNNING:
@@ -189,50 +193,85 @@ class RenderVideoJobHandler:
         output = render_output_path(self._output_root, payload.project_id, payload.render_id)
         repair_service, call, ledger = None, None, None
         database = getattr(self._projects, "db", None)
+        consumer, owner = None, None
         if database is not None:
-            from app.evaluation_composition import is_composition
+            from app.evaluation_composition import is_composition, EvaluationCompositionService
             if is_composition(database,job_id=job.id):
-                from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
-                return EvaluationCompositionHandler(database,self._renderer.data_root,self._renderer)(job)
-        _require_closed_evaluation_lane(database, job)
+                consumer = EvaluationCompositionService(database,self._renderer.data_root)
         def require_current_use_constraints():
+            if consumer is not None:
+                return consumer.require_current_job(job)
             if database is not None:
                 from app.source_use_constraints import SourceUseConstraintService
                 try:
                     SourceUseConstraintService(database, getattr(self._renderer, "data_root", None)).require_render_snapshot(job)
                 except ValueError:
                     raise JobExecutionError("use_constraint_render_plan_changed_replan", "source-use policy or evidence changed; replan required", retryable=False) from None
-        require_current_use_constraints()
-        if database is not None and database.connection.execute("SELECT id FROM presentation_repairs WHERE replacement_job_id=?", (str(job.id),)).fetchone():
-            from app.presentation_repair import PresentationRepairService
-            from app.production_runs import ProductionRunNotReady
-            repair_service = PresentationRepairService(database, self._renderer.data_root, self._output_root)
-            ledger = ProviderCallLedger(database)
-            try:
-                call = repair_service.reserve_render(job)
-            except (ProductionRunNotReady, BudgetLimitError, ProviderCallError, ValueError):
-                raise JobExecutionError("presentation_repair_not_admitted", "presentation repair admission or budget changed", retryable=False) from None
         try:
-            self._renderer.render(payload.video_spec, output)
-            require_current_use_constraints()
-            if repair_service is not None:
-                evidence = repair_service.verify_output(job)
+            if consumer is not None:
+                context = self.require_dispatch(job)
+                owner = consumer.records.owner(job_id=job.id)
+                ledger = ProviderCallLedger(database)
+                key = f"composition:{owner['batch_id']}:render"
+                old = ProviderCallRepository(database).get_by_idempotency_key(key)
+                if old is not None:
+                    if old.status == "completed":
+                        consumer.require_result(job)
+                        return
+                    raise UseAdmissionError("composition_render_reconciliation_required")
+                cost = UsageCost(category=CostCategory.RENDER,amount=Decimal("0"),currency="USD",note="external charge zero; local compute unknown")
+                reserved = ledger.reserve_execution(project_id=job.project_id,idempotency_key=key,operation="render",mode="runtime",
+                    provider="local-render",model="remotion-ffmpeg",input_source=f"render:{owner['render_id']}",
+                    input_digest=owner["request_sha256"],estimated_cost=cost,allow_existing_unknown_cost=True,
+                    reservation_guard=lambda: consumer._fence(context["token"]))
+                if not reserved.owner:
+                    raise UseAdmissionError("composition_render_reconciliation_required")
+                call = reserved.record
+                output = consumer.output_path(owner).with_name("staged.mp4")
+                self._renderer.render_composition(job.id,output)
+            else:
+                _require_closed_evaluation_lane(database, job)
+                require_current_use_constraints()
+                if database is not None and database.connection.execute("SELECT id FROM presentation_repairs WHERE replacement_job_id=?", (str(job.id),)).fetchone():
+                    from app.presentation_repair import PresentationRepairService
+                    from app.production_runs import ProductionRunNotReady
+                    repair_service = PresentationRepairService(database, self._renderer.data_root, self._output_root)
+                    ledger = ProviderCallLedger(database)
+                    try:
+                        call = repair_service.reserve_render(job)
+                    except (ProductionRunNotReady, BudgetLimitError, ProviderCallError, ValueError):
+                        raise JobExecutionError("presentation_repair_not_admitted", "presentation repair admission or budget changed", retryable=False) from None
+                self._renderer.render(payload.video_spec, output)
+            if consumer is not None or repair_service is not None:
+                from app.presentation_repair import measure_render_output
+                evidence = measure_render_output(output,payload.video_spec) if consumer is not None else repair_service.verify_output(job)
+                context = require_current_use_constraints()
+                def persist():
+                    consumer._fence(context["token"])
+                    final = consumer.output_path(owner)
+                    if final.exists():
+                        raise UseAdmissionError("composition_output_already_exists")
+                    output.replace(final)
+                    database.connection.execute("INSERT INTO execution_use_content_origins(content_hash,subject_kind,subject_id) VALUES (?,'render',?)",
+                        (evidence["sha256"],owner["render_id"]))
+                    consumer.records.save("result",owner["run_id"],dict(project_id=str(job.project_id),evidence=evidence))
                 ledger.finish(project_id=job.project_id, call_id=call.id, status="completed", usage_observable=False,
                     actual_cost=UsageCost(category=CostCategory.RENDER, amount=Decimal("0"), currency="USD", note="external charge zero; local compute unknown"),
-                    result_payload=evidence)
-        except RenderTimeout:
-            _finish_job_provider_call(ledger, job, call, status="failed", error_code="render_timeout")
-            output.unlink(missing_ok=True)
-            raise JobExecutionError("render_timeout", "local renderer timed out", retryable=True) from None
-        except RenderProcessError:
-            _finish_job_provider_call(ledger, job, call, status="failed", error_code="render_processing_failed")
-            output.unlink(missing_ok=True)
-            raise JobExecutionError("render_processing_failed", "local renderer failed", retryable=True) from None
-        except (RenderInputError, LocalResourceError, UnauthorizedVisualError):
-            _finish_job_provider_call(ledger, job, call, status="failed", error_code="render_invalid")
-            output.unlink(missing_ok=True)
-            raise JobExecutionError("render_invalid", "render input is not processable", retryable=False) from None
+                    result_payload=evidence,persist_result=persist if consumer is not None else None)
+            else:
+                require_current_use_constraints()
         except Exception as exc:
+            if consumer is not None:
+                _finish_job_provider_call(ledger,job,call,status="failed",error_code="composition_render_failed")
+                code = str(exc) if isinstance(exc,ValueError) and str(exc).startswith("composition_") else "composition_render_failed"
+                raise JobExecutionError(code,code,retryable=False) from None
+            if isinstance(exc,JobExecutionError):
+                raise
+            if isinstance(exc,(RenderTimeout,RenderProcessError,RenderInputError,LocalResourceError,UnauthorizedVisualError)):
+                code = "render_timeout" if isinstance(exc,RenderTimeout) else "render_processing_failed" if isinstance(exc,RenderProcessError) else "render_invalid"
+                _finish_job_provider_call(ledger,job,call,status="failed",error_code=code)
+                output.unlink(missing_ok=True)
+                raise JobExecutionError(code,"local render failed",retryable=isinstance(exc,(RenderTimeout,RenderProcessError))) from None
             if repair_service is None:
                 raise
             code = getattr(exc, "reasons", ("presentation_repair_output_unverified",))[0]

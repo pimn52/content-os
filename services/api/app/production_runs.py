@@ -389,12 +389,9 @@ class ProductionRunService:
         if is_composition(self.db,run_id=run_id):
             value = EvaluationCompositionService(self.db,self.data_root).get(project_id,run_id)
             row = self.db.connection.execute("SELECT * FROM production_runs WHERE id=?",(str(run_id),)).fetchone()
-            state = value["state"]
-            status = {"pending":"render_pending","running":"render_running","failed":"render_failed",
-                "awaiting_u_product":"render_completed_awaiting_review","cancelled":"cancelled"}.get(state,"render_failed")
-            return ProductionRun(id=run_id,project_id=project_id,idempotency_key=row["idempotency_key"],
-                preflight_fingerprint=row["preflight_fingerprint"],render_job_id=UUID(value["render_job_id"]),
-                created_at=row["created_at"],status=status,talking_review_policy_version=row["talking_review_policy_version"],evaluation_composition=value)
+            run = _run_from_row(self.db,row)
+            return run.model_copy(update=dict(evaluation_composition=value,status=
+                "render_failed" if not value["current_eligible"] or value["state"] in {"completed","reconciliation_required"} else run.status))
         from app.evaluation_master import EvaluationMasterService, is_evaluation_master_run
         if is_evaluation_master_run(self.db, run_id):
             return EvaluationMasterService(self.db, self.data_root).get(project_id, run_id)
@@ -470,11 +467,11 @@ class ProductionRunService:
             if use_admission_ids:
                 raise ProductionRunNotReady(("provider_receipts_are_not_media_use_permission",))
             try:
-                value = EvaluationCompositionService(self.db,self.data_root).start_retained(project_id,
+                run_id = EvaluationCompositionService(self.db,self.data_root).start_retained(project_id,
                     style=style_tokens,fingerprint=expected_fingerprint,idempotency_key=idempotency_key)
             except ValueError as exc:
                 raise ProductionRunNotReady((str(exc),)) from None
-            return self.get(project_id,UUID(value["id"]))
+            return self.get(project_id,run_id)
         if talking_review_policy_version not in {1, 2}:
             raise ProductionRunConflict("talking_review_policy_unknown")
         with self.db.transaction(immediate=True):
@@ -1304,8 +1301,9 @@ class ProductionRunService:
             return self.get(project_id, run_id)
 
     def cancel(self, project_id: UUID, run_id: UUID) -> ProductionRun | None:
+        from app.evaluation_composition import is_composition
         from app.evaluation_master import EvaluationMasterService, is_evaluation_master_run
-        if is_evaluation_master_run(self.db, run_id):
+        if not is_composition(self.db,run_id=run_id) and is_evaluation_master_run(self.db, run_id):
             return EvaluationMasterService(self.db, self.data_root).cancel(project_id, run_id)
         with self.db.transaction(immediate=True):
             row = self.db.connection.execute(
@@ -1400,9 +1398,10 @@ class ProductionRunService:
             if owner is None or owner["project_id"] != str(project_id):
                 return None
             job = JobRepository(self.db).get(UUID(owner["job_id"]))
-            consumer.require_current_job(job)
             if job.status == JobStatus.FAILED and consumer.records.get("result",run_id) is not None:
                 consumer.reconcile(project_id,run_id)
+            else:
+                consumer.require_current_job(job)
             return self.get(project_id,run_id)  # Never re-enqueue/re-render a spent slot.
         from app.evaluation_master import is_evaluation_master_run
         if is_evaluation_master_run(self.db, run_id):

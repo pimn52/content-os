@@ -20,8 +20,16 @@ from test_evaluation_talking_calibration import calibration_flow, start
 from test_evaluation_talking_normal_inputs import normal_inputs, qa_case, bound_job, child_case, setup
 from test_evaluation_talking_dual_normal import talking_case, original_talking_case, candidate
 from test_evaluation_talking_normal_flow import save, http
-from test_evaluation_composition import batch
 from test_execution_admission import OPERATOR_KEY
+
+
+def batch(c, scenes=()):
+    authorization = c.root/"composition-authorization.txt"
+    authorization.write_text("Synthetic explicit internal-only batch; no actual execution permission",encoding="utf-8")
+    report = dict(policy="evaluation-composition-v1",project_id=str(c.project),master_run_id=str(c.parent.id),
+        authorization_reference=authorization.name,authorization_sha256=hashlib.sha256(authorization.read_bytes()).hexdigest(),
+        scene_ids=[str(x) for x in scenes],max_renders=1,findings=["Synthetic operator-bound batch"])
+    return c.composition.adopt_batch(c.project,save(c.root,"composition-batch.json",report),OPERATOR_KEY)
 
 
 @pytest.fixture

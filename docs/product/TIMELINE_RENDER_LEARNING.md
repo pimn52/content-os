@@ -280,7 +280,7 @@ Feedback records generate next-suggestion text. Exact retained presentation dupl
 ## Current capability
 
 Normal production preflight/start now consumes approved same-project retained
-Voice/Talking through the existing `evaluation-composition-v1` executor. It
+Voice/Talking using the existing `evaluation-composition-v1` consumption rules. It
 selects an AudioAsset directly, maps exact current scene speech into one or
 more original TalkingRuns, and emits a full-Master VideoSpec. Historical
 EvaluationMaster/child-operation bindings, generation status/runtime versions
@@ -291,16 +291,22 @@ mandatory. An operator adopts the existing exact composition-use review and
 one local-render allowance; a purpose label or old provider grant is insufficient.
 Generation admission remains separate and does not accept these consumer grants.
 
-The ordinary Render Worker delegates to the same once-only private executor;
-no separate Worker policy or second composition selection/save/start UI is
-needed. Normal render GET/HEAD/Range access checks the owned Run, current
+The ordinary Render Worker executes both ordinary and scoped retained renders
+in `RenderVideoJobHandler`, sharing completion accounting and failure handling;
+there is no second Composition handler or selection/start contract. Private
+output persistence and once-only allowance remain scoped. Normal render GET/HEAD/Range access checks the owned Run, current
 permission, project and actual result hash under explicit internal purpose.
 Selected input/output bytes retain their noncommercial restriction across
 aliases. Unknown source subtitles receive no added overlay, reviewed full
 frames are contained without a new crop, and a terminal non-speaking interval
 uses an explicit text-free neutral background. Failed execution preserves its
-spent slot; saved-result reconciliation performs no new render. Old read-only
-history/operator/recovery APIs remain available. This retained creator-speaking
+spent slot; normal ProductionRun resume reconciles a saved result without a new
+render, while pending cancellation uses the existing Render Job cancellation.
+Run status and playback use normal production/render APIs; separate Composition
+selection/status/reconcile/media actions are removed. The read-only history list
+is retained because normal ProductionRun has no equivalent list. Operator use/allowance
+adoption, its read-only permission preflight, and necessary generation-recovery
+APIs remain. Existing persisted records are retained. This retained creator-speaking
 path does not establish new-topic generation, automatic editorial suitability,
 user-operated end-to-end acceptance or the30–60s R1/repeatability endpoint.
 

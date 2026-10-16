@@ -1145,7 +1145,7 @@ def create_app(
         parts = request.url.path.strip("/").split("/")
         if (len(parts) >= 4 and parts[0] == "projects" and parts[2] == "production-runs"
             and request.method not in ("GET", "HEAD", "OPTIONS")
-            and not (len(parts) == 5 and parts[4] == "cancel")):
+            and not (len(parts) == 5 and parts[4] in {"cancel", "resume"})):
             from app.evaluation_master import is_evaluation_master_run
             try:
                 identity = UUID(parts[3])

@@ -11,7 +11,6 @@ from app.domain.evaluation_composition import (POLICY, CompositionSelection, Com
     CompositionUseReview, CompositionAdmission)
 from app.domain.models import (Job, JobType, JobStatus, RenderVideoJobPayload, execution_canonical_sha256 as digest)
 from app.db.evaluation_master import EvaluationMasterRepository
-from app.evaluation_talking import EvaluationTalkingService
 from app.execution_admission import ProviderUseAdmissionService, UseAdmissionError, configured_admission_actor
 from app.execution_scope import ExecutionScopeService, _make_scope, read_subject_scope, job_use_identity
 from app.media.audio_access import file_digest
@@ -261,15 +260,13 @@ class EvaluationCompositionService:
         return self._batch(UUID(row[0]))
 
     def start_retained(self, project_id, *, style, fingerprint, idempotency_key):
-        from app.domain.evaluation_composition import CompositionStart
         selection = self.retained_selection(project_id,style)
         c = self._context(project_id,selection)
         if fingerprint != c["request_sha256"]:
             raise UseAdmissionError("composition_preflight_changed")
         use = self.current_use(project_id,c)
         batch = self.retained_batch(project_id,selection)
-        return self.create(project_id,CompositionStart(selection=selection,expected_fingerprint=fingerprint,
-            idempotency_key=idempotency_key,admission_id=use.id,batch_id=UUID(batch["id"])))
+        return self._create(project_id,c,use,batch,idempotency_key)
 
     def preflight(self, project_id, selection):
         result = dict(policy=POLICY,purpose="internal_evaluation",eligible=False,reasons=[],missing_scenes=[],dispatch_authorized=False)
@@ -307,7 +304,6 @@ class EvaluationCompositionService:
                 raise UseAdmissionError("composition_terminal_reconciliation_required")
             JobRepository(self.db).update(job.model_copy(update=dict(status=JobStatus.COMPLETED,
                 error_code=None,error_message=None,updated_at=datetime.now(timezone.utc))))
-        return self.get(project_id,identity)
 
     def adopt_batch(self, project_id, payload, key):
         actor = configured_admission_actor(key)
@@ -424,42 +420,36 @@ class EvaluationCompositionService:
                 self.records.save("admission",identity,dict(raw,value=value.model_dump(mode="json")),update=True)
             return value
 
-    def create(self, project_id, payload):
-        c = self._context(project_id,payload.selection)
-        receipt = self._receipt(payload.admission_id,c,project_id)
-        batch = self._batch(payload.batch_id)
-        if (batch["project_id"] != str(project_id) or (batch["review"].get("master_run_id") or batch["review"].get("master_audio_id")) != str(payload.selection.parent_id)
-            or c["request_sha256"] != payload.expected_fingerprint):
-            raise UseAdmissionError("composition_batch_or_preflight_changed")
-        previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(str(payload.batch_id),)).fetchone()
+    def _create(self, project_id, c, receipt, batch, idempotency_key):
+        previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(batch["id"],)).fetchone()
         if previous:
             owner = self.records.owner(run_id=previous[0])
             if owner is None or owner["request_sha256"] != c["request_sha256"]:
                 raise UseAdmissionError("composition_render_allowance_spent")
-            return self.get(project_id,UUID(previous[0]))
+            return UUID(previous[0])
         with self.db.transaction(immediate=True):
             self._fence(c["token"])
-            previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(str(payload.batch_id),)).fetchone()
+            previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(batch["id"],)).fetchone()
             if previous:
                 raise UseAdmissionError("composition_concurrent_submission_reload")
-            if self.db.connection.execute("SELECT 1 FROM production_runs WHERE idempotency_key=?",(payload.idempotency_key,)).fetchone():
+            if self.db.connection.execute("SELECT 1 FROM production_runs WHERE idempotency_key=?",(idempotency_key,)).fetchone():
                 raise UseAdmissionError("composition_run_key_conflict")
             self._check_render_budget(project_id,c)
             run_id,job_id,render_id = uuid4(),uuid4(),uuid4()
             now = datetime.now(timezone.utc)
-            job = Job(id=job_id,project_id=project_id,type=JobType.RENDER,idempotency_key=f"composition:{payload.batch_id}:render",
+            job = Job(id=job_id,project_id=project_id,type=JobType.RENDER,idempotency_key=f"composition:{batch['id']}:render",
                 created_at=now,updated_at=now,payload=RenderVideoJobPayload(project_id=project_id,render_id=render_id,video_spec=c["spec"]))
             JobRepository(self.db).create(job)
             self.db.connection.execute("""INSERT INTO production_runs(id,project_id,idempotency_key,preflight_fingerprint,
                 draft_version,script_revision,style_tokens,repair_allowance,stage,render_job_id,created_at,talking_review_policy_version)
-                VALUES (?,?,?,?,?,?,?,0,'evaluation_composition',?,?,?)""",(str(run_id),str(project_id),payload.idempotency_key,c["request_sha256"],
+                VALUES (?,?,?,?,?,?,?,0,'evaluation_composition',?,?,?)""",(str(run_id),str(project_id),idempotency_key,c["request_sha256"],
                 c["draft"].version,c["draft"].script_revision,c["spec"].edit_plan.style_tokens.model_dump_json(),str(job_id),now.isoformat(),
                 min(v["run"].review_policy_version for v in c["inputs"].values())))
-            self.db.connection.execute("INSERT INTO evaluation_composition_slots VALUES (?,'render',?)",(str(payload.batch_id),str(run_id)))
+            self.db.connection.execute("INSERT INTO evaluation_composition_slots VALUES (?,'render',?)",(batch["id"],str(run_id)))
             self.db.connection.execute("INSERT INTO evaluation_composition_owners VALUES (?,?,?,?,?,?,?,?)",
-                (str(run_id),str(project_id),str(job_id),str(render_id),str(payload.batch_id),c["request_sha256"],job_use_identity(job),c["scope"].fingerprint))
-            self.records.save("binding",run_id,dict(project_id=str(project_id),selection=payload.selection.model_dump(mode="json"),
-                admission_id=str(receipt.id),admission_sha256=digest(receipt.model_dump(mode="json")),batch_id=str(payload.batch_id),
+                (str(run_id),str(project_id),str(job_id),str(render_id),batch["id"],c["request_sha256"],job_use_identity(job),c["scope"].fingerprint))
+            self.records.save("binding",run_id,dict(project_id=str(project_id),selection=c["selection"].model_dump(mode="json"),
+                admission_id=str(receipt.id),admission_sha256=digest(receipt.model_dump(mode="json")),batch_id=batch["id"],
                 request_sha256=c["request_sha256"],proof=c["proof"]))
             for kind,identity,sha in (("run",run_id,c["request_sha256"]),("job",job_id,job_use_identity(job)),("render",render_id,c["request_sha256"])):
                 self.db.connection.execute("INSERT INTO execution_use_scopes(subject_kind,subject_id,project_id,fingerprint,payload,subject_sha256) VALUES (?,?,?,?,?,?)",
@@ -472,7 +462,7 @@ class EvaluationCompositionService:
                     (sha,str(run_id)))
             from app.source_use_constraints import SourceUseConstraintService
             SourceUseConstraintService(self.db,self.root).snapshot_render(project_id,job_id)
-        return self.get(project_id,run_id)
+        return run_id
 
     def require_job_identity(self, job):
         if job is None:
@@ -590,6 +580,7 @@ def claim_talking_slot(db, operation):
     old = db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",
         (row[0],"talking:"+str(operation.selection.scene_plan_id))).fetchone()
     if old and old[0] != str(operation.id):
+        from app.evaluation_talking import EvaluationTalkingService
         from app.evaluation_talking_recovery import TalkingRecoveryService
         TalkingRecoveryService(EvaluationTalkingService(db,getattr(db,"data_root",Path(db.path).parent))).require_successor(operation)
         return
@@ -619,5 +610,6 @@ def require_talking_slot(db, operation):
     slot = db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",
         (row[0],"talking:"+str(operation.selection.scene_plan_id))).fetchone()
     if slot is None or slot[0] != str(operation.id):
+        from app.evaluation_talking import EvaluationTalkingService
         from app.evaluation_talking_recovery import TalkingRecoveryService
         TalkingRecoveryService(EvaluationTalkingService(db,getattr(db,"data_root",Path(db.path).parent))).require_successor(operation)

@@ -112,7 +112,7 @@ It compiles an accepted EditPlan plus verified audio/visual Assets/Clips onto on
 
 ### Render / Review / Learning
 
-Owns Remotion/FFmpeg output, human quality gates, explicit publication records, usage evidence and feedback.
+Owns Remotion/FFmpeg output, human quality gates, explicit publication records, usage evidence and feedback. Normal and scoped retained Render Jobs share `RenderVideoJobHandler`; ProductionRun owns start, Job status, cancellation and saved-result resume. EvaluationComposition retains media-use/allowance and private-access checks, with no second handler/start/status/media action; its unique read-only history list remains. Existing records remain; consumer grants cannot authorize Voice/Talking generation.
 
 A narrow Talking repair service atomically preserves predecessor evidence, creates one replacement Job and switches only the affected scene's active binding. Fresh QA/preview links a successor while old collections/reviews stay immutable. The current application guard and repair call/charge limits run inside the existing provider-reservation SQLite transaction before inference; repair does not confer human approval.
 

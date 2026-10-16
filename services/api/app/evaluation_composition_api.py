@@ -1,7 +1,6 @@
-"""Normal explicit retained-media selection, adoption, continuation and review."""
+"""Operator media-use/allowance adoption; execution belongs to ProductionRun."""
 from uuid import UUID
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Request
 from app.domain.evaluation_composition import CompositionSelection, CompositionAdoption
 from app.domain.evaluation_master import MasterRevocation
 from app.evaluation_composition import EvaluationCompositionService
@@ -17,11 +16,6 @@ def service(request):
 @router.post("/preflight")
 async def preflight(project_id: UUID, payload: CompositionSelection, request: Request):
     return service(request).preflight(project_id,payload)
-
-
-@router.get("/selections")
-async def selections(project_id: UUID, request: Request):
-    return action(lambda: service(request).records.list("selection",project_id))
 
 
 @router.get("/admissions")
@@ -51,25 +45,8 @@ async def batch(project_id: UUID, payload: CompositionAdoption, request: Request
 
 @router.get("/runs")
 async def runs(project_id: UUID, request: Request):
+    # Ordinary production has no history-list equivalent yet; retain discovery,
+    # without another start, reconcile or media execution entry.
     s = service(request)
     return action(lambda: [s.get(project_id,UUID(r[0])) for r in s.db.connection.execute(
         "SELECT run_id FROM evaluation_composition_owners WHERE project_id=? ORDER BY rowid DESC",(str(project_id),))])
-
-
-@router.get("/runs/{identity}")
-async def get(project_id: UUID, identity: UUID, request: Request):
-    return action(lambda: service(request).get(project_id,identity))
-
-
-@router.post("/runs/{identity}/reconcile")
-async def reconcile(project_id: UUID, identity: UUID, request: Request):
-    return action(lambda: service(request).reconcile(project_id,identity))
-
-
-@router.api_route("/runs/{identity}/media",methods=["GET","HEAD"])
-async def media(project_id: UUID, identity: UUID, request: Request, purpose: str | None = None):
-    try:
-        path = service(request).media(project_id,identity,purpose)
-    except (ValueError,KeyError,TypeError,OSError):
-        raise HTTPException(403,"composition_current_scoped_result_required") from None
-    return FileResponse(path,headers={"Cache-Control":"no-store"})

@@ -31,13 +31,6 @@ class CompositionSelection(BaseModel):
         return self.master_run_id or self.master_audio_id
 
 
-class CompositionSave(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    selection: CompositionSelection
-    expected_fingerprint: Sha256
-    idempotency_key: str = Field(min_length=1, max_length=500)
-
-
 class CompositionBatchReview(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     policy: Literal["evaluation-composition-v1"]
@@ -109,11 +102,6 @@ class CompositionUseReview(BaseModel):
         if len({v.dependency for v in self.dependency_findings}) != len(self.dependency_findings):
             raise ValueError("composition_dependency_evidence_duplicate")
         return self
-
-
-class CompositionStart(CompositionSave):
-    admission_id: UUID
-    batch_id: UUID
 
 
 class CompositionAdmission(BaseModel):

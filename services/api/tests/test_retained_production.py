@@ -1,7 +1,7 @@
 """Retained-only production: synthetic local media/consent; no model or render."""
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -130,3 +130,179 @@ def test_current_media_safety_fails_without_fallback_generation(legacy,change):
     with pytest.raises((ValueError,OSError)):service._context(pid,selection)
     assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
     assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
+
+
+@pytest.mark.parametrize('outcome',['completed','renderer_failure','generic_handler'])
+def test_one_normal_worker_preserves_private_result_accounting_and_once_only(legacy,monkeypatch,outcome):
+    """Synthetic subprocess/QA only: no media render or provider call."""
+    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    context=service._context(pid,service.retained_selection(pid,style));use=use_and_batch(service,pid,context,key)
+    runs=ProductionRunService(db,db.data_root)
+    def start(key):
+        return runs.start(pid,idempotency_key=key,expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
+    run=start('worker');job=JobRepository(db).get(run.render_job_id)
+    from app.renderer import RemotionRenderer
+    from app.jobs.handlers import RenderVideoJobHandler
+    from app.jobs.runner import JobRunner
+    from app.jobs.store import JobStore
+    from app.db import ProviderCallRepository
+    from test_remotion_renderer import _Runner,_renderer_project
+    from app import presentation_repair
+    fake=_Runner(returncode=1 if outcome=='renderer_failure' else 0)
+    renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
+        renderer_dir=_renderer_project(db.data_root/'renderer'),runner=fake)
+    handler=RenderVideoJobHandler(ProjectRepository(db),renderer,db.data_root/'renders')
+    monkeypatch.setattr(presentation_repair,'measure_render_output',lambda path,spec:dict(
+        state='verified',sha256=hashlib.sha256(path.read_bytes()).hexdigest(),scope='synthetic_technical_only'))
+    selected=handler if outcome!='generic_handler' else lambda _:pytest.fail('untrusted callback consumed restricted media')
+    runner=JobRunner(JobStore(db),{JobType.RENDER:selected},worker_id='normal-render',lease_duration=timedelta(minutes=5),max_attempts=1)
+    finished=runner.run_once(job_id=job.id)
+    assert finished.status==(JobStatus.COMPLETED if outcome=='completed' else JobStatus.FAILED)
+    assert runner.run_once(job_id=job.id) is None
+    assert start('another-key').id==run.id
+    calls=ProviderCallRepository(db).list_all()
+    assert len(calls)==(0 if outcome=='generic_handler' else 1)
+    if calls:assert calls[0].status==('completed' if outcome=='completed' else 'failed')
+    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
+    if outcome!='completed':
+        assert runs.get(pid,run.id).status=='render_failed'
+        with pytest.raises(UseAdmissionError):service.media(pid,run.id,'internal_evaluation')
+        return
+    path=service.media(pid,run.id,'internal_evaluation')
+    assert path.read_bytes()==b'minimal-muxed-mp4'
+    with pytest.raises(UseAdmissionError):service.media(uuid4(),run.id,'internal_evaluation')
+    with pytest.raises(UseAdmissionError):service.media(pid,run.id,'commercial_production')
+    from app.media.audio_access import require_ordinary_media
+    with pytest.raises(UseAdmissionError):require_ordinary_media(db,db.data_root,path,kind='render',subject_id=job.payload.render_id)
+    JobRepository(db).update(finished.model_copy(update=dict(status=JobStatus.FAILED)))
+    assert runs.get(pid,run.id).status=='render_failed'
+    assert runs.resume(pid,run.id).status=='render_completed_awaiting_review'
+    assert len(fake.calls)==2
+    service.revoke(pid,use.id,'Fixture revoked',key)
+    assert runs.get(pid,run.id).status=='render_failed'
+    with pytest.raises(UseAdmissionError):service.media(pid,run.id,'internal_evaluation')
+
+
+def test_retained_budget_and_immutable_selection_reject_before_job_creation(legacy):
+    from app.db import BudgetPolicyRepository
+    from app.production_runs import ProductionRunNotReady
+    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
+    budgets=BudgetPolicyRepository(db)
+    from app.domain.models import BudgetPolicy
+    budgets.save(BudgetPolicy(project_id=pid,max_calls=0,updated_at=datetime.now(timezone.utc)))
+    with pytest.raises(ProductionRunNotReady):
+        ProductionRunService(db,db.data_root).start(pid,idempotency_key='blocked',expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
+    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
+
+
+def test_only_normal_run_and_media_routes_remain(legacy,monkeypatch):
+    import asyncio,httpx
+    from app.main import create_app
+    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
+    monkeypatch.setenv('CONTENT_OS_DATA_ROOT',str(db.data_root))
+    app=create_app(db.path);app.state.database=db
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as api:
+            base=f'/projects/{pid}'
+            plan=await api.post(base+'/production-preflight',json={'purpose':'internal_evaluation'})
+            assert plan.status_code==200
+            response=await api.post(base+'/production-runs',json=dict(purpose='internal_evaluation',idempotency_key='normal-api',expected_fingerprint=plan.json()['fingerprint']))
+            assert response.status_code==201,response.text
+            run=response.json();assert (await api.get(base+'/production-runs/'+run['id'])).status_code==200
+            resumed=await api.post(base+'/production-runs/'+run['id']+'/resume')
+            assert resumed.status_code==200 and resumed.json()['render_job_id']==run['render_job_id']
+            for operation in ['voice-dispatch','talking-dispatch','presentation-repair']:
+                assert (await api.post(base+'/production-runs/'+run['id']+'/'+operation,json={})).status_code==409
+            history=await api.get(base+'/evaluation-composition/runs')
+            assert history.status_code==200 and [r['id'] for r in history.json()]==[run['id']]
+            for method,path in [('GET','selections'),('GET','runs/'+run['id']),('POST','runs/'+run['id']+'/reconcile'),('GET','runs/'+run['id']+'/media')]:
+                assert (await api.request(method,base+'/evaluation-composition/'+path)).status_code==404
+            assert (await api.get(base+'/renders/'+run['evaluation_composition']['render_id']+'?purpose=internal_evaluation')).status_code==403
+            cancelled=await api.post(base+'/production-runs/'+run['id']+'/cancel')
+            assert cancelled.status_code==200 and cancelled.json()['status']=='cancelled'
+            assert JobRepository(db).get(UUID(run['render_job_id'])).status==JobStatus.CANCELLED
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('tamper',['binding','scope','slot','owner','terms'])
+def test_normal_job_keeps_exact_identity_and_current_license_checks(legacy,tamper):
+    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    c=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,c,key)
+    run=ProductionRunService(db,db.data_root).start(pid,idempotency_key='identity',expected_fingerprint=c['request_sha256'],style_tokens=style,purpose='internal_evaluation')
+    job=JobRepository(db).get(run.render_job_id)
+    if tamper=='binding':
+        binding=service.records.get('binding',run.id);binding['proof']['audio_sha256']='f'*64
+        service.records.save('binding',run.id,binding,update=True)
+    elif tamper=='scope':
+        db.connection.execute("DELETE FROM execution_use_scopes WHERE subject_kind='render'")
+    elif tamper=='slot':
+        db.connection.execute("UPDATE evaluation_composition_slots SET operation_id=? WHERE slot='render'",(str(uuid4()),))
+    elif tamper=='owner':
+        db.connection.execute('DELETE FROM evaluation_composition_owners')
+    else:
+        (db.data_root/'synthetic-terms.txt').write_text('Changed after adoption')
+    with pytest.raises(UseAdmissionError):service.require_current_job(job)
+    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
+
+
+@pytest.mark.parametrize("fps",[(30,1),(30000,1001)])
+def test_absolute_timing_full_master_and_neutral_tail(fps,tmp_path):
+    from app.assembly.evaluation_composition import assemble_retained_composition
+    from app.domain.models import AudioAsset, RationalFps, VisualStyleTokens, TranscriptSegment, Clip
+    from test_video_spec_assembly import _project,_scene,_asset
+    from app.renderer.remotion import RemotionRenderer
+    from app.db import Database, AssetRepository, ClipRepository
+    from test_remotion_renderer import _renderer_project
+    project=_project(RationalFps(numerator=fps[0],denominator=fps[1]))
+    scenes=[_scene(project,i) for i in range(2)]
+    audio=AudioAsset(source_file="synthetic.wav",content_hash="a"*64,duration_ms=2300,sample_rate=24000,channels=1,
+        authorization_reference="synthetic",imported_at=project.created_at,transcript_source="synthetic-timing",
+        transcript_segments=[TranscriptSegment(start_ms=0,end_ms=1001,text=scenes[0].voice_text),TranscriptSegment(start_ms=1001,end_ms=2100,text=scenes[1].voice_text)])
+    inputs={s.id:dict(asset=_asset(i+1,source_kind="ai_video"),clip=Clip(asset_id=uuid4(),start_ms=0,end_ms=3000,asset_duration_ms=3000)) for i,s in enumerate(scenes)}
+    spec=assemble_retained_composition(project,audio,[(scenes[0],0,1001),(scenes[1],1001,2100)],inputs,VisualStyleTokens())
+    assert spec.master_narration.end_ms==2300
+    assert sum(s.duration_frames for s in spec.scenes)==(2300*fps[0]+1000*fps[1]-1)//(1000*fps[1])
+    tail=spec.scenes[-1]
+    assert (tail.narration_start_ms,tail.narration_end_ms)==(2100,2300)
+    assert not tail.caption and not tail.captions and tail.subtitle_treatment.value=="none"
+    with Database(tmp_path/"tail.sqlite3") as db:
+        renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),renderer_dir=_renderer_project(tmp_path/"renderer"))
+        prepared=renderer._validate_scene(tail,spec.fps,project_id=project.id,master_audio_id=audio.id,validate_scene_narration=False)
+        props=renderer._stage_props(spec.model_copy(update={"scenes":[tail]}),{tail.scene_id:prepared},tmp_path,"tail",None)
+        assert props["sceneSources"][tail.scene_id]["text"]==""
+        assert props["sceneSources"][tail.scene_id]["graphicTreatment"]=="none"
+
+
+def test_db_fence_tolerates_only_heartbeat_renewal(tmp_path):
+    from datetime import datetime,timezone
+    from app.db import Database
+    from app.domain.models import Job,JobType
+    from app.jobs.store import JobStore
+    with Database(tmp_path/"fence.sqlite3") as db:
+        service=EvaluationCompositionService(db,tmp_path)
+        now=datetime.now(timezone.utc)
+        job=Job(type=JobType.RENDER,created_at=now,updated_at=now,idempotency_key="fence")
+        JobRepository(db).create(job)
+        store=JobStore(db)
+        claimed=store.claim("fixture",timedelta(minutes=5),max_attempts=1,job_id=job.id)
+        before=service._token()
+        assert store.heartbeat(claimed.id,"fixture",timedelta(minutes=5))
+        assert service._token()==before
+        db.connection.execute("UPDATE jobs SET lease_owner='other' WHERE id=?",(str(job.id),))
+        assert service._token()!=before
+
+
+def test_worker_uses_one_render_handler_independent_of_legacy_policy(tmp_path,monkeypatch):
+    from app.db import Database
+    from app.worker_cli import parse_config,build_runner
+    from app.domain.models import JobType
+    from app.jobs.handlers import RenderVideoJobHandler
+    cfg=parse_config(['--db',str(tmp_path/'worker.sqlite3'),'--data-root',str(tmp_path),'--once','--job-type','render','--max-attempts','1'])
+    monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','evaluation-composition-v1')
+    with Database(cfg.db_path) as db:
+        runner=build_runner(cfg,db)
+        assert type(runner._handlers[JobType.RENDER]) is RenderVideoJobHandler
+        monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','unknown')
+        assert type(build_runner(cfg,db)._handlers[JobType.RENDER]) is RenderVideoJobHandler

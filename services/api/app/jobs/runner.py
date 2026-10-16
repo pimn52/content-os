@@ -203,14 +203,12 @@ class JobRunner:
                     from app.jobs.evaluation_talking_handler import MaintainedEvaluationTalkingHandler
                     from app.jobs.evaluation_talking_qa_handler import EvaluationTalkingQaHandler
                     from app.jobs.evaluation_talking_preview_handler import EvaluationTalkingPreviewHandler
-                    from app.jobs.evaluation_composition_handler import EvaluationCompositionHandler
                     owned_types = {
                         MaintainedVoiceDraftHandler: "voice_draft_handler_unsupported",
                         MaintainedVoiceEvaluationQAHandler: "voice_qa_handler_unsupported",
                         MaintainedEvaluationTalkingHandler: "evaluation_talking_handler_unsupported",
                         EvaluationTalkingQaHandler: "evaluation_talking_handler_unsupported",
                         EvaluationTalkingPreviewHandler: "evaluation_talking_handler_unsupported",
-                        EvaluationCompositionHandler: "composition_handler_unsupported",
                     }
                     from app.jobs.handlers import RenderVideoJobHandler
                     from app.evaluation_composition import is_composition
