@@ -13,6 +13,10 @@ This file owns implementation behavior only. Product scope belongs in the produc
 - Preserve source commit `f32677d13fbba8a6dbdbac48030eaa5ea4f49907`, golden media and review evidence. A Git branch is not a backup of local media/database; arrange local backups before any destructive step.
 - Classify every cleanup candidate by real callers and runtime evidence as KEEP / MERGE / ISOLATE / DELETE-CANDIDATE. Suspected bloat is not proof of safe deletion.
 - Do not invent a new recovery framework, extra policy layer, loader, state machine or large implementation document. Work from `STATUS.md` and return a brief owner decision table.
+- **Product-first deletion mandate:** the next authorized cut must shorten the normal creator-to-publishable-video path, consolidate duplicate evaluation/production execution or remove an actual model/runtime obstacle; routine script/disk/doc cleanup is deferred. Cite a real user-visible effect and report net deleted complexity.
+- **Golden-quality no-regression:** reuse V55/V60/V64 only with verified exact copy/project/source/rights compatibility. Never spend inference to reproduce known-good same-input media as a convenience. A technically valid but visibly worse output is a product regression, not an acceptance.
+- **Minimal necessary safety:** keep source authorization, consent, model-use/license boundaries, privacy, cost/budget and durable asset/QA facts. Reject new proof versions, PE/native-load research and redundant defense machinery unless a reproduced risk cannot be addressed by a maintained, bounded process boundary. Do not turn this into relaxed execution permission.
+
 - No modifications to `master` from the recovery branch unless the owner has approved a reviewed change and a defined rollback/quality regression plan.
 
 ## 1. Engineering invariants
