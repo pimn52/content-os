@@ -103,7 +103,6 @@ class EvaluationCompositionService:
         from app.production_runs import _unique_scene_speech_span
         from app.assembly.evaluation_composition import assemble_retained_composition
         from app.db import AssetRepository, ClipRepository, VoiceProfileRepository, TalkingProfileRepository
-        from app.talking.admission import talking_visual_blocker
         from app.media.local_paths import existing_local_media_file
         from app.source_use_constraints import SourceUseConstraintService, presentation
         token = self._token()
@@ -112,6 +111,9 @@ class EvaluationCompositionService:
         if not ordered or set(selection.talking_runs) - {s.id for s in ordered}:
             raise UseAdmissionError("composition_scene_selection_changed")
         intervals,inputs,missing,proofs,consents = [],{},[],[],{}
+        from app.routing import AssetRouter
+        from app.search import ClipTextSearchService
+        router = AssetRouter(ClipTextSearchService(self.db),AssetRepository(self.db))
         dependencies = set()
         voice_origins_facts = {}
         # Current consent and model provenance are facts of the selected media;
@@ -160,14 +162,11 @@ class EvaluationCompositionService:
             run = TalkingRunRepository(self.db).get(run_id)
             if run is None:
                 raise UseAdmissionError("composition_talking_run_missing")
-            asset = AssetRepository(self.db).get(run.assembled_asset_id)
-            clip = ClipRepository(self.db).get(run.assembled_clip_id)
-            if asset is None or clip is None:
-                raise UseAdmissionError("composition_talking_media_missing")
-            blocker = talking_visual_blocker(asset,clip,AssetRepository(self.db),project_id=project_id,
-                copy=scene.voice_text,master_audio_id=audio.id,master_interval=interval)
-            if blocker:
-                raise UseAdmissionError(blocker)
+            candidates = router.reviewed_talking_candidates(scene,master_audio_id=audio.id,master_interval=interval,run_id=run.id)
+            if not candidates:
+                raise UseAdmissionError("composition_talking_visual_not_eligible")
+            asset = AssetRepository(self.db).get(candidates[0].asset_id)
+            clip = ClipRepository(self.db).get(candidates[0].clip_id)
             if file_digest(existing_local_media_file(asset.source_file,self.root)) != asset.content_hash:
                 raise UseAdmissionError("composition_talking_bytes_changed")
             for child in run.child_evidence:
@@ -180,10 +179,10 @@ class EvaluationCompositionService:
                     or run.authorized_reference_clip_id not in profile.reference_clip_ids):
                     raise UseAdmissionError("composition_talking_consent_required")
                 consents["talking:"+str(profile.id)] = profile.consent.model_dump(mode="json")
-            offset = interval[0]-run.master_start_ms
+            offset = interval[0]-run.master_start_ms-asset.metadata.get("source_derivation",{}).get("source_interval",{}).get("start_ms",0)
             # An in-memory source window, never a new persisted Clip or media.
             window = clip.model_copy(update=dict(start_ms=offset,end_ms=offset+interval[1]-interval[0]))
-            inputs[scene.id] = dict(asset=asset,clip=window,run=run)
+            inputs[scene.id] = dict(asset=asset,clip=window,run=run,candidate=candidates[0])
             own = self.scopes.get("talking_run",run.id)
             if own is not None: values.append(own)
             values.extend(self.scopes.scopes_for_hash(asset.content_hash))
@@ -222,8 +221,9 @@ class EvaluationCompositionService:
     def retained_selection(self, project_id, style):
         from app.production_preflight import _approved_master
         from app.production_runs import _unique_scene_speech_span
-        from app.db import AssetRepository, ClipRepository
-        from app.talking.admission import talking_visual_blocker
+        from app.db import AssetRepository
+        from app.routing import AssetRouter
+        from app.search import ClipTextSearchService
         draft = ProjectDraftRepository(self.db).get(project_id)
         if draft is None or not draft.scenes:
             raise UseAdmissionError("composition_scene_selection_changed")
@@ -232,17 +232,15 @@ class EvaluationCompositionService:
         if audio is None:
             raise UseAdmissionError("composition_approved_master_required")
         choices = {}
+        assets = AssetRepository(self.db)
+        router = AssetRouter(ClipTextSearchService(self.db),assets)
         for scene in ordered:
             interval = _unique_scene_speech_span(audio,ordered,scene.id)
             if interval is None:
                 raise UseAdmissionError("composition_speech_interval_unaligned")
-            for run in TalkingRunRepository(self.db).list_for_project(project_id):
-                asset = AssetRepository(self.db).get(run.assembled_asset_id)
-                clip = ClipRepository(self.db).get(run.assembled_clip_id)
-                if asset is not None and clip is not None and talking_visual_blocker(
-                    asset,clip,AssetRepository(self.db),project_id=project_id,copy=scene.voice_text,
-                    master_audio_id=audio.id,master_interval=interval) is None:
-                    choices[scene.id] = run.id;break
+            candidates = router.reviewed_talking_candidates(scene,master_audio_id=audio.id,master_interval=interval)
+            if candidates:
+                choices[scene.id] = UUID(assets.get(candidates[0].asset_id).metadata["talking_run"]["run_id"])
         return CompositionSelection(master_audio_id=audio.id,style_tokens=style,talking_runs=choices)
 
     def current_use(self, project_id, context):

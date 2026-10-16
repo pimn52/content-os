@@ -32,6 +32,14 @@ test('late preflight cannot reinstate a changed presentation; project change cle
   s.h.setProps({ projectId: 'Q' }); await s.h.flush(); assert.equal(s.h.input('成片人物呈现').props.value, 'default');
 });
 
+test('normal editorial choice carries the existing profile through preflight and start', async () => {
+  const s = setup(); await s.h.flush(); await s.h.change('成片人物呈现', 'editorial');
+  await s.h.click('预检整条方案'); await s.h.click('保存 / 启动');
+  assert.equal(s.calls[0].body.style_tokens.name, 'content-os-editorial');
+  assert.deepEqual(s.calls[1].body.style_tokens, s.calls[0].body.style_tokens);
+  assert.equal(s.calls[1].body.expected_fingerprint, plan.fingerprint);
+});
+
 test('unsaved editorial changes invalidate the inspected plan and block preflight until save', async () => {
   const s = setup(); await s.h.flush(); await s.h.click('预检整条方案');
   s.h.setProps({draftDirty: true}); await s.h.flush();

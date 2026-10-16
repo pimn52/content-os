@@ -16,7 +16,7 @@ from app.domain.models import (
     VisualIntent,
 )
 from app.main import create_app
-from app.production_preflight import _presentation_for_style
+from app.assembly.edit_plan import presentation_for_style
 
 
 def test_subject_first_selects_only_supported_talking_panel_and_preserves_default():
@@ -31,13 +31,29 @@ def test_subject_first_selects_only_supported_talking_panel_and_preserves_defaul
             clip_id=uuid4() if kind is not SourceKind.TYPOGRAPHY else None,
             match_score=1, why=["fixture"], estimated_cost=UsageCost(category=CostCategory.RENDER, amount=None))
         entry = _default_edit_plan(project, [scene], {scene.id: candidate}).scenes[0]
-        assert _presentation_for_style(entry, VisualStyleTokens()).model_dump() == entry.model_dump()
-        chosen = _presentation_for_style(entry, VisualStyleTokens(name="content-os-subject-first"))
+        assert presentation_for_style(entry, VisualStyleTokens()).model_dump() == entry.model_dump()
+        chosen = presentation_for_style(entry, VisualStyleTokens(name="content-os-subject-first"))
         assert chosen.portrait_presentation.value == expected
         assert chosen.selected_asset_id == entry.selected_asset_id
         assert chosen.selected_clip_id == entry.selected_clip_id
         assert chosen.framing_policy == entry.framing_policy
         assert chosen.graphic_text == entry.graphic_text
+
+
+def test_editorial_requires_real_bounded_headline_and_safe_margin():
+    import pytest
+    from types import SimpleNamespace
+    from app.assembly.edit_plan import EditPlanPreflightError
+    from app.domain.models import EditPlanScene, VisualStyleTokens
+    entry = EditPlanScene(scene_plan_id=uuid4(),scene_id="speaker",visual_role="talking",
+        selected_source_kind="ai_video",selected_asset_id=uuid4(),selected_clip_id=uuid4(),
+        framing_policy="face_safe_contain",fallback={"graphic_treatment":"headline","text":"Context"})
+    style = VisualStyleTokens(name="content-os-editorial")
+    for text,asset,reason in ((None,None,"editorial_semantic_plan_required"),
+        ("x"*33,None,"talking_panel_graphics_exceed_header"),
+        ("Context",SimpleNamespace(width=720,height=1280),"portrait_graphic_margin_unavailable")):
+        with pytest.raises(EditPlanPreflightError,match=reason):
+            presentation_for_style(entry.model_copy(update={"graphic_text":text}),style,asset)
 
 
 def test_normal_preflight_retains_selected_style_and_invalidates_default_fingerprint(tmp_path):

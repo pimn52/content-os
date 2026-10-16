@@ -13,7 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.assembly.edit_plan import EditPlanPreflightError, resolve_edit_plan, _default_edit_plan
+from app.assembly.edit_plan import EditPlanPreflightError, resolve_edit_plan, _default_edit_plan, presentation_for_style
 from app.budget import snapshot
 from app.costs import estimate_whole_production
 from app.db import (
@@ -24,7 +24,7 @@ from app.db import (
 from app.domain.models import (
     Asset, AudioAsset, CandidateAsset, CostCategory, CostEstimate, EditPlan, EditPlanScene, EditVisualRole, ImageAsset,
     GraphicTreatment, Project, ProjectDraft, ScenePlan, SourceKind,
-    PortraitPresentation, SubtitleTreatment, TalkingFramingPolicy, UsageCost, VisualStyleTokens, VideoSpec,
+    SubtitleTreatment, TalkingFramingPolicy, UsageCost, VisualStyleTokens, VideoSpec,
 )
 from app.media.crop_assessment import CropAssessmentRepository, CropProposal
 from app.routing import AssetRouter
@@ -93,14 +93,7 @@ class ProductionPreflight(BaseModel):
     retained_media: dict | None = None
 
 
-def _presentation_for_style(entry: EditPlanScene, style: VisualStyleTokens) -> EditPlanScene:
-    """Select an existing contain layout, without granting media eligibility."""
-    if (style.name == "content-os-subject-first"
-            and entry.selected_source_kind is SourceKind.AI_VIDEO
-            and entry.visual_role is EditVisualRole.TALKING
-            and entry.framing_policy is TalkingFramingPolicy.FACE_SAFE_CONTAIN):
-        return EditPlanScene.model_validate({**entry.model_dump(), "portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})
-    return entry
+
 
 
 def build_production_preflight(
@@ -227,7 +220,7 @@ def build_production_preflight(
                 "burned_in_subtitles": burned_state,
                 "subtitle_treatment": SubtitleTreatment.NONE if burned_state == "present" else SubtitleTreatment.TIMED_CAPTIONS,
             })
-            entry = _presentation_for_style(entry, style_tokens)
+            entry = presentation_for_style(entry, style_tokens, item_source)
             matches = use_service.evaluate(item, presentation(entry, width=project.resolution_width,
                 height=project.resolution_height, style=style_tokens), use_records)
             if matches:
@@ -379,10 +372,11 @@ def build_production_preflight(
             by_scene = {decision.scene_plan_id: decision for decision in decisions}
             preliminary_edit_plan = EditPlan(
                 project_id=project.id, style_tokens=style_tokens,
-                scenes=[_presentation_for_style(entry.model_copy(update={
+                scenes=[presentation_for_style(entry.model_copy(update={
                     "subtitle_treatment": by_scene[entry.scene_plan_id].subtitle_treatment,
                     "burned_in_subtitles": by_scene[entry.scene_plan_id].burned_in_subtitles,
-                }), style_tokens) for entry in base_plan.scenes],
+                }), style_tokens, assets.get(selections[entry.scene_plan_id].asset_id)
+                    if selections[entry.scene_plan_id].asset_id is not None else None) for entry in base_plan.scenes],
             )
             resolve_edit_plan(project, scenes, selections, clip_intervals=intervals, supplied=preliminary_edit_plan)
         except (EditPlanPreflightError, ValueError):
@@ -473,16 +467,14 @@ def _retained_preflight(consumer,project,draft,context,expected_fingerprint):
     selected,decisions = [],[]
     for scene in sorted(draft.scenes,key=lambda s:s.order):
         item = context["inputs"][scene.id]
-        candidate = CandidateAsset(scene_plan_id=scene.id,source_kind=SourceKind.AI_VIDEO,
-            asset_id=item["asset"].id,clip_id=item["clip"].id,match_score=1,
-            why=["same-project approved TalkingRun; exact current speech interval"],recommended=True,
-            estimated_cost=UsageCost(category=CostCategory.TALKING,amount=Decimal("0"),currency="USD"))
+        candidate = item["candidate"].model_copy(update={"recommended":True})
+        entry = next(e for e in spec.edit_plan.scenes if e.scene_plan_id==scene.id)
         selected.append(candidate)
         decisions.append(PreflightScene(scene_plan_id=scene.id,scene_id=scene.scene_id,
             visual_role=EditVisualRole.TALKING,planned_source_kind=SourceKind.AI_VIDEO,selected_candidate=candidate,
             source_authorization_reference=item["asset"].authorization_reference,production_need="none",
-            suitability="reviewed_talking_run",subtitle_treatment=SubtitleTreatment.NONE,burned_in_subtitles="unknown",
-            graphic_treatment=GraphicTreatment.NONE,reasons=("retain reviewed full frame; no new crop or subtitle overlay",),
+            suitability="reviewed_talking_run",subtitle_treatment=entry.subtitle_treatment,burned_in_subtitles=entry.burned_in_subtitles,
+            graphic_treatment=entry.graphic_treatment,reasons=tuple(candidate.why),
             visual_dependency_fingerprint=_digest(next(p for p in context["proof"]["inputs"] if p["scene_id"]==str(scene.id)))))
     actions = (_action("voice",None,False,0,"reuse approved Master without generation",CostCategory.VOICE,Decimal("0"),context["request_sha256"]),
         _action("render",None,True,1,"existing once-only local retained-media render",CostCategory.RENDER,Decimal("0"),context["request_sha256"]))

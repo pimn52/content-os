@@ -1,16 +1,13 @@
 """Named exact-input assembly using existing EditPlan and timing contracts."""
-from app.assembly.edit_plan import resolve_edit_plan
-from app.assembly.video_spec import _audio_captions_for_interval, _master_offset_to_frames as timeline_frame
-from app.domain.models import (CandidateAsset, CostCategory, MasterNarration, PortraitPresentation,
+from app.assembly.edit_plan import resolve_edit_plan, presentation_for_style
+from app.assembly.video_spec import _audio_captions_for_interval, _master_offset_to_frames as timeline_frame, _edit_scene_fields
+from app.domain.models import (CostCategory, MasterNarration,
     SourceKind, SubtitleTreatment, UsageCost, VideoScene, VideoSpec, VideoVisual)
 
 
 def assemble_retained_composition(project, audio, intervals, inputs, style):
     cost = UsageCost(category=CostCategory.RENDER, amount="0", currency="USD", note="local composition; compute cost unknown")
-    choices = {scene.id: CandidateAsset(scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO,
-        asset_id=inputs[scene.id]["asset"].id, clip_id=inputs[scene.id]["clip"].id,
-        match_score=1, why=["Explicit exact approved TalkingRun"], recommended=False, estimated_cost=cost)
-        for scene, _, _ in intervals}
+    choices = {scene.id: inputs[scene.id]["candidate"] for scene, _, _ in intervals}
     ordered = [s for s, _, _ in intervals]
     clips = {}
     for value in inputs.values():
@@ -20,9 +17,10 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=None)
     # Retain the reviewed complete frame. Unknown source subtitles never
     # authorize another overlay, even when a legacy source is landscape.
-    entries = [e.model_copy(update={"subtitle_treatment": SubtitleTreatment.NONE, **(
-        {"portrait_presentation": PortraitPresentation.PORTRAIT_PANEL}
-        if style.name == "content-os-subject-first" else {})}) for e in plan.scenes]
+    entries = [presentation_for_style(e.model_copy(update={
+        "subtitle_treatment":SubtitleTreatment.TIMED_CAPTIONS if "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else SubtitleTreatment.NONE,
+        "burned_in_subtitles":"absent" if "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else "unknown"}),style,
+        inputs[e.scene_plan_id]["asset"]) for e in plan.scenes]
     plan = plan.model_copy(update={"scenes": entries, "style_tokens": style})
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=plan)
     scenes = []
@@ -41,9 +39,7 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
                 clip_end_ms=clip.end_ms, source_duration_ms=asset.duration_ms),
             narration_asset_id=audio.id, narration_start_ms=start, narration_end_ms=end,
             caption=scene.voice_text, captions=_audio_captions_for_interval(audio,start,end),
-            visual_role=entry.visual_role, framing_policy=entry.framing_policy,
-            portrait_presentation=entry.portrait_presentation, subtitle_treatment=entry.subtitle_treatment,
-            style_tokens=style))
+            **_edit_scene_fields(entry,plan)))
         cursor_ms = end
     if cursor_ms < audio.duration_ms:
         first, last = timeline_frame(cursor_ms,project.fps), timeline_frame(audio.duration_ms,project.fps)

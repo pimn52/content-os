@@ -27,8 +27,8 @@ export function productionKey(projectId: string) { return `content-os-production
 export function startBody(plan: ProductionPlan, talkingReviewPolicyVersion: 1 | 2 = 2) {
   return { idempotency_key: `web-production:${plan.project_id}:${plan.fingerprint}`, expected_fingerprint: plan.fingerprint, talking_review_policy_version: talkingReviewPolicyVersion };
 }
-export function presentationStyle(choice: "default" | "subject_first") {
-  return choice === "subject_first" ? { name: "content-os-subject-first", background_color: "#f3efe5", foreground_color: "#172033", accent_color: "#ca4c2c" } : {};
+export function presentationStyle(choice: "default" | "subject_first" | "editorial") {
+  return choice !== "default" ? { name: choice === "editorial" ? "content-os-editorial" : "content-os-subject-first", background_color: "#f3efe5", foreground_color: "#172033", accent_color: "#ca4c2c" } : {};
 }
 export function talkingRepairKey(projectId: string, runId: string, scenePlanId: string, fingerprint: string) {
   return `web-talking-repair:${projectId}:${runId}:${scenePlanId}:${fingerprint}`;

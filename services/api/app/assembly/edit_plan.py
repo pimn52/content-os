@@ -17,11 +17,30 @@ from app.domain.models import (
     SourceKind,
     SubtitleTreatment,
     TalkingFramingPolicy,
+    PortraitPresentation,
 )
 
 
 class EditPlanPreflightError(ValueError):
     """A visual plan is unsafe or contradictory before renderer work begins."""
+
+
+def presentation_for_style(entry, style, asset=None):
+    """Select existing layouts without inventing a crop or editorial content."""
+    if (style.name in {"content-os-subject-first","content-os-editorial"}
+        and entry.selected_source_kind is SourceKind.AI_VIDEO
+        and entry.visual_role is EditVisualRole.TALKING
+        and entry.framing_policy is TalkingFramingPolicy.FACE_SAFE_CONTAIN):
+        if style.name == "content-os-editorial" and not entry.graphic_text:
+            raise EditPlanPreflightError("editorial_semantic_plan_required")
+        if entry.graphic_text and (len(entry.graphic_text)>32 or len(entry.graphic_text.splitlines())>2):
+            raise EditPlanPreflightError("talking_panel_graphics_exceed_header")
+        if asset is not None and asset.width < asset.height:
+            if entry.graphic_text:
+                raise EditPlanPreflightError("portrait_graphic_margin_unavailable")
+            return entry
+        return entry.model_copy(update={"portrait_presentation":PortraitPresentation.PORTRAIT_PANEL})
+    return entry
 
 
 _TEXT_TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
@@ -61,6 +80,7 @@ def _default_edit_plan(
         if scene.graphic_plan is not None and scene.graphic_plan.kind == "text_card":
             treatment = GraphicTreatment(scene.graphic_plan.treatment)
             short_text = "\n".join(scene.graphic_plan.points)
+        graphic = role is EditVisualRole.GRAPHIC or role is EditVisualRole.TALKING and scene.graphic_plan is not None and scene.graphic_plan.kind == "text_card"
         entries.append(EditPlanScene(
             scene_plan_id=scene.id,
             scene_id=scene.scene_id,
@@ -71,8 +91,8 @@ def _default_edit_plan(
             # Unknown or absent crop evidence always resolves to the full-frame
             # designed treatment; it never inherits old fixed crop metadata.
             framing_policy=TalkingFramingPolicy.FACE_SAFE_CONTAIN,
-            graphic_treatment=treatment if role is EditVisualRole.GRAPHIC else GraphicTreatment.NONE,
-            graphic_text=short_text if role is EditVisualRole.GRAPHIC else None,
+            graphic_treatment=treatment if graphic else GraphicTreatment.NONE,
+            graphic_text=short_text if graphic else None,
             fallback=EditPlanFallback(graphic_treatment=treatment, text=short_text),
         ))
     return EditPlan(project_id=project.id, scenes=entries)

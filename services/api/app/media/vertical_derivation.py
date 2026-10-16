@@ -121,6 +121,23 @@ class VerticalSourceDerivationService:
         finally:
             temp.unlink(missing_ok=True)
 
+    def verify_existing(self, asset: Asset, clip: Clip) -> VerticalDerivationResult:
+        """Reopen existing crop evidence/bytes without creating or rendering media."""
+        p = asset.metadata.get("source_derivation")
+        if not isinstance(p, dict):
+            raise VerticalDerivationValidationError("vertical derivation provenance is missing")
+        request = VerifiedVerticalDerivationRequest.model_validate({
+            **{k:p[k] for k in ("idempotency_key","source_asset_id","source_clip_id","crop_window",
+                "source_subtitle_state","known_subtitle_regions","evidence")},
+            "start_ms":p["source_interval"]["start_ms"], "end_ms":p["source_interval"]["end_ms"],
+            "output_height":asset.height,
+        })
+        source,_,_ = self._validate_request(request)
+        result = self._existing_idempotent_result(request,source)
+        if result is None or result.asset != asset or result.clip != clip:
+            raise VerticalDerivationConflict("existing derivative identity changed")
+        return result
+
     def _existing_idempotent_result(self, request: VerifiedVerticalDerivationRequest, source: Asset) -> VerticalDerivationResult | None:
         for asset in self.assets.list():
             provenance = asset.metadata.get("source_derivation")

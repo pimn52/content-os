@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
 
@@ -238,16 +239,12 @@ class AssetRouter:
             usage = None if asset is None else asset.metadata.get("r1_usage")
             if (
                 asset is None
+                or asset.source_kind is SourceKind.AI_VIDEO  # One reviewed-Run discovery path below.
                 or asset.source_kind not in self.allowed_source_kinds
                 or asset.source_kind not in requested_sources
                 or usage is not None and usage != "production"
                 or clip.end_ms - clip.start_ms < scene.duration_target_ms
             ):
-                continue
-            if asset.source_kind is SourceKind.AI_VIDEO and talking_visual_blocker(
-                asset, clip, self.assets, project_id=scene.project_id, copy=scene.voice_text,
-                selected_duration_ms=scene.duration_target_ms,
-            ) is not None:
                 continue
             if self._known_bad_crop(scene, asset, clip):
                 continue
@@ -272,32 +269,53 @@ class AssetRouter:
             set(scene.preferred_sources) | set(scene.fallback_sources)
         ):
             return []
-        clips = ClipRepository(self.assets.db)
-        candidates: list[tuple[float, CandidateAsset]] = []
-        for run in TalkingRunRepository(self.assets.db).list_for_project(scene.project_id):
-            asset = self.assets.get(run.assembled_asset_id)
-            clip = clips.get(run.assembled_clip_id)
-            if asset is None or clip is None or asset.metadata.get("r1_usage") not in (None, "production"):
+        result = []
+        for c in self.reviewed_talking_candidates(scene):
+            asset = self.assets.get(c.asset_id)
+            source_hash = asset.metadata.get("source_derivation",{}).get("source_content_hash",asset.content_hash)
+            if all(commercial_content_blocker(self.assets.db,sha) is None for sha in {asset.content_hash,source_hash}):
+                result.append((c.match_score,c))
+        return result
+
+    def reviewed_talking_candidates(self, scene: ScenePlan, *, master_audio_id=None, master_interval=None, run_id=None):
+        """Shared media suitability, separate from current-purpose permission."""
+        from app.media.vertical_derivation import VerticalSourceDerivationService
+        from app.media.importer import MediaImporter
+        from app.media.ffprobe import FFProbeAdapter
+        db = self.assets.db
+        root = getattr(db,"data_root",Path(db.path).parent)
+        derivation = VerticalSourceDerivationService(db,root,MediaImporter(db,root,FFProbeAdapter()))
+        clips = ClipRepository(db)
+        candidates: list[CandidateAsset] = []
+        for run in TalkingRunRepository(db).list_for_project(scene.project_id):
+            if run_id is not None and run.id != run_id:
                 continue
-            if commercial_content_blocker(self.assets.db, asset.content_hash) is not None:
-                continue
-            if clip.end_ms - clip.start_ms < scene.duration_target_ms:
-                continue
-            if talking_visual_blocker(
-                asset, clip, self.assets, project_id=scene.project_id, copy=scene.voice_text,
-                selected_duration_ms=scene.duration_target_ms,
-            ) is not None:
-                continue
-            if self._known_bad_crop(scene, asset, clip):
-                continue
-            candidate = CandidateAsset(
-                scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
-                match_score=0.7, why=["admitted TalkingRun", "same project and exact reviewed speech"],
-                reuse_count=clip.used_count,
-                estimated_cost=_local_cost(SourceKind.AI_VIDEO),
-            )
-            candidates.append((candidate.match_score, candidate))
-        return candidates
+            visuals = [a for a in self.assets.list() if a.id==run.assembled_asset_id or
+                isinstance(a.metadata.get("source_derivation"),dict) and a.metadata["source_derivation"].get("source_asset_id")==str(run.assembled_asset_id)]
+            for asset in visuals:
+                available = [clips.get(run.assembled_clip_id)] if asset.id==run.assembled_asset_id else clips.list_by_asset(asset.id)
+                for clip in available:
+                    if clip is None or asset.metadata.get("r1_usage") not in (None,"production"):
+                        continue
+                    if asset.id!=run.assembled_asset_id:
+                        try:
+                            derivation.verify_existing(asset,clip)
+                        except (ValueError,RuntimeError,KeyError,TypeError,OSError):
+                            continue
+                    if master_interval is None and clip.end_ms-clip.start_ms<scene.duration_target_ms:
+                        continue
+                    if talking_visual_blocker(asset,clip,self.assets,project_id=scene.project_id,copy=scene.voice_text,
+                        master_audio_id=master_audio_id,master_interval=master_interval,
+                        selected_duration_ms=scene.duration_target_ms if master_interval is None else None) is not None or self._known_bad_crop(scene,asset,clip):
+                        continue
+                    candidate = CandidateAsset(
+                        scene_plan_id=scene.id, source_kind=SourceKind.AI_VIDEO, asset_id=asset.id, clip_id=clip.id,
+                        match_score=0.7+0.05*min(1,asset.height/asset.width/(16/9)),
+                        why=["admitted TalkingRun", "same project and exact reviewed speech",
+                            "verified existing portrait derivative" if asset.id!=run.assembled_asset_id else "reviewed complete frame; no new crop"],
+                        reuse_count=clip.used_count, estimated_cost=_local_cost(SourceKind.AI_VIDEO))
+                    candidates.append(candidate)
+        return sorted(candidates,key=lambda c:(-c.match_score,str(c.asset_id),str(c.clip_id)))
 
 
 def _scene_query(scene: ScenePlan) -> str:

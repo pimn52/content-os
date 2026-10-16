@@ -101,7 +101,6 @@ const SparseEmphasis: React.FC<{cues: PresentationCue[]; tokens: StyleTokens}> =
 const GraphicCard: React.FC<{text: string; treatment: GraphicTreatment; tokens: StyleTokens; durationFrames: number}> = ({text, treatment, tokens, durationFrames}) => {
   if (treatment === 'none' && !text) return <AbsoluteFill style={{backgroundColor: tokens.background_color}} />;
   if (tokens.name === 'content-os-editorial-ending') return <EditorialFrame tokens={tokens} label="04 / 留下判断"><div style={{position: 'absolute', top: 190, left: 64, right: 64, fontSize: 83, fontWeight: 900, lineHeight: 1.22, whiteSpace: 'pre-line'}}>让观众带走{'\n'}完整判断</div><PanelBody text={text} treatment="contrast" tokens={tokens} frame={0} durationFrames={durationFrames} /></EditorialFrame>;
-  if (tokens.name === 'content-os-editorial') return <EditorialGraphic text={text} treatment={treatment} tokens={tokens} durationFrames={durationFrames} />;
   const base: React.CSSProperties = {
     backgroundColor: tokens.background_color, color: tokens.foreground_color, fontFamily: tokens.font_family,
     padding: 90, display: 'flex', minHeight: '100%', whiteSpace: 'pre-line', overflowWrap: 'anywhere',
@@ -168,6 +167,9 @@ const EditorialFrame: React.FC<{tokens: StyleTokens; label: string; children: Re
 
 const EditorialPanel: React.FC<{source: VideoSource; audioMode: RenderProps['audioMode']; tokens: StyleTokens}> = ({source, audioMode, tokens}) => {
   const frame = useCurrentFrame();
+  // Normal EditPlan supplies semantic text, not evaluation-only timed cues.
+  // Reuse the existing roomy source panel; never invent editorial filler.
+  if (!source.presentationCues?.length) return <SubjectFirstPanel source={source} audioMode={audioMode} tokens={tokens} />;
   const cue = source.presentationCues?.find((item) => frame >= item.startFrame && frame < item.startFrame + item.durationFrames);
   const cueFrame = frame - (cue?.startFrame ?? 0);
   const progress = Math.min(1, cueFrame / 12);
@@ -178,12 +180,7 @@ const EditorialPanel: React.FC<{source: VideoSource; audioMode: RenderProps['aud
     <div style={{position: 'absolute', top: 500, left: 40, right: 40, height: 478, borderRadius: 22, overflow: 'hidden', background: '#111', boxShadow: '0 20px 45px #17203325', opacity: videoOpacity}}>
       <OffthreadVideo src={staticFile(source.src)} trimBefore={source.trimBefore} trimAfter={source.trimAfter} volume={audioMode === 'source' ? 1 : 0} style={{width: '100%', height: '100%', objectFit: 'contain'}} />
     </div>
-    {cue ? <PanelBody text={cue.text} treatment={cue.treatment} tokens={tokens} frame={cueFrame} durationFrames={cue.durationFrames} stepFrames={cue.stepFrames} /> : <>
-    <div style={{position: 'absolute', top: 1040, left: 64, right: 64, borderLeft: `7px solid ${tokens.accent_color}`, paddingLeft: 30}}>
-      <div style={{fontSize: 27, color: tokens.accent_color, letterSpacing: 4, marginBottom: 25}}>剪辑原则</div>
-      <div style={{fontSize: 51, fontWeight: 700, lineHeight: 1.55}}>观点独立成立<br />证据留在语境里</div>
-    </div>
-    <div style={{position: 'absolute', top: 1360, left: 64, right: 64, display: 'flex', gap: 18}}>{['问题', '证据', '语境'].map((word, i) => <div key={word} style={{flex: 1, padding: '28px 12px', borderRadius: 16, background: '#e6e0d5', textAlign: 'center', fontSize: 36}}><span style={{color: tokens.accent_color, fontSize: 22}}>0{i + 1}　</span>{word}</div>)}</div></>}
+    {cue ? <PanelBody text={cue.text} treatment={cue.treatment} tokens={tokens} frame={cueFrame} durationFrames={cue.durationFrames} stepFrames={cue.stepFrames} /> : null}
   </EditorialFrame>;
 };
 
@@ -198,28 +195,4 @@ const PanelBody: React.FC<{text: string; treatment: GraphicTreatment; tokens: St
     return <div style={{position: 'absolute', top: 1070, left: 64, right: 64, display: 'flex', gap: 24}}>{parts.map((part, i) => <div key={i} style={{flex: 1, padding: '48px 24px', borderRadius: 20, background: i === 0 ? tokens.foreground_color : '#e6e0d5', color: i === 0 ? tokens.background_color : tokens.foreground_color}}><div style={{fontSize: 27, color: tokens.accent_color, marginBottom: 28}}>{i === 0 ? '应该留下' : '而不是'}</div><div style={{fontSize: 62, fontWeight: 900, lineHeight: 1.35}}>{part}</div></div>)}</div>;
   }
   return <div style={{position: 'absolute', top: 1060, left: 64, right: 64, borderLeft: `7px solid ${tokens.accent_color}`, paddingLeft: 32}}><div style={{fontSize: 27, color: tokens.accent_color, letterSpacing: 4, marginBottom: 30}}>剪辑原则</div><div style={{fontSize: 57, fontWeight: 700, lineHeight: 1.65, whiteSpace: 'pre-line'}}>{text}</div><div style={{marginTop: 60, fontSize: 30, opacity: .6}}>让一句话，仍然代表原来的意思。</div></div>;
-};
-
-const EditorialGraphic: React.FC<{text: string; treatment: GraphicTreatment; tokens: StyleTokens; durationFrames: number}> = ({text, treatment, tokens, durationFrames}) => {
-  const frame = useCurrentFrame();
-  // Sequence duration is provided by the owning scene, so progression stays
-  // local and deterministic rather than depending on wall-clock time.
-  const active = Math.min(2, Math.floor(frame / Math.max(1, durationFrames / 3)));
-  if (treatment === 'key_point') {
-    const labels = text.split('·').map((part) => part.trim());
-    const details = ['让观众知道在回答什么', '只保留最有力的支撑', '交代观点从哪里来'];
-    return <EditorialFrame tokens={tokens} label="02 / 三步结构">
-      <div style={{position: 'absolute', top: 215, left: 64, fontSize: 84, fontWeight: 900, lineHeight: 1.3}}>一句话很炸？<br /><span style={{color: tokens.accent_color}}>先让答案成立。</span></div>
-      <div style={{position: 'absolute', top: 575, left: 64, right: 64}}>{labels.map((label, i) => <div key={i} style={{display: 'flex', alignItems: 'center', gap: 30, padding: '45px 30px', marginBottom: 28, borderRadius: 18, background: i === active ? tokens.foreground_color : '#e6e0d5', color: i === active ? tokens.background_color : tokens.foreground_color}}><div style={{fontSize: 61, color: tokens.accent_color, fontWeight: 800}}>0{i + 1}</div><div><div style={{fontSize: 58, fontWeight: 800}}>{label}</div><div style={{fontSize: 30, marginTop: 12, opacity: .8}}>{details[i] ?? ''}</div></div></div>)}</div>
-    </EditorialFrame>;
-  }
-  if (treatment === 'contrast') {
-    const parts = text.split('\n');
-    return <EditorialFrame tokens={tokens} label="04 / 留下判断">
-      <div style={{position: 'absolute', top: 220, left: 64, fontSize: 68, fontWeight: 800}}>观众应该带走什么？</div>
-      <div style={{position: 'absolute', top: 450, left: 64, right: 64, padding: 55, background: tokens.foreground_color, color: tokens.background_color, borderRadius: 24}}><div style={{fontSize: 30, color: tokens.accent_color, marginBottom: 30}}>留下</div><div style={{fontSize: 98, fontWeight: 900, lineHeight: 1.3}}>{parts[0]}</div><div style={{fontSize: 34, marginTop: 35, opacity: .8}}>有问题 · 有依据 · 有语境</div></div>
-      <div style={{position: 'absolute', top: 1090, left: 64, right: 64, borderTop: '2px solid #17203330', paddingTop: 45}}><div style={{fontSize: 29, opacity: .55}}>而不是</div><div style={{fontSize: 73, fontWeight: 700, marginTop: 25, opacity: .55}}>{parts.slice(1).join('\n')}</div></div>
-    </EditorialFrame>;
-  }
-  return <EditorialFrame tokens={tokens} label="观点"><div style={{position: 'absolute', top: 480, left: 64, right: 64, fontSize: 100, fontWeight: 900, lineHeight: 1.25, whiteSpace: 'pre-line'}}>{text}</div></EditorialFrame>;
 };

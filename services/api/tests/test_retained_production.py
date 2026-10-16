@@ -247,10 +247,75 @@ def test_normal_job_keeps_exact_identity_and_current_license_checks(legacy,tampe
     assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
 
 
+@pytest.fixture
+def portrait(legacy):
+    from app.media import MediaImporter,ProbeMetadata,VerticalSourceDerivationService
+    from app.domain.models import VerifiedVerticalDerivationRequest,SourceCropWindow,VerifiedVerticalDerivationEvidence,RationalFps
+    from pathlib import Path
+    db,pid,asset,_,_,_,_=legacy
+    asset=AssetRepository(db).update(asset.model_copy(update={'width':1280,'height':720}))
+    class Probe:
+        def probe(self,path):return ProbeMetadata(duration_ms=5000,width=1080,height=1080,fps=RationalFps(numerator=30,denominator=1),has_audio=False,metadata={})
+    crop=SourceCropWindow(x=0,y=0,width=500,height=500)
+    clip=ClipRepository(db).list_by_asset(asset.id)[0]
+    evidence=VerifiedVerticalDerivationEvidence(source_asset_id=asset.id,source_clip_id=clip.id,source_content_hash=asset.content_hash,
+        covered_start_ms=0,covered_end_ms=5000,crop_window=crop,face_head_clearance_verified=True,crop_stability_verified=True,
+        source_subtitle_clearance_verified=True,method='human_full_interval_review',method_version='synthetic-v1',
+        coverage='full_interval_continuous',confidence='reviewed',evidence_reference='Synthetic fixture, no actual crop-safety claim')
+    request=VerifiedVerticalDerivationRequest(idempotency_key='synthetic-square',source_asset_id=asset.id,source_clip_id=clip.id,
+        start_ms=0,end_ms=5000,crop_window=crop,output_height=1080,source_subtitle_state='not_observed',evidence=evidence)
+    service=VerticalSourceDerivationService(db,db.data_root,MediaImporter(db,db.data_root,Probe()),runner=lambda argv:Path(argv[-1]).write_bytes(b'synthetic derived media'))
+    return service.derive(request)
+
+
+@pytest.mark.parametrize('style_name',['content-os-subject-first','content-os-editorial'])
+def test_normal_visual_route_edit_plan_spec_and_renderer_share_verified_portrait(legacy,portrait,style_name):
+    from app.domain.models import GraphicCardPlan
+    from app.renderer import RemotionRenderer
+    from test_remotion_renderer import _renderer_project
+    db,pid,_,_,_,draft,key=legacy
+    draft=draft.model_copy(update={'version':draft.version+1,'scenes':[s.model_copy(update={'graphic_plan':GraphicCardPlan(kind='text_card',treatment='headline',points=['word0 / word1'])}) for s in draft.scenes]})
+    ProjectDraftRepository(db).save(draft)
+    service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens(name=style_name)
+    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
+    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
+    assert plan.status=='ready_for_authorized_dispatch' and all(d.selected_candidate.asset_id==portrait.asset.id for d in plan.scenes)
+    run=ProductionRunService(db,db.data_root).start(pid,idempotency_key='portrait',expected_fingerprint=plan.fingerprint,style_tokens=style,purpose='internal_evaluation')
+    job=JobRepository(db).get(run.render_job_id);spec=job.payload.video_spec
+    assert all(s.visual.asset_id==portrait.asset.id and s.portrait_presentation.value=='portrait_panel' for s in spec.scenes[:5])
+    assert all(s.graphic_text=='word0 / word1' and s.subtitle_treatment.value=='timed_captions' for s in spec.scenes[:5])
+    assert spec.edit_plan.scenes[0].graphic_text==spec.scenes[0].graphic_text
+    renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),renderer_dir=_renderer_project(db.data_root/'props-renderer'))
+    prepared={s.scene_id:renderer._validate_scene(s,spec.fps,project_id=pid,master_audio_id=context['audio'].id,
+        validate_scene_narration=False,composition_job_id=job.id) for s in spec.scenes}
+    stage=db.data_root/'props-stage';stage.mkdir()
+    props=renderer._stage_props(spec,prepared,stage,'synthetic',None)
+    source=props['sceneSources'][spec.scenes[0].scene_id]
+    assert source['styleTokens']['name']==style_name and source['graphicText']=='word0 / word1'
+    assert source['verticalReframeMode']=='contain' and source['sourceBottomCropRatio']==0
+
+
+@pytest.mark.parametrize('invalid',['bytes','evidence','interval'])
+def test_invalid_portrait_falls_back_to_reviewed_original_without_new_media(legacy,portrait,invalid):
+    from pathlib import Path
+    db,pid,original,_,_,_,_=legacy
+    if invalid=='bytes':Path(portrait.asset.source_file).write_bytes(b'changed')
+    else:
+        p=portrait.asset.metadata['source_derivation']
+        if invalid=='evidence':p['evidence']['face_head_clearance_verified']=False
+        else:p['source_interval']['end_ms']=4999
+        AssetRepository(db).update(portrait.asset)
+    service=EvaluationCompositionService(db,db.data_root)
+    context=service._context(pid,service.retained_selection(pid,VisualStyleTokens(name='content-os-subject-first')))
+    assert all(v['asset'].id==original.id for v in context['inputs'].values())
+    assert all(s.subtitle_treatment.value=='none' for s in context['spec'].scenes[:5])
+    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
+
+
 @pytest.mark.parametrize("fps",[(30,1),(30000,1001)])
 def test_absolute_timing_full_master_and_neutral_tail(fps,tmp_path):
     from app.assembly.evaluation_composition import assemble_retained_composition
-    from app.domain.models import AudioAsset, RationalFps, VisualStyleTokens, TranscriptSegment, Clip
+    from app.domain.models import AudioAsset, RationalFps, VisualStyleTokens, TranscriptSegment, Clip, CandidateAsset
     from test_video_spec_assembly import _project,_scene,_asset
     from app.renderer.remotion import RemotionRenderer
     from app.db import Database, AssetRepository, ClipRepository
@@ -261,6 +326,10 @@ def test_absolute_timing_full_master_and_neutral_tail(fps,tmp_path):
         authorization_reference="synthetic",imported_at=project.created_at,transcript_source="synthetic-timing",
         transcript_segments=[TranscriptSegment(start_ms=0,end_ms=1001,text=scenes[0].voice_text),TranscriptSegment(start_ms=1001,end_ms=2100,text=scenes[1].voice_text)])
     inputs={s.id:dict(asset=_asset(i+1,source_kind="ai_video"),clip=Clip(asset_id=uuid4(),start_ms=0,end_ms=3000,asset_duration_ms=3000)) for i,s in enumerate(scenes)}
+    for scene in scenes:
+        item=inputs[scene.id]
+        item['candidate']=CandidateAsset(scene_plan_id=scene.id,source_kind='ai_video',asset_id=item['asset'].id,clip_id=item['clip'].id,
+            match_score=1,why=['synthetic'],estimated_cost={'category':'render','amount':'0','currency':'USD'})
     spec=assemble_retained_composition(project,audio,[(scenes[0],0,1001),(scenes[1],1001,2100)],inputs,VisualStyleTokens())
     assert spec.master_narration.end_ms==2300
     assert sum(s.duration_frames for s in spec.scenes)==(2300*fps[0]+1000*fps[1]-1)//(1000*fps[1])

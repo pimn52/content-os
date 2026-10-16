@@ -58,16 +58,22 @@ are evaluation props, not persisted EditPlan fields or normal UI/automatic
 editorial selection. The continuous editorial-panel contract is separate;
 neither layout proves better quality or generalization.
 
-Normal production preflight/start exposes an explicit subject-first style
-choice. It selects the existing larger contain panel only for AI Talking
-entries with the supported face-safe framing policy; other visuals retain
-their existing presentation. The inspected style is sent again at start,
+Normal production preflight/start exposes subject-first and editorial choices.
+Both reuse the existing larger contain panel for supported AI Talking entries;
+editorial requires a saved semantic scene headline instead of invented filler.
+Headers exceeding the existing panel margin, or text over a full portrait
+without a safe margin, stop explicitly. Full portrait media without graphics
+keeps the full canvas. The inspected style is sent again at start,
 bound by the preflight fingerprint and persisted on the Run. Exact-use
 avoidance compares that same proposed presentation before selection. Changing
 the UI choice clears its prior preview; it does not alter a previously created
-Run or grant source suitability. This has code/fixture coverage, not a new
-creator render or human publishability approval. Source viewport cropping is
-chosen separately in the ordinary media panel.
+Run or grant source suitability. Existing reviewed vertical derivatives can now
+reach the retained-media path through the shared Router. Their existing source
+bytes, full-interval crop/subtitle clearance and derivative identity are
+revalidated without creating media. Invalid derivatives fall back to the
+reviewed original complete frame and require authorization for that actual
+selection. Source viewport creation remains separate in the ordinary media
+panel; no automatic crop, detection or new evidence is inferred.
 
 The ordinary draft scene editor now exposes existing creator-speaking,
 action-evidence and explanatory requirements, their reasons and source
@@ -76,8 +82,11 @@ references, plus legacy/static-card/unsupported graphic intent. An additive
 graphics while retaining captions. It requires a media main visual: selected
 typography, supplied graphic overrides and automatic typography tails for a
 short continuous source fail explicitly. The legacy null declaration retains
-existing behavior; static cards remain a graphic source/fallback plan, not
-automatic overlays on Talking media. Unsupported diagrams/animation remain
+existing behavior. Explicit static-card text can also supply a bounded Talking
+panel headline; it does not replace the speaker or become a full-copy overlay.
+Ordinary editorial cards reuse the common semantic card renderer instead of
+the former interview-specific duplicate template. Timed editorial presentation
+cues remain evaluation props. Unsupported diagrams/animation remain
 unsupported. No classifier or universal stylistic default is introduced.
 
 Changes save through the existing draft endpoint and retained revisions;
