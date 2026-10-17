@@ -331,6 +331,34 @@ class EvaluationCompositionService:
             raise UseAdmissionError("composition_run_owner_missing")
         job = JobRepository(self.db).get(UUID(owner["job_id"]))
         c = self.require_current_job(job)
+        if self.records.get("result",identity) is None:
+            # Explicit resume may replace one failure before reservation. Keep
+            # the failed Job intact; a reserved call is never replayed here.
+            from app.db import ProviderCallRepository
+            key = f"composition:{owner['batch_id']}:render"
+            replacement_key = key + ":recovery"
+            with self.db.transaction(immediate=True):
+                self._fence(c["token"])
+                if (job.status != JobStatus.FAILED or job.idempotency_key != key
+                    or ProviderCallRepository(self.db).get_by_idempotency_key(key) is not None
+                    or self.output_path(owner).exists()
+                    or self.output_path(owner).with_name("staged.mp4").exists()):
+                    raise UseAdmissionError("composition_render_reconciliation_required")
+                self._check_render_budget(project_id,c)
+                now = datetime.now(timezone.utc)
+                replacement = Job(project_id=project_id,type=JobType.RENDER,idempotency_key=replacement_key,
+                    created_at=now,updated_at=now,payload=job.payload)
+                JobRepository(self.db).create(replacement)
+                self.db.connection.execute("UPDATE production_runs SET render_job_id=? WHERE id=?",(str(replacement.id),str(identity)))
+                self.db.connection.execute("UPDATE evaluation_composition_owners SET job_id=?,job_sha256=? WHERE run_id=?",
+                    (str(replacement.id),job_use_identity(replacement),str(identity)))
+                self.db.connection.execute("INSERT INTO execution_use_scopes(subject_kind,subject_id,project_id,fingerprint,payload,subject_sha256) VALUES ('job',?,?,?,?,?)",
+                    (str(replacement.id),str(project_id),c["scope"].fingerprint,c["scope"].model_dump_json(),job_use_identity(replacement)))
+                binding = self.records.get("binding",identity)
+                self.records.save("binding",identity,dict(binding,recovered_from_job_id=str(job.id)),update=True)
+                from app.source_use_constraints import SourceUseConstraintService
+                SourceUseConstraintService(self.db,self.root).snapshot_render(project_id,replacement.id)
+            return
         self.require_result(job)
         with self.db.transaction(immediate=True):
             self._fence(c["token"])

@@ -318,9 +318,14 @@ permission, project and actual result hash under explicit internal purpose.
 Selected generated input/output bytes retain their noncommercial restriction across
 aliases. Unknown source subtitles receive no added overlay, reviewed full
 frames are contained without a new crop, and a terminal non-speaking interval
-uses an explicit text-free neutral background. Failed execution preserves its
-spent slot; normal ProductionRun resume reconciles a saved result without a new
-render, while pending cancellation uses the existing Render Job cancellation.
+uses an explicit text-free neutral background. Reservation and settlement reuse
+the admitted VideoSpec estimate; unpriced local compute stays unknown, subject
+to the existing unknown-cost policy and currency/call ceilings. Normal
+ProductionRun resume reconciles a saved result without rendering again. A failed
+Job with no reserved call, saved result or output may be replaced once through
+explicit resume, preserving its history and consuming the original unspent
+allowance. A reserved call is never replayed; pending cancellation uses the
+existing Render Job cancellation.
 Run status and playback use normal production/render APIs; separate Composition
 selection/status/reconcile/media actions are removed. The read-only history list
 is retained because normal ProductionRun has no equivalent list. Operator use/allowance

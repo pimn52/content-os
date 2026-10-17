@@ -219,7 +219,7 @@ class RenderVideoJobHandler:
                         consumer.require_result(job)
                         return
                     raise UseAdmissionError("composition_render_reconciliation_required")
-                cost = UsageCost(category=CostCategory.RENDER,amount=Decimal("0"),currency="USD",note="external charge zero; local compute unknown")
+                cost = payload.video_spec.estimated_cost
                 reserved = ledger.reserve_execution(project_id=job.project_id,idempotency_key=key,operation="render",mode="runtime",
                     provider="local-render",model="remotion-ffmpeg",input_source=f"render:{owner['render_id']}",
                     input_digest=owner["request_sha256"],estimated_cost=cost,allow_existing_unknown_cost=True,
@@ -256,7 +256,7 @@ class RenderVideoJobHandler:
                         (evidence["sha256"],owner["render_id"]))
                     consumer.records.save("result",owner["run_id"],dict(project_id=str(job.project_id),evidence=evidence))
                 ledger.finish(project_id=job.project_id, call_id=call.id, status="completed", usage_observable=False,
-                    actual_cost=UsageCost(category=CostCategory.RENDER, amount=Decimal("0"), currency="USD", note="external charge zero; local compute unknown"),
+                    actual_cost=cost if consumer is not None else UsageCost(category=CostCategory.RENDER, amount=Decimal("0"), currency="USD", note="external charge zero; local compute unknown"),
                     result_payload=evidence,persist_result=persist if consumer is not None else None)
             else:
                 require_current_use_constraints()

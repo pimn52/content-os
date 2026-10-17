@@ -1431,11 +1431,11 @@ class ProductionRunService:
             if owner is None or owner["project_id"] != str(project_id):
                 return None
             job = JobRepository(self.db).get(UUID(owner["job_id"]))
-            if job.status == JobStatus.FAILED and consumer.records.get("result",run_id) is not None:
+            if job.status == JobStatus.FAILED:
                 consumer.reconcile(project_id,run_id)
             else:
                 consumer.require_current_job(job)
-            return self.get(project_id,run_id)  # Never re-enqueue/re-render a spent slot.
+            return self.get(project_id,run_id)  # Spent calls never re-enqueue.
         from app.evaluation_master import is_evaluation_master_run
         if is_evaluation_master_run(self.db, run_id):
             raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))

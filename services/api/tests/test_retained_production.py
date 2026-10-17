@@ -60,7 +60,7 @@ def legacy(tmp_path, admit_talking_run, monkeypatch):
     monkeypatch.setenv('CONTENT_OS_EXECUTION_ADMISSION_KEY_HASHES',json.dumps({'fixture':hashlib.sha256(key.encode()).hexdigest()}))
     from app.db import BudgetPolicyRepository
     from app.domain.models import BudgetPolicy
-    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,allow_unknown_cost=True,max_calls=1,updated_at=now))
+    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',allow_unknown_cost=True,max_calls=1,updated_at=now))
     yield db,pid,asset,audio,talking,draft,key
     db.close()
 
@@ -227,7 +227,14 @@ def test_one_normal_worker_preserves_private_result_accounting_and_once_only(leg
     assert start('another-key').id==run.id
     calls=ProviderCallRepository(db).list_all()
     assert len(calls)==(0 if outcome=='generic_handler' else 1)
-    if calls:assert calls[0].status==('completed' if outcome=='completed' else 'failed')
+    if calls:
+        assert calls[0].status==('completed' if outcome=='completed' else 'failed')
+        assert calls[0].estimated_cost == job.payload.video_spec.estimated_cost
+        if outcome=='completed':
+            assert calls[0].actual_cost == job.payload.video_spec.estimated_cost
+            assert calls[0].actual_cost.amount is None and calls[0].actual_cost.currency is None
+        else:
+            with pytest.raises(UseAdmissionError):runs.resume(pid,run.id)
     assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
     if outcome!='completed':
         assert runs.get(pid,run.id).status=='render_failed'
@@ -259,6 +266,38 @@ def test_retained_budget_and_immutable_selection_reject_before_job_creation(lega
     with pytest.raises(ProductionRunNotReady):
         ProductionRunService(db,db.data_root).start(pid,idempotency_key='blocked',expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
     assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
+
+
+def test_explicit_resume_replaces_only_one_unreserved_failure_preserving_history(legacy):
+    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
+    runs=ProductionRunService(db,db.data_root)
+    run=runs.start(pid,idempotency_key='recover',expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
+    jobs=JobRepository(db);old=jobs.get(run.render_job_id)
+    jobs.update(old.model_copy(update=dict(status=JobStatus.FAILED,attempt=1,error_code='composition_render_failed')))
+    history=dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())
+    resumed=runs.resume(pid,run.id);new=jobs.get(resumed.render_job_id)
+    assert new.id!=old.id and new.status==JobStatus.PENDING and new.attempt==0 and new.payload==old.payload
+    assert runs.resume(pid,run.id).render_job_id==new.id
+    service.require_current_job(new)
+    assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==history
+    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
+    jobs.update(new.model_copy(update=dict(status=JobStatus.FAILED,attempt=1)))
+    with pytest.raises(UseAdmissionError):runs.resume(pid,run.id)
+
+
+def test_known_cny_cost_still_obeys_amount_limit(legacy):
+    from decimal import Decimal
+    from app.budget import ProviderCallLedger, BudgetLimitError
+    from app.db import BudgetPolicyRepository
+    from app.domain.models import BudgetPolicy, UsageCost, CostCategory
+    db,pid,*_=legacy
+    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',max_amount=Decimal('2'),max_calls=1,
+        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
+    ledger=ProviderCallLedger(db)
+    ledger.check_reservation(project_id=pid,estimated_cost=UsageCost(category=CostCategory.RENDER,amount=Decimal('1'),currency='CNY'))
+    with pytest.raises(BudgetLimitError):
+        ledger.check_reservation(project_id=pid,estimated_cost=UsageCost(category=CostCategory.RENDER,amount=Decimal('3'),currency='CNY'))
 
 
 def test_only_normal_run_and_media_routes_remain(legacy,monkeypatch):
