@@ -166,7 +166,7 @@ class EvaluationCompositionService:
                 asset = AssetRepository(self.db).get(candidate.asset_id) if candidate.asset_id else None
                 clip = ClipRepository(self.db).get(candidate.clip_id) if candidate.clip_id else None
                 if candidate.source_kind is SourceKind.TYPOGRAPHY:
-                    if scene.visual_requirement == "action_evidence" or scene.graphic_plan is None or scene.graphic_plan.kind != "text_card":
+                    if scene.visual_requirement == "action_evidence" or scene.graphic_plan is None or scene.graphic_plan.kind not in {"text_card", "diagram"}:
                         missing.append(str(scene.id));continue
                 else:
                     if (asset is None or clip is None or clip.asset_id != asset.id

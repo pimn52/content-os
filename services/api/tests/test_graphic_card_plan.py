@@ -53,25 +53,29 @@ def test_all_declared_points_survive_resolution_and_supplied_plan_cannot_drop_th
         resolve_edit_plan(owner, [value], selected, clip_intervals={}, supplied=changed)
 
 
-def test_declared_card_survives_videospec_and_normal_renderer_props(tmp_path):
+@pytest.mark.parametrize("treatment", ["key_point", "diagram_flow", "diagram_loss", "diagram_factors"])
+def test_declared_card_survives_videospec_and_normal_renderer_props(tmp_path,treatment):
     from app.db import Database, AssetRepository, ClipRepository
     from app.assembly import VideoSpecAssembler
     from app.renderer import RemotionRenderer
     from test_remotion_renderer import _Runner, _renderer_project
     owner = project()
+    points = POINTS[:2] if treatment == "diagram_loss" else POINTS
+    graphic = GraphicCardPlan(kind="diagram" if treatment.startswith("diagram_") else "text_card",treatment=treatment,points=points)
     value = scene(voice_text="每一刀检查主张是否完整。").model_copy(update={
-        "project_id": owner.id, "graphic_plan": card(), "caption_emphasis": ["结论"],
+        "project_id": owner.id, "graphic_plan": graphic, "caption_emphasis": ["结论"],
     })
     candidate = CandidateAsset(scene_plan_id=value.id, source_kind=SourceKind.TYPOGRAPHY,
         match_score=0, why=["explicit card"], estimated_cost=UsageCost(category=CostCategory.TYPOGRAPHY))
     with Database(tmp_path / "spec.sqlite") as db:
         assets, clips = AssetRepository(db), ClipRepository(db)
         spec = VideoSpecAssembler(assets, clips).assemble(owner, [value], {value.id: candidate.model_copy(update={"recommended": True})})
-        assert spec.scenes[0].graphic_text == "\n".join(POINTS)
+        assert spec.scenes[0].graphic_text == "\n".join(points)
         runner = _Runner()
         RemotionRenderer(assets, clips, renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner).render(
             spec, tmp_path / "card.mp4")
-        assert runner.calls[0][3]["sceneSources"][value.scene_id]["text"] == "\n".join(POINTS)
+        staged = runner.calls[0][3]["sceneSources"][value.scene_id]
+        assert staged["text"] == "\n".join(points) and staged["graphicTreatment"] == treatment
 
 
 @pytest.mark.parametrize("supported", [True, False])

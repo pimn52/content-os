@@ -563,8 +563,8 @@ class VisualIntent(ContractModel):
 class GraphicCardPlan(ContractModel):
     """Explicit executable text card, or a named unsupported visual need."""
 
-    kind: Literal["text_card", "unsupported", "none"]
-    treatment: Literal["headline", "key_point", "contrast"] | None = None
+    kind: Literal["text_card", "diagram", "unsupported", "none"]
+    treatment: Literal["headline", "key_point", "contrast", "diagram_flow", "diagram_loss", "diagram_factors"] | None = None
     points: list[str] = Field(default_factory=list, max_length=4)
     reason: str | None = Field(default=None, min_length=1, max_length=1000)
 
@@ -574,6 +574,10 @@ class GraphicCardPlan(ContractModel):
             if not (self.reason or "").strip() or self.treatment is not None or self.points:
                 raise ValueError("unsupported or omitted graphics require a reason and no executable card")
         else:
+            if (self.kind == "diagram") != bool(self.treatment and self.treatment.startswith("diagram_")):
+                raise ValueError("diagrams require an explicit diagram treatment")
+            if self.kind == "diagram" and (len(self.points) < 2 or self.treatment == "diagram_loss" and len(self.points) != 2):
+                raise ValueError("diagrams require two to four labels; information loss requires two")
             if self.reason is not None or self.treatment is None or not self.points or any(
                 not point.strip() or len(point) > 24 or "\n" in point or "\r" in point for point in self.points
             ) or sum(len(point) for point in self.points) > 72:
@@ -1615,6 +1619,9 @@ class GraphicTreatment(StrEnum):
     HEADLINE = "headline"
     KEY_POINT = "key_point"
     CONTRAST = "contrast"
+    DIAGRAM_FLOW = "diagram_flow"
+    DIAGRAM_LOSS = "diagram_loss"
+    DIAGRAM_FACTORS = "diagram_factors"
 
 
 class VisualStyleTokens(ContractModel):

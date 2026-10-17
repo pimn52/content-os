@@ -123,7 +123,7 @@ def test_new_narration_consumes_graphics_and_authorized_footage_in_same_worker(l
     db,pid,_,audio,_,draft,key=legacy
     scenes=[s.model_copy(update=dict(preferred_sources=[SourceKind.TYPOGRAPHY],fallback_sources=[],
         visual_requirement="explanatory",visual_requirement_reason="Synthetic concept explanation",
-        graphic_plan=GraphicCardPlan(kind="text_card",treatment="key_point",points=[f"Point {i}"])))
+        graphic_plan=GraphicCardPlan(kind="diagram",treatment="diagram_flow",points=[f"Input {i}",f"Output {i}"])))
         for i,s in enumerate(draft.scenes)]
     source=None
     if footage:
@@ -298,6 +298,26 @@ def test_known_cny_cost_still_obeys_amount_limit(legacy):
     ledger.check_reservation(project_id=pid,estimated_cost=UsageCost(category=CostCategory.RENDER,amount=Decimal('1'),currency='CNY'))
     with pytest.raises(BudgetLimitError):
         ledger.check_reservation(project_id=pid,estimated_cost=UsageCost(category=CostCategory.RENDER,amount=Decimal('3'),currency='CNY'))
+
+
+def test_approved_display_copy_uses_word_positions_without_rewriting_asr(legacy):
+    from copy import deepcopy
+    from app.assembly.evaluation_composition import _approved_scene_captions
+    from app.voice_qa import comparison_tokens
+    _,_,_,audio,_,draft,_=legacy
+    text='码率是每秒分给画面的数据量，提高码率不会恢复源里丢失的细节。'
+    observed=text.translate(str.maketrans({'码':'碼','画':'畫','丢':'丟','源':'原'}))
+    words=[dict(text=char,start_ms=i*100,end_ms=(i+1)*100) for i,char in enumerate(''.join(comparison_tokens(observed)))]
+    end=words[-1]['end_ms']
+    audio=audio.model_copy(update=dict(duration_ms=end,transcript_segments=[TranscriptSegment(start_ms=0,end_ms=end,text=observed)],
+        metadata=dict(voice_generation=dict(qa_state='verified',target_text=text),voice_word_timing=dict(source_sha256=audio.content_hash,words=words))))
+    original=deepcopy(audio.model_dump(mode='json'));scene=draft.scenes[0].model_copy(update={'voice_text':text})
+    captions=_approved_scene_captions(audio,[scene],scene,0,end)
+    assert ''.join(c.text for c in captions)==text
+    assert all(c.start_ms in {w['start_ms'] for w in words} and c.end_ms in {w['end_ms'] for w in words} for c in captions)
+    assert audio.model_dump(mode='json')==original
+    audio.metadata['voice_word_timing']['source_sha256']='0'*64
+    assert _approved_scene_captions(audio,[scene],scene,0,end)==[]
 
 
 def test_only_normal_run_and_media_routes_remain(legacy,monkeypatch):

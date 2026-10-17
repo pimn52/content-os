@@ -1,5 +1,6 @@
 import React from 'react';
 import {AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame} from 'remotion';
+import {InformationDiagram} from './InformationDiagram';
 
 type VideoScene = {
   scene_id: string;
@@ -11,7 +12,7 @@ type VideoScene = {
 };
 
 type StyleTokens = {name: string; background_color: string; foreground_color: string; accent_color: string; font_family: string};
-type GraphicTreatment = 'none' | 'headline' | 'key_point' | 'contrast';
+type GraphicTreatment = 'none' | 'headline' | 'key_point' | 'contrast' | 'diagram_flow' | 'diagram_loss' | 'diagram_factors';
 type PresentationCue = {startFrame: number; durationFrames: number; label: string; title: string; treatment: GraphicTreatment; text: string; stepFrames?: number[]};
 
 type VideoSource = {kind: 'video'; src: string; trimBefore: number; trimAfter: number; verticalReframeMode?: 'contain' | 'center_crop' | 'bottom_crop_contain'; portraitPresentation?: 'full_canvas' | 'portrait_panel'; sourceBottomCropRatio?: number; graphicText?: string | null; graphicTreatment?: GraphicTreatment; styleTokens?: StyleTokens; narrationSrc?: string; narrationStartFrame?: number; presentationCues?: PresentationCue[]};
@@ -99,6 +100,9 @@ const SparseEmphasis: React.FC<{cues: PresentationCue[]; tokens: StyleTokens}> =
 };
 
 const GraphicCard: React.FC<{text: string; treatment: GraphicTreatment; tokens: StyleTokens; durationFrames: number}> = ({text, treatment, tokens, durationFrames}) => {
+  const frame = useCurrentFrame();
+  if (treatment.startsWith('diagram_')) return <InformationDiagram treatment={treatment} text={text} frame={frame} durationFrames={durationFrames}
+    background={tokens.background_color} foreground={tokens.foreground_color} accent={tokens.accent_color} font={tokens.font_family} />;
   if (treatment === 'none' && !text) return <AbsoluteFill style={{backgroundColor: tokens.background_color}} />;
   if (tokens.name === 'content-os-editorial-ending') return <EditorialFrame tokens={tokens} label="04 / 留下判断"><div style={{position: 'absolute', top: 190, left: 64, right: 64, fontSize: 83, fontWeight: 900, lineHeight: 1.22, whiteSpace: 'pre-line'}}>让观众带走{'\n'}完整判断</div><PanelBody text={text} treatment="contrast" tokens={tokens} frame={0} durationFrames={durationFrames} /></EditorialFrame>;
   const base: React.CSSProperties = {

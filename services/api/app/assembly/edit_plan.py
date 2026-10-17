@@ -77,7 +77,7 @@ def _default_edit_plan(
         # The provisional entry is also used for exact-use comparisons. Only
         # resolve_edit_plan's preflight grants a renderable plan; unsupported
         # declarations must reach the normal blocked-result reporting path.
-        if scene.graphic_plan is not None and scene.graphic_plan.kind == "text_card":
+        if scene.graphic_plan is not None and scene.graphic_plan.kind in {"text_card", "diagram"}:
             treatment = GraphicTreatment(scene.graphic_plan.treatment)
             short_text = "\n".join(scene.graphic_plan.points)
         graphic = role is EditVisualRole.GRAPHIC or role is EditVisualRole.TALKING and scene.graphic_plan is not None and scene.graphic_plan.kind == "text_card"
@@ -126,7 +126,7 @@ def _preflight(
             elif (entry.fallback.text != "\n".join(scene.graphic_plan.points)
                     or entry.fallback.graphic_treatment.value != scene.graphic_plan.treatment):
                 raise EditPlanPreflightError("graphic_card_points_or_treatment_changed")
-            if scene.graphic_plan.kind == "text_card" and candidate.source_kind is SourceKind.TYPOGRAPHY and (
+            if scene.graphic_plan.kind in {"text_card", "diagram"} and candidate.source_kind is SourceKind.TYPOGRAPHY and (
                 entry.graphic_text != "\n".join(scene.graphic_plan.points)
                 or entry.graphic_treatment.value != scene.graphic_plan.treatment
             ):

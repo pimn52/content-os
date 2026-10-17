@@ -26,6 +26,17 @@ possible primary view. Captions and viewpoint text are graphic treatments,
 not automatically B-roll. EditPlan owns their content purpose and presentation;
 the renderer executes it.
 
+An explicit diagram visual plan can use the existing graphic route for a data
+flow, information-loss illustration or factor relationship diagram. These small
+Remotion SVG treatments show conceptual motion, labelled as illustrations rather
+than measurements; they do not synthesize comparison evidence or turn a static
+card into a product-quality PASS. Revised diagram compositions display the
+approved narration copy at verified word positions, leaving raw ASR unchanged;
+uncertain alignment receives no invented timed captions. Previously admitted
+specs remain reproducible. Shot selection and source burned-in subtitle clearance
+remain material editorial inputs; containment alone does not supply safe portrait
+cropping, remove source subtitles or prove visual suitability.
+
 Editorial choices should depend on the declared content task and available
 evidence. Opinion/interview material may retain the speaker and context;
 tutorials may need actual steps/screens/details; cases may need supporting
