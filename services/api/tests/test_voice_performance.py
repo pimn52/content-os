@@ -102,7 +102,7 @@ def test_reference_window_ranking_only_proposes_candidates_without_quality_or_bo
     ], speech_quality=None)
     windows = select_voice_reference_windows([clip], {asset.id: asset})
     assert windows and windows[0].clip_id == clip.id
-    assert 3_000 <= windows[0].end_ms - windows[0].start_ms <= 10_000
+    assert 5_000 <= windows[0].end_ms - windows[0].start_ms <= 10_000
     assert windows[0].rank_score is not None
     profile = VoiceProfile(name="Creator", provider="omnivoice", provider_profile_id="creator",
         reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Creator", basis="self",

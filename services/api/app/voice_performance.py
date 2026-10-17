@@ -231,7 +231,7 @@ def plan_voice_generation_spans(
 
 def select_voice_reference_windows(
     clips: Sequence[Clip], assets: dict[UUID, Asset], *, data_root: str | Path | None = None,
-    minimum_ms: int = 3_000, maximum_ms: int = 10_000,
+    minimum_ms: int = 5_000, maximum_ms: int = 10_000,
 ) -> tuple[VoiceReferenceWindow, ...]:
     """Return ranked ASR-derived candidates only; this never qualifies a reference."""
     if minimum_ms <= 0 or maximum_ms < minimum_ms:

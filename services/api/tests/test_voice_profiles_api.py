@@ -78,14 +78,19 @@ def test_reference_candidates_need_explicit_confirmation_before_stable_default_r
         IPProfileRepository(db).create(ip)
         project = Project(ip_profile_id=ip.id, title="Voice", topic="New copy", fps=RationalFps(numerator=25, denominator=1), created_at="2026-09-09T08:00:00Z")
         ProjectRepository(db).create(project)
-        asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=12_000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1), authorization_reference="source-rights", imported_at="2026-09-09T08:00:00Z")
+        asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=20_000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1), has_audio=True, authorization_reference="source-rights", imported_at="2026-09-09T08:00:00Z")
         AssetRepository(db).create(asset)
-        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=12_000, asset_duration_ms=12_000, voice_candidate=True, transcript_segments=[
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=8_000, asset_duration_ms=20_000, voice_candidate=True, transcript_segments=[
             {"start_ms": 0, "end_ms": 2_000, "text": "先说明白"},
             {"start_ms": 2_100, "end_ms": 4_500, "text": "再讲重点"},
             {"start_ms": 4_600, "end_ms": 7_000, "text": "最后落下"},
         ])
         ClipRepository(db).create(clip)
+        discovered_clip = Clip(asset_id=asset.id, start_ms=10_000, end_ms=18_000, asset_duration_ms=20_000,
+            transcript="资产其他时间的完整句子", transcript_segments=[
+                {"start_ms": 10_000, "end_ms": 18_000, "text": "资产其他时间的完整句子"},
+            ])
+        ClipRepository(db).create(discovered_clip)
     profile = {"ip_profile_id":str(ip.id),"name": "Creator voice", "provider": "omnivoice", "provider_profile_id": "creator-reference", "reference_clip_ids": [str(clip.id)], "consent": {"subject_name": "Creator", "basis": "self", "confirmed": True, "confirmed_at": "2026-09-09T08:00:00Z"}, "created_at": "2026-09-09T08:00:00Z"}
     with TestClient(create_app(database_path)) as client:
         created = client.post("/voice-profiles", json=profile)
@@ -93,6 +98,8 @@ def test_reference_candidates_need_explicit_confirmation_before_stable_default_r
         profile_id = created.json()["id"]
         choices = client.get(f"/voice-profiles/{profile_id}/reference-windows")
         assert choices.status_code == 200 and choices.json()
+        assert any(item["selection"]["clip_id"] == str(discovered_clip.id) for item in choices.json())
+        assert all(item["selection"]["start_ms"] >= clip.end_ms for item in choices.json())
         selected = choices.json()[0]["selection"]
         assert choices.json()[0]["review_required"] is True
         assert "speech_quality" not in choices.json()[0]

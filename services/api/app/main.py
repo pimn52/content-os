@@ -2633,12 +2633,32 @@ def create_app(
             raise HTTPException(status_code=404, detail="voice profile not found")
         if not profile.consent.confirmed:
             raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
-        clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
-        assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
+        clip_repository, asset_repository = ClipRepository(db), AssetRepository(db)
+        bound_clips = [clip for clip_id in profile.reference_clip_ids if (clip := clip_repository.get(clip_id)) is not None]
+        bound_asset_ids = {clip.asset_id for clip in bound_clips}
+        previously_bound_ranges = [(clip.asset_id, clip.start_ms, clip.end_ms) for clip in bound_clips]
+        assets = {}
+        for asset_id in bound_asset_ids:
+            asset = asset_repository.get(asset_id)
+            if (asset is None or asset.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                    or not asset.has_audio or not asset.authorization_reference.strip()
+                    or asset.metadata.get("ip_profile_id") not in (None, str(profile.ip_profile_id))):
+                continue
+            assets[asset.id] = asset
+        # Profile Clips authorize the source Asset; discover across that
+        # Asset's full indexed timeline instead of limiting search to the few
+        # reference Clips already attached to the VoiceProfile.
+        clips = [clip for asset_id in assets for clip in clip_repository.list_by_asset(asset_id)]
         candidates = select_voice_reference_windows(
             [clip for clip in clips if not is_confirmed_voice_reference(clip)],
             assets,
             data_root=request.app.state.data_root,
+            minimum_ms=5_000,
+        )
+        candidates = tuple(
+            window for window in candidates
+            if not any(window.asset_id == asset_id and window.start_ms < end_ms and start_ms < window.end_ms
+                       for asset_id, start_ms, end_ms in previously_bound_ranges)
         )
         return [
             {
@@ -2696,8 +2716,8 @@ def create_app(
         if asset is None:
             raise HTTPException(status_code=404, detail="reference asset not found")
         duration_ms = payload.end_ms - payload.start_ms
-        if not 6_000 <= duration_ms <= 10_000 or payload.end_ms > asset.duration_ms:
-            raise HTTPException(status_code=422, detail="confirmed voice reference must be 6–10 seconds within its source asset")
+        if not 5_000 <= duration_ms <= 10_000 or payload.end_ms > asset.duration_ms:
+            raise HTTPException(status_code=422, detail="confirmed voice reference must be 5–10 seconds within its source asset")
         ref_text = payload.ref_text.strip()
         suitability_basis = payload.voice_suitability_basis.strip()
         if not ref_text or len(suitability_basis) < 8:
