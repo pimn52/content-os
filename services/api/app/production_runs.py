@@ -177,7 +177,40 @@ class TalkingSourceContext(BaseModel):
 
 
 def _unique_scene_speech_span(audio, scenes, scene_plan_id: UUID) -> tuple[int, int] | None:
-    """Find one unambiguous ordered exact-segment path accepted by source-bind."""
+    """Use admitted word timing where QA substitutions preserve token positions."""
+    from app.voice_qa import _alignment_counts
+    from app.domain.asr_recipe import ASR_PARAMETERS
+    generation = audio.metadata.get("voice_generation", {})
+    evidence = audio.metadata.get("voice_word_timing", {})
+    target = tuple(t for scene in scenes for t in comparison_tokens(scene.voice_text))
+    words = evidence.get("words", [])
+    if (generation.get("qa_state") == "verified" and evidence.get("source_sha256") == audio.content_hash
+            and target and target == comparison_tokens(generation.get("target_text", "")) and words):
+        observed, edges, previous = [], {0: 0}, 0
+        for word in words:
+            start, end = word.get("start_ms"), word.get("end_ms")
+            tokens = comparison_tokens(word.get("text", ""))
+            if (type(start) is not int or type(end) is not int or start < previous
+                    or end <= start or end > audio.duration_ms or not tokens):
+                break
+            observed.extend(tokens); edges[len(observed)] = end; previous = end
+        else:
+            missing, duplicate, substitutions = _alignment_counts(target, observed)
+            # No insertion/deletion, shifting or cut inside a recognizer word.
+            # Keep original ASR text and apply the existing QA tolerance only.
+            if (len(target) == len(observed) and not missing and not duplicate
+                    and substitutions == sum(a != b for a, b in zip(target, observed))
+                    and substitutions / len(target) <= ASR_PARAMETERS["max_substitution_ratio"]):
+                cursor = 0
+                for scene in scenes:
+                    end = cursor + len(comparison_tokens(scene.voice_text))
+                    if cursor not in edges or end not in edges:
+                        break
+                    if scene.id == scene_plan_id:
+                        return edges[cursor], edges[end]
+                    cursor = end
+    # Historical assets without position-preserving word timing keep exact matching.
+
     segments = tuple(audio.transcript_segments)
     if (not audio.transcript_source or not segments or any(
         item.start_ms < 0 or item.end_ms <= item.start_ms or item.end_ms > audio.duration_ms

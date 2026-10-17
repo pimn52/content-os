@@ -546,7 +546,8 @@ def _approved_master(db: Database, project_id: UUID, copy: str) -> AudioAsset | 
             _require_generated_voice_qa(audio,db)
         except ValueError:
             continue
-        spoken = "".join(comparison_tokens(" ".join(segment.text for segment in audio.transcript_segments)))
+        spoken = "".join(comparison_tokens(audio.metadata["voice_generation"].get("target_text")
+            or " ".join(segment.text for segment in audio.transcript_segments)))
         if target and target == spoken:
             return audio
     return None

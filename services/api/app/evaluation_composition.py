@@ -92,7 +92,8 @@ class EvaluationCompositionService:
         _require_generated_voice_qa(audio,self.db)
         copy = draft.script or " ".join(s.voice_text for s in sorted(draft.scenes,key=lambda s:s.order))
         if (not comparison_tokens(copy) or comparison_tokens(copy) != comparison_tokens(
-            " ".join(s.text for s in audio.transcript_segments))):
+            audio.metadata.get("voice_generation", {}).get("target_text")
+            or " ".join(s.text for s in audio.transcript_segments))):
             raise UseAdmissionError("composition_master_copy_mismatch")
         from app.media.local_paths import existing_local_media_file
         if file_digest(existing_local_media_file(audio.source_file,self.root)) != audio.content_hash:

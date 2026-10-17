@@ -6,7 +6,7 @@ from app.domain.models import (CostCategory, MasterNarration,
 
 
 def assemble_retained_composition(project, audio, intervals, inputs, style):
-    cost = UsageCost(category=CostCategory.RENDER, amount="0", currency="USD", note="local composition; compute cost unknown")
+    cost = UsageCost(category=CostCategory.RENDER, amount=None, currency=None, note="local composition; external API cash cost0; compute cost unknown")
     choices = {scene.id: inputs[scene.id]["candidate"] for scene, _, _ in intervals}
     ordered = [s for s, _, _ in intervals]
     clips = {}

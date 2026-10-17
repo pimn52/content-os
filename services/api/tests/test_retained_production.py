@@ -58,6 +58,9 @@ def legacy(tmp_path, admit_talking_run, monkeypatch):
     ProjectDraftRepository(db).save(draft)
     key='synthetic-operator-key-000000000000000000000000000000'
     monkeypatch.setenv('CONTENT_OS_EXECUTION_ADMISSION_KEY_HASHES',json.dumps({'fixture':hashlib.sha256(key.encode()).hexdigest()}))
+    from app.db import BudgetPolicyRepository
+    from app.domain.models import BudgetPolicy
+    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,allow_unknown_cost=True,max_calls=1,updated_at=now))
     yield db,pid,asset,audio,talking,draft,key
     db.close()
 
@@ -252,7 +255,7 @@ def test_retained_budget_and_immutable_selection_reject_before_job_creation(lega
     context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
     budgets=BudgetPolicyRepository(db)
     from app.domain.models import BudgetPolicy
-    budgets.save(BudgetPolicy(project_id=pid,max_calls=0,updated_at=datetime.now(timezone.utc)))
+    budgets.save(BudgetPolicy(project_id=pid,max_calls=0,allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
     with pytest.raises(ProductionRunNotReady):
         ProductionRunService(db,db.data_root).start(pid,idempotency_key='blocked',expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
     assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
@@ -437,3 +440,30 @@ def test_worker_uses_one_render_handler_independent_of_legacy_policy(tmp_path,mo
         assert type(runner._handlers[JobType.RENDER]) is RenderVideoJobHandler
         monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','unknown')
         assert type(build_runner(cfg,db)._handlers[JobType.RENDER]) is RenderVideoJobHandler
+
+
+@pytest.mark.parametrize("change", [None, "stale", "missing", "inside_word", "unverified", "overlap"])
+def test_verified_position_preserving_words_map_scenes_without_rewriting_asr(change):
+    from types import SimpleNamespace
+    from app.production_runs import _unique_scene_speech_span
+    from app.domain.models import AudioAsset, TranscriptSegment
+    tokens = [f"word{i}" for i in range(80)]
+    copy = " ".join(tokens)
+    observed = list(tokens); observed[10] = "recognized"
+    words = [dict(start_ms=i*100, end_ms=(i+1)*100, text=t) for i,t in enumerate(observed)]
+    metadata = dict(voice_generation=dict(target_text=copy, qa_state="verified"),
+        voice_word_timing=dict(source_sha256="a"*64, words=words))
+    scenes = [SimpleNamespace(id=uuid4(), voice_text=" ".join(tokens[:40])),
+        SimpleNamespace(id=uuid4(), voice_text=" ".join(tokens[40:]))]
+    if change == "stale": metadata["voice_word_timing"]["source_sha256"] = "b"*64
+    elif change == "missing": words.pop(10)
+    elif change == "inside_word": words[39:41] = [dict(start_ms=3900,end_ms=4100,text=" ".join(observed[39:41]))]
+    elif change == "unverified": metadata["voice_generation"]["qa_state"] = "pending"
+    elif change == "overlap": words[2]["start_ms"] = 150
+    audio = AudioAsset(source_file="fixture.wav",content_hash="a"*64,duration_ms=8200,
+        sample_rate=24000,channels=1,authorization_reference="synthetic",imported_at=datetime.now(timezone.utc),
+        transcript_source="fixture-asr",transcript_segments=[TranscriptSegment(start_ms=0,end_ms=8000,text=" ".join(observed))],metadata=metadata)
+    before = audio.model_dump_json()
+    assert _unique_scene_speech_span(audio,scenes,scenes[0].id) == ((0,4000) if change is None else None)
+    if change is None: assert _unique_scene_speech_span(audio,scenes,scenes[1].id) == (4000,8000)
+    assert audio.model_dump_json() == before
