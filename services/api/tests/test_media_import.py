@@ -13,9 +13,9 @@ from threading import Barrier, Event
 
 import pytest
 
-from app.db import AssetRepository, CURRENT_SCHEMA_VERSION, Database, apply_migrations
+from app.db import AssetRepository, AudioAssetRepository, CURRENT_SCHEMA_VERSION, Database, apply_migrations
 from app.domain.models import RationalFps
-from app.media import FFProbeAdapter, MediaImporter, ProbeMetadata
+from app.media import AudioImportError, AudioImporter, AudioProbeMetadata, FFProbeAdapter, MediaImporter, ProbeMetadata
 from app.media.ffprobe import ProbeInvalid, ProbeMalformed, ProbeNoVideo
 
 
@@ -128,6 +128,54 @@ def test_import_path_and_stream_dedupe_and_cleanup(tmp_path: Path):
     assert source.read_bytes() == b"same bytes"
     assert len(AssetRepository(db).list()) == 1
     db.close()
+
+
+def test_audio_import_falls_back_to_exclusive_copy_when_hardlinks_are_denied(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / ".import-source.tmp"
+    destination = tmp_path / "audio-by-hash.wav"
+    source.write_bytes(b"generated pcm bytes")
+
+    def deny_hardlink(*_args, **_kwargs):
+        raise PermissionError(13, "hard links denied")
+
+    monkeypatch.setattr(os, "link", deny_hardlink)
+    assert AudioImporter._place(source, destination) is True
+    assert destination.read_bytes() == b"generated pcm bytes"
+    assert not source.exists()
+
+    duplicate = tmp_path / ".duplicate-source.tmp"
+    duplicate.write_bytes(b"must not overwrite")
+    assert AudioImporter._place(duplicate, destination) is False
+    assert not duplicate.exists()
+    assert destination.read_bytes() == b"generated pcm bytes"
+
+
+def test_audio_import_fallback_verifies_hash_and_rolls_back_corrupt_copy(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"generated pcm bytes")
+    data_root = tmp_path / "data"
+    db = Database(tmp_path / "store.sqlite")
+
+    class AudioProbe:
+        def probe_audio(self, _path: Path) -> AudioProbeMetadata:
+            return AudioProbeMetadata(1000, 24000, 1, "zh", {})
+
+    def deny_hardlink(*_args, **_kwargs):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(os, "link", deny_hardlink)
+    monkeypatch.setattr(shutil, "copyfileobj", lambda src, dst: dst.write(src.read(5)))
+    importer = AudioImporter(db, data_root, AudioProbe())
+    expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    try:
+        with pytest.raises(AudioImportError, match="does not match its content hash"):
+            importer.import_path(source, "local-test")
+        assert AudioAssetRepository(db).get_by_content_hash(expected_hash) is None
+        originals = data_root / "assets" / "audio-originals"
+        assert list(originals.glob(f"{expected_hash}.*")) == []
+        assert list(originals.glob(".import-*.tmp")) == []
+    finally:
+        db.close()
 
 
 def test_concurrent_duplicate_import_retains_one_asset_and_one_original(tmp_path: Path) -> None:

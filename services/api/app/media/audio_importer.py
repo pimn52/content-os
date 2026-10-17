@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -116,8 +117,7 @@ class AudioImporter:
                     repository.create(value)
                     register_generated_import_scope(self.db, "audio", value, generated_job)
                     placed = self._place(temp, destination)
-                    if not placed:
-                        _verify_hash(destination, content_hash)
+                    _verify_hash(destination, content_hash)
                 return value
             except sqlite3.IntegrityError:
                 winner = repository.get_by_content_hash(content_hash)
@@ -142,7 +142,30 @@ class AudioImporter:
         except FileExistsError:
             temp.unlink(missing_ok=True)
             return False
-        temp.unlink(missing_ok=True)
+        except PermissionError:
+            # Some Windows filesystems or sandboxed roots deny hard-link creation.
+            # Copy into an exclusive destination so an existing hash path is never overwritten.
+            try:
+                with temp.open("rb") as source, destination.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+                    target.flush()
+                    os.fsync(target.fileno())
+                temp.unlink(missing_ok=True)
+            except FileExistsError:
+                temp.unlink(missing_ok=True)
+                return False
+            except BaseException:
+                try:
+                    destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+            return True
+        try:
+            temp.unlink(missing_ok=True)
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
         return True
 
     @staticmethod
