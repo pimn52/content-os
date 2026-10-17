@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -23,6 +24,51 @@ class MediaImportError(RuntimeError):
 
 
 MAX_CHUNK_SIZE = 64 * 1024 * 1024
+
+
+def _place_exclusive(temp: Path, destination: Path) -> bool:
+    """Retain a temp file without overwriting a content-addressed destination."""
+    try:
+        os.link(temp, destination)
+    except FileExistsError:
+        temp.unlink(missing_ok=True)
+        return False
+    except PermissionError:
+        created_destination = False
+        destination_exists = False
+        try:
+            with temp.open("rb") as source:
+                try:
+                    target = destination.open("xb")
+                except FileExistsError:
+                    destination_exists = True
+                else:
+                    created_destination = True
+                    with target:
+                        shutil.copyfileobj(source, target)
+                        target.flush()
+                        os.fsync(target.fileno())
+            if destination_exists:
+                temp.unlink(missing_ok=True)
+                return False
+            temp.unlink(missing_ok=True)
+        except BaseException:
+            if created_destination:
+                try:
+                    destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        return True
+    try:
+        temp.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return True
 
 
 class MediaImporter:
@@ -104,8 +150,7 @@ class MediaImporter:
                     repository.create(value)
                     register_generated_import_scope(self.db, "asset", value, generated_job)
                     newly_created = self._place(temp, destination)
-                    if not newly_created:
-                        self._verify_content_hash(destination, content_hash)
+                    self._verify_content_hash(destination, content_hash)
                 return value
             except sqlite3.IntegrityError as conflict:
                 # A contender that wins the unique hash row is the only one
@@ -133,14 +178,7 @@ class MediaImporter:
         # Linking is exclusive: unlike an exists/replace sequence it cannot
         # overwrite another importer's retained original. Temp and destination
         # share a directory, so this is an atomic same-volume operation.
-        try:
-            os.link(temp, destination)
-        except FileExistsError:
-            temp.unlink(missing_ok=True)
-            return False
-        else:
-            temp.unlink(missing_ok=True)
-            return True
+        return _place_exclusive(temp, destination)
 
     @staticmethod
     def _cleanup_created(path: Path) -> None:

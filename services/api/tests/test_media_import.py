@@ -114,7 +114,11 @@ def test_probe_errors_are_typed(tmp_path: Path, document, error):
         _fake_probe(tmp_path, document).probe(tmp_path / "x.mp4")
 
 
-def test_import_path_and_stream_dedupe_and_cleanup(tmp_path: Path):
+def test_import_path_and_stream_dedupe_and_cleanup(tmp_path: Path, monkeypatch):
+    def deny_hardlink(*_args, **_kwargs):
+        raise PermissionError(13, "hard links denied")
+
+    monkeypatch.setattr(os, "link", deny_hardlink)
     source = tmp_path / "原始 footage with spaces.mp4"
     source.write_bytes(b"same bytes")
     db = Database(tmp_path / "store.sqlite")
@@ -124,6 +128,8 @@ def test_import_path_and_stream_dedupe_and_cleanup(tmp_path: Path):
     assert first.id == second.id
     assert first.source_file == second.source_file
     assert Path(first.source_file).parent == (tmp_path / "data root" / "assets" / "originals")
+    assert first.content_hash == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert Path(first.source_file).read_bytes() == source.read_bytes()
     assert len(list((tmp_path / "data root" / "assets" / "originals").glob("*"))) == 1
     assert source.read_bytes() == b"same bytes"
     assert len(AssetRepository(db).list()) == 1

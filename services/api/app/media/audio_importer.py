@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
-import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ from app.domain.models import AudioAsset, Job, JobType, SourceKind
 from app.execution_scope import register_generated_import_scope
 
 from .ffprobe import AudioProbeMetadata, FFProbeAdapter, ProbeError
+from .importer import _place_exclusive
 
 
 class AudioImportError(RuntimeError):
@@ -137,36 +137,7 @@ class AudioImporter:
 
     @staticmethod
     def _place(temp: Path, destination: Path) -> bool:
-        try:
-            os.link(temp, destination)
-        except FileExistsError:
-            temp.unlink(missing_ok=True)
-            return False
-        except PermissionError:
-            # Some Windows filesystems or sandboxed roots deny hard-link creation.
-            # Copy into an exclusive destination so an existing hash path is never overwritten.
-            try:
-                with temp.open("rb") as source, destination.open("xb") as target:
-                    shutil.copyfileobj(source, target)
-                    target.flush()
-                    os.fsync(target.fileno())
-                temp.unlink(missing_ok=True)
-            except FileExistsError:
-                temp.unlink(missing_ok=True)
-                return False
-            except BaseException:
-                try:
-                    destination.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
-            return True
-        try:
-            temp.unlink(missing_ok=True)
-        except BaseException:
-            destination.unlink(missing_ok=True)
-            raise
-        return True
+        return _place_exclusive(temp, destination)
 
     @staticmethod
     def _existing_or_error(asset: AudioAsset) -> AudioAsset:

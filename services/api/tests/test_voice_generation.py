@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import math
+import os
 from pathlib import Path
+import struct
 from uuid import uuid4
 import wave
 
@@ -18,6 +21,8 @@ from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.jobs.runner import JobExecutionError
 from app.main import create_app
+from app.media.audio_importer import AudioImporter
+from app.media.ffprobe import AudioProbeMetadata
 from app.providers.voice import VoiceSynthesisResult
 from app.providers.asr import TranscriptionResult, TranscriptionSegment, TranscriptionWord
 from app.voice_qa import VoiceQaError, apply_voice_human_review, apply_voice_qa, comparison_tokens, verify_generated_voice, voice_human_review_status
@@ -146,6 +151,104 @@ def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> 
         call = ProviderCallRepository(db).list_for_project(project.id)[0]
         assert call.operation == "tts" and call.status == "completed"
         assert call.estimated_cost.amount == Decimal("0")
+    finally:
+        db.close()
+
+
+def test_voice_job_import_and_independent_qa_run_offline_with_windows_copy_fallback(tmp_path: Path, monkeypatch) -> None:
+    db = Database(tmp_path / "voice-import-qa.sqlite")
+    try:
+        project, profile = _project_and_profile(db, tmp_path)
+        with db.transaction():
+            BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=False, updated_at=datetime.now(timezone.utc)))
+
+        target_text = "这是离线语音生产链路测试。"
+        payload = VoiceGenerationJobPayload(
+            project_id=project.id, voice_profile_id=profile.id, text=target_text,
+            authorization_reference="fixture:voice-consent", language="zh",
+        )
+        now = datetime.now(timezone.utc)
+        voice_job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, idempotency_key="offline-voice-import-qa", created_at=now, updated_at=now, payload=payload)
+        JobStore(db).enqueue(voice_job)
+
+        def deny_hardlink(*_args, **_kwargs):
+            raise PermissionError(13, "hard links denied by the Windows filesystem")
+
+        monkeypatch.setattr(os, "link", deny_hardlink)
+
+        class Provider:
+            provider_name = "test-voice"
+            model = "offline-fixture"
+            is_local = True
+
+            def synthesize(self, _profile: VoiceProfile, _text: str, output_path: Path, *, language: str | None = None) -> VoiceSynthesisResult:
+                assert language == "zh"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                sample_rate = 24_000
+                frame_count = sample_rate * 2
+                samples = [int(6_000 * math.sin(2 * math.pi * 440 * index / sample_rate)) for index in range(frame_count)]
+                with wave.open(str(output_path), "wb") as sink:
+                    sink.setnchannels(1)
+                    sink.setsampwidth(2)
+                    sink.setframerate(sample_rate)
+                    sink.writeframes(struct.pack(f"<{frame_count}h", *samples))
+                return VoiceSynthesisResult(output_path, provider_version="offline-fixture")
+
+        class Probe:
+            def probe_audio(self, _path: str | Path) -> AudioProbeMetadata:
+                return AudioProbeMetadata(duration_ms=2_000, sample_rate=24_000, channels=1, language="zh", metadata={})
+
+        data_root = tmp_path / "data-root"
+        importer = AudioImporter(db, data_root, probe=Probe())
+        voice_handler = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db), AudioAssetRepository(db), importer, Provider(),
+            tmp_path / "worker-output", ProviderCallLedger(db),
+        )
+        voice_result = JobRunner(
+            JobStore(db), {JobType.GENERATE_VOICE: voice_handler}, worker_id="offline-voice-worker",
+            lease_duration=timedelta(minutes=1), max_attempts=1,
+        ).run_once()
+
+        assert voice_result is not None and voice_result.status is JobStatus.COMPLETED
+        audio = AudioAssetRepository(db).list()[0]
+        retained = Path(audio.source_file)
+        assert retained.is_relative_to(data_root.resolve())
+        assert hashlib.sha256(retained.read_bytes()).hexdigest() == audio.content_hash
+        assert audio.metadata["voice_generation"]["qa_state"] == "pending"
+
+        qa_job = Job(
+            project_id=project.id, type=JobType.VERIFY_VOICE, idempotency_key="offline-independent-qa",
+            created_at=now, updated_at=now,
+            payload=VoiceQaJobPayload(project_id=project.id, narration_audio_id=audio.id, target_text=target_text),
+        )
+        JobStore(db).enqueue(qa_job)
+
+        class ASRFixture:
+            model = "offline-fixture"
+            is_local = True
+
+            def transcribe(self, audio_path: Path, *, language: str | None = None, prompt: str | None = None) -> TranscriptionResult:
+                assert Path(audio_path) == retained and language == "zh" and prompt is None
+                return TranscriptionResult(target_text, (TranscriptionSegment(0, 1_900, target_text),), "zh")
+
+        qa_handler = VoiceQaJobHandler(
+            AudioAssetRepository(db), ASRFixture(), ProviderCallLedger(db),
+            provider_name="offline-fixture-asr", provider_model="offline-fixture", data_root=data_root,
+        )
+        qa_result = JobRunner(
+            JobStore(db), {JobType.VERIFY_VOICE: qa_handler}, worker_id="offline-qa-worker",
+            lease_duration=timedelta(minutes=1), max_attempts=1,
+        ).run_once()
+
+        assert qa_result is not None and qa_result.status is JobStatus.COMPLETED
+        verified = AudioAssetRepository(db).get(audio.id)
+        assert verified is not None
+        generation = verified.metadata["voice_generation"]
+        assert generation["qa_state"] == "verified"
+        assert generation["human_review_state"] == "pending"
+        assert generation["qa"]["copy_coverage"] == 1.0
+        calls = ProviderCallRepository(db).list_for_project(project.id)
+        assert [(call.operation, call.status) for call in calls] == [("tts", "completed"), ("asr", "completed")]
     finally:
         db.close()
 
