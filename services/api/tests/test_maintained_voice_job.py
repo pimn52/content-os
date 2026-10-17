@@ -60,7 +60,8 @@ def bound_job(setup, child_case, monkeypatch, request):
             fps=RationalFps(numerator=25, denominator=1), has_audio=True, authorization_reference="synthetic-source", imported_at=now)
         AssetRepository(db).create(asset)
         clip = Clip(asset_id=asset.id, start_ms=0, end_ms=3000, asset_duration_ms=3000,
-            transcript_segments=[TranscriptSegment(start_ms=0, end_ms=3000, text="synthetic reference")])
+            transcript="synthetic reference", transcript_segments=[TranscriptSegment(start_ms=0, end_ms=3000, text="synthetic reference")],
+            transcript_source="owner-confirmed-reference:confirmed synthetic solo speech")
         ClipRepository(db).create(clip)
         from app.db import ProjectRepository
         voice = VoiceProfile(name="synthetic", provider="omnivoice", provider_profile_id="synthetic",

@@ -452,6 +452,14 @@ class VoiceProfileRepository(_Repository[VoiceProfile]):
         )
         return value
 
+    def update(self, value: VoiceProfile) -> VoiceProfile:
+        cursor = self.db.connection.execute(
+            "UPDATE voice_profiles SET payload = ? WHERE id = ?", (_payload(value), str(value.id))
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
+
 
 class TalkingProfileRepository(_Repository[TalkingProfile]):
     table, model = "talking_profiles", TalkingProfile

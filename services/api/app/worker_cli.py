@@ -44,7 +44,7 @@ from app.talking.planned_preview import TalkingRunPreviewJobHandler
 from app.search import ClipEmbeddingIndexer
 from app.renderer import RemotionRenderer
 from app.runtime import resolve_local_executable
-from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice, select_voice_reference_windows, VoicePerformancePlanningError
+from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice, VoicePerformancePlanningError
 from app.voice_pace import VoicePaceCandidateJobHandler
 
 
@@ -358,73 +358,19 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
     device = os.environ.get("CONTENT_OS_OMNIVOICE_DEVICE", "cpu").strip()
     if not re.fullmatch(r"cpu|cuda(?::[0-9]+)?", device):
         raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_DEVICE must be an explicit CPU or CUDA device")
-    reference_policy = os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment").strip().lower()
-    if reference_policy not in {"first_segment", "best_window"}:
-        raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY must be first_segment or best_window")
-    reference_window_index = 0
-    if reference_policy == "best_window":
-        try:
-            reference_window_index = int(os.environ.get("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "0").strip())
-        except ValueError as exc:
-            raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX must be a non-negative integer") from exc
-        if reference_window_index < 0:
-            raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX must be a non-negative integer")
-
     clips = ClipRepository(db)
     assets = AssetRepository(db)
     ffmpeg = Path(config.ffmpeg)
 
-    def reference_window(clip: object) -> tuple[int, int, str]:
-        """Use one observed spoken interval as the cloning reference.
-
-        Long ordinary clips are valid source material, but feeding an entire
-        minute of speech to OmniVoice can cause it to replay a tail of the
-        reference before starting the requested copy.  The provider boundary
-        may derive a short window from the persisted ASR evidence; Core still
-        stores the original Clip and transcript unchanged.
-        """
-
-        clip_start = int(getattr(clip, "start_ms"))
-        clip_end = int(getattr(clip, "end_ms"))
-        segments = getattr(clip, "transcript_segments", ())
-        for segment in segments:
-            start = getattr(segment, "start_ms", None)
-            end = getattr(segment, "end_ms", None)
-            text_value = getattr(segment, "text", None)
-            if not isinstance(start, int) or not isinstance(end, int) or not isinstance(text_value, str):
-                continue
-            if start < clip_start or end > clip_end or end <= start or not text_value.strip():
-                continue
-            # A single clean sentence is a better reference than replaying a
-            # whole source-led monologue.  Keep the original absolute timing.
-            return start, end, text_value.strip()
-        transcript = getattr(clip, "transcript", None)
-        if not isinstance(transcript, str) or not transcript.strip():
-            raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
-        return clip_start, clip_end, transcript.strip()
-
-    def selected_reference_window(profile: object) -> tuple[Path, int, int, str]:
-        reference_ids = getattr(profile, "reference_clip_ids", None)
-        if not reference_ids:
-            raise VoiceInputError("OmniVoice requires at least one consented reference Clip")
+    def reference_choices(profile: object):
+        reference_ids = getattr(profile, "reference_clip_ids", ())
         referenced = [clips.get(item) for item in reference_ids]
         available = [item for item in referenced if item is not None]
-        if not available:
-            raise VoiceInputError("OmniVoice reference Clip needs a real transcript before Voice generation")
-        if reference_policy == "best_window":
-            resolved_assets = {asset.id: asset for asset in (assets.get(clip.asset_id) for clip in available) if asset is not None}
-            windows = select_voice_reference_windows(available, resolved_assets, data_root=config.data_root)
-            if windows:
-                if reference_window_index >= len(windows):
-                    raise VoiceConfigurationError("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX is outside available authorized windows")
-                window = windows[reference_window_index]
-                return Path(window.source_file), window.start_ms, window.end_ms, window.transcript
-        clip = available[0]
-        asset = assets.get(clip.asset_id)
-        if asset is None:
-            raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
-        start_ms, end_ms, transcript = reference_window(clip)
-        return _resolve_omnivoice_reference_path(asset.source_file, config.data_root), start_ms, end_ms, transcript
+        resolved_assets = {asset.id: asset for asset in (assets.get(clip.asset_id) for clip in available) if asset is not None}
+        try:
+            return authorized_voice_reference_choices(profile, available, resolved_assets, data_root=config.data_root)
+        except VoicePerformancePlanningError as exc:
+            raise VoiceInputError(str(exc)) from exc
 
     def provider_language(language: str | None) -> str | None:
         # The public contract uses compact language codes.  OmniVoice accepts
@@ -434,29 +380,28 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         return {"zh": "Chinese", "en": "English"}.get(normalized, language.strip() if normalized else None)
 
     def synthesize(profile: object, text: str, target: Path, language: str | None, selection: VoiceReferenceWindowSelection | None = None) -> Path:
+        choices = reference_choices(profile)
+        if not choices:
+            raise VoiceInputError("OmniVoice requires a user-confirmed complete reference before inference")
         if selection is None:
-            source_path, reference_start_ms, reference_end_ms, reference_text = selected_reference_window(profile)
+            selection, window = choices[0]
         else:
             if not isinstance(selection, VoiceReferenceWindowSelection):
                 raise VoiceInputError("selected Voice reference is invalid")
-            reference_ids = getattr(profile, "reference_clip_ids", ())
-            available = [clip for clip_id in reference_ids if (clip := clips.get(clip_id)) is not None]
-            resolved_assets = {asset.id: asset for clip in available if (asset := assets.get(clip.asset_id)) is not None}
             try:
-                choices = authorized_voice_reference_choices(profile, available, resolved_assets, data_root=config.data_root)
                 window = resolve_authorized_voice_reference_choice(selection, choices)
             except VoicePerformancePlanningError as exc:
                 raise VoiceInputError(str(exc)) from exc
-            source_path = Path(window.source_file)
-            digest = hashlib.sha256()
-            with source_path.open("rb") as source:
-                for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != selection.source_content_hash:
-                raise VoiceInputError("selected Voice reference source changed since authorization")
-            reference_start_ms, reference_end_ms, reference_text = window.start_ms, window.end_ms, window.transcript
+        source_path = Path(window.source_file)
         if not source_path.is_file():
             raise VoiceInputError("OmniVoice reference Clip points to unavailable media")
+        digest = hashlib.sha256()
+        with source_path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != selection.source_content_hash:
+            raise VoiceInputError("selected Voice reference source changed since authorization")
+        reference_start_ms, reference_end_ms, reference_text = window.start_ms, window.end_ms, window.transcript
         resolved_language = provider_language(language or getattr(profile, "language", None))
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="content-os-omnivoice-", dir=str(target.parent)) as temporary:
@@ -499,7 +444,7 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
     provider.repair_execution = {"runtime": os.environ.get("CONTENT_OS_VOICE_RUNTIME_ID"),
         "machine_id": os.environ.get("CONTENT_OS_VOICE_MACHINE_ID"),
         "parameters": {"runtime_python": str(runtime), "num_step": num_step, "speed": speed, "timeout_seconds": timeout_seconds,
-            "device": device, "reference_policy": reference_policy, "reference_window_index": reference_window_index}}
+            "device": device}}
     return provider
 
 

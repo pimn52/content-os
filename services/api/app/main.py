@@ -35,7 +35,7 @@ from app.media import AudioAssetNotFound, AudioImportError, AudioImporter, Audio
 from app.media.crop_assessment import CropAssessment, CropAssessmentRepository, CropProposal
 from app.workspace import workspace_page
 from app.voice_delivery import VoiceDeliveryTextError, validate_voice_delivery_text
-from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice, VoicePerformancePlanningError
+from app.voice_performance import authorized_voice_reference_choices, is_confirmed_voice_reference, resolve_authorized_voice_reference_choice, select_voice_reference_windows, VoicePerformancePlanningError
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
     EmbeddingAuthenticationError,
@@ -678,6 +678,18 @@ class VoiceProfileRequest(BaseModel):
     consent: ConsentRecord
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     created_at: AwareDatetime
+
+
+class ConfirmVoiceReferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    complete_sentence_confirmed: Literal[True]
+    exact_ref_text_confirmed: Literal[True]
+    voice_suitability_confirmed: Literal[True]
+    voice_suitability_basis: str = Field(min_length=8, max_length=400)
+    asset_id: UUID
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    ref_text: str = Field(min_length=1, max_length=10_000)
 
 
 class VoiceGenerationJobRequest(BaseModel):
@@ -2623,11 +2635,27 @@ def create_app(
             raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
         clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
         assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
-        choices = authorized_voice_reference_choices(profile, clips, assets, data_root=request.app.state.data_root)
+        candidates = select_voice_reference_windows(
+            [clip for clip in clips if not is_confirmed_voice_reference(clip)],
+            assets,
+            data_root=request.app.state.data_root,
+        )
         return [
-            {"selection": selection.model_dump(mode="json"), "transcript": window.transcript,
-             "duration_ms": window.end_ms - window.start_ms, "rank": rank}
-            for rank, (selection, window) in enumerate(choices)
+            {
+                "selection": VoiceReferenceWindowSelection(
+                    clip_id=window.clip_id,
+                    asset_id=window.asset_id,
+                    source_content_hash=assets[window.asset_id].content_hash,
+                    start_ms=window.start_ms,
+                    end_ms=window.end_ms,
+                    transcript_sha256=hashlib.sha256(window.transcript.encode("utf-8")).hexdigest(),
+                ).model_dump(mode="json"),
+                "transcript": window.transcript,
+                "duration_ms": window.end_ms - window.start_ms,
+                "candidate_rank": rank,
+                "review_required": True,
+            }
+            for rank, window in enumerate(candidates, start=1)
         ]
 
     @application.post("/voice-profiles", response_model=VoiceProfile, status_code=201, tags=["voice"])
@@ -2646,6 +2674,54 @@ def create_app(
         with db.transaction():
             repository.create(value)
         return value
+
+    @application.put("/voice-profiles/{profile_id}/reference-clip", response_model=VoiceProfile, tags=["voice"])
+    async def confirm_voice_reference_clip(
+        profile_id: UUID, payload: ConfirmVoiceReferenceRequest, request: Request,
+    ) -> VoiceProfile:
+        db: Database = request.app.state.database
+        profiles = VoiceProfileRepository(db)
+        profile = profiles.get(profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="voice profile not found")
+        if not profile.consent.confirmed or profile.ip_profile_id is None:
+            raise HTTPException(status_code=422, detail="confirmed IP-bound voice consent is required")
+        if IPProfileRepository(db).get(profile.ip_profile_id) is None:
+            raise HTTPException(status_code=422, detail="voice profile IP binding is unavailable")
+        clips = ClipRepository(db)
+        existing = [clips.get(clip_id) for clip_id in profile.reference_clip_ids]
+        if not any(clip is not None and clip.asset_id == payload.asset_id for clip in existing):
+            raise HTTPException(status_code=422, detail="reference asset must already be bound to this voice profile")
+        asset = AssetRepository(db).get(payload.asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="reference asset not found")
+        duration_ms = payload.end_ms - payload.start_ms
+        if not 6_000 <= duration_ms <= 10_000 or payload.end_ms > asset.duration_ms:
+            raise HTTPException(status_code=422, detail="confirmed voice reference must be 6–10 seconds within its source asset")
+        ref_text = payload.ref_text.strip()
+        suitability_basis = payload.voice_suitability_basis.strip()
+        if not ref_text or len(suitability_basis) < 8:
+            raise HTTPException(status_code=422, detail="exact reference text and a concrete voice-suitability basis are required")
+        for clip in existing:
+            if (clip is not None and is_confirmed_voice_reference(clip)
+                    and clip.asset_id == payload.asset_id
+                    and clip.start_ms == payload.start_ms and clip.end_ms == payload.end_ms
+                    and clip.transcript == ref_text):
+                return profile
+        if len(profile.reference_clip_ids) >= 100:
+            raise HTTPException(status_code=409, detail="voice profile reference clip limit reached")
+        reference = Clip(
+            asset_id=asset.id, start_ms=payload.start_ms, end_ms=payload.end_ms,
+            asset_duration_ms=asset.duration_ms, transcript=ref_text,
+            transcript_segments=[{"start_ms": payload.start_ms, "end_ms": payload.end_ms, "text": ref_text}],
+            transcript_source=f"owner-confirmed-reference:{suitability_basis}",
+            voice_candidate=True,
+        )
+        updated = profile.model_copy(update={"reference_clip_ids": [*profile.reference_clip_ids, reference.id]})
+        with db.transaction(immediate=True):
+            clips.create(reference)
+            profiles.update(updated)
+        return updated
 
     @application.get("/talking-profiles", response_model=list[TalkingProfile], tags=["voice"])
     async def list_talking_profiles(request: Request) -> list[TalkingProfile]:
@@ -3376,10 +3452,14 @@ def create_app(
             raise HTTPException(status_code=422, detail="delivery text and draft performance plan cannot yet be applied together")
         if payload.reference_window is not None and payload.use_draft_performance_plan:
             raise HTTPException(status_code=422, detail="selected reference and draft performance plan cannot yet be applied together")
-        if payload.reference_window is not None:
-            clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
-            assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
-            choices = authorized_voice_reference_choices(profile, clips, assets, data_root=request.app.state.data_root)
+        clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
+        assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
+        choices = authorized_voice_reference_choices(profile, clips, assets, data_root=request.app.state.data_root)
+        if not choices:
+            raise HTTPException(status_code=422, detail="voice profile has no user-confirmed default reference")
+        if payload.reference_window is None and not payload.use_draft_performance_plan:
+            payload = payload.model_copy(update={"reference_window": choices[0][0]})
+        elif payload.reference_window is not None:
             try:
                 resolve_authorized_voice_reference_choice(payload.reference_window, choices)
             except VoicePerformancePlanningError as exc:

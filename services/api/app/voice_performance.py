@@ -26,6 +26,16 @@ class VoicePerformancePlanningError(ValueError):
     pass
 
 
+VOICE_REFERENCE_CONFIRMATION_PREFIX = "owner-confirmed-reference:"
+
+
+def is_confirmed_voice_reference(clip: Clip) -> bool:
+    source = clip.transcript_source
+    return isinstance(source, str) and source.startswith(VOICE_REFERENCE_CONFIRMATION_PREFIX) and bool(
+        source.removeprefix(VOICE_REFERENCE_CONFIRMATION_PREFIX).strip()
+    )
+
+
 @dataclass(frozen=True)
 class VoiceReferenceWindow:
     clip_id: UUID
@@ -34,7 +44,7 @@ class VoiceReferenceWindow:
     end_ms: int
     transcript: str
     source_file: str
-    score: float
+    rank_score: float | None
 
     def __post_init__(self) -> None:
         if self.end_ms <= self.start_ms or not self.transcript.strip() or not self.source_file:
@@ -223,11 +233,13 @@ def select_voice_reference_windows(
     clips: Sequence[Clip], assets: dict[UUID, Asset], *, data_root: str | Path | None = None,
     minimum_ms: int = 3_000, maximum_ms: int = 10_000,
 ) -> tuple[VoiceReferenceWindow, ...]:
-    """Return ranked authorized speech windows; no arbitrary media scan occurs."""
+    """Return ranked ASR-derived candidates only; this never qualifies a reference."""
     if minimum_ms <= 0 or maximum_ms < minimum_ms:
         raise ValueError("Voice reference window bounds are invalid")
     candidates: list[VoiceReferenceWindow] = []
     for clip in clips:
+        if is_confirmed_voice_reference(clip):
+            continue
         asset = assets.get(clip.asset_id)
         source_path = None if asset is None else _resolve_source_path(asset.source_file, data_root)
         if source_path is None or not source_path.is_file():
@@ -243,32 +255,47 @@ def select_voice_reference_windows(
                 text.append(segment.text.strip())
                 duration = segment.end_ms - segments[start].start_ms
                 if duration >= minimum_ms:
-                    quality = float(clip.speech_quality) if clip.speech_quality is not None else 0.5
-                    # Prefer a compact ~6s internally continuous window; score
-                    # is only selection provenance, not a quality claim.
-                    score = quality - abs(duration - 6_000) / 100_000
+                    # Duration is only a display-order hint. It says nothing
+                    # about sentence completeness, transcript accuracy, or audio cleanliness.
+                    rank_score = -abs(duration - 8_000)
                     candidates.append(VoiceReferenceWindow(
                         clip_id=clip.id, asset_id=asset.id, start_ms=segments[start].start_ms,
-                        end_ms=segment.end_ms, transcript=" ".join(text), source_file=str(source_path), score=score,
+                        end_ms=segment.end_ms, transcript=" ".join(text), source_file=str(source_path),
+                        rank_score=rank_score,
                     ))
                 end += 1
-    return tuple(sorted(candidates, key=lambda item: (-item.score, item.clip_id.hex, item.start_ms, item.end_ms)))
+    return tuple(sorted(candidates, key=lambda item: (-(item.rank_score or 0), item.clip_id.hex, item.start_ms, item.end_ms)))
 
 
 def authorized_voice_reference_choices(
     profile: VoiceProfile, clips: Sequence[Clip], assets: dict[UUID, Asset], *, data_root: str | Path,
 ) -> tuple[tuple[VoiceReferenceWindowSelection, VoiceReferenceWindow], ...]:
-    """Expose stable source-bound choices without claiming a best speaking style."""
+    """Return only exact, user-confirmed Clip bindings in profile order."""
     if not profile.consent.confirmed:
         raise VoicePerformancePlanningError("Voice reference choices require explicit profile consent")
     allowed_ids = set(profile.reference_clip_ids)
-    allowed_clips = [clip for clip in clips if clip.id in allowed_ids]
-    windows = select_voice_reference_windows(allowed_clips, assets, data_root=data_root)
+    by_id = {clip.id: clip for clip in clips if clip.id in allowed_ids}
     choices = []
-    for window in windows:
-        asset = assets.get(window.asset_id)
-        if asset is None:
+    for clip_id in profile.reference_clip_ids:
+        clip = by_id.get(clip_id)
+        if clip is None or not is_confirmed_voice_reference(clip):
             continue
+        asset = assets.get(clip.asset_id)
+        transcript = clip.transcript.strip() if isinstance(clip.transcript, str) else ""
+        if asset is None or not transcript:
+            continue
+        if (len(clip.transcript_segments) != 1
+                or clip.transcript_segments[0].start_ms != clip.start_ms
+                or clip.transcript_segments[0].end_ms != clip.end_ms
+                or clip.transcript_segments[0].text != transcript):
+            continue
+        source_path = _resolve_source_path(asset.source_file, data_root)
+        if not source_path.is_file():
+            continue
+        window = VoiceReferenceWindow(
+            clip_id=clip.id, asset_id=asset.id, start_ms=clip.start_ms,
+            end_ms=clip.end_ms, transcript=transcript, source_file=str(source_path), rank_score=None,
+        )
         choices.append((VoiceReferenceWindowSelection(
             clip_id=window.clip_id, asset_id=window.asset_id,
             source_content_hash=asset.content_hash, start_ms=window.start_ms,

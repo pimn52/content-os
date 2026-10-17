@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import sys
+from uuid import uuid4
 
 import pytest
 
@@ -56,7 +57,10 @@ def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_
     with Database(db_path) as db:
         asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=12_000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1), authorization_reference="source-rights", imported_at=datetime.now(timezone.utc))
         AssetRepository(db).create(asset)
-        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=12_000, asset_duration_ms=12_000, voice_candidate=True, transcript_segments=[{"start_ms": 0, "end_ms": 3_000, "text": "这是前半句"}, {"start_ms": 3_100, "end_ms": 6_000, "text": "这是后半句"}])
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=7_000, asset_duration_ms=12_000,
+            transcript="这是一句已确认的完整参考。",
+            transcript_segments=[{"start_ms": 0, "end_ms": 7_000, "text": "这是一句已确认的完整参考。"}],
+            transcript_source="owner-confirmed-reference:solo clear speech without music", voice_candidate=True)
         ClipRepository(db).create(clip)
         profile = VoiceProfile(name="Creator", provider="omnivoice", provider_profile_id="creator", reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
         VoiceProfileRepository(db).create(profile)
@@ -323,7 +327,6 @@ def configured_voice(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTENT_OS_OMNIVOICE_PYTHON", str(runtime))
     monkeypatch.setenv("CONTENT_OS_OMNIVOICE_MODEL", str(model))
     monkeypatch.setenv("CONTENT_OS_OMNIVOICE_DEVICE", "cuda:0")
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment")
     calls = []
     def subprocess_fixture(command, **options):
         calls.append(command)
@@ -336,8 +339,9 @@ def configured_voice(tmp_path, monkeypatch):
             duration_ms=12000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1),
             authorization_reference="fixture-rights", imported_at=datetime.now(timezone.utc))
         AssetRepository(db).create(asset)
-        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=12000, asset_duration_ms=12000,
-            transcript_segments=[{"start_ms": 0, "end_ms": 3000, "text": "original first segment"}])
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=8000, asset_duration_ms=12000,
+            transcript="confirmed reference sentence", transcript_segments=[{"start_ms": 0, "end_ms": 8000, "text": "confirmed reference sentence"}],
+            transcript_source="owner-confirmed-reference:confirmed complete solo speech",)
         ClipRepository(db).create(clip)
         profile = VoiceProfile(name="Fixture", provider="omnivoice", provider_profile_id="fixture",
             reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Fixture", basis="self",
@@ -346,7 +350,7 @@ def configured_voice(tmp_path, monkeypatch):
         yield SimpleNamespace(db=db, config=config, profile=profile, source=source, calls=calls, output=tmp_path / "output.wav")
 
 
-def test_omnivoice_command_uses_same_frozen_device_and_reference_policy_as_receipt(configured_voice, monkeypatch):
+def test_omnivoice_uses_confirmed_default_reference_without_dynamic_window_policy(configured_voice, monkeypatch):
     c = configured_voice; provider = _build_voice_provider(c.config, c.db)
     monkeypatch.setenv("CONTENT_OS_OMNIVOICE_DEVICE", "cpu")
     monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "invalid-after-construction")
@@ -356,48 +360,47 @@ def test_omnivoice_command_uses_same_frozen_device_and_reference_policy_as_recei
     assert command[:3] == [parameters["runtime_python"], "-m", "omnivoice.cli.infer"]
     assert command[command.index("--device") + 1] == parameters["device"] == "cuda:0"
     assert command[command.index("--num_step") + 1] == str(parameters["num_step"]) == "32"
-    assert command[command.index("--ref_text") + 1] == "original first segment"
-    assert parameters["reference_policy"] == "first_segment" and parameters["reference_window_index"] == 0
+    assert command[command.index("--ref_text") + 1] == "confirmed reference sentence"
+    assert "reference_policy" not in parameters and "reference_window_index" not in parameters
     assert len(c.calls) == 2
 
 
-def test_omnivoice_best_window_index_is_frozen_before_execution(configured_voice, monkeypatch):
-    from types import SimpleNamespace
+def test_omnivoice_reuses_confirmed_reference_ahead_of_higher_ranked_unconfirmed_candidate(configured_voice):
     c = configured_voice
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "best_window")
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "1")
-    windows = [SimpleNamespace(source_file=str(c.source), start_ms=i*3000, end_ms=(i+1)*3000, transcript=f"window-{i}") for i in range(2)]
-    monkeypatch.setattr("app.worker_cli.select_voice_reference_windows", lambda *args, **kwargs: windows)
+    from app.db import AssetRepository, ClipRepository
+    asset = AssetRepository(c.db).list()[0]
+    clip_id = c.profile.reference_clip_ids[0]
+    unreviewed = Clip(asset_id=asset.id, start_ms=0, end_ms=9000, asset_duration_ms=asset.duration_ms,
+        transcript_segments=[{"start_ms": 0, "end_ms": 9000, "text": "unreviewed longer window"}], transcript="unreviewed longer window",
+        speech_quality=1.0, voice_candidate=True)
+    ClipRepository(c.db).create(unreviewed)
+    profile = c.profile.model_copy(update={"reference_clip_ids": [unreviewed.id, clip_id]})
     provider = _build_voice_provider(c.config, c.db)
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "0")
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "first_segment")
-    provider.synthesize(c.profile, "synthetic requested copy", c.output)
+    provider.synthesize(profile, "synthetic requested copy", c.output)
     command = c.calls[-1]
-    assert command[command.index("--ref_text") + 1] == "window-1"
-    assert provider.repair_execution["parameters"]["reference_window_index"] == 1
-    assert provider.repair_execution["parameters"]["reference_policy"] == "best_window"
+    assert command[command.index("--ref_text") + 1] == "confirmed reference sentence"
+
+
+def test_omnivoice_without_confirmed_reference_stops_before_extraction(configured_voice):
+    c = configured_voice
+    from app.db import ClipRepository
+    confirmed = ClipRepository(c.db).get(c.profile.reference_clip_ids[0])
+    unconfirmed = ClipRepository(c.db).create(confirmed.model_copy(update={
+        "id": uuid4(), "transcript_source": "faster-whisper:small", "speech_quality": 1.0,
+        "transcript": "high scoring but unconfirmed candidate",
+    }))
+    profile = c.profile.model_copy(update={"reference_clip_ids": [unconfirmed.id]})
+    provider = _build_voice_provider(c.config, c.db)
+    with pytest.raises(VoiceInputError, match="user-confirmed complete reference"):
+        provider.synthesize(profile, "synthetic requested copy", c.output)
+    assert c.calls == []
 
 
 @pytest.mark.parametrize("setting,value", [("CONTENT_OS_OMNIVOICE_DEVICE", "auto"),
     ("CONTENT_OS_OMNIVOICE_DEVICE", ""), ("CONTENT_OS_OMNIVOICE_DEVICE", "cuda:bad"),
-    ("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "unknown"),
-    ("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "-1"),
-    ("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "nan")])
+    ("CONTENT_OS_OMNIVOICE_NUM_STEP", "0")])
 def test_omnivoice_invalid_configuration_stops_before_any_process(configured_voice, monkeypatch, setting, value):
     c = configured_voice
-    if setting.endswith("WINDOW_INDEX"):
-        monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "best_window")
     monkeypatch.setenv(setting, value)
     with pytest.raises(VoiceConfigurationError): _build_voice_provider(c.config, c.db)
-    assert c.calls == []
-
-
-def test_omnivoice_out_of_range_frozen_window_stops_before_extraction(configured_voice, monkeypatch):
-    c = configured_voice
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_POLICY", "best_window")
-    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_REFERENCE_WINDOW_INDEX", "2")
-    monkeypatch.setattr("app.worker_cli.select_voice_reference_windows", lambda *args, **kwargs: [object()])
-    provider = _build_voice_provider(c.config, c.db)
-    with pytest.raises(VoiceConfigurationError, match="outside available"):
-        provider.synthesize(c.profile, "synthetic requested copy", c.output)
     assert c.calls == []

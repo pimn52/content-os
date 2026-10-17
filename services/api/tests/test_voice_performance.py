@@ -6,9 +6,9 @@ import wave
 
 import pytest
 
-from app.domain.models import Asset, AudioAsset, Clip, NarrationEmphasis, NarrationPace, NarrationPause, NarrationPerformanceCue, NarrationPerformanceCueKind, NarrationPerformancePlanSource, RationalFps
+from app.domain.models import Asset, AudioAsset, Clip, ConsentRecord, NarrationEmphasis, NarrationPace, NarrationPause, NarrationPerformanceCue, NarrationPerformanceCueKind, NarrationPerformancePlanSource, RationalFps, VoiceProfile
 from app.narration_performance import NarrationBoundaryKind, NarrationBoundaryMap, build_narration_performance_plan, derive_narration_boundary_map
-from app.voice_performance import VoicePerformanceComposer, VoicePerformancePlanningError, pause_duration_ms, plan_voice_generation_spans, plan_voice_performance_units, select_voice_reference_windows
+from app.voice_performance import VoicePerformanceComposer, VoicePerformancePlanningError, authorized_voice_reference_choices, pause_duration_ms, plan_voice_generation_spans, plan_voice_performance_units, select_voice_reference_windows
 
 
 COPY = "先把判断说清楚。但是，结构决定观众能否听懂。最后，让结论落下。"
@@ -93,14 +93,18 @@ def test_composer_uses_total_pause_budget_and_rejects_nonterminal_seam(tmp_path:
         VoicePerformanceComposer().compose([_verified_audio(first), _verified_audio(second)], spans, tmp_path / "unsafe.wav", boundary_map=NarrationBoundaryMap("a" * 64, ()))
 
 
-def test_reference_windows_rank_continuous_authorized_transcript(tmp_path: Path) -> None:
+def test_reference_window_ranking_only_proposes_candidates_without_quality_or_boundary_approval(tmp_path: Path) -> None:
     source = tmp_path / "creator.media"
     source.write_bytes(b"media")
     asset = Asset(source_file=str(source), content_hash="a" * 64, duration_ms=20_000, width=320, height=180, fps=RationalFps(numerator=25, denominator=1), authorization_reference="creator-rights", imported_at=datetime.now(timezone.utc))
     clip = Clip(asset_id=asset.id, start_ms=0, end_ms=20_000, asset_duration_ms=20_000, transcript_segments=[
-        {"start_ms": 0, "end_ms": 2_000, "text": "第一句"}, {"start_ms": 2_100, "end_ms": 4_500, "text": "第二句"}, {"start_ms": 4_600, "end_ms": 7_000, "text": "第三句"},
-    ], speech_quality=0.8)
+        {"start_ms": 0, "end_ms": 2_000, "text": "截断尾音"}, {"start_ms": 2_100, "end_ms": 4_500, "text": "片段内容"}, {"start_ms": 4_600, "end_ms": 7_000, "text": "截断句尾"},
+    ], speech_quality=None)
     windows = select_voice_reference_windows([clip], {asset.id: asset})
     assert windows and windows[0].clip_id == clip.id
     assert 3_000 <= windows[0].end_ms - windows[0].start_ms <= 10_000
-    assert "第一句" in windows[0].transcript
+    assert windows[0].rank_score is not None
+    profile = VoiceProfile(name="Creator", provider="omnivoice", provider_profile_id="creator",
+        reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Creator", basis="self",
+        confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
+    assert authorized_voice_reference_choices(profile, [clip], {asset.id: asset}, data_root=tmp_path) == ()

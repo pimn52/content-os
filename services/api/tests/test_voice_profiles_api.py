@@ -69,7 +69,7 @@ def test_voice_and_talking_profiles_require_consent_and_existing_reference_clips
         assert client.post("/talking-profiles", json={**talking_payload, "consent": {**voice_payload["consent"], "confirmed": False}}).status_code == 422
 
 
-def test_voice_reference_choice_round_trips_into_normal_job_and_rejects_stale_choice(tmp_path: Path) -> None:
+def test_reference_candidates_need_explicit_confirmation_before_stable_default_reuse(tmp_path: Path) -> None:
     database_path = tmp_path / "voice-reference.sqlite3"
     source = tmp_path / "reference.mp4"
     source.write_bytes(b"authorized source bytes")
@@ -94,16 +94,47 @@ def test_voice_reference_choice_round_trips_into_normal_job_and_rejects_stale_ch
         choices = client.get(f"/voice-profiles/{profile_id}/reference-windows")
         assert choices.status_code == 200 and choices.json()
         selected = choices.json()[0]["selection"]
+        assert choices.json()[0]["review_required"] is True
+        assert "speech_quality" not in choices.json()[0]
         request = {"idempotency_key": "selected-ref", "voice_profile_id": profile_id, "text": "任意，新文案", "delivery_text": "任意新文案", "authorization_reference": "voice-consent", "reference_window": selected}
-        first = client.post(f"/projects/{project.id}/voice-jobs", json=request)
-        assert first.status_code == 201
+        assert client.post(f"/projects/{project.id}/voice-jobs", json=request).status_code == 422
+        default_request = {**request, "idempotency_key": "no-confirmed-default", "reference_window": None}
+        assert client.post(f"/projects/{project.id}/voice-jobs", json=default_request).status_code == 422
+
+        ref_text = "先说明白事实，再给出清晰的结论。"
+        confirmation = {
+            "complete_sentence_confirmed": True,
+            "exact_ref_text_confirmed": True,
+            "voice_suitability_confirmed": True,
+            "voice_suitability_basis": "本人单独清晰说话，无背景音乐，适合作为长期声线参考",
+            "asset_id": str(asset.id), "start_ms": 0, "end_ms": 7_000, "ref_text": ref_text,
+        }
+        assert client.put(f"/voice-profiles/{profile_id}/reference-clip", json={
+            **confirmation, "voice_suitability_confirmed": False,
+        }).status_code == 422
+        saved = client.put(f"/voice-profiles/{profile_id}/reference-clip", json=confirmation)
+        assert saved.status_code == 200, saved.json()
+        confirmed_id = next(value for value in saved.json()["reference_clip_ids"] if value != str(clip.id))
+        with Database(database_path) as db:
+            confirmed = ClipRepository(db).get(confirmed_id)
+            assert confirmed is not None and confirmed.transcript == ref_text
+            assert confirmed.transcript_source.startswith("owner-confirmed-reference:")
+
+        # The discovery endpoint remains candidate-only; the confirmed Clip is
+        # consumed by default and is not re-ranked into a new window.
+        choices_after = client.get(f"/voice-profiles/{profile_id}/reference-windows").json()
+        assert choices_after and all(item["review_required"] is True for item in choices_after)
+        default_request = {**request, "idempotency_key": "confirmed-default", "reference_window": None}
+        first = client.post(f"/projects/{project.id}/voice-jobs", json=default_request)
+        assert first.status_code == 201, first.json()
         with Database(database_path) as db:
             stored = JobRepository(db).get(first.json()["id"]).payload
-            assert stored.reference_window.model_dump(mode="json") == selected
+            assert str(stored.reference_window.clip_id) == confirmed_id
+            assert stored.reference_window.start_ms == 0 and stored.reference_window.end_ms == 7_000
+            assert stored.reference_window.transcript_sha256 == hashlib.sha256(ref_text.encode()).hexdigest()
             assert stored.text == request["text"] and stored.delivery_text == request["delivery_text"]
-        repeat = client.post(f"/projects/{project.id}/voice-jobs", json=request)
+        repeat = client.post(f"/projects/{project.id}/voice-jobs", json=default_request)
         assert repeat.status_code == 201 and repeat.json()["id"] == first.json()["id"]
-        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "reference_window": {**selected, "source_content_hash": "0" * 64}}).status_code == 422
-        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "reference_window": None}).status_code == 409
+        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "idempotency_key": "still-candidate", "reference_window": selected}).status_code == 422
         assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "delivery_text": "任意别的文案"}).status_code == 422
         assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "use_draft_performance_plan": True}).status_code == 422
