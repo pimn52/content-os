@@ -69,6 +69,35 @@ def test_real_ffmpeg_video_selected_reference(reference_case):
         assert owned.verify_for(c.window, c.selection, owned.inputs_snapshot())["source_sha256"] == c.selection.source_content_hash
 
 
+def test_source_timestamp_offset_is_preserved_before_sample_selection(reference_case):
+    from dataclasses import replace
+    c = reference_case
+    source = c.root / "offset.nut"
+    subprocess.run([str(c.tool), "-nostdin", "-v", "error", "-n", "-f", "lavfi", "-i",
+        "color=c=blue:s=32x48:r=10:d=2", "-i", c.window.source_file,
+        "-af", "asetpts=PTS+0.064/TB", "-c:v", "mpeg4", "-c:a", "pcm_s16le", "-f", "nut", str(source)],
+        check=True, capture_output=True, timeout=30)
+    c.window = replace(c.window, source_file=str(source), start_ms=0, end_ms=200)
+    c.selection = c.selection.model_copy(update=dict(start_ms=0, end_ms=200,
+        source_content_hash=hashlib.sha256(source.read_bytes()).hexdigest()))
+    with prepare(c) as owned:
+        with wave.open(owned.inputs_snapshot().reference_audio, "rb") as audio:
+            assert audio.getnframes() == 4800
+            samples = struct.unpack("<4800h", audio.readframes(4800))
+        assert all(value == 0 for value in samples[:1400])
+        assert all(value != 0 for value in samples[-1000:])
+
+
+def test_actual_short_source_is_not_padded_to_pass(reference_case):
+    from dataclasses import replace
+    c = reference_case
+    c.window = replace(c.window, end_ms=3000)
+    c.selection = c.selection.model_copy(update=dict(end_ms=3000))
+    with pytest.raises(ExecutionPreparationError, match="voice_reference_output_invalid"):
+        prepare(c)
+    assert list(c.staging.iterdir()) == []
+
+
 @pytest.mark.parametrize("change", ["source", "derived", "tool", "interval"])
 def test_current_reference_drift_rejected(reference_case, monkeypatch, change):
     c = reference_case

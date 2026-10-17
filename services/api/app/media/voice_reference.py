@@ -21,7 +21,14 @@ def reference_extraction_command(ffmpeg, source, target, start_ms, end_ms, *, ca
         "-t", f"{(end_ms - start_ms) / 1000:.3f}", "-vn", "-ac", "1", "-ar", "24000",
         "-c:a", "pcm_s16le", str(target)]
     if canonical:
-        command[1:2] = ["-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file"]
+        # Decode on the source timeline before selecting samples. MP4/AAC
+        # seeking can discard decoder priming even with output-side -ss.
+        # Do not pad the tail: a truly short source must still fail validation.
+        command = [str(ffmpeg), "-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file",
+            "-i", str(source), "-vn", "-af",
+            f"aresample=24000:async=1:min_hard_comp=0.001:first_pts=0,"
+            f"atrim=start_sample={start_ms * 24}:end_sample={end_ms * 24},asetpts=PTS-STARTPTS",
+            "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(target)]
         command[-1:-1] = ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact"]
     return command
 
@@ -111,6 +118,7 @@ def prepare_voice_reference(*, data_root, staging_parent, ffmpeg, window, select
         derived = inputs.model_copy(update=dict(reference_audio=str(target), reference_sha256=_hash(target),
             reference_start_frame=0, reference_end_frame=frames))
         provenance = dict(recipe="ffmpeg-selected-mono24k-pcm16-v1", tool_sha256=tool_sha,
+            timing="source_pts_then_sample_trim",
             source_sha256=selection.source_content_hash, clip_id=str(window.clip_id), asset_id=str(window.asset_id),
             start_ms=window.start_ms, end_ms=window.end_ms, derived_sha256=derived.reference_sha256,
             sampling_rate=24000, frames=frames)
