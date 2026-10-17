@@ -5,7 +5,7 @@ from pathlib import Path
 import struct
 import subprocess
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 import wave
 
 import pytest
@@ -89,7 +89,7 @@ def test_invalid_normal_request_creates_no_partial_job_or_call(bound_job, change
     payload = body(c)
     if change == "receipt": payload["use_admission_ids"] = []
     if change == "capability": payload["execution_capability_profile_id"] = None
-    if change == "reference": payload["reference_window"] = None
+    if change == "reference": payload["reference_window"]["clip_id"] = str(uuid4())
     if change == "implicit": payload.pop("purpose")
     if change == "command": payload["command"] = ["caller-program"]
     with TestClient(create_app(c.db.path)) as client:

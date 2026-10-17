@@ -72,7 +72,7 @@ class VoiceDraftService:
                 raise ValueError()
         except (ValueError, OSError):
             raise UseAdmissionError("maintained_voice_reference_changed") from None
-        for dependency in self.scopes.require_content(payload.reference_window.source_content_hash,
+        for dependency in self.scopes.require_content(payload.reference_window.authorization_content_hash,
                 project_id=scope.project_id, purpose=scope.purpose, operation="derivation"):
             if any(value not in scope.bindings for value in dependency.bindings):
                 raise UseAdmissionError("execution_use_ancestor_dropped")

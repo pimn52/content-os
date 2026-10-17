@@ -341,7 +341,8 @@ class VoiceEvaluationQAService:
                 asset_id = json.loads(row["payload"])["asset_id"]
                 asset = self.db.connection.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
                 rows.append(None if asset is None else tuple(asset))
-        hashes = sorted({audio.content_hash, producer.payload.reference_window.source_content_hash})
+        hashes = sorted({audio.content_hash, producer.payload.reference_window.source_content_hash,
+            producer.payload.reference_window.authorization_content_hash})
         scopes = []
         for content_hash in hashes:
             scopes.extend(self.scopes.scopes_for_hash(content_hash))

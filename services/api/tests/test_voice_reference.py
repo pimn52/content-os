@@ -55,6 +55,45 @@ def test_real_ffmpeg_stereo_resample_exact_window_and_stable_identity(reference_
         assert replay.inputs_snapshot().reference_audio != inputs.reference_audio
 
 
+def test_analysis_wav_reference_uses_its_own_sample_clock(reference_case):
+    from dataclasses import replace
+    c = reference_case
+    source = c.root / "analysis-16k.wav"
+    with wave.open(str(source), "wb") as audio:
+        audio.setparams((1, 2, 16_000, 0, "NONE", "not compressed"))
+        audio.writeframes(struct.pack("<h", 1200) * (16_000 * 3))
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    parent_asset_hash = "f" * 64
+    c.window = replace(c.window, source_file=str(source), source_timebase="analysis_wav",
+        source_content_hash=source_hash, asset_content_hash=parent_asset_hash)
+    c.selection = c.selection.model_copy(update=dict(source_content_hash=source_hash,
+        source_timebase="analysis_wav", asset_content_hash=parent_asset_hash))
+    c.inputs = c.inputs.model_copy(update=dict(reference_audio=str(source), reference_sha256=source_hash,
+        reference_end_frame=36_000))
+
+    command = reference_extraction_command(c.tool, source, "target.wav", 200, 1700,
+        canonical=True, source_timebase="analysis_wav")
+    assert "-ss" not in command
+    assert "atrim=start_sample=3200:end_sample=27200" in command[command.index("-af") + 1]
+    with prepare(c) as owned:
+        output = Path(owned.inputs_snapshot().reference_audio)
+        with wave.open(str(output), "rb") as audio:
+            assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getnframes()) == (1, 2, 24_000, 36_000)
+        provenance = owned.verify_for(c.window, c.selection, owned.inputs_snapshot())
+        assert provenance["timing"] == "analysis_wav_sample_trim"
+        assert provenance["source_sha256"] == source_hash
+        assert provenance["asset_sha256"] == parent_asset_hash
+
+
+def test_analysis_wav_selection_cannot_be_reinterpreted_as_asset_pts(reference_case, monkeypatch):
+    from dataclasses import replace
+    c = reference_case
+    c.window = replace(c.window, source_timebase="analysis_wav", asset_content_hash="f" * 64)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("must reject mismatched timebase"))
+    with pytest.raises(ExecutionPreparationError, match="voice_reference_binding_invalid"):
+        prepare(c)
+
+
 def test_real_ffmpeg_video_selected_reference(reference_case):
     c = reference_case
     video = c.root / "synthetic.mp4"

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import subprocess
 from uuid import uuid4
@@ -97,14 +98,36 @@ def test_reference_window_ranking_only_proposes_candidates_without_quality_or_bo
     source = tmp_path / "creator.media"
     source.write_bytes(b"media")
     asset = Asset(source_file=str(source), content_hash="a" * 64, duration_ms=20_000, width=320, height=180, fps=RationalFps(numerator=25, denominator=1), authorization_reference="creator-rights", imported_at=datetime.now(timezone.utc))
-    clip = Clip(asset_id=asset.id, start_ms=0, end_ms=20_000, asset_duration_ms=20_000, transcript_segments=[
+    analysis_audio = tmp_path / "assets" / "audio" / f"{asset.content_hash}-16000-1.wav"
+    analysis_audio.parent.mkdir(parents=True)
+    with wave.open(str(analysis_audio), "wb") as output:
+        output.setnchannels(1); output.setsampwidth(2); output.setframerate(16_000)
+        output.writeframes((10_000).to_bytes(2, "little", signed=True) * 16_000 * 20)
+    clip = Clip(asset_id=asset.id, start_ms=15_000, end_ms=20_000, asset_duration_ms=20_000, transcript_source="faster-whisper:small", transcript_segments=[
         {"start_ms": 0, "end_ms": 2_000, "text": "截断尾音"}, {"start_ms": 2_100, "end_ms": 4_500, "text": "片段内容"}, {"start_ms": 4_600, "end_ms": 7_000, "text": "截断句尾"},
     ], speech_quality=None)
-    windows = select_voice_reference_windows([clip], {asset.id: asset})
+    windows = select_voice_reference_windows([clip], {asset.id: asset}, data_root=tmp_path)
     assert windows and windows[0].clip_id == clip.id
     assert 5_000 <= windows[0].end_ms - windows[0].start_ms <= 10_000
+    assert any(window.start_ms < clip.start_ms for window in windows)
     assert windows[0].rank_score is not None
+    assert all(window.source_timebase == "analysis_wav" for window in windows)
+    assert all(window.source_file == str(analysis_audio) and window.source_content_hash == hashlib.sha256(analysis_audio.read_bytes()).hexdigest() for window in windows)
     profile = VoiceProfile(name="Creator", provider="omnivoice", provider_profile_id="creator",
         reference_clip_ids=[clip.id], consent=ConsentRecord(subject_name="Creator", basis="self",
         confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
     assert authorized_voice_reference_choices(profile, [clip], {asset.id: asset}, data_root=tmp_path) == ()
+
+
+def test_reference_window_candidates_do_not_fall_back_to_original_asset_time(tmp_path: Path) -> None:
+    source = tmp_path / "creator.media"
+    source.write_bytes(b"media")
+    asset = Asset(source_file=str(source), content_hash="b" * 64, duration_ms=20_000, width=320, height=180,
+        fps=RationalFps(numerator=25, denominator=1), authorization_reference="creator-rights", imported_at=datetime.now(timezone.utc))
+    clip = Clip(asset_id=asset.id, start_ms=0, end_ms=20_000, asset_duration_ms=20_000,
+        transcript_source="faster-whisper:small", transcript_segments=[
+            {"start_ms": 0, "end_ms": 2_000, "text": "未经核对的原片时间"},
+            {"start_ms": 2_100, "end_ms": 4_500, "text": "分析坐标候选"},
+            {"start_ms": 4_600, "end_ms": 7_000, "text": "没有派生音轨"},
+        ])
+    assert select_voice_reference_windows([clip], {asset.id: asset}, data_root=tmp_path) == ()

@@ -35,7 +35,7 @@ from app.media import AudioAssetNotFound, AudioImportError, AudioImporter, Audio
 from app.media.crop_assessment import CropAssessment, CropAssessmentRepository, CropProposal
 from app.workspace import workspace_page
 from app.voice_delivery import VoiceDeliveryTextError, validate_voice_delivery_text
-from app.voice_performance import authorized_voice_reference_choices, is_confirmed_voice_reference, resolve_authorized_voice_reference_choice, select_voice_reference_windows, VoicePerformancePlanningError
+from app.voice_performance import authorized_voice_reference_choices, is_confirmed_voice_reference, resolve_authorized_voice_reference_choice, select_voice_reference_windows, voice_reference_window_selection, VoicePerformancePlanningError
 from app.jobs.targets import AssetJobIdempotencyConflict, AssetJobTargetStore, UnsupportedAssetJobType
 from app.providers.embedding import (
     EmbeddingAuthenticationError,
@@ -686,10 +686,20 @@ class ConfirmVoiceReferenceRequest(BaseModel):
     exact_ref_text_confirmed: Literal[True]
     voice_suitability_confirmed: Literal[True]
     voice_suitability_basis: str = Field(min_length=8, max_length=400)
-    asset_id: UUID
-    start_ms: int = Field(ge=0)
-    end_ms: int = Field(gt=0)
+    asset_id: UUID | None = None
+    start_ms: int | None = Field(default=None, ge=0)
+    end_ms: int | None = Field(default=None, gt=0)
+    reference_window: VoiceReferenceWindowSelection | None = None
     ref_text: str = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def one_source_selection(self) -> "ConfirmVoiceReferenceRequest":
+        legacy = (self.asset_id, self.start_ms, self.end_ms)
+        if self.reference_window is None and any(value is None for value in legacy):
+            raise ValueError("legacy Voice reference confirmation requires asset_id and interval")
+        if self.reference_window is not None and any(value is not None for value in legacy):
+            raise ValueError("Voice reference confirmation must use either a selected window or a legacy Asset interval")
+        return self
 
 
 class VoiceGenerationJobRequest(BaseModel):
@@ -2636,7 +2646,6 @@ def create_app(
         clip_repository, asset_repository = ClipRepository(db), AssetRepository(db)
         bound_clips = [clip for clip_id in profile.reference_clip_ids if (clip := clip_repository.get(clip_id)) is not None]
         bound_asset_ids = {clip.asset_id for clip in bound_clips}
-        previously_bound_ranges = [(clip.asset_id, clip.start_ms, clip.end_ms) for clip in bound_clips]
         assets = {}
         for asset_id in bound_asset_ids:
             asset = asset_repository.get(asset_id)
@@ -2655,23 +2664,14 @@ def create_app(
             data_root=request.app.state.data_root,
             minimum_ms=5_000,
         )
-        candidates = tuple(
-            window for window in candidates
-            if not any(window.asset_id == asset_id and window.start_ms < end_ms and start_ms < window.end_ms
-                       for asset_id, start_ms, end_ms in previously_bound_ranges)
-        )
         return [
             {
-                "selection": VoiceReferenceWindowSelection(
-                    clip_id=window.clip_id,
-                    asset_id=window.asset_id,
-                    source_content_hash=assets[window.asset_id].content_hash,
-                    start_ms=window.start_ms,
-                    end_ms=window.end_ms,
-                    transcript_sha256=hashlib.sha256(window.transcript.encode("utf-8")).hexdigest(),
-                ).model_dump(mode="json"),
+                "selection": voice_reference_window_selection(window).model_dump(mode="json"),
                 "transcript": window.transcript,
                 "duration_ms": window.end_ms - window.start_ms,
+                "source_timebase": window.source_timebase,
+                "source_asset_content_hash": assets[window.asset_id].content_hash,
+                "reference_audio_content_hash": window.source_content_hash,
                 "candidate_rank": rank,
                 "review_required": True,
             }
@@ -2710,34 +2710,74 @@ def create_app(
             raise HTTPException(status_code=422, detail="voice profile IP binding is unavailable")
         clips = ClipRepository(db)
         existing = [clips.get(clip_id) for clip_id in profile.reference_clip_ids]
-        if not any(clip is not None and clip.asset_id == payload.asset_id for clip in existing):
+        selection = payload.reference_window
+        asset_id = selection.asset_id if selection is not None else payload.asset_id
+        start_ms = selection.start_ms if selection is not None else payload.start_ms
+        end_ms = selection.end_ms if selection is not None else payload.end_ms
+        if not any(clip is not None and clip.asset_id == asset_id for clip in existing):
             raise HTTPException(status_code=422, detail="reference asset must already be bound to this voice profile")
-        asset = AssetRepository(db).get(payload.asset_id)
+        asset = AssetRepository(db).get(asset_id)
         if asset is None:
             raise HTTPException(status_code=404, detail="reference asset not found")
-        duration_ms = payload.end_ms - payload.start_ms
-        if not 5_000 <= duration_ms <= 10_000 or payload.end_ms > asset.duration_ms:
-            raise HTTPException(status_code=422, detail="confirmed voice reference must be 5–10 seconds within its source asset")
+        source_timebase = None
+        source_file = None
+        source_hash = None
+        source_duration_ms = None
+        if selection is not None:
+            if selection.source_timebase != "analysis_wav":
+                raise HTTPException(status_code=422, detail="selected derived Voice reference must use its analysis-WAV timeline")
+            if (asset.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                    or not asset.has_audio or not asset.authorization_reference.strip()
+                    or asset.metadata.get("ip_profile_id") not in (None, str(profile.ip_profile_id))):
+                raise HTTPException(status_code=422, detail="reference source Asset is not eligible for this IP-bound VoiceProfile")
+            candidates = select_voice_reference_windows(
+                ClipRepository(db).list_by_asset(asset.id), {asset.id: asset},
+                data_root=request.app.state.data_root, minimum_ms=5_000,
+            )
+            matched = next((window for window in candidates
+                if voice_reference_window_selection(window) == selection), None)
+            if matched is None or matched.source_duration_ms is None:
+                raise HTTPException(status_code=409, detail="selected analysis-WAV reference is no longer current")
+            source_path = Path(matched.source_file).resolve()
+            root = Path(request.app.state.data_root).resolve()
+            try:
+                source_file = source_path.relative_to(root).as_posix()
+            except ValueError:
+                raise HTTPException(status_code=422, detail="derived Voice reference must remain within the configured data root") from None
+            source_timebase = "analysis_wav"
+            source_hash = selection.source_content_hash
+            source_duration_ms = matched.source_duration_ms
+        duration_ms = end_ms - start_ms
+        effective_duration_ms = source_duration_ms if source_timebase == "analysis_wav" else asset.duration_ms
+        if not 5_000 <= duration_ms <= 10_000 or end_ms > effective_duration_ms:
+            raise HTTPException(status_code=422, detail="confirmed voice reference must be 5–10 seconds within its source timeline")
         ref_text = payload.ref_text.strip()
         suitability_basis = payload.voice_suitability_basis.strip()
         if not ref_text or len(suitability_basis) < 8:
             raise HTTPException(status_code=422, detail="exact reference text and a concrete voice-suitability basis are required")
         for clip in existing:
             if (clip is not None and is_confirmed_voice_reference(clip)
-                    and clip.asset_id == payload.asset_id
-                    and clip.start_ms == payload.start_ms and clip.end_ms == payload.end_ms
-                    and clip.transcript == ref_text):
+                    and clip.asset_id == asset.id
+                    and clip.start_ms == start_ms and clip.end_ms == end_ms
+                    and clip.transcript == ref_text
+                    and clip.reference_source_timebase == source_timebase
+                    and clip.reference_source_file == source_file
+                    and clip.reference_source_content_hash == source_hash):
                 return profile
         if len(profile.reference_clip_ids) >= 100:
             raise HTTPException(status_code=409, detail="voice profile reference clip limit reached")
         reference = Clip(
-            asset_id=asset.id, start_ms=payload.start_ms, end_ms=payload.end_ms,
+            asset_id=asset.id, start_ms=start_ms, end_ms=end_ms,
             asset_duration_ms=asset.duration_ms, transcript=ref_text,
-            transcript_segments=[{"start_ms": payload.start_ms, "end_ms": payload.end_ms, "text": ref_text}],
+            reference_source_timebase=source_timebase,
+            reference_source_file=source_file,
+            reference_source_content_hash=source_hash,
+            reference_source_duration_ms=source_duration_ms,
+            transcript_segments=[{"start_ms": start_ms, "end_ms": end_ms, "text": ref_text}],
             transcript_source=f"owner-confirmed-reference:{suitability_basis}",
             voice_candidate=True,
         )
-        updated = profile.model_copy(update={"reference_clip_ids": [*profile.reference_clip_ids, reference.id]})
+        updated = profile.model_copy(update={"reference_clip_ids": [reference.id, *profile.reference_clip_ids]})
         with db.transaction(immediate=True):
             clips.create(reference)
             profiles.update(updated)

@@ -15,7 +15,11 @@ from app.providers.prepared import ExecutionPreparationError
 from app.providers.runtime_tree import _exact_path
 
 
-def reference_extraction_command(ffmpeg, source, target, start_ms, end_ms, *, canonical=False):
+def reference_extraction_command(ffmpeg, source, target, start_ms, end_ms, *, canonical=False, source_timebase="asset_pts"):
+    if source_timebase not in {"asset_pts", "analysis_wav"}:
+        raise ValueError("unsupported voice-reference timebase")
+    if source_timebase == "analysis_wav" and not canonical:
+        raise ValueError("analysis-WAV extraction requires canonical sample trimming")
     # Default preserves the existing Worker CLI command exactly.
     command = [str(ffmpeg), "-y", "-ss", f"{start_ms / 1000:.3f}", "-i", str(source),
         "-t", f"{(end_ms - start_ms) / 1000:.3f}", "-vn", "-ac", "1", "-ar", "24000",
@@ -24,10 +28,18 @@ def reference_extraction_command(ffmpeg, source, target, start_ms, end_ms, *, ca
         # Decode on the source timeline before selecting samples. MP4/AAC
         # seeking can discard decoder priming even with output-side -ss.
         # Do not pad the tail: a truly short source must still fail validation.
+        if source_timebase == "analysis_wav":
+            audio_filter = (
+                f"atrim=start_sample={start_ms * 16}:end_sample={end_ms * 16},"
+                "asetpts=PTS-STARTPTS,aresample=24000"
+            )
+        else:
+            audio_filter = (
+                f"aresample=24000:async=1:min_hard_comp=0.001:first_pts=0,"
+                f"atrim=start_sample={start_ms * 24}:end_sample={end_ms * 24},asetpts=PTS-STARTPTS"
+            )
         command = [str(ffmpeg), "-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file",
-            "-i", str(source), "-vn", "-af",
-            f"aresample=24000:async=1:min_hard_comp=0.001:first_pts=0,"
-            f"atrim=start_sample={start_ms * 24}:end_sample={end_ms * 24},asetpts=PTS-STARTPTS",
+            "-i", str(source), "-vn", "-af", audio_filter,
             "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(target)]
         command[-1:-1] = ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact"]
     return command
@@ -63,6 +75,8 @@ class OwnedVoiceReference:
     def verify_for(self, window, selection, inputs):
         if self._closed or window != self._window or Path(window.source_file).resolve() != self._source:
             raise ExecutionPreparationError("voice_reference_binding_changed")
+        if selection.source_timebase != window.source_timebase or selection.asset_content_hash != window.asset_content_hash:
+            raise ExecutionPreparationError("voice_reference_binding_changed")
         expected = self.inputs_snapshot()
         keys = ("reference_audio", "reference_text", "reference_sha256", "reference_start_frame",
             "reference_end_frame", "reference_max_bytes", "reference_max_frames")
@@ -93,6 +107,8 @@ def prepare_voice_reference(*, data_root, staging_parent, ffmpeg, window, select
             or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 600
             or window.clip_id != selection.clip_id or window.asset_id != selection.asset_id
             or window.start_ms != selection.start_ms or window.end_ms != selection.end_ms
+            or window.source_timebase != selection.source_timebase
+            or window.asset_content_hash != selection.asset_content_hash
             or inputs.reference_text != window.transcript.strip()
             or _hash(source) != selection.source_content_hash):
             raise ExecutionPreparationError("voice_reference_binding_invalid")
@@ -102,7 +118,8 @@ def prepare_voice_reference(*, data_root, staging_parent, ffmpeg, window, select
         tool_sha = _hash(tool)
         temporary = TemporaryDirectory(prefix="voice-reference-", dir=staging)
         target = Path(temporary.name) / "reference.wav"
-        command = reference_extraction_command(tool, source, target, window.start_ms, window.end_ms, canonical=True)
+        command = reference_extraction_command(tool, source, target, window.start_ms, window.end_ms,
+            canonical=True, source_timebase=window.source_timebase)
         environment = {"PATH": str(tool.parent)}
         if os.name == "nt":
             from app.providers.maintained_runtime import _system_root
@@ -118,10 +135,12 @@ def prepare_voice_reference(*, data_root, staging_parent, ffmpeg, window, select
         derived = inputs.model_copy(update=dict(reference_audio=str(target), reference_sha256=_hash(target),
             reference_start_frame=0, reference_end_frame=frames))
         provenance = dict(recipe="ffmpeg-selected-mono24k-pcm16-v1", tool_sha256=tool_sha,
-            timing="source_pts_then_sample_trim",
+            timing="analysis_wav_sample_trim" if window.source_timebase == "analysis_wav" else "source_pts_then_sample_trim",
             source_sha256=selection.source_content_hash, clip_id=str(window.clip_id), asset_id=str(window.asset_id),
             start_ms=window.start_ms, end_ms=window.end_ms, derived_sha256=derived.reference_sha256,
             sampling_rate=24000, frames=frames)
+        if window.asset_content_hash is not None:
+            provenance["asset_sha256"] = window.asset_content_hash
         owned = OwnedVoiceReference(_OWNED, temporary, root, source, tool, window, tool_sha, derived, provenance)
         owned.verify_for(window, selection, derived)
         return owned

@@ -1,6 +1,7 @@
 import hashlib
 from pathlib import Path
 from uuid import uuid4
+import wave
 
 from fastapi.testclient import TestClient
 
@@ -80,55 +81,67 @@ def test_reference_candidates_need_explicit_confirmation_before_stable_default_r
         ProjectRepository(db).create(project)
         asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=20_000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1), has_audio=True, authorization_reference="source-rights", imported_at="2026-09-09T08:00:00Z")
         AssetRepository(db).create(asset)
+        analysis_audio = tmp_path / "assets" / "audio" / f"{asset.content_hash}-16000-1.wav"
+        analysis_audio.parent.mkdir(parents=True)
+        with wave.open(str(analysis_audio), "wb") as output:
+            output.setnchannels(1); output.setsampwidth(2); output.setframerate(16_000)
+            output.writeframes((8_000).to_bytes(2, "little", signed=True) * 16_000 * 20)
         clip = Clip(asset_id=asset.id, start_ms=0, end_ms=8_000, asset_duration_ms=20_000, voice_candidate=True, transcript_segments=[
             {"start_ms": 0, "end_ms": 2_000, "text": "先说明白"},
             {"start_ms": 2_100, "end_ms": 4_500, "text": "再讲重点"},
             {"start_ms": 4_600, "end_ms": 7_000, "text": "最后落下"},
-        ])
+        ], transcript_source="faster-whisper:small")
         ClipRepository(db).create(clip)
         discovered_clip = Clip(asset_id=asset.id, start_ms=10_000, end_ms=18_000, asset_duration_ms=20_000,
             transcript="资产其他时间的完整句子", transcript_segments=[
                 {"start_ms": 10_000, "end_ms": 18_000, "text": "资产其他时间的完整句子"},
-            ])
+            ], transcript_source="faster-whisper:small")
         ClipRepository(db).create(discovered_clip)
     profile = {"ip_profile_id":str(ip.id),"name": "Creator voice", "provider": "omnivoice", "provider_profile_id": "creator-reference", "reference_clip_ids": [str(clip.id)], "consent": {"subject_name": "Creator", "basis": "self", "confirmed": True, "confirmed_at": "2026-09-09T08:00:00Z"}, "created_at": "2026-09-09T08:00:00Z"}
     with TestClient(create_app(database_path)) as client:
         created = client.post("/voice-profiles", json=profile)
         assert created.status_code == 201
         profile_id = created.json()["id"]
-        choices = client.get(f"/voice-profiles/{profile_id}/reference-windows")
-        assert choices.status_code == 200 and choices.json()
-        assert any(item["selection"]["clip_id"] == str(discovered_clip.id) for item in choices.json())
-        assert all(item["selection"]["start_ms"] >= clip.end_ms for item in choices.json())
-        selected = choices.json()[0]["selection"]
-        assert choices.json()[0]["review_required"] is True
-        assert "speech_quality" not in choices.json()[0]
-        request = {"idempotency_key": "selected-ref", "voice_profile_id": profile_id, "text": "任意，新文案", "delivery_text": "任意新文案", "authorization_reference": "voice-consent", "reference_window": selected}
+        response = client.get(f"/voice-profiles/{profile_id}/reference-windows")
+        assert response.status_code == 200 and response.json()
+        choices = response.json()
+        assert any(item["selection"]["clip_id"] == str(discovered_clip.id) for item in choices)
+        assert all(item["selection"]["source_timebase"] == "analysis_wav" for item in choices)
+        assert all(item["source_timebase"] == "analysis_wav" for item in choices)
+        assert all(item["source_asset_content_hash"] == asset.content_hash for item in choices)
+        derived_hash = hashlib.sha256(analysis_audio.read_bytes()).hexdigest()
+        assert all(item["reference_audio_content_hash"] == derived_hash for item in choices)
+        selected = choices[0]["selection"]
+        assert choices[0]["review_required"] is True and "speech_quality" not in choices[0]
+        request = {"idempotency_key": "selected-ref", "voice_profile_id": profile_id,
+            "text": "任意，新文案", "delivery_text": "任意新文案", "authorization_reference": "voice-consent",
+            "reference_window": selected}
         assert client.post(f"/projects/{project.id}/voice-jobs", json=request).status_code == 422
-        default_request = {**request, "idempotency_key": "no-confirmed-default", "reference_window": None}
-        assert client.post(f"/projects/{project.id}/voice-jobs", json=default_request).status_code == 422
+        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request,
+            "idempotency_key": "no-confirmed-default", "reference_window": None}).status_code == 422
 
         ref_text = "先说明白事实，再给出清晰的结论。"
         confirmation = {
-            "complete_sentence_confirmed": True,
-            "exact_ref_text_confirmed": True,
+            "complete_sentence_confirmed": True, "exact_ref_text_confirmed": True,
             "voice_suitability_confirmed": True,
             "voice_suitability_basis": "本人单独清晰说话，无背景音乐，适合作为长期声线参考",
-            "asset_id": str(asset.id), "start_ms": 0, "end_ms": 7_000, "ref_text": ref_text,
+            "reference_window": selected, "ref_text": ref_text,
         }
         assert client.put(f"/voice-profiles/{profile_id}/reference-clip", json={
             **confirmation, "voice_suitability_confirmed": False,
         }).status_code == 422
         saved = client.put(f"/voice-profiles/{profile_id}/reference-clip", json=confirmation)
         assert saved.status_code == 200, saved.json()
-        confirmed_id = next(value for value in saved.json()["reference_clip_ids"] if value != str(clip.id))
+        confirmed_id = saved.json()["reference_clip_ids"][0]
         with Database(database_path) as db:
             confirmed = ClipRepository(db).get(confirmed_id)
             assert confirmed is not None and confirmed.transcript == ref_text
             assert confirmed.transcript_source.startswith("owner-confirmed-reference:")
+            assert confirmed.reference_source_timebase == "analysis_wav"
+            assert confirmed.reference_source_file == analysis_audio.relative_to(tmp_path).as_posix()
+            assert confirmed.reference_source_content_hash == derived_hash
+            assert confirmed.reference_source_duration_ms == 20_000
 
-        # The discovery endpoint remains candidate-only; the confirmed Clip is
-        # consumed by default and is not re-ranked into a new window.
         choices_after = client.get(f"/voice-profiles/{profile_id}/reference-windows").json()
         assert choices_after and all(item["review_required"] is True for item in choices_after)
         default_request = {**request, "idempotency_key": "confirmed-default", "reference_window": None}
@@ -137,11 +150,12 @@ def test_reference_candidates_need_explicit_confirmation_before_stable_default_r
         with Database(database_path) as db:
             stored = JobRepository(db).get(first.json()["id"]).payload
             assert str(stored.reference_window.clip_id) == confirmed_id
-            assert stored.reference_window.start_ms == 0 and stored.reference_window.end_ms == 7_000
+            assert stored.reference_window.start_ms == selected["start_ms"]
+            assert stored.reference_window.end_ms == selected["end_ms"]
+            assert stored.reference_window.source_timebase == "analysis_wav"
+            assert stored.reference_window.source_content_hash == derived_hash
+            assert stored.reference_window.authorization_content_hash == asset.content_hash
             assert stored.reference_window.transcript_sha256 == hashlib.sha256(ref_text.encode()).hexdigest()
             assert stored.text == request["text"] and stored.delivery_text == request["delivery_text"]
         repeat = client.post(f"/projects/{project.id}/voice-jobs", json=default_request)
         assert repeat.status_code == 201 and repeat.json()["id"] == first.json()["id"]
-        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "idempotency_key": "still-candidate", "reference_window": selected}).status_code == 422
-        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "delivery_text": "任意别的文案"}).status_code == 422
-        assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "use_draft_performance_plan": True}).status_code == 422

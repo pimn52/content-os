@@ -185,6 +185,6 @@ def require_completed_review(db, root, audio, job, producer, scopes, *, project_
             raise ValueError()
     except (ValueError, OSError):
         raise UseAdmissionError("maintained_voice_reference_changed") from None
-    service.require_content(job.payload.reference_window.source_content_hash,
+    service.require_content(job.payload.reference_window.authorization_content_hash,
         project_id=project_id, purpose=purpose, operation="derivation")
     return REVIEW_POLICY

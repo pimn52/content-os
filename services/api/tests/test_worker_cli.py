@@ -337,7 +337,7 @@ def configured_voice(tmp_path, monkeypatch):
     with Database(tmp_path / "config.sqlite") as db:
         asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
             duration_ms=12000, width=720, height=1280, fps=RationalFps(numerator=25, denominator=1),
-            authorization_reference="fixture-rights", imported_at=datetime.now(timezone.utc))
+            has_audio=True, authorization_reference="fixture-rights", imported_at=datetime.now(timezone.utc))
         AssetRepository(db).create(asset)
         clip = Clip(asset_id=asset.id, start_ms=0, end_ms=8000, asset_duration_ms=12000,
             transcript="confirmed reference sentence", transcript_segments=[{"start_ms": 0, "end_ms": 8000, "text": "confirmed reference sentence"}],
@@ -379,6 +379,52 @@ def test_omnivoice_reuses_confirmed_reference_ahead_of_higher_ranked_unconfirmed
     provider.synthesize(profile, "synthetic requested copy", c.output)
     command = c.calls[-1]
     assert command[command.index("--ref_text") + 1] == "confirmed reference sentence"
+
+
+def test_omnivoice_uses_confirmed_analysis_wav_bytes_and_text(configured_voice):
+    from app.db import ClipRepository
+    import wave
+
+    c = configured_voice
+    root = c.config.data_root
+    analysis_audio = root / "assets" / "audio" / "analysis-reference.wav"
+    analysis_audio.parent.mkdir(parents=True)
+    with wave.open(str(analysis_audio), "wb") as output:
+        output.setnchannels(1); output.setsampwidth(2); output.setframerate(16_000)
+        output.writeframes((1_000).to_bytes(2, "little", signed=True) * 16_000 * 12)
+    parent_asset = AssetRepository(c.db).list()[0]
+    ref_text = "要弄明白为什么全球视频画质下降，首先要明白一点：就是任何网络传输的视频都被极大地压缩。"
+    derived = Clip(
+        asset_id=parent_asset.id,
+        start_ms=1_000, end_ms=8_000, asset_duration_ms=12_000,
+        reference_source_timebase="analysis_wav",
+        reference_source_file=analysis_audio.relative_to(root).as_posix(),
+        reference_source_content_hash=hashlib.sha256(analysis_audio.read_bytes()).hexdigest(),
+        reference_source_duration_ms=12_000,
+        transcript=ref_text, transcript_segments=[{"start_ms": 1_000, "end_ms": 8_000, "text": ref_text}],
+        transcript_source="owner-confirmed-reference:complete solo speech, exact text and suitability confirmed",
+        voice_candidate=True,
+    )
+    ClipRepository(c.db).create(derived)
+    profile = c.profile.model_copy(update={"reference_clip_ids": [derived.id]})
+    from app.voice_performance import authorized_voice_reference_choices
+    selection, window = authorized_voice_reference_choices(
+        profile, [derived], {parent_asset.id: parent_asset}, data_root=root,
+    )[0]
+    assert window.source_file == str(analysis_audio)
+    assert selection.source_content_hash == hashlib.sha256(analysis_audio.read_bytes()).hexdigest()
+    assert selection.authorization_content_hash == parent_asset.content_hash
+
+    provider = _build_voice_provider(c.config, c.db)
+    provider.synthesize_with_reference(profile, "短句验证文案", c.output, language="zh", reference_window=selection)
+    extraction, inference = c.calls
+    audio_filter = extraction[extraction.index("-af") + 1]
+    assert extraction[extraction.index("-i") + 1] == str(analysis_audio)
+    assert "atrim=start_sample=16000:end_sample=128000" in audio_filter
+    assert "aresample=24000" in audio_filter
+    assert "-ss" not in extraction
+    assert inference[inference.index("--ref_text") + 1] == ref_text
+    assert inference[inference.index("--ref_audio") + 1] == extraction[-1]
 
 
 def test_omnivoice_without_confirmed_reference_stops_before_extraction(configured_voice):

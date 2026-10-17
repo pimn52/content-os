@@ -408,7 +408,8 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
             reference_audio = Path(temporary) / "reference.wav"
             try:
                 extraction = subprocess.run(
-                    reference_extraction_command(ffmpeg, source_path, reference_audio, reference_start_ms, reference_end_ms),
+                    reference_extraction_command(ffmpeg, source_path, reference_audio, reference_start_ms, reference_end_ms,
+                        canonical=window.source_timebase == "analysis_wav", source_timebase=window.source_timebase),
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,

@@ -18,7 +18,7 @@ from typing import Sequence
 from uuid import UUID
 import wave
 
-from app.domain.models import Asset, AudioAsset, Clip, NarrationDeliverySegment, NarrationPause, NarrationPerformancePlan, TranscriptSegment, VoiceProfile, VoiceReferenceWindowSelection
+from app.domain.models import Asset, AudioAsset, Clip, NarrationDeliverySegment, NarrationPause, NarrationPerformancePlan, SourceKind, TranscriptSegment, VoiceProfile, VoiceReferenceWindowSelection
 from app.narration_performance import NarrationBoundaryKind, NarrationBoundaryMap, compile_narration_delivery_plan, validate_narration_performance_plan
 
 
@@ -45,10 +45,30 @@ class VoiceReferenceWindow:
     transcript: str
     source_file: str
     rank_score: float | None
+    source_timebase: str = "asset_pts"
+    source_content_hash: str | None = None
+    asset_content_hash: str | None = None
+    source_duration_ms: int | None = None
 
     def __post_init__(self) -> None:
         if self.end_ms <= self.start_ms or not self.transcript.strip() or not self.source_file:
             raise ValueError("Voice reference window must be a non-empty local source interval")
+
+
+def voice_reference_window_selection(window: VoiceReferenceWindow) -> VoiceReferenceWindowSelection:
+    """Pin both the source bytes and the parent Asset that carries its rights."""
+    if window.source_content_hash is None:
+        raise VoicePerformancePlanningError("Voice reference source hash is unavailable")
+    return VoiceReferenceWindowSelection(
+        clip_id=window.clip_id,
+        asset_id=window.asset_id,
+        source_content_hash=window.source_content_hash,
+        start_ms=window.start_ms,
+        end_ms=window.end_ms,
+        transcript_sha256=hashlib.sha256(window.transcript.encode("utf-8")).hexdigest(),
+        source_timebase=window.source_timebase,
+        asset_content_hash=window.asset_content_hash if window.source_timebase == "analysis_wav" else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -233,35 +253,62 @@ def select_voice_reference_windows(
     clips: Sequence[Clip], assets: dict[UUID, Asset], *, data_root: str | Path | None = None,
     minimum_ms: int = 5_000, maximum_ms: int = 10_000,
 ) -> tuple[VoiceReferenceWindow, ...]:
-    """Return ranked ASR-derived candidates only; this never qualifies a reference."""
+    """Rank ASR candidates against the exact cached analysis-WAV clock.
+
+    ASR timestamps belong to the generated 16 kHz mono analysis WAV, not the
+    original Asset PTS timeline. This proposes candidates; it never approves
+    their transcript, sentence boundaries, or audio quality.
+    """
     if minimum_ms <= 0 or maximum_ms < minimum_ms:
         raise ValueError("Voice reference window bounds are invalid")
     candidates: list[VoiceReferenceWindow] = []
+    grouped: dict[UUID, list[Clip]] = {}
     for clip in clips:
-        if is_confirmed_voice_reference(clip):
+        if not is_confirmed_voice_reference(clip) and clip.asset_id in assets:
+            grouped.setdefault(clip.asset_id, []).append(clip)
+    for asset_id, asset_clips in grouped.items():
+        asset = assets[asset_id]
+        source_path = _analysis_audio_path(asset, data_root)
+        if source_path is None:
             continue
-        asset = assets.get(clip.asset_id)
-        source_path = None if asset is None else _resolve_source_path(asset.source_file, data_root)
-        if source_path is None or not source_path.is_file():
+        try:
+            with wave.open(str(source_path), "rb") as audio:
+                if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16_000):
+                    continue
+                duration_ms = audio.getnframes() * 1000 // audio.getframerate()
+        except (OSError, wave.Error):
             continue
-        segments = [item for item in clip.transcript_segments if item.start_ms >= clip.start_ms and item.end_ms <= clip.end_ms]
+        # Clip intervals use original Asset time. TranscriptSegment offsets use
+        # the cached analysis WAV time, so deduplicate ASR rows without clipping
+        # them against Clip.start_ms/end_ms.
+        segment_clips: dict[tuple[int, int, str], Clip] = {}
+        for clip in asset_clips:
+            if not (clip.transcript_source or "").startswith("faster-whisper:"):
+                continue
+            for segment in clip.transcript_segments:
+                if segment.end_ms <= duration_ms:
+                    segment_clips.setdefault((segment.start_ms, segment.end_ms, segment.text.strip()), clip)
+        segments = sorted(segment_clips, key=lambda item: (item[0], item[1], item[2]))
+        audio_hash = _file_sha256(source_path)
         for start in range(len(segments)):
             end = start
             text: list[str] = []
             while end < len(segments):
                 segment = segments[end]
-                if segment.end_ms - segments[start].start_ms > maximum_ms:
+                if segment[1] - segments[start][0] > maximum_ms:
                     break
-                text.append(segment.text.strip())
-                duration = segment.end_ms - segments[start].start_ms
+                text.append(segment[2])
+                duration = segment[1] - segments[start][0]
                 if duration >= minimum_ms:
                     # Duration is only a display-order hint. It says nothing
                     # about sentence completeness, transcript accuracy, or audio cleanliness.
                     rank_score = -abs(duration - 8_000)
+                    owner = segment_clips[segments[start]]
                     candidates.append(VoiceReferenceWindow(
-                        clip_id=clip.id, asset_id=asset.id, start_ms=segments[start].start_ms,
-                        end_ms=segment.end_ms, transcript=" ".join(text), source_file=str(source_path),
-                        rank_score=rank_score,
+                        clip_id=owner.id, asset_id=asset.id, start_ms=segments[start][0],
+                        end_ms=segment[1], transcript=" ".join(text), source_file=str(source_path),
+                        rank_score=rank_score, source_timebase="analysis_wav", source_content_hash=audio_hash,
+                        asset_content_hash=asset.content_hash, source_duration_ms=duration_ms,
                     ))
                 end += 1
     return tuple(sorted(candidates, key=lambda item: (-(item.rank_score or 0), item.clip_id.hex, item.start_ms, item.end_ms)))
@@ -289,19 +336,44 @@ def authorized_voice_reference_choices(
                 or clip.transcript_segments[0].end_ms != clip.end_ms
                 or clip.transcript_segments[0].text != transcript):
             continue
-        source_path = _resolve_source_path(asset.source_file, data_root)
+        source_timebase = "asset_pts"
+        source_hash = asset.content_hash
+        source_duration_ms = asset.duration_ms
+        source_file = asset.source_file
+        if clip.reference_source_timebase == "analysis_wav":
+            if (data_root is None or clip.reference_source_file is None
+                    or clip.reference_source_content_hash is None
+                    or clip.reference_source_duration_ms is None
+                    or asset.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                    or not asset.has_audio or not asset.authorization_reference.strip()
+                    or asset.metadata.get("ip_profile_id") not in (None, str(profile.ip_profile_id))):
+                continue
+            source_timebase = "analysis_wav"
+            source_hash = clip.reference_source_content_hash
+            source_duration_ms = clip.reference_source_duration_ms
+            source_file = clip.reference_source_file
+        source_path = _resolve_source_path(source_file, data_root)
         if not source_path.is_file():
             continue
+        if source_timebase == "analysis_wav":
+            try:
+                if not source_path.resolve().is_relative_to(Path(data_root).resolve()):
+                    continue
+                with wave.open(str(source_path), "rb") as audio:
+                    if ((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16_000)
+                            or audio.getnframes() * 1000 // audio.getframerate() != source_duration_ms):
+                        continue
+                if _file_sha256(source_path) != source_hash:
+                    continue
+            except (OSError, ValueError, wave.Error):
+                continue
         window = VoiceReferenceWindow(
             clip_id=clip.id, asset_id=asset.id, start_ms=clip.start_ms,
             end_ms=clip.end_ms, transcript=transcript, source_file=str(source_path), rank_score=None,
+            source_timebase=source_timebase, source_content_hash=source_hash,
+            asset_content_hash=asset.content_hash, source_duration_ms=source_duration_ms,
         )
-        choices.append((VoiceReferenceWindowSelection(
-            clip_id=window.clip_id, asset_id=window.asset_id,
-            source_content_hash=asset.content_hash, start_ms=window.start_ms,
-            end_ms=window.end_ms,
-            transcript_sha256=hashlib.sha256(window.transcript.encode("utf-8")).hexdigest(),
-        ), window))
+        choices.append((voice_reference_window_selection(window), window))
     return tuple(choices)
 
 
@@ -373,9 +445,28 @@ def _resolve_source_path(source_file: str, data_root: str | Path | None) -> Path
     return root.parent / path if path.parts and path.parts[0].casefold() == root.name.casefold() else root / path
 
 
+def _analysis_audio_path(asset: Asset, data_root: str | Path | None) -> Path | None:
+    if data_root is None:
+        return None
+    root = Path(data_root).resolve()
+    path = (root / "assets" / "audio" / f"{asset.content_hash}-16000-1.wav").resolve()
+    try:
+        if not path.is_relative_to(root) or not path.is_file():
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
 __all__ = [
     "NarrationPerformanceUnit", "VoiceGenerationSpan", "VoicePerformancePlanningError", "VoicePerformanceRenderPlan",
     "VoicePerformanceComposer", "VoicePerformanceComposition", "VoiceReferenceWindow", "pause_duration_ms",
     "plan_voice_generation_spans", "plan_voice_performance_units", "select_voice_reference_windows",
     "authorized_voice_reference_choices", "resolve_authorized_voice_reference_choice",
+    "voice_reference_window_selection",
 ]

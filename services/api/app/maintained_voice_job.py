@@ -213,7 +213,7 @@ def execute_configured_maintained_voice_job(*, db, data_root, output_root, stagi
     if binding is None or binding.capability_profile_id != job.payload.execution_capability_profile_id:
         raise UseAdmissionError("execution_admission_binding_mismatch")
     scopes.require_current(scope,project_id=job.project_id,purpose=scope.purpose,operation="generation")
-    for dependency in scopes.scopes_for_hash(job.payload.reference_window.source_content_hash):
+    for dependency in scopes.scopes_for_hash(job.payload.reference_window.authorization_content_hash):
         scopes.require_current(dependency,project_id=job.project_id,purpose=scope.purpose,operation="derivation")
     existing = ProviderCallRepository(db).get_by_idempotency_key(f"maintained-voice:{job.id}")
     if existing is not None and existing.status in {"reserved", "running"}:

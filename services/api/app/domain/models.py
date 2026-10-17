@@ -437,6 +437,11 @@ class Clip(ContractModel):
     start_ms: NonNegativeMs
     end_ms: NonNegativeMs
     asset_duration_ms: PositiveFrames
+    reference_source_timebase: Literal["analysis_wav"] | None = None
+    reference_source_file: str | None = Field(default=None, min_length=1, max_length=2_000)
+    reference_source_content_hash: str | None = Field(default=None, min_length=64, max_length=64,
+        pattern=r"^[0-9a-f]{64}$")
+    reference_source_duration_ms: PositiveFrames | None = None
     transcript: str | None = Field(default=None, max_length=100_000)
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list, max_length=10_000)
     transcript_source: str | None = Field(default=None, max_length=500, description="Traceable source reference for the current transcript.")
@@ -464,8 +469,22 @@ class Clip(ContractModel):
     def valid_interval(self) -> "Clip":
         if self.end_ms <= self.start_ms:
             raise ValueError("end_ms must be greater than start_ms")
-        if self.end_ms > self.asset_duration_ms:
-            raise ValueError("clip interval exceeds asset duration")
+        derived_source = (
+            self.reference_source_timebase,
+            self.reference_source_file,
+            self.reference_source_content_hash,
+            self.reference_source_duration_ms,
+        )
+        if self.reference_source_timebase is None:
+            if any(value is not None for value in derived_source[1:]):
+                raise ValueError("derived Voice reference source fields require a source timebase")
+            duration_ms = self.asset_duration_ms
+        else:
+            if any(value is None for value in derived_source):
+                raise ValueError("analysis-WAV Voice references require a pinned source file, hash, and duration")
+            duration_ms = self.reference_source_duration_ms
+        if self.end_ms > duration_ms:
+            raise ValueError("clip interval exceeds its source duration")
         return self
 
 
@@ -2186,12 +2205,25 @@ class VoiceReferenceWindowSelection(ContractModel):
     start_ms: NonNegativeMs
     end_ms: PositiveFrames
     transcript_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_timebase: Literal["asset_pts", "analysis_wav"] = "asset_pts"
+    asset_content_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def analysis_source_is_pinned(self) -> "VoiceReferenceWindowSelection":
+        if self.source_timebase == "analysis_wav" and self.asset_content_hash is None:
+            raise ValueError("analysis-WAV candidates require their exact derived-source hash")
+        return self
 
     @model_validator(mode="after")
     def valid_interval(self) -> "VoiceReferenceWindowSelection":
         if self.end_ms <= self.start_ms:
             raise ValueError("Voice reference window end_ms must exceed start_ms")
         return self
+
+    @property
+    def authorization_content_hash(self) -> str:
+        """The parent asset owns rights; source_content_hash pins the bytes read."""
+        return self.asset_content_hash or self.source_content_hash
 
 
 class VoiceGenerationJobPayload(ContractModel):
