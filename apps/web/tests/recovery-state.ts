@@ -64,7 +64,7 @@ export function createRecoveryFixture(storage: Storage, kind: "voice" | "present
   async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const state = load(); const body = options?.body ? JSON.parse(String(options.body)) : {};
     const write = options?.method === "POST";
-    if (path === "/voice-profiles" || path === "/execution-settings/capabilities") return [] as T;
+    if (path.startsWith("/voice-profiles?") || path === "/execution-settings/capabilities") return [] as T;
     if (path === base) return clone(state.run) as T;
     if (path === `/projects/${projectId}/draft`) return { version: state.version, scenes: [{ id: "scene-plan-1", scene_id: "scene-1", caption_emphasis: ["Fixture short point"] }] } as T;
     if (path === base + "/voice-repairs") return clone(kind === "voice" ? state.records : []) as T;

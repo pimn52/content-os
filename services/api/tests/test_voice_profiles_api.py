@@ -12,6 +12,8 @@ from app.main import create_app
 def test_voice_and_talking_profiles_require_consent_and_existing_reference_clips(tmp_path: Path) -> None:
     database_path = tmp_path / "voice.sqlite3"
     with Database(database_path) as db:
+        ip=IPProfile(creator_name="Creator")
+        IPProfileRepository(db).create(ip)
         asset = Asset(
             source_file=str(tmp_path / "reference.mp4"),
             content_hash="c" * 64,
@@ -28,6 +30,7 @@ def test_voice_and_talking_profiles_require_consent_and_existing_reference_clips
 
     voice_id = str(uuid4())
     voice_payload = {
+        "ip_profile_id":str(ip.id),
         "id": voice_id,
         "name": "Creator voice",
         "provider": "deferred-provider",
@@ -83,7 +86,7 @@ def test_voice_reference_choice_round_trips_into_normal_job_and_rejects_stale_ch
             {"start_ms": 4_600, "end_ms": 7_000, "text": "最后落下"},
         ])
         ClipRepository(db).create(clip)
-    profile = {"name": "Creator voice", "provider": "omnivoice", "provider_profile_id": "creator-reference", "reference_clip_ids": [str(clip.id)], "consent": {"subject_name": "Creator", "basis": "self", "confirmed": True, "confirmed_at": "2026-09-09T08:00:00Z"}, "created_at": "2026-09-09T08:00:00Z"}
+    profile = {"ip_profile_id":str(ip.id),"name": "Creator voice", "provider": "omnivoice", "provider_profile_id": "creator-reference", "reference_clip_ids": [str(clip.id)], "consent": {"subject_name": "Creator", "basis": "self", "confirmed": True, "confirmed_at": "2026-09-09T08:00:00Z"}, "created_at": "2026-09-09T08:00:00Z"}
     with TestClient(create_app(database_path)) as client:
         created = client.post("/voice-profiles", json=profile)
         assert created.status_code == 201

@@ -55,9 +55,11 @@ export function VoiceDraftPanel({ projectId, request, planSource }: { projectId:
     setStatus(null); setError(""); setNotice(""); setJobId("");
     setSavedDrafts([]); setHistoryError("");
     try { setJobId(localStorage.getItem(bookmark) ?? ""); } catch { setNotice("本地恢复记录不可读；已保存的后台任务不受影响。"); }
-    Promise.all([request<Profile[]>("/voice-profiles"), request<Capability[]>("/execution-settings/capabilities")]).then(([voice, capabilities]) => {
+    Promise.all([request<Profile[]>(`/voice-profiles?project_id=${projectId}&default_only=true`), request<Capability[]>("/execution-settings/capabilities")]).then(([voice, capabilities]) => {
       if (token !== catalogEpoch.current) return;
       setProfiles(voice.filter(p => p.consent.confirmed && p.provider === "omnivoice"));
+      setProfileId(voice.find(p => p.consent.confirmed && p.provider === "omnivoice")?.id ?? "");
+      if (!voice.length) setNotice("当前项目 IP 尚未指定授权声线，请先完成 IP 与 Voice Profile 绑定。");
       setCapabilities(capabilities.filter(c => c.capability === "voice" && c.provider === "omnivoice" && c.mode === "local"));
     }).catch(reason => { if (token === catalogEpoch.current) setError(String(reason.message ?? reason)); });
     return () => { ++catalogEpoch.current; ++epoch.current; };

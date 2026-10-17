@@ -52,6 +52,8 @@ def legacy(tmp_path, admit_talking_run, monkeypatch):
         payload=TalkingGenerationJobPayload(project_id=pid,talking_profile_id=talking.id,reference_clip_id=clip.id,
             narration_audio_id=audio.id,authorization_reference='synthetic-consent')))
     project=ProjectRepository(db).get(pid)
+    voice=voice.model_copy(update={"ip_profile_id":project.ip_profile_id})
+    db.connection.execute("UPDATE voice_profiles SET payload=? WHERE id=?",(voice.model_dump_json(),str(voice.id)))
     scenes=[_scene(project,i,1000).model_copy(update=dict(voice_text=f'word{i}',preferred_sources=[SourceKind.AI_VIDEO],
         visual_requirement='creator_speaking',visual_requirement_reason='Synthetic explicit speaking requirement')) for i in range(5)]
     draft=ProjectDraft(project_id=pid,version=1,script_revision=1,script=copy,scenes=scenes,updated_at=now)

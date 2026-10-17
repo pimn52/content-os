@@ -201,6 +201,11 @@ def build_production_preflight(
     authorization: list[str] = ["provider_license_and_privacy_scope"]
     if reusable_master is None:
         authorization.append("voice_consent")
+        from app.voice_plan import resolve_project_voice_profile
+        try:
+            resolve_project_voice_profile(db,project.id)
+        except ValueError as exc:
+            stop.append(str(exc))
     need_analysis = False
 
     for scene in scenes:
@@ -544,6 +549,8 @@ def _approved_master(db: Database, project_id: UUID, copy: str) -> AudioAsset | 
             continue
         try:
             _require_generated_voice_qa(audio,db)
+            from app.voice_plan import require_project_voice_audio
+            require_project_voice_audio(db,project_id,audio)
         except ValueError:
             continue
         spoken = "".join(comparison_tokens(audio.metadata["voice_generation"].get("target_text")

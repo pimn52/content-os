@@ -112,11 +112,13 @@ export function ProductionVoicePanel({ projectId, draftVersion, scriptRevision, 
     const token = ++choiceEpoch.current;
     setProfiles([]); setCapabilities([]); setProfileId(""); setCapabilityId(""); setAuthorization(""); setError(""); setNotice("");
     Promise.all([
-      request<VoiceProfile[]>("/voice-profiles"),
+      request<VoiceProfile[]>(`/voice-profiles?project_id=${projectId}&default_only=true`),
       request<Capability[]>("/execution-settings/capabilities"),
     ]).then(([voice, evidence]) => {
       if (token !== choiceEpoch.current) return;
       setProfiles(voice);
+      setProfileId(voice[0]?.id ?? "");
+      if (!voice.length) setNotice("当前项目 IP 尚未指定授权声线，请先完成 IP 与 Voice Profile 绑定。");
       setCapabilities(evidence.filter(item => item.capability === "voice"));
     }).catch(reason => { if (token === choiceEpoch.current) setError(String(reason.message ?? reason)); });
     return () => { ++choiceEpoch.current; };

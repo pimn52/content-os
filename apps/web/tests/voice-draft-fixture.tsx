@@ -18,7 +18,7 @@ function access(purpose: string) {
 }
 const request = async <T,>(path: string, options?: RequestInit): Promise<T> => {
   record(path, options);
-  if (path === "/voice-profiles") return [{ id: "fixture-profile", name: "合成测试声线", provider: "omnivoice", consent: { confirmed: true } }] as T;
+  if (path.startsWith("/voice-profiles?")) return [{ id: "fixture-profile", name: "合成测试声线", provider: "omnivoice", consent: { confirmed: true } }] as T;
   if (path === "/execution-settings/capabilities") return [{ id: "fixture-capability", capability: "voice", provider: "omnivoice", mode: "local", model: "合成配置", readiness: "verified", quality_status: "verified" }] as T;
   if (path.endsWith("/provider-use-admissions")) return [{ id: "fixture-receipt", project_id: project, revoked_at: null, review: { intended_activity: "合成浏览器测试", license_version: "fixture-only", permitted_operations: ["generation", "review"], identity: { capability: "voice", provider: "omnivoice", model: "合成配置" } } }] as T;
   if (path.endsWith("/reference-windows")) return [{ selection: { source_content_hash: "a".repeat(64), clip_id: "fixture-clip" }, transcript: "仅用于测试的合成参考", duration_ms: 1000 }] as T;

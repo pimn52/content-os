@@ -33,6 +33,7 @@ def _project_and_profile(db: Database, root: Path) -> tuple[Project, VoiceProfil
     # VoiceProfileRepository deliberately records consent provenance; the
     # profile endpoint additionally validates real reference clips.
     profile = VoiceProfile(
+        ip_profile_id=ip.id,
         name="Creator voice", provider="test-voice", provider_profile_id="creator-v1", reference_clip_ids=[clip.id],
         consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=datetime.now(timezone.utc)),
         language="zh", created_at=datetime.now(timezone.utc),

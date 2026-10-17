@@ -282,7 +282,8 @@ class ProductionRunStartRequest(BaseModel):
 
 class ProductionRunVoiceDispatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    voice_profile_id: UUID
+    voice_profile_id: UUID | None = None
+    cross_ip_voice_authorization_reference: str | None = Field(default=None, min_length=1, max_length=500)
     capability_profile_id: UUID
     authorization_reference: str = Field(min_length=1, max_length=500)
 
@@ -440,11 +441,13 @@ class ProjectCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     topic: str = Field(min_length=1, max_length=5_000)
     creator_name: str = Field(default="本地创作者", min_length=1, max_length=200)
+    ip_profile_id: UUID | None = None
 
 
 class IPProfileUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     creator_name: str = Field(min_length=1, max_length=200)
+    default_voice_profile_id: UUID | None = None
     domains: list[str] = Field(default_factory=list, max_length=30)
     audience: str | None = Field(default=None, max_length=1_000)
     topics: list[str] = Field(default_factory=list, max_length=100)
@@ -667,6 +670,7 @@ class HistoricalContentRequest(BaseModel):
 class VoiceProfileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: UUID = Field(default_factory=uuid4)
+    ip_profile_id: UUID | None = None
     name: str = Field(min_length=1, max_length=200)
     provider: str = Field(min_length=1, max_length=100)
     provider_profile_id: str = Field(min_length=1, max_length=500)
@@ -681,7 +685,8 @@ class VoiceGenerationJobRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     idempotency_key: str = Field(min_length=1, max_length=500)
-    voice_profile_id: UUID
+    voice_profile_id: UUID | None = None
+    cross_ip_voice_authorization_reference: str | None = Field(default=None, min_length=1, max_length=500)
     text: str = Field(min_length=1, max_length=100_000)
     delivery_text: str | None = Field(default=None, min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
@@ -1426,31 +1431,54 @@ def create_app(
     @application.post("/projects", response_model=Project, status_code=201, tags=["projects"])
     async def create_project(payload: ProjectCreateRequest, request: Request) -> Project:
         db: Database = request.app.state.database
-        # R1 is single-user/single-active-IP: projects share the first local
-        # profile instead of creating a disconnected empty profile each time.
         profiles = IPProfileRepository(db).list()
-        profile = profiles[0] if profiles else IPProfile(creator_name=payload.creator_name)
+        if payload.ip_profile_id is not None:
+            profile = IPProfileRepository(db).get(payload.ip_profile_id)
+            if profile is None:
+                raise HTTPException(status_code=404, detail="IP profile not found")
+        elif "creator_name" in payload.model_fields_set:
+            matches = [p for p in profiles if p.creator_name == payload.creator_name]
+            if len(matches) > 1:
+                raise HTTPException(status_code=422, detail="project_ip_selection_required")
+            profile = matches[0] if matches else IPProfile(creator_name=payload.creator_name)
+        elif len(profiles) > 1:
+            raise HTTPException(status_code=422, detail="project_ip_selection_required")
+        else:
+            profile = profiles[0] if profiles else IPProfile(creator_name=payload.creator_name)
         project = Project(
             ip_profile_id=profile.id, title=payload.title, topic=payload.topic,
             fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc),
         )
         with db.transaction():
-            if not profiles:
+            if IPProfileRepository(db).get(profile.id) is None:
                 IPProfileRepository(db).create(profile)
             ProjectRepository(db).create(project)
         return project
 
     @application.get("/ip-profile", response_model=IPProfile, tags=["profile"])
-    async def get_default_ip_profile(request: Request) -> IPProfile:
-        profile = next(iter(IPProfileRepository(request.app.state.database).list()), None)
+    async def get_default_ip_profile(request: Request, ip_profile_id: UUID | None = None) -> IPProfile:
+        repo = IPProfileRepository(request.app.state.database)
+        profile = repo.get(ip_profile_id) if ip_profile_id else next(iter(repo.list()), None)
         if profile is None:
             raise HTTPException(status_code=404, detail="default IP profile not initialized")
         return profile
 
+    @application.get("/ip-profiles", response_model=list[IPProfile], tags=["profile"])
+    async def list_ip_profiles(request: Request) -> list[IPProfile]:
+        return IPProfileRepository(request.app.state.database).list()
+
     @application.put("/ip-profile", response_model=IPProfile, tags=["profile"])
-    async def update_default_ip_profile(payload: IPProfileUpdateRequest, request: Request) -> IPProfile:
+    async def update_default_ip_profile(payload: IPProfileUpdateRequest, request: Request, ip_profile_id: UUID | None = None) -> IPProfile:
         db: Database = request.app.state.database
-        profile = next(iter(IPProfileRepository(db).list()), None)
+        profile = IPProfileRepository(db).get(ip_profile_id) if ip_profile_id else next(iter(IPProfileRepository(db).list()), None)
+        if ip_profile_id is not None and profile is None:
+            raise HTTPException(status_code=404, detail="IP profile not found")
+        if profile is not None and "default_voice_profile_id" not in payload.model_fields_set:
+            payload = payload.model_copy(update={"default_voice_profile_id":profile.default_voice_profile_id})
+        if payload.default_voice_profile_id is not None:
+            voice = VoiceProfileRepository(db).get(payload.default_voice_profile_id)
+            if profile is None or voice is None or not voice.consent.confirmed or voice.ip_profile_id != profile.id:
+                raise HTTPException(status_code=422, detail="default_voice_must_belong_to_ip")
         if profile is None:
             profile = IPProfile(id=uuid4(), **payload.model_dump())
             with db.transaction():
@@ -2099,6 +2127,7 @@ def create_app(
                 project_id, run_id, voice_profile_id=payload.voice_profile_id,
                 capability_profile_id=payload.capability_profile_id,
                 authorization_reference=payload.authorization_reference,
+                cross_ip_voice_authorization_reference=payload.cross_ip_voice_authorization_reference,
             )
         except ProductionRunNotReady as exc:
             raise HTTPException(status_code=409, detail={"code": "voice_dispatch_not_ready", "reasons": exc.reasons}) from exc
@@ -2572,8 +2601,17 @@ def create_app(
         return value
 
     @application.get("/voice-profiles", response_model=list[VoiceProfile], tags=["voice"])
-    async def list_voice_profiles(request: Request) -> list[VoiceProfile]:
-        return VoiceProfileRepository(request.app.state.database).list()
+    async def list_voice_profiles(request: Request, project_id: UUID | None = None, default_only: bool = False) -> list[VoiceProfile]:
+        db = request.app.state.database
+        profiles = VoiceProfileRepository(db).list()
+        if project_id is None:
+            return profiles
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        ip = IPProfileRepository(db).get(project.ip_profile_id)
+        return [p for p in profiles if p.consent.confirmed and p.ip_profile_id == project.ip_profile_id
+            and (not default_only or ip is not None and p.id == ip.default_voice_profile_id)]
 
     @application.get("/voice-profiles/{profile_id}/reference-windows", tags=["voice"])
     async def list_voice_reference_windows(profile_id: UUID, request: Request) -> list[dict[str, Any]]:
@@ -2595,6 +2633,8 @@ def create_app(
     @application.post("/voice-profiles", response_model=VoiceProfile, status_code=201, tags=["voice"])
     async def create_voice_profile(payload: VoiceProfileRequest, request: Request) -> VoiceProfile:
         db: Database = request.app.state.database
+        if payload.ip_profile_id is None or IPProfileRepository(db).get(payload.ip_profile_id) is None:
+            raise HTTPException(status_code=422, detail="voice_profile_ip_binding_required")
         _validate_profile_reference_clips(db, payload.reference_clip_ids)
         value = VoiceProfile(**payload.model_dump())
         repository = VoiceProfileRepository(db)
@@ -3321,11 +3361,12 @@ def create_app(
         db: Database = request.app.state.database
         if ProjectRepository(db).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
-        profile = VoiceProfileRepository(db).get(payload.voice_profile_id)
-        if profile is None:
-            raise HTTPException(status_code=404, detail="voice profile not found")
-        if not profile.consent.confirmed:
-            raise HTTPException(status_code=422, detail="voice profile requires explicit consent")
+        from app.voice_plan import resolve_project_voice_profile
+        try:
+            profile = resolve_project_voice_profile(db,project_id,payload.voice_profile_id,payload.cross_ip_voice_authorization_reference)
+        except UseAdmissionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        payload = payload.model_copy(update={"voice_profile_id":profile.id})
         if payload.delivery_text is not None:
             try:
                 validate_voice_delivery_text(payload.text, payload.delivery_text)
@@ -3365,6 +3406,7 @@ def create_app(
         voice_payload = VoiceGenerationJobPayload(
             project_id=project_id,
             voice_profile_id=payload.voice_profile_id,
+            cross_ip_voice_authorization_reference=payload.cross_ip_voice_authorization_reference,
             text=payload.text,
             delivery_text=payload.delivery_text,
             authorization_reference=payload.authorization_reference,

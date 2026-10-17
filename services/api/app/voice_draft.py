@@ -11,7 +11,7 @@ from app.media.audio_access import file_digest
 from app.media.local_paths import existing_local_media_file
 from pathlib import Path
 from app.voice_calibration import calibration_receipts, request_digest, require_claim, POLICY as CALIBRATION
-from app.voice_plan import require_saved_voice_plan
+from app.voice_plan import require_saved_voice_plan, resolve_project_voice_profile
 from app.voice_performance import authorized_voice_reference_choices, resolve_authorized_voice_reference_choice
 
 POLICY = "voice-draft-v1"
@@ -59,8 +59,8 @@ class VoiceDraftService:
             or spec.provider != "omnivoice" or spec.mode != "local"
             or spec.capability != "voice" or payload.expected_provider != spec.provider or payload.expected_model != spec.model):
             raise UseAdmissionError("voice_draft_execution_unsupported")
-        profile = VoiceProfileRepository(self.db).get(payload.voice_profile_id)
-        if profile is None or not profile.consent.confirmed or profile.provider != spec.provider:
+        profile = resolve_project_voice_profile(self.db,scope.project_id,payload.voice_profile_id,payload.cross_ip_voice_authorization_reference)
+        if profile.provider != spec.provider:
             raise UseAdmissionError("voice_profile_not_authorized")
         clips = [value for identity in profile.reference_clip_ids if (value := ClipRepository(self.db).get(identity))]
         assets = {value.id: value for clip in clips if (value := AssetRepository(self.db).get(clip.asset_id))}
@@ -91,6 +91,7 @@ class VoiceDraftService:
             raise UseAdmissionError("voice_draft_execution_binding_required")
         identity = selected[0].identity
         payload = VoiceGenerationJobPayload(project_id=project_id, voice_profile_id=request.voice_profile_id,
+            cross_ip_voice_authorization_reference=request.cross_ip_voice_authorization_reference,
             text=request.text, delivery_text=request.delivery_text, language=request.language,
             authorization_reference=request.authorization_reference, reference_window=request.reference_window,
             execution_capability_profile_id=request.execution_capability_profile_id,

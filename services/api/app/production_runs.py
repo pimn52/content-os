@@ -1725,8 +1725,9 @@ class ProductionRunService:
         return tuple(reconciled)
 
     def dispatch_voice(
-        self, project_id: UUID, run_id: UUID, *, voice_profile_id: UUID,
+        self, project_id: UUID, run_id: UUID, *, voice_profile_id: UUID | None,
         capability_profile_id: UUID, authorization_reference: str,
+        cross_ip_voice_authorization_reference: str | None = None,
     ) -> ProductionRun | None:
         """Link one authorized existing Voice Job; never invoke a provider here."""
         from app.evaluation_master import is_evaluation_master_run
@@ -1734,6 +1735,9 @@ class ProductionRunService:
             raise ProductionRunNotReady(("evaluation_master_downstream_operation_not_supported",))
         if not authorization_reference.strip():
             raise ProductionRunNotReady(("voice_authorization_reference_required",))
+        from app.voice_plan import resolve_project_voice_profile
+        profile = resolve_project_voice_profile(self.db,project_id,voice_profile_id,cross_ip_voice_authorization_reference)
+        voice_profile_id = profile.id
         with self.db.transaction(immediate=True):
             row = self.db.connection.execute(
                 "SELECT * FROM production_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id)),
@@ -1746,6 +1750,7 @@ class ProductionRunService:
                     raise ProductionRunConflict("production run Voice Job is missing")
                 selected = ProviderMachineCapabilityProfileRepository(self.db).get(capability_profile_id)
                 if (job.payload.voice_profile_id != voice_profile_id
+                    or job.payload.cross_ip_voice_authorization_reference != cross_ip_voice_authorization_reference
                     or job.payload.authorization_reference != authorization_reference
                     or job.payload.execution_capability_profile_id != capability_profile_id
                     or selected is None or selected.provider != job.payload.expected_provider
@@ -1771,10 +1776,7 @@ class ProductionRunService:
                 raise ProductionRunNotReady(("voice_budget_not_authorized",))
             if draft.narration_performance_plan is not None:
                 raise ProductionRunNotReady(("voice_performance_plan_dispatch_not_implemented",))
-            profile = VoiceProfileRepository(self.db).get(voice_profile_id)
             capability = ProviderMachineCapabilityProfileRepository(self.db).get(capability_profile_id)
-            if profile is None or not profile.consent.confirmed:
-                raise ProductionRunNotReady(("voice_profile_consent_required",))
             if any(ClipRepository(self.db).get(clip_id) is None for clip_id in profile.reference_clip_ids):
                 raise ProductionRunNotReady(("voice_reference_clip_missing",))
             if (capability is None or capability.capability != "voice" or capability.provider != profile.provider
@@ -1786,6 +1788,7 @@ class ProductionRunService:
             job_id, now = uuid4(), datetime.now(timezone.utc)
             payload = VoiceGenerationJobPayload(
                 project_id=project_id, voice_profile_id=voice_profile_id,
+                cross_ip_voice_authorization_reference=cross_ip_voice_authorization_reference,
                 text=draft.script or "\n\n".join(scene.voice_text for scene in sorted(draft.scenes, key=lambda scene: scene.order)),
                 authorization_reference=authorization_reference,
                 expected_provider=capability.provider, expected_model=capability.model,

@@ -62,7 +62,9 @@ def bound_job(setup, child_case, monkeypatch, request):
         clip = Clip(asset_id=asset.id, start_ms=0, end_ms=3000, asset_duration_ms=3000,
             transcript_segments=[TranscriptSegment(start_ms=0, end_ms=3000, text="synthetic reference")])
         ClipRepository(db).create(clip)
+        from app.db import ProjectRepository
         voice = VoiceProfile(name="synthetic", provider="omnivoice", provider_profile_id="synthetic",
+            ip_profile_id=ProjectRepository(db).get(project).ip_profile_id,
             reference_clip_ids=[clip.id], consent=ConsentRecord(confirmed=True, subject_name="synthetic",
                 basis="self", confirmed_at=now, authorization_reference="synthetic-consent"),
             language="zh", created_at=now)

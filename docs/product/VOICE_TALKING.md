@@ -21,6 +21,19 @@ Create **new words in the authorized creator's voice and face** without requirin
 
 Voice and Talking are separate provider-neutral capabilities with separate quality gates.
 
+Project.ip_profile_id determines narration identity. An IP may designate its
+default_voice_profile_id; each registered VoiceProfile explicitly names its
+owning IP. Ordinary Voice panels load that project's designated, consented voice
+rather than the global catalog. Missing ownership/default configuration stays
+blocked. An explicitly selected cross-IP narrator also requires a separate
+cross_ip_voice_authorization_reference, persisted in the same Voice Job; ordinary
+consent or an internal-use label does not imply this choice. Existing Voice and
+Render Workers recheck this rule, and automatic Master selection excludes an
+incompatible voice. License, project, reference bytes, budget and QA still apply.
+Historical audio, QA and human listening approvals remain facts about their
+original voice, not approval of another creator's identity. Binding fields are
+omitted when absent so reading old records does not rewrite their identities.
+
 ## User outcome
 
 From new copy, Content OS should be able to produce:

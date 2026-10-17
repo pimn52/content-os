@@ -18,6 +18,7 @@ type CostEstimate = { currency: string; known_amount: string; unknown_cost_count
 type CostReductionSuggestion = { scene_plan_id: UUID; current: Candidate; suggested: Candidate; changed: boolean; reason: string };
 type CostReductionResponse = { project_id: UUID; suggestions: CostReductionSuggestion[]; proposed_selections: Candidate[]; changed_scene_count: number };
 type IPProfile = {
+  default_voice_profile_id?: UUID;
   id: UUID; creator_name: string; domains: string[]; audience: string | null; topics: string[];
   knowledge: string[]; opinions: string[]; vocabulary: string[]; style_notes: string[];
   avoided_expressions: string[]; boundaries: string[]; common_hooks: string[]; metadata: Record<string, unknown>;
@@ -46,7 +47,7 @@ type AccountConnection = { id: UUID; provider: string; account_external_id: stri
 type HistoricalContent = { id: UUID; account_connection_id: UUID; external_id: string; title: string; published_at: string | null; description: string | null; transcript: string | null; metrics: Record<string, number> };
 type Clip = { id: UUID; asset_id: UUID; start_ms: number; end_ms: number; visual_description: string | null; transcript: string | null; talking_candidate?: boolean; talking_reference_assessment?: Record<string, unknown> | null };
 type ConsentRecord = { subject_name: string; basis: "self" | "explicit_authorization"; confirmed: boolean; confirmed_at: string; authorization_reference?: string | null };
-type VoiceProfile = { id: UUID; name: string; provider: string; provider_profile_id: string; reference_clip_ids: UUID[]; consent: ConsentRecord; language: string | null; created_at: string };
+type VoiceProfile = { id: UUID; ip_profile_id?: UUID; name: string; provider: string; provider_profile_id: string; reference_clip_ids: UUID[]; consent: ConsentRecord; language: string | null; created_at: string };
 type TalkingProfile = { id: UUID; name: string; provider: string; provider_profile_id: string | null; reference_clip_ids: UUID[]; consent: ConsentRecord; created_at: string };
 type Publication = { id: UUID; output_version: string; platform: string; published_at: string; content_url: string | null; metrics: Record<string, unknown>; metric_source: string | null };
 type Feedback = { id: UUID; output_version: string; accepted: boolean; changed_fields: string[]; rejection_reason: string | null; notes: string | null; created_at: string };
@@ -160,6 +161,7 @@ function App() {
   const [readiness, setReadiness] = useState<RuntimeReadiness | null>(null);
   const [budget, setBudget] = useState<BudgetResponse | null>(null);
   const [profile, setProfile] = useState<IPProfile | null>(null);
+  const [ipProfiles, setIpProfiles] = useState<IPProfile[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetReadiness, setAssetReadiness] = useState<Record<UUID, AssetReadiness>>({});
@@ -223,12 +225,13 @@ function App() {
 
   async function loadAll() {
     try {
-      const [currentBudget, runtime, currentProfile, currentProjects, currentAssets, currentAudios, currentOpportunities, currentAccounts, currentHistorical, currentVoice, currentTalking] = await Promise.all([
+      const [currentBudget, runtime, currentProfile, currentProjects, currentAssets, currentAudios, currentOpportunities, currentAccounts, currentHistorical, currentVoice, currentTalking, currentIPs] = await Promise.all([
         api<BudgetResponse>("/budget"),
         api<RuntimeReadiness>("/runtime/readiness"), api<IPProfile>("/ip-profile").catch(() => null),
         api<Project[]>("/projects"), api<Asset[]>("/assets"), api<AudioAsset[]>("/audio-assets"), api<Opportunity[]>("/opportunities"),
         api<AccountConnection[]>("/account-connections"), api<HistoricalContent[]>("/historical-content"),
         api<VoiceProfile[]>("/voice-profiles"), api<TalkingProfile[]>("/talking-profiles"),
+        api<IPProfile[]>("/ip-profiles"),
       ]);
       const currentShootTasks = (await Promise.all(currentProjects.map((project) => api<ShootTask[]>(`/projects/${project.id}/shoot-tasks`)))).flat();
       const currentClips = (await Promise.all(currentAssets.map((asset) => api<Clip[]>(`/assets/${asset.id}/clips`)))).flat();
@@ -236,6 +239,7 @@ function App() {
       setReadiness(runtime); setBudget(currentBudget); setBudgetAmount(currentBudget.policy?.max_amount ?? ""); setBudgetCalls(currentBudget.policy?.max_calls == null ? "" : String(currentBudget.policy.max_calls)); setAllowUnknownCost(currentBudget.policy?.allow_unknown_cost ?? false);
       setProfile(currentProfile); setProjects(currentProjects); setAssets(currentAssets); setAssetReadiness(Object.fromEntries(currentReadiness.map((value) => [value.asset_id, value]))); setAudioAssets(currentAudios); setShootTasks(currentShootTasks); setClips(currentClips); setOpportunities(currentOpportunities);
       setAccounts(currentAccounts); setHistoricalContent(currentHistorical); setVoiceProfiles(currentVoice); setTalkingProfiles(currentTalking);
+      setIpProfiles(currentIPs);
       const executionSchemas = await api<{ schemas: ProviderSettingsSchema[] }>("/execution-settings/schemas");
       setSettingsSchemas(executionSchemas.schemas);
       const saved = localStorage.getItem("content-os-active-project");
@@ -630,7 +634,17 @@ function App() {
 
   async function createVoice(event: FormEvent<HTMLFormElement>, talking = false) {
     event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement); const body = { name: String(form.get("name")), provider: String(form.get("provider")), provider_profile_id: String(form.get("provider_profile_id") ?? "") || null, reference_clip_ids: split(String(form.get("reference_clip_ids"))), consent: consentFrom(form), created_at: new Date().toISOString() };
-    try { await api<VoiceProfile | TalkingProfile>(talking ? "/talking-profiles" : "/voice-profiles", { method: "POST", body: JSON.stringify(body) }); await loadAll(); formElement.reset(); setMessage({ text: talking ? "Talking Profile 注册记录已保存" : "Voice Profile 注册记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Profile 保存失败", error: true }); } finally { setBusy(false); }
+    try {
+      const ipId = String(form.get("ip_profile_id") ?? "");
+      const created = await api<VoiceProfile | TalkingProfile>(talking ? "/talking-profiles" : "/voice-profiles", { method: "POST", body: JSON.stringify({ ...body, ...(!talking ? { ip_profile_id: ipId } : {}) }) });
+      if (!talking && form.get("default_voice")) {
+        const ip = ipProfiles.find(item => item.id === ipId); if (!ip) throw new Error("所选 IP 已不存在");
+        const { id, ...settings } = ip;
+        delete (settings as Record<string, unknown>).schema_version;
+        await api<IPProfile>(`/ip-profile?ip_profile_id=${id}`, { method: "PUT", body: JSON.stringify({ ...settings, default_voice_profile_id: created.id }) });
+      }
+      await loadAll(); formElement.reset(); setMessage({ text: talking ? "Talking Profile 注册记录已保存" : "Voice Profile 与 IP 绑定已保存" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "Profile 保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function waitForJob(jobId: UUID): Promise<JobResponse> {
@@ -755,7 +769,7 @@ function App() {
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget);
-    try { const project = await api<Project>("/projects", { method: "POST", body: JSON.stringify({ title: String(form.get("title")), topic: String(form.get("topic")), creator_name: profile?.creator_name ?? "本地创作者" }) }); await loadAll(); setSelectedProjectId(project.id); setMessage({ text: "项目已创建，可以开始生成草稿" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "项目创建失败", error: true }); } finally { setBusy(false); }
+    try { const project = await api<Project>("/projects", { method: "POST", body: JSON.stringify({ title: String(form.get("title")), topic: String(form.get("topic")), ip_profile_id: String(form.get("ip_profile_id")) }) }); await loadAll(); setSelectedProjectId(project.id); setMessage({ text: "项目已创建，可以开始生成草稿" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "项目创建失败", error: true }); } finally { setBusy(false); }
   }
 
   async function planProject() {
@@ -997,7 +1011,7 @@ function App() {
         {voiceReviewAssetId && <><AudioAudition audioId={voiceReviewAssetId} projectId={selectedProject.id} request={api} /><form key={voiceReviewAssetId} onSubmit={(event) => void submitVoiceReview(event)} className="subform"><h3>此音频的六维判断</h3><label>证据引用<input name="evidence_reference" required placeholder="例如：u-voice:2026-09-24:creator-listen" /></label><label>具体发现（每行一条）<textarea name="findings" required rows={3} placeholder="请写下影响判断的具体听感" /></label><div className="columns compact">{voiceReviewDimensions.map(([key, label]) => <label key={key}>{label}<select name={key} required defaultValue=""><option value="">请选择</option><option value="pass">合格</option><option value="needs_revision">需修改</option></select></label>)}</div><button disabled={busy} className="button primary">保存此音频的 U-Voice 判断</button></form></>}
       </section>}
       {selectedProject && <VoiceDraftPanel key={`voice-draft:${selectedProject.id}`} projectId={selectedProject.id} request={api} planSource={{ version: draft?.version ?? 0, scriptRevision: draft?.script_revision ?? 0, text: draft?.script || [...(draft?.scenes ?? [])].sort((a, b) => a.order - b.order).map(scene => scene.voice_text).join("\n\n"), hasScenes: !!draft?.scenes.length, dirty: draftDirty }} />}
-      <section className="card"><div className="section-heading"><div><span className="kicker">04 / DRAFT</span><h2>项目与草稿</h2></div><span className="badge">可恢复</span></div><div className="project-toolbar"><form onSubmit={createProject} className="project-form"><Field label="项目标题" name="title" placeholder="本次内容的名称" /><Field label="主题" name="topic" placeholder="可以只填主题，不必先写完整稿件" /><button disabled={busy} className="button primary">创建项目</button></form><label className="project-select">当前项目<select value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(event.target.value || null)}><option value="">选择项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title} · {project.topic}</option>)}</select></label></div>
+      <section className="card"><div className="section-heading"><div><span className="kicker">04 / DRAFT</span><h2>项目与草稿</h2></div><span className="badge">可恢复</span></div><div className="project-toolbar"><form onSubmit={createProject} className="project-form"><label>所属 IP<select name="ip_profile_id" required defaultValue=""><option value="">明确选择项目 IP</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label><Field label="项目标题" name="title" placeholder="本次内容的名称" /><Field label="主题" name="topic" placeholder="可以只填主题，不必先写完整稿件" /><button disabled={busy} className="button primary">创建项目</button></form><label className="project-select">当前项目<select value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(event.target.value || null)}><option value="">选择项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title} · {project.topic}</option>)}</select></label></div>
         {selectedProject && <div className="production"><div className="row-between"><div><h3>{selectedProject.title}</h3><p className="muted">{selectedProject.topic} · 草稿 v{draft?.version ?? 0} · 文案 r{draft?.script_revision ?? 0}</p></div><div className="actions"><button disabled={busy} className="button" onClick={() => void planProject()}>生成文案 + ScenePlan</button><button disabled={busy || !draft?.scenes.length} className="button" onClick={() => void routeProject()}>查找候选</button><button disabled={busy || !routes.length} className="button" onClick={() => void assembleSourceLedProject()}>按原声 + ASR 组装</button><button disabled={busy || !routes.length} className="button" onClick={() => void assembleProject()}>主旁白时间线组装</button><button disabled={busy || !videoSpec} className="button primary" onClick={() => void renderProject()}>本地渲染</button></div></div>
         {routes.length > 0 && <div className="cost-actions"><button disabled={busy} className="button" onClick={() => void reduceCostProject()}>按低成本替代方案</button><small className="muted">只比较当前候选；未知价格不会被当作便宜，应用后仍需审核匹配度。</small></div>}
         {draft && <div id="project-draft-editor" className="draft-editor"><label>脚本 / 旁白稿（可选）<textarea value={draft.script ?? ""} onChange={(event) => updateDraftScript(event.target.value)} placeholder="可以先写要表达的观点；留空时由模型生成可编辑文案。" /></label><button disabled={busy} className="button" onClick={() => void saveDraftText()}>保存稿件</button><small className="muted">服务端会记录稿件与 IP 证据版本；编辑脚本、场景文案或 IP 后，旧计划、候选和渲染都会失效，不能被旧标签页重新提交。</small>{draft.invalidation_reasons.length > 0 && <small className="error">已失效：{draft.invalidation_reasons.join("、")}；请重新生成后续结果。</small>}</div>}
@@ -1048,7 +1062,7 @@ function App() {
           <div><form onSubmit={(event) => void createHistorical(event)}><h3>历史内容导入记录</h3><label>所属账号<select name="account_connection_id" required disabled={!accounts.length}><option value="">选择只读账号</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name || account.account_external_id}</option>)}</select></label><Field label="外部内容 ID" name="external_id" placeholder="video-id" /><Field label="标题" name="title" placeholder="历史内容标题" /><Field label="字幕 / 转录" name="transcript" as="textarea" /><Field label="指标 JSON（可选）" name="metrics" placeholder='{"views": 100}' /><button disabled={busy || !accounts.length} className="button primary">保存历史内容</button></form><div className="asset-list">{historicalContent.slice(0, 6).map((item) => <div className="asset-row" key={item.id}><div><strong>{item.title}</strong><small>{item.external_id} · {Object.keys(item.metrics).join(", ") || "无指标"}</small></div></div>)}{historicalContent.length === 0 && <p className="muted">导入字幕和元数据后才能形成可追溯证据。</p>}</div></div>
         </div>
         <div className="columns compact">
-          <form onSubmit={(event) => void createVoice(event)}><h3>Voice Profile 登记</h3><Field label="名称" name="name" placeholder="本人声音候选" /><Field label="Provider" name="provider" placeholder="provider-name" /><Field label="Provider Profile ID" name="provider_profile_id" placeholder="profile-id" /><Field label="参考 Clip IDs" name="reference_clip_ids" placeholder="uuid, uuid" /><Field label="同意主体" name="subject_name" placeholder="本人" /><label>同意依据<select name="basis" defaultValue="self"><option value="self">本人</option><option value="explicit_authorization">明确授权</option></select></label><Field label="授权记录引用（如适用）" name="authorization_reference" /><label><input name="confirmed" type="checkbox" defaultChecked required /> 我确认这些参考 Clip 可用于此 Profile 登记</label><button disabled={busy} className="button">登记 Voice Profile</button></form>
+          <form onSubmit={(event) => void createVoice(event)}><h3>Voice Profile 登记</h3><label>声音所属 IP<select name="ip_profile_id" required defaultValue=""><option value="">明确选择声音主体 IP</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label><label><input name="default_voice" type="checkbox" /> 将此授权声线指定为该 IP 的默认声音</label><Field label="名称" name="name" placeholder="本人声音候选" /><Field label="Provider" name="provider" placeholder="provider-name" /><Field label="Provider Profile ID" name="provider_profile_id" placeholder="profile-id" /><Field label="参考 Clip IDs" name="reference_clip_ids" placeholder="uuid, uuid" /><Field label="同意主体" name="subject_name" placeholder="本人" /><label>同意依据<select name="basis" defaultValue="self"><option value="self">本人</option><option value="explicit_authorization">明确授权</option></select></label><Field label="授权记录引用（如适用）" name="authorization_reference" /><label><input name="confirmed" type="checkbox" defaultChecked required /> 我确认这些参考 Clip 可用于此 Profile 登记</label><button disabled={busy} className="button">登记 Voice Profile</button></form>
           <form onSubmit={(event) => void createVoice(event, true)}><h3>Talking Profile 登记</h3><Field label="名称" name="name" placeholder="本人 Talking 候选" /><Field label="Provider" name="provider" placeholder="provider-name" /><Field label="Provider Profile ID（可选）" name="provider_profile_id" placeholder="profile-id" /><Field label="参考 Clip IDs" name="reference_clip_ids" placeholder="uuid, uuid" /><Field label="同意主体" name="subject_name" placeholder="本人" /><label>同意依据<select name="basis" defaultValue="self"><option value="self">本人</option><option value="explicit_authorization">明确授权</option></select></label><Field label="授权记录引用（如适用）" name="authorization_reference" /><label><input name="confirmed" type="checkbox" defaultChecked required /> 我确认这些参考 Clip 可用于此 Profile 登记</label><button disabled={busy} className="button">登记 Talking Profile</button></form>
         </div>
         <p className="muted">参考 Clip 必须是已导入并可定位的真实 Clip；当前只登记授权与候选元数据，不提供生成、试听或质量通过结论。{clips.length ? ` 当前可引用 Clip：${clips.length} 个。` : " 需要先完成素材分析才会出现可引用 Clip。"}</p>

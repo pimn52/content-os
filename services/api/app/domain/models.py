@@ -11,7 +11,7 @@ from pathlib import PureWindowsPath
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Discriminator, Field, JsonValue, Tag, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Discriminator, Field, JsonValue, Tag, field_validator, model_validator, model_serializer
 from pydantic_core import PydanticCustomError
 from .execution_runtime import HostRuntimeObservation, HostRuntimeObservationV3Policy2, RuntimeInventoryDescriptor
 from .maintained_runtime import MaintainedRuntimeInventoryDescriptor, MaintainedEvidenceReference, MaintainedHostObservation
@@ -142,6 +142,7 @@ class RationalFps(ContractModel):
 
 class IPProfile(ContractModel):
     id: UUID = Field(default_factory=uuid4)
+    default_voice_profile_id: UUID | None = None
     creator_name: str = Field(min_length=1, max_length=200)
     domains: list[str] = Field(default_factory=list, max_length=30)
     audience: str | None = Field(default=None, max_length=1_000)
@@ -154,6 +155,14 @@ class IPProfile(ContractModel):
     boundaries: list[str] = Field(default_factory=list, max_length=100)
     common_hooks: list[str] = Field(default_factory=list, max_length=100)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+    @model_serializer(mode="wrap")
+    def serialize_voice_binding(self, handler):
+        data = handler(self)
+        if self.default_voice_profile_id is None:
+            data.pop("default_voice_profile_id",None)
+        return data
 
 
 class AnalysisKeyframe(ContractModel):
@@ -462,6 +471,7 @@ class Clip(ContractModel):
 
 class VoiceProfile(ContractModel):
     id: UUID = Field(default_factory=uuid4)
+    ip_profile_id: UUID | None = None
     name: str = Field(min_length=1, max_length=200)
     provider: str = Field(min_length=1, max_length=100)
     provider_profile_id: str = Field(min_length=1, max_length=500)
@@ -469,6 +479,14 @@ class VoiceProfile(ContractModel):
     consent: ConsentRecord
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
     created_at: AwareDatetime
+
+
+    @model_serializer(mode="wrap")
+    def serialize_ip_binding(self, handler):
+        data = handler(self)
+        if self.ip_profile_id is None:
+            data.pop("ip_profile_id",None)
+        return data
 
 
 class TalkingProfile(ContractModel):
@@ -2181,6 +2199,7 @@ class VoiceGenerationJobPayload(ContractModel):
 
     project_id: UUID
     voice_profile_id: UUID
+    cross_ip_voice_authorization_reference: str | None = Field(default=None, min_length=1, max_length=500)
     text: str = Field(min_length=1, max_length=100_000)
     delivery_text: str | None = Field(default=None, min_length=1, max_length=100_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
@@ -2197,6 +2216,13 @@ class VoiceGenerationJobPayload(ContractModel):
         if any(value is not None for value in pins) and not all(value is not None for value in pins):
             raise ValueError("pinned Voice execution requires provider, model and capability profile")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_voice_choice(self, handler):
+        data = handler(self)
+        if self.cross_ip_voice_authorization_reference is None:
+            data.pop("cross_ip_voice_authorization_reference",None)
+        return data
 
 
 class VoiceQaJobPayload(ContractModel):

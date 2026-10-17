@@ -10,7 +10,7 @@ function fixture(unknown = false, saved = false) {
   let state = { job_id: 'job-1', project_id: 'project-1', state: 'pending', job_status: 'pending', reasons: [], error_code: null, outputs: [], recovery_action: null };
   const request = async (path, options) => {
     calls.push({ path, options });
-    if (path === '/voice-profiles') return [{ id: 'profile-1', name: 'Synthetic', provider: 'omnivoice', consent: { confirmed: true } }];
+    if (path.startsWith('/voice-profiles?')) return path.includes('project_id=project-1&') ? [{ id: 'profile-1', name: 'Synthetic', provider: 'omnivoice', consent: { confirmed: true } }] : [];
     if (path === '/execution-settings/capabilities') return [{ id: 'cap-1', capability: 'voice', provider: 'omnivoice', mode: 'local', model: 'synthetic', readiness: unknown ? 'configured' : 'verified', quality_status: unknown ? 'unknown' : 'verified' }];
     if (path.includes('/reference-windows')) return [{ selection: { source_content_hash: 'a'.repeat(64) }, transcript: 'synthetic reference', duration_ms: 1000 }];
     if (path.endsWith('/voice-jobs')) return { id: 'job-1', project_id: 'project-1' };
@@ -175,7 +175,7 @@ test('historical target mismatch stays reviewable and standalone creation preser
 });
 
 test('asynchronously loaded plan does not discard same-project voice configuration discovery',async()=>{
-  const f=fixture();let resolve;const request=(path,options)=>path==='/voice-profiles'?new Promise(r=>{resolve=r;}):f.request(path,options);
+  const f=fixture();let resolve;const request=(path,options)=>path.startsWith('/voice-profiles?')?new Promise(r=>{resolve=r;}):f.request(path,options);
   const h=f.create({request,planSource:{...savedPlan,hasScenes:false,text:''}});await h.flush();
   h.setProps({planSource:savedPlan});await h.flush();resolve([{id:'profile-1',name:'Late authorized voice',provider:'omnivoice',consent:{confirmed:true}}]);await h.flush();
   assert.match(h.text(),/Late authorized voice/);assert.equal(f.calls.filter(c=>c.options?.method==='POST').length,0);h.unmount();

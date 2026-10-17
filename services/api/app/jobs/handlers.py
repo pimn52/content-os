@@ -208,6 +208,11 @@ class RenderVideoJobHandler:
                 except ValueError:
                     raise JobExecutionError("use_constraint_render_plan_changed_replan", "source-use policy or evidence changed; replan required", retryable=False) from None
         try:
+            if database is not None and payload.video_spec.master_narration is not None:
+                from app.voice_plan import require_project_voice_audio
+                master = AudioAssetRepository(database).get(payload.video_spec.master_narration.audio_asset_id)
+                if master is not None and master.metadata.get("voice_generation"):
+                    require_project_voice_audio(database,job.project_id,master)
             if consumer is not None:
                 context = self.require_dispatch(job)
                 owner = consumer.records.owner(job_id=job.id)
@@ -263,7 +268,7 @@ class RenderVideoJobHandler:
         except Exception as exc:
             if consumer is not None:
                 _finish_job_provider_call(ledger,job,call,status="failed",error_code="composition_render_failed")
-                code = str(exc) if isinstance(exc,ValueError) and str(exc).startswith("composition_") else "composition_render_failed"
+                code = str(exc) if isinstance(exc,UseAdmissionError) else "composition_render_failed"
                 raise JobExecutionError(code,code,retryable=False) from None
             if isinstance(exc,JobExecutionError):
                 raise
@@ -308,9 +313,11 @@ class VoiceGenerationJobHandler:
         _require_closed_evaluation_lane(self._profiles.db, job)
         if self._ledger is None and self._profiles.db.connection.execute("SELECT id FROM voice_repairs WHERE replacement_job_id = ?", (str(job.id),)).fetchone():
             raise JobExecutionError("voice_repair_accounting_required", "Repair requires durable accounting", retryable=False)
-        profile = self._profiles.get(job.payload.voice_profile_id)
-        if profile is None or not profile.consent.confirmed:
-            raise JobExecutionError("voice_profile_not_authorized", "an explicitly consented voice profile is required", retryable=False)
+        from app.voice_plan import resolve_project_voice_profile
+        try:
+            profile = resolve_project_voice_profile(self._profiles.db,job.project_id,job.payload.voice_profile_id,job.payload.cross_ip_voice_authorization_reference)
+        except UseAdmissionError as exc:
+            raise JobExecutionError(str(exc),str(exc),retryable=False) from None
         provider_name = getattr(self._provider, "provider_name", None)
         model = getattr(self._provider, "model", None)
         if not isinstance(provider_name, str) or not provider_name.strip() or not isinstance(model, str) or not model.strip():

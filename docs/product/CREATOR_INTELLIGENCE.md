@@ -6,6 +6,13 @@ Maintain the durable creator context that lets Content OS decide **what is worth
 
 The primary product object is the creator/brand workspace, not an isolated video.
 
+Project creation accepts an explicit IPProfile identity; multiple existing IPs
+require a deliberate selection rather than silently taking the first record.
+New Voice Profile registration selects its owning IP and may explicitly designate
+that IP's default voice. These are relationships on the existing IP/Profile/Job
+objects. Changing a historical project's IP does not migrate its ScenePlan,
+Master, source-use authorization or quality approvals automatically.
+
 ## User outcome
 
 A creator should be able to upload/confirm their own information once, then repeatedly start new content from a topic or evidence source without restating identity, positioning and historical context every time.
