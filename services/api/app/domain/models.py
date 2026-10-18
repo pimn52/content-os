@@ -1330,8 +1330,9 @@ class VoiceQAInputBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     audio_id: UUID
     audio_sha256: Sha256
-    producer_job_id: UUID
-    producer_job_sha256: Sha256
+    producer_job_id: UUID | None
+    producer_job_sha256: Sha256 | None
+    composition_source_take_audio_ids: tuple[UUID, ...] = ()
     producer_metadata_sha256: Sha256
     original_scope_fingerprint: Sha256
     original_admissions: tuple[tuple[UUID, Sha256], ...] = Field(min_length=1, max_length=100)
@@ -1343,6 +1344,12 @@ class VoiceQAInputBinding(BaseModel):
         ids = [str(row[0]) for row in self.original_admissions]
         if ids != sorted(set(ids)):
             raise ValueError("voice_qa_input_admissions_invalid")
+        takes = [str(value) for value in self.composition_source_take_audio_ids]
+        if ((self.producer_job_id is None) != (self.producer_job_sha256 is None)
+            or (self.producer_job_id is None and not takes)
+            or (self.producer_job_id is not None and takes)
+            or len(takes) != len(set(takes))):
+            raise ValueError("voice_qa_input_producer_invalid")
         return self
 
 

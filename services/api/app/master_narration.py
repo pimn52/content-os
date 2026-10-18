@@ -20,6 +20,7 @@ from app.domain.models import (
 from app.media import AudioImportError, AudioImporter
 from app.voice_takes import VerifiedVoiceTake, VoiceTakeComposer, VoiceTakeCompositionError
 from app.voice_seam import VoiceSeamCompactionError, compact_measured_seam_quiet
+from app.voice_qa import voice_copy_adjudication_is_valid
 
 
 class MasterNarrationCompositionError(ValueError):
@@ -85,11 +86,16 @@ class MasterNarrationComposer:
             "provider": "composed_voice_takes",
             "model": "provider_neutral_composition",
             "project_id": str(project_id),
+            "voice_profile_id": takes[0].audio.metadata["voice_generation"]["voice_profile_id"],
             "target_text": " ".join(self._target_text(take.audio) for take in takes),
             "qa_state": "pending",
             "composition": {
                 "source_take_audio_ids": list(provisional.source_asset_ids),
                 "source_take_content_hashes": [take.audio.content_hash for take in takes],
+                "copy_adjudicated_source_take_audio_ids": [
+                    str(take.audio.id) for take in takes
+                    if voice_copy_adjudication_is_valid(take.audio, project_id=project_id)
+                ],
                 "expected_duration_ms": expected_duration_ms,
                 "timing_state": "provisional_pending_master_voice_qa",
             },
@@ -118,8 +124,11 @@ class MasterNarrationComposer:
     def _take(self, project_id: UUID, audio_id: UUID, index: int) -> VerifiedVoiceTake:
         audio = self.audios.get(audio_id)
         generation = None if audio is None else audio.metadata.get("voice_generation")
-        if audio is None or not isinstance(generation, dict) or generation.get("qa_state") != "verified":
-            raise MasterNarrationCompositionError("every MasterNarration take must be a QA-verified generated Voice asset")
+        if audio is None or not isinstance(generation, dict) or not (
+            generation.get("qa_state") == "verified"
+            or voice_copy_adjudication_is_valid(audio, project_id=project_id)
+        ):
+            raise MasterNarrationCompositionError("every MasterNarration take must have verified QA or a valid owner copy adjudication")
         job_id = generation.get("job_id")
         try:
             job = self.jobs.get(UUID(job_id)) if isinstance(job_id, str) else None

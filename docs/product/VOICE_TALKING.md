@@ -198,6 +198,15 @@ At minimum:
 - playable audio;
 - provider/reference provenance.
 
+An automated copy-QA failure remains recorded as failed. For the owner-confirmed
+owner-confirmed Mandarin homophone substitutions from the exact P6 examples
+(码率/马律 and 源里/原理), the normal Voice API can retain a separate
+asset-, project-, target- and transcript-bound copy adjudication when the only
+QA blocker is those substitutions and the full copy has no missing or repeated
+tokens. This does not upgrade the automated QA result or approve Voice quality;
+it only permits the exact adjudicated take to enter Master composition. The
+composed Master still requires its own independent QA and U-Voice review.
+
 ### Voice performance observation
 
 For a QA-verified narration AudioAsset with its exact requested copy, the

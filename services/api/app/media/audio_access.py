@@ -116,12 +116,18 @@ class AudioAccess:
                     raise UseAdmissionError("execution_use_review_context_required")
                 from app.voice_calibration import calibration_receipts, require_completed_review
                 if any(calibration_receipts(self.db, scope) for scope in scopes):
-                    if job is None or producer is None:
-                        raise UseAdmissionError("execution_use_origin_missing")
-                    result["review_policy"] = require_completed_review(self.db, self.root, producer_audio, job, producer,
-                        scopes, project_id=project_id, purpose=purpose)
-                    if qa_policy is not None:
+                    generation = audio.metadata.get("voice_generation", {})
+                    if generation.get("provider") == "composed_voice_takes":
+                        if qa_policy is None:
+                            raise UseAdmissionError("voice_qa_composition_review_required")
                         result["review_policy"] = qa_policy
+                    else:
+                        if job is None or producer is None:
+                            raise UseAdmissionError("execution_use_origin_missing")
+                        result["review_policy"] = require_completed_review(self.db, self.root, producer_audio, job, producer,
+                            scopes, project_id=project_id, purpose=purpose)
+                        if qa_policy is not None:
+                            result["review_policy"] = qa_policy
                 else:
                     for scope in scopes:
                         self.service.require_current(scope, project_id=project_id, purpose=purpose, operation="review")

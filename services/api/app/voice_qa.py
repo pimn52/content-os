@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from datetime import datetime
+import hashlib
+import json
 import math
 from pathlib import Path
 import re
 import struct
 from typing import Sequence
 import wave
+from uuid import UUID
 
 from opencc import OpenCC
 
@@ -23,6 +27,10 @@ _TRADITIONAL_TO_SIMPLIFIED = OpenCC("t2s")
 # speech-copy comparison, the Mandarin progressive glyph variants 著/着 are
 # indistinguishable; normalize them only in the ephemeral comparison stream.
 _SPOKEN_GLYPH_VARIANTS = str.maketrans({"著": "着"})
+_OWNER_CONFIRMED_HOMOPHONES = frozenset({
+    ("码", "马"), ("率", "律"),
+    ("源", "原"), ("里", "理"),
+})
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,156 @@ class VoiceQaReport:
 
 class VoiceQaError(ValueError):
     pass
+
+
+def apply_voice_copy_adjudication(
+    audio: AudioAsset,
+    *,
+    project_id: UUID,
+    confirmed_target_text: str,
+    evidence_reference: str,
+    reviewed_at: datetime,
+) -> AudioAsset:
+    """Record an owner-confirmed homophone only when it is the sole QA failure.
+
+    The automated QA claim remains failed and unchanged. This separate,
+    source-bound decision only makes the exact copy eligible for take
+    composition; it does not mark the audio technically verified or approve
+    its likeness, delivery, or publication quality.
+    """
+
+    if not isinstance(audio, AudioAsset):
+        raise VoiceQaError("copy adjudication requires a generated Voice asset")
+    if not isinstance(project_id, UUID):
+        raise VoiceQaError("copy adjudication requires its owning project")
+    if not isinstance(reviewed_at, datetime) or reviewed_at.tzinfo is None:
+        raise VoiceQaError("copy adjudication requires a timezone-aware review time")
+    if not isinstance(evidence_reference, str) or not evidence_reference.strip():
+        raise VoiceQaError("copy adjudication requires a review evidence reference")
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict):
+        raise VoiceQaError("copy adjudication requires a generated Voice asset")
+    target_text = generation.get("target_text")
+    if not isinstance(target_text, str) or confirmed_target_text != target_text:
+        raise VoiceQaError("copy adjudication must confirm the exact generated copy")
+    project_value = generation.get("project_id")
+    if project_value != str(project_id):
+        raise VoiceQaError("copy adjudication project does not match the generated asset")
+    if generation.get("copy_adjudication") is not None:
+        raise VoiceQaError("copy adjudication is immutable for this exact asset")
+    pairs = _adjudicable_homophone_pairs(audio, generation)
+    if not pairs:
+        raise VoiceQaError("only explicitly owner-confirmed P6 ASR homophones can be adjudicated")
+
+    payload = {
+        "state": "accepted",
+        "decision": "owner_confirmed_homophone",
+        "project_id": str(project_id),
+        "audio_sha256": audio.content_hash,
+        "target_text_sha256": _sha256_text(target_text),
+        "transcript_sha256": _transcript_sha256(audio),
+        "substitutions": [{"target": target, "asr": observed} for target, observed in pairs],
+        "evidence_reference": evidence_reference.strip(),
+        "reviewed_at": reviewed_at.isoformat(),
+    }
+    metadata = dict(audio.metadata)
+    updated_generation = dict(generation)
+    updated_generation["copy_adjudication"] = payload
+    # Deliberately preserve generation["qa_state"] and generation["qa"] verbatim.
+    metadata["voice_generation"] = updated_generation
+    return audio.model_copy(update={"metadata": metadata})
+
+
+def voice_copy_adjudication_is_valid(audio: AudioAsset, *, project_id: UUID | None = None) -> bool:
+    """Check the exact, narrow manual copy decision without upgrading QA."""
+
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict):
+        return False
+    adjudication = generation.get("copy_adjudication")
+    if not isinstance(adjudication, dict) or adjudication.get("state") != "accepted":
+        return False
+    target_text = generation.get("target_text")
+    project_value = generation.get("project_id")
+    if not isinstance(target_text, str) or not isinstance(project_value, str):
+        return False
+    if project_id is not None and project_value != str(project_id):
+        return False
+    if (
+        adjudication.get("decision") != "owner_confirmed_homophone"
+        or adjudication.get("project_id") != project_value
+        or adjudication.get("audio_sha256") != audio.content_hash
+        or adjudication.get("target_text_sha256") != _sha256_text(target_text)
+        or adjudication.get("transcript_sha256") != _transcript_sha256(audio)
+        or not isinstance(adjudication.get("evidence_reference"), str)
+        or not adjudication["evidence_reference"].strip()
+        or not isinstance(adjudication.get("reviewed_at"), str)
+    ):
+        return False
+    pairs = _adjudicable_homophone_pairs(audio, generation)
+    expected = [{"target": target, "asr": observed} for target, observed in pairs]
+    return bool(pairs) and adjudication.get("substitutions") == expected
+
+
+def voice_take_copy_accepted(audio: AudioAsset, *, project_id: UUID | None = None) -> bool:
+    """Allow ordinary verified QA or the exact owner-adjudicated homophone."""
+
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict):
+        return False
+    if generation.get("qa_state") == "verified":
+        return True
+    return voice_copy_adjudication_is_valid(audio, project_id=project_id)
+
+
+def _adjudicable_homophone_pairs(audio: AudioAsset, generation: dict) -> tuple[tuple[str, str], ...]:
+    qa = generation.get("qa")
+    target_text = generation.get("target_text")
+    if (
+        generation.get("qa_state") != "failed"
+        or not isinstance(qa, dict)
+        or qa.get("qa_state") != "failed"
+        or qa.get("playable") is not True
+        or qa.get("copy_coverage") != 1.0
+        or qa.get("missing_token_count") != 0
+        or qa.get("duplicate_token_count") != 0
+        or not isinstance(qa.get("substitution_token_count"), int)
+        or qa.get("checks") != ["copy_substitution_tokens"]
+        or not isinstance(target_text, str)
+        or not audio.transcript_source
+        or not audio.transcript_segments
+    ):
+        return ()
+    target_tokens = comparison_tokens(target_text)
+    observed_tokens = comparison_tokens(" ".join(segment.text for segment in audio.transcript_segments))
+    pairs: list[tuple[str, str]] = []
+    for tag, target_start, target_end, observed_start, observed_end in SequenceMatcher(
+        None, target_tokens, observed_tokens, autojunk=False,
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "replace" or target_end - target_start != observed_end - observed_start:
+            return ()
+        for target, observed in zip(target_tokens[target_start:target_end], observed_tokens[observed_start:observed_end]):
+            pair = (target, observed)
+            if pair not in _OWNER_CONFIRMED_HOMOPHONES:
+                return ()
+            pairs.append(pair)
+    if not pairs or len(pairs) != qa.get("substitution_token_count"):
+        return ()
+    return tuple(pairs)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _transcript_sha256(audio: AudioAsset) -> str:
+    value = {
+        "source": audio.transcript_source,
+        "segments": [segment.model_dump(mode="json") for segment in audio.transcript_segments],
+    }
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def verify_generated_voice(

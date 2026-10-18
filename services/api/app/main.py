@@ -101,7 +101,12 @@ from app.domain.models import TalkingReviewDimensions, TalkingReviewFinding, Tal
 from app.voice_takes import VoiceTakeComposer
 from app.voice_observation import VoiceObservationError, observe_voice_performance
 from app.voice_boundary_alignment import voice_asset_project_id
-from app.voice_qa import VoiceQaError, apply_voice_human_review, voice_human_review_status
+from app.voice_qa import (
+    VoiceQaError,
+    apply_voice_copy_adjudication,
+    apply_voice_human_review,
+    voice_human_review_status,
+)
 from app.domain.voice_evaluation_review import EvaluationVoiceReviewInput, EvaluationVoiceReviewRecord
 from app.voice_evaluation_review import EvaluationVoiceReviewService, require_legacy_human_review
 
@@ -787,6 +792,14 @@ class VoiceHumanReviewRequest(BaseModel):
             rhythm=self.rhythm,
             reviewed_at=reviewed_at,
         )
+
+
+class VoiceCopyAdjudicationRequest(BaseModel):
+    """Explicitly confirm the generated copy when QA found only a known homophone."""
+
+    model_config = ConfigDict(extra="forbid")
+    confirmed_target_text: str = Field(min_length=1, max_length=100_000)
+    evidence_reference: str = Field(min_length=1, max_length=500)
 
 
 class TalkingHumanReviewRequest(BaseModel):
@@ -3735,6 +3748,66 @@ def create_app(
         except (ValueError, KeyError, TypeError, OSError) as exc:
             reason = str(exc) if isinstance(exc, ValueError) else "voice_human_review_evidence_invalid"
             raise HTTPException(status_code=409 if reason == "voice_human_review_immutable_conflict" else 422, detail=reason) from exc
+
+    @application.post(
+        "/projects/{project_id}/voice-assets/{audio_id}/copy-adjudication",
+        response_model=AudioAsset,
+        tags=["voice"],
+    )
+    async def record_voice_copy_adjudication(
+        project_id: UUID, audio_id: UUID, payload: VoiceCopyAdjudicationRequest, request: Request,
+    ) -> AudioAsset:
+        """Record an owner-confirmed homophone without changing automated QA."""
+
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        audios = AudioAssetRepository(db)
+        audio = audios.get(audio_id)
+        if audio is None:
+            raise HTTPException(status_code=404, detail="narration audio not found")
+        if not _voice_audio_belongs_to_project(db, audio, project_id):
+            raise HTTPException(status_code=422, detail="narration audio does not belong to the requested project")
+        generation = audio.metadata.get("voice_generation")
+        try:
+            job_id = UUID(generation["job_id"]) if isinstance(generation, dict) else None
+        except (KeyError, TypeError, ValueError):
+            job_id = None
+        job = JobRepository(db).get(job_id) if job_id is not None else None
+        if (
+            job is None or job.project_id != project_id or job.type is not JobType.GENERATE_VOICE
+            or job.status is not JobStatus.COMPLETED
+            or not isinstance(job.payload, VoiceGenerationJobPayload)
+            or generation.get("target_text") != job.payload.text
+            or audio.authorization_reference != job.payload.authorization_reference
+        ):
+            raise HTTPException(status_code=422, detail="copy adjudication requires the exact completed project Voice Job")
+        from app.execution_scope import ExecutionScopeService
+        from app.media.audio_access import file_digest
+        try:
+            scopes = ExecutionScopeService(db, request.app.state.data_root).require_content(
+                audio.content_hash, project_id=project_id, purpose="internal_evaluation", operation="review",
+            )
+            if not scopes or any(scope.purpose != "internal_evaluation" for scope in scopes):
+                raise UseAdmissionError("voice_copy_adjudication_internal_scope_required")
+            source = existing_local_media_file(audio.source_file, request.app.state.data_root)
+            if file_digest(source) != audio.content_hash:
+                raise ValueError("execution_use_content_changed")
+            updated = apply_voice_copy_adjudication(
+                audio,
+                project_id=project_id,
+                confirmed_target_text=payload.confirmed_target_text,
+                evidence_reference=payload.evidence_reference,
+                reviewed_at=datetime.now(timezone.utc),
+            )
+        except UseAdmissionError as exc:
+            raise _use_admission_error(exc) from exc
+        except (ValueError, OSError) as exc:
+            detail = str(exc) if str(exc) else "voice_copy_adjudication_invalid"
+            raise HTTPException(status_code=409 if "immutable" in detail else 422, detail=detail) from exc
+        with db.transaction():
+            audios.update(updated)
+        return updated
 
     @application.post(
         "/projects/{project_id}/voice-assets/{audio_id}/human-review",

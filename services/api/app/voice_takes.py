@@ -15,6 +15,7 @@ import subprocess
 from typing import Sequence
 
 from app.domain.models import AudioAsset, TranscriptSegment
+from app.voice_qa import voice_take_copy_accepted
 
 
 class VoiceTakeCompositionError(RuntimeError):
@@ -101,8 +102,8 @@ class VoiceTakeComposer:
             raise VoiceTakeCompositionError("each voice take needs a scene ID")
         audio = take.audio
         generation = audio.metadata.get("voice_generation")
-        if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
-            raise VoiceTakeCompositionError(f"voice take {take.scene_id!r} is not QA-verified")
+        if not isinstance(generation, dict) or not voice_take_copy_accepted(audio):
+            raise VoiceTakeCompositionError(f"voice take {take.scene_id!r} has neither verified QA nor a valid owner copy adjudication")
         if not audio.transcript_source or not audio.transcript_segments:
             raise VoiceTakeCompositionError(f"voice take {take.scene_id!r} has no real timed transcript")
         source = self._resolve_source(audio.source_file)

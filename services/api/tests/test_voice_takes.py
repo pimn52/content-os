@@ -26,7 +26,7 @@ def _take(path: Path, *, text: str, start: int = 0, end: int = 500) -> AudioAsse
 def test_composer_requires_independently_verified_timed_takes(tmp_path: Path) -> None:
     audio = _take(tmp_path / "one.wav", text="第一句")
     pending = audio.model_copy(update={"metadata": {"voice_generation": {"qa_state": "pending"}}})
-    with pytest.raises(VoiceTakeCompositionError, match="not QA-verified"):
+    with pytest.raises(VoiceTakeCompositionError, match="neither verified QA nor a valid owner copy adjudication"):
         VoiceTakeComposer().compose([VerifiedVoiceTake("hook", pending)], tmp_path / "master.wav")
     unmapped = audio.model_copy(update={"transcript_segments": [], "transcript_source": None})
     with pytest.raises(VoiceTakeCompositionError, match="no real timed transcript"):

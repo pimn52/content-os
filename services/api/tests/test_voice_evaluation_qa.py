@@ -22,7 +22,7 @@ from app.media.audio_access import AudioAccess
 from app.providers.maintained_asr_execution import (observe_asr_inventory, prepare_maintained_asr_child)
 from app.runtime_inventory import RuntimeInventoryStore
 from app.voice_evaluation_qa import (VoiceEvaluationQAService, _original_proof, retained_claim,
-    execute_evaluation_qa, require_completed_qa, REVIEW_POLICY)
+    execute_evaluation_qa, require_completed_qa, REVIEW_POLICY, qa_call_digest)
 from app.jobs.voice_evaluation_qa_handler import MaintainedVoiceEvaluationQAHandler
 from app.jobs.runner import JobRunner
 from app.jobs.store import JobStore
@@ -179,6 +179,27 @@ def test_new_schema_and_report_do_not_satisfy_old_voice_contracts(qa_case):
     with pytest.raises(ValidationError):ProviderUseLicenseReviewV3.model_validate_json(q.receipt.review.model_dump_json())
     raw=q.receipt.review.model_dump(mode="json");raw["max_provider_calls"]=True
     with pytest.raises(ValidationError):ProviderUseLicenseReviewV4.model_validate_json(json.dumps(raw))
+
+
+def test_retained_qa_digest_uses_the_original_persisted_claim_shape():
+    from app.budget import provider_call_input_digest
+
+    stored_claim = {"policy":"voice-evaluation-qa-v1", "input_binding":{"audio_id":"legacy-audio"}}
+    expanded_claim = {"policy":"voice-evaluation-qa-v1", "input_binding":{
+        "audio_id":"legacy-audio", "composition_source_take_audio_ids":[]}}
+    execution = SimpleNamespace(model_dump=lambda **_kwargs: {"runtime":"local"})
+    receipt = SimpleNamespace(review=SimpleNamespace(
+        identity=SimpleNamespace(provider="faster-whisper", model="medium"),
+        execution_specification=execution, configuration_sha256="c"*64), review_sha256="d"*64)
+    claim = SimpleNamespace(project_id=uuid4(), execution_sha256="e"*64,
+        model_dump=lambda **_kwargs: expanded_claim)
+
+    expected = provider_call_input_digest(dict(project_id=str(claim.project_id), operation="asr",
+        provider="faster-whisper", model="medium", input_source="voice-evaluation-qa-job",
+        input=dict(claim=stored_claim, execution_specification={"runtime":"local"},
+            execution_sha256=claim.execution_sha256, configuration_sha256="c"*64, review_sha256="d"*64)))
+    assert qa_call_digest(claim, receipt, claim_payload=stored_claim) == expected
+    assert qa_call_digest(claim, receipt) != expected
 
 
 def test_normal_http_entry_and_scoped_full_range_current_revocation(qa_case):

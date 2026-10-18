@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from uuid import UUID
 from typing import Literal
 from pydantic import BaseModel, ConfigDict
-from app.db import AudioAssetRepository, JobRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository
+from app.db import (AudioAssetRepository, JobRepository, ProviderCallRepository,
+    ProviderMachineCapabilityProfileRepository, ProjectRepository)
 from app.domain.models import (AudioAsset, Job, JobStatus, JobType, VoiceQaJobPayload,
-    ProviderUseLicenseReviewV4, VoiceQAInputBinding, Sha256, execution_canonical_sha256)
+    ProviderUseLicenseReviewV4, VoiceQAInputBinding, Sha256, VoiceGenerationJobPayload,
+    VoiceReferenceWindowSelection, execution_canonical_sha256)
 from app.domain.asr_child import ASRChildRequest, ASRChildResult
 from app.domain.asr_recipe import ASR_PARAMETERS
 from app.execution_admission import UseAdmissionError, resolve_provider_use
@@ -78,7 +80,7 @@ def has_qa_reference(db, audio):
     return False
 
 
-def _original_proof_unchecked(db, root, audio, *, project_id):
+def _voice_job_original_proof_unchecked(db, root, audio, *, project_id):
     from app.voice_calibration import require_completed_review
     generation = audio.metadata.get("voice_generation", {})
     try:
@@ -110,6 +112,172 @@ def _original_proof_unchecked(db, root, audio, *, project_id):
         target_text_sha256=hashlib.sha256(producer.payload.text.encode()).hexdigest(),
         language=producer.payload.language or audio.language or "")
     return binding, source
+
+
+def _composed_source_scope(db, root, project_id, source_ids):
+    from app.execution_scope import _make_scope
+    service = ExecutionScopeService(db, root)
+    bindings = {}
+    for audio_id in source_ids:
+        scope = service.get("audio", audio_id)
+        if scope is None or scope.project_id != project_id or scope.purpose != "internal_evaluation":
+            raise UseAdmissionError("voice_qa_composition_source_scope_missing")
+        for binding in scope.bindings:
+            previous = bindings.get(binding.admission_id)
+            if previous is not None and previous != binding:
+                raise UseAdmissionError("provider_use_binding_changed")
+            bindings[binding.admission_id] = binding
+    if not bindings:
+        raise UseAdmissionError("voice_qa_composition_source_scope_missing")
+    scope = _make_scope(project_id, "internal_evaluation",
+        tuple(bindings[key] for key in sorted(bindings, key=str)))
+    service.require_current(scope, project_id=project_id, purpose="internal_evaluation", operation="review")
+    return scope
+
+
+def _composed_original_proof_unchecked(db, root, audio, *, project_id):
+    from app.voice_qa import voice_copy_adjudication_is_valid, voice_take_copy_accepted
+    from app.voice_plan import resolve_project_voice_profile
+
+    generation = audio.metadata.get("voice_generation")
+    composition = generation.get("composition") if isinstance(generation, dict) else None
+    if (not isinstance(generation, dict) or generation.get("provider") != "composed_voice_takes"
+        or generation.get("model") != "provider_neutral_composition"
+        or generation.get("project_id") != str(project_id) or generation.get("job_id") is not None
+        or not isinstance(composition, dict) or generation.get("qa_state") not in {"pending", "verified", "failed"}):
+        raise UseAdmissionError("voice_qa_composition_origin_invalid")
+    try:
+        source_ids = tuple(UUID(value) for value in composition["source_take_audio_ids"])
+        source_hashes = tuple(composition["source_take_content_hashes"])
+        target_text = generation["target_text"]
+        if (not source_ids or len(source_ids) > 100 or len(source_ids) != len(source_hashes)
+            or len(set(source_ids)) != len(source_ids) or not isinstance(target_text, str) or not target_text.strip()
+            or composition.get("timing_state") != "provisional_pending_master_voice_qa"
+            or composition.get("expected_duration_ms") != audio.duration_ms):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise UseAdmissionError("voice_qa_composition_origin_invalid") from None
+
+    source_repo = AudioAssetRepository(db)
+    sources = []
+    target_parts = []
+    adjudicated_ids = []
+    voice_signature = None
+    first_job = None
+    scopes = ExecutionScopeService(db, root)
+    from app.domain.models import VoiceGenerationJobPayload
+
+    for audio_id, content_hash in zip(source_ids, source_hashes):
+        if not isinstance(content_hash, str) or len(content_hash) != 64:
+            raise UseAdmissionError("voice_qa_composition_source_changed")
+        current = source_repo.get(audio_id)
+        source_claim = retained_claim(db, audio_id)
+        if (current is None or current.content_hash != content_hash or source_claim is None
+            or source_claim.project_id != project_id or source_claim.original_audio.id != audio_id
+            or source_claim.original_audio.content_hash != content_hash):
+            raise UseAdmissionError("voice_qa_composition_source_changed")
+
+        # Verify the producer against its pre-QA output snapshot. Independent
+        # QA and owner homophone decisions remain separate immutable overlays.
+        source_binding, source_path = _voice_job_original_proof_unchecked(
+            db, root, source_claim.original_audio, project_id=project_id)
+        source_job = JobRepository(db).get(source_binding.producer_job_id)
+        if (source_job is None or not isinstance(source_job.payload, VoiceGenerationJobPayload)
+            or current.metadata.get("voice_generation", {}).get("target_text") != source_job.payload.text):
+            raise UseAdmissionError("voice_qa_composition_source_job_changed")
+        require_completed_qa(db, root, current, project_id=project_id, purpose="internal_evaluation")
+        if not voice_take_copy_accepted(current, project_id=project_id):
+            raise UseAdmissionError("voice_qa_composition_source_copy_unaccepted")
+        if voice_copy_adjudication_is_valid(current, project_id=project_id):
+            adjudicated_ids.append(str(audio_id))
+
+        ref = VoiceReferenceWindowSelection.model_validate(source_job.payload.reference_window)
+        reference_identity = json.dumps({
+            "clip_id": str(ref.clip_id), "asset_id": str(ref.asset_id),
+            "source_content_hash": ref.source_content_hash, "source_timebase": ref.source_timebase,
+            "asset_content_hash": ref.asset_content_hash,
+        }, sort_keys=True, separators=(",", ":"))
+        signature = (str(source_job.payload.voice_profile_id), current.metadata["voice_generation"].get("provider"),
+            current.metadata["voice_generation"].get("model"), current.authorization_reference, reference_identity)
+        if voice_signature is None:
+            voice_signature, first_job = signature, source_job
+        elif signature != voice_signature:
+            raise UseAdmissionError("voice_qa_composition_voice_identity_changed")
+        target_parts.append(source_job.payload.text.strip())
+        sources.append((current, source_job, source_path))
+
+    if target_text != " ".join(target_parts):
+        raise UseAdmissionError("voice_qa_composition_target_changed")
+    if composition.get("copy_adjudicated_source_take_audio_ids") != adjudicated_ids:
+        raise UseAdmissionError("voice_qa_composition_copy_decision_changed")
+    if audio.authorization_reference != sources[0][0].authorization_reference:
+        raise UseAdmissionError("voice_qa_composition_authorization_changed")
+    if generation.get("voice_profile_id") not in (None, voice_signature[0]):
+        raise UseAdmissionError("voice_qa_composition_voice_identity_changed")
+    resolve_project_voice_profile(db, project_id, first_job.payload.voice_profile_id,
+        getattr(first_job.payload, "cross_ip_voice_authorization_reference", None))
+
+    raw_duration = sum(source.duration_ms for source, _, _ in sources)
+    seam = composition.get("measured_seam_compaction")
+    if seam is not None:
+        try:
+            cuts = seam["cuts"]
+            if (seam.get("method") != "pcm16_mono_24khz_10ms_rms_below_minus45dbfs"
+                or seam.get("margin_ms_each_side") != 60 or seam.get("max_cut_ms") != 300
+                or seam.get("raw_duration_ms") != raw_duration
+                or seam.get("final_sha256") != audio.content_hash
+                or len(cuts) != len(sources) - 1):
+                raise ValueError()
+            boundaries = []
+            elapsed = 0
+            for source, _, _ in sources[:-1]:
+                elapsed += source.duration_ms
+                boundaries.append(elapsed)
+            total_cut = 0
+            prior_end = -1
+            for index, (cut, boundary) in enumerate(zip(cuts, boundaries)):
+                start, end = cut["start_ms"], cut["end_ms"]
+                if (cut.get("seam_index") != index or type(start) is not int or type(end) is not int
+                    or start < 0 or end <= start or end - start > 300 or start >= boundary or end <= boundary
+                    or start < prior_end or end > raw_duration):
+                    raise ValueError()
+                total_cut += end - start
+                prior_end = end
+            if raw_duration - total_cut != audio.duration_ms:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise UseAdmissionError("voice_qa_composition_seam_evidence_invalid") from None
+    elif raw_duration != audio.duration_ms:
+        raise UseAdmissionError("voice_qa_composition_duration_changed")
+
+    source = existing_local_media_file(audio.source_file, Path(root))
+    if not source.is_relative_to(Path(root).resolve()) or file_digest(source) != audio.content_hash:
+        raise UseAdmissionError("execution_use_content_changed")
+    scope = _composed_source_scope(db, root, project_id, source_ids)
+    saved_scope = scopes.get("audio", audio.id)
+    if saved_scope is not None and saved_scope != scope:
+        raise UseAdmissionError("execution_use_scope_immutable")
+    if saved_scope is not None:
+        origins = db.connection.execute("SELECT content_hash FROM execution_use_content_origins WHERE subject_kind='audio' AND subject_id=?",
+            (str(audio.id),)).fetchall()
+        if len(origins) != 1 or origins[0][0] != audio.content_hash:
+            raise UseAdmissionError("execution_use_origin_missing")
+
+    binding = VoiceQAInputBinding(audio_id=audio.id, audio_sha256=audio.content_hash,
+        producer_job_id=None, producer_job_sha256=None, composition_source_take_audio_ids=source_ids,
+        producer_metadata_sha256=execution_canonical_sha256(generation),
+        original_scope_fingerprint=scope.fingerprint,
+        original_admissions=tuple((value.admission_id, value.review_sha256) for value in scope.bindings),
+        target_text_sha256=hashlib.sha256(target_text.encode()).hexdigest(),
+        language=audio.language or first_job.payload.language or "zh")
+    return binding, source
+
+
+def _original_proof_unchecked(db, root, audio, *, project_id):
+    generation = audio.metadata.get("voice_generation", {})
+    if generation.get("provider") == "composed_voice_takes" or "composition" in generation:
+        return _composed_original_proof_unchecked(db, root, audio, project_id=project_id)
+    return _voice_job_original_proof_unchecked(db, root, audio, project_id=project_id)
 
 
 def _original_proof(db, root, audio, *, project_id):
@@ -198,21 +366,46 @@ def _projection(db, root, claim, raw, *, configured=False):
         if configured else dict(execution_sha256=claim.execution_sha256))
     result = result.model_copy(update={"metadata": {**result.metadata, "voice_evaluation_qa":
         dict(policy=POLICY, job_id=str(claim.job_id), admission_id=str(claim.admission_id), **execution)}})
+    if claim.input_binding.composition_source_take_audio_ids:
+        source = AudioAssetRepository(db).get(claim.input_binding.composition_source_take_audio_ids[0])
+        source_generation = None if source is None else source.metadata.get("voice_generation")
+        profile_id = source_generation.get("voice_profile_id") if isinstance(source_generation, dict) else None
+        if not isinstance(profile_id, str) or not profile_id:
+            raise UseAdmissionError("voice_qa_composition_voice_identity_changed")
+        generation = dict(result.metadata["voice_generation"])
+        generation["voice_profile_id"] = profile_id
+        result = result.model_copy(update={"metadata": {**result.metadata, "voice_generation": generation}})
     return result, report.metadata(provider=spec.provider, model=spec.model)
 
 
-def qa_input_document(claim, receipt):
-    return dict(claim=claim.model_dump(mode="json"),
+def _matches_qa_projection(audio, projected, *, project_id):
+    if audio == projected:
+        return True
+    from app.voice_qa import voice_copy_adjudication_is_valid
+    if not voice_copy_adjudication_is_valid(audio, project_id=project_id):
+        return False
+    metadata = dict(audio.metadata)
+    generation = dict(metadata.get("voice_generation", {}))
+    generation.pop("copy_adjudication", None)
+    metadata["voice_generation"] = generation
+    return audio.model_copy(update={"metadata": metadata}) == projected
+
+
+def qa_input_document(claim, receipt, *, claim_payload=None):
+    # Hash the retained claim shape when verifying older completed calls. New
+    # optional binding fields must not rewrite the identity of an old claim.
+    claim_value = claim.model_dump(mode="json") if claim_payload is None else claim_payload
+    return dict(claim=claim_value,
         execution_specification=receipt.review.execution_specification.model_dump(mode="json"),
         execution_sha256=claim.execution_sha256, configuration_sha256=receipt.review.configuration_sha256,
         review_sha256=receipt.review_sha256)
 
 
-def qa_call_digest(claim, receipt):
+def qa_call_digest(claim, receipt, *, claim_payload=None):
     from app.budget import provider_call_input_digest
     return provider_call_input_digest(dict(project_id=str(claim.project_id), operation="asr",
         provider=receipt.review.identity.provider, model=receipt.review.identity.model,
-        input_source=CALL_SOURCE, input=qa_input_document(claim, receipt)))
+        input_source=CALL_SOURCE, input=qa_input_document(claim, receipt, claim_payload=claim_payload)))
 
 
 def require_completed_qa(db, root, audio, *, project_id, purpose):
@@ -222,6 +415,15 @@ def require_completed_qa(db, root, audio, *, project_id, purpose):
     claim = retained_claim(db, audio.id)
     if claim is None or claim.project_id != project_id:
         raise UseAdmissionError("voice_qa_claim_missing")
+    claim_row = db.connection.execute("SELECT payload FROM voice_evaluation_qa_claims WHERE audio_id=?",
+        (str(audio.id),)).fetchone()
+    try:
+        claim_payload_json = claim_row["payload"]
+        claim_payload = json.loads(claim_payload_json)
+        if QAClaim.model_validate_json(claim_payload_json) != claim:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise UseAdmissionError("voice_qa_claim_invalid") from None
     job, scope, receipt = _job_binding(db, root, claim, retained=True)
     call = ProviderCallRepository(db).get_by_idempotency_key(f"voice-evaluation-qa:{job.id}")
     value = (call.result_payload or {}).get("result") if call and call.status == "completed" else None
@@ -229,15 +431,16 @@ def require_completed_qa(db, root, audio, *, project_id, purpose):
         or call.mode != "runtime" or call.input_source != CALL_SOURCE
         or call.provider != receipt.review.identity.provider or call.model != receipt.review.identity.model
         or value.get("audio_id") != str(audio.id) or value.get("job_id") != str(job.id)
-        or value.get("claim_sha256") != execution_canonical_sha256(claim.model_dump(mode="json"))
-        or value.get("input_digest") != call.input_digest or call.input_digest != qa_call_digest(claim, receipt)):
+        or value.get("claim_sha256") != execution_canonical_sha256(claim_payload)
+        or value.get("input_digest") != call.input_digest
+        or call.input_digest != qa_call_digest(claim, receipt, claim_payload=claim_payload)):
         raise UseAdmissionError("voice_qa_result_unbound")
     try:
         raw = ASRChildResult.model_validate_json(json.dumps(value["transcription"], allow_nan=False))
         projected, report = _projection(db, root, claim, raw,
             configured=value.get("configuration_observation") == "configured_local_process")
         if (value.get("report") != report or value.get("projection_sha256") != execution_canonical_sha256(projected.model_dump(mode="json"))
-            or audio != projected):
+            or not _matches_qa_projection(audio, projected, project_id=project_id)):
             raise ValueError()
     except (KeyError, TypeError, ValueError):
         raise UseAdmissionError("voice_qa_projection_changed") from None
@@ -272,6 +475,8 @@ class VoiceEvaluationQAService:
         if has_qa_reference(self.db, audio):
             raise UseAdmissionError("voice_qa_claim_missing")
         binding, _ = _original_proof(self.db, self.root, audio, project_id=project_id)
+        origin_scope = (_composed_source_scope(self.db, self.root, project_id,
+            binding.composition_source_take_audio_ids) if binding.composition_source_take_audio_ids else None)
         if hashlib.sha256(target.encode()).hexdigest() != binding.target_text_sha256:
             raise UseAdmissionError("voice_qa_target_changed")
         scope = self.scopes.prepare(project_id, purpose="internal_evaluation", admission_ids=(request.use_admission_id,))
@@ -292,6 +497,8 @@ class VoiceEvaluationQAService:
             if self.db.connection.execute("SELECT 1 FROM voice_evaluation_qa_claims WHERE audio_id=? OR admission_id=?",
                 (str(audio.id), str(receipt.id))).fetchone():
                 raise UseAdmissionError("voice_qa_already_claimed")
+            if origin_scope is not None:
+                self.scopes.pin("audio", audio.id, origin_scope, operation="review", content_hash=audio.content_hash)
             stored = JobRepository(self.db).create(job)
             if stored.id != job.id:
                 raise UseAdmissionError("voice_qa_idempotency_conflict")
@@ -321,34 +528,67 @@ class VoiceEvaluationQAService:
 
     def _facts(self, audio, claim):
         # Narrow durable composite authority; never read files/native code under lock.
-        producer = JobRepository(self.db).get(UUID(audio.metadata["voice_generation"]["job_id"]))
-        if producer is None:
-            raise UseAdmissionError("voice_qa_original_producer_missing")
-        rows = [producer.model_dump_json()]
+        rows = [audio.model_dump_json()]
         saved = AudioAssetRepository(self.db).get(audio.id)
         rows.append(None if saved is None else saved.model_dump_json())
-        profile_row = self.db.connection.execute("SELECT * FROM voice_profiles WHERE id=?",
-            (str(producer.payload.voice_profile_id),)).fetchone()
-        rows.append(None if profile_row is None else tuple(profile_row))
         from app.db import VoiceProfileRepository
-        profile = VoiceProfileRepository(self.db).get(producer.payload.voice_profile_id)
-        clip_ids = set([] if profile is None else profile.reference_clip_ids)
-        clip_ids.add(producer.payload.reference_window.clip_id)
-        for identity in sorted(clip_ids, key=str):
-            row = self.db.connection.execute("SELECT * FROM clips WHERE id=?", (str(identity),)).fetchone()
-            rows.append(None if row is None else tuple(row))
-            if row:
-                asset_id = json.loads(row["payload"])["asset_id"]
-                asset = self.db.connection.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
-                rows.append(None if asset is None else tuple(asset))
-        hashes = sorted({audio.content_hash, producer.payload.reference_window.source_content_hash,
-            producer.payload.reference_window.authorization_content_hash})
         scopes = []
-        for content_hash in hashes:
+        source_ids = () if claim is None else claim.input_binding.composition_source_take_audio_ids
+        origin_ids = source_ids or (audio.id,)
+        producers, hashes = [], {audio.content_hash}
+        audios = AudioAssetRepository(self.db)
+        for identity in origin_ids:
+            source_audio = audios.get(identity)
+            source_claim = retained_claim(self.db, identity) if source_ids else None
+            producer_audio = source_claim.original_audio if source_claim is not None else (audio if identity == audio.id else source_audio)
+            rows.append(None if source_audio is None else source_audio.model_dump_json())
+            rows.append(None if source_claim is None else source_claim.model_dump_json())
+            if producer_audio is None:
+                raise UseAdmissionError("voice_qa_composition_source_changed")
+            producer_generation = producer_audio.metadata.get("voice_generation", {})
+            try:
+                producer = JobRepository(self.db).get(UUID(producer_generation["job_id"]))
+            except (KeyError, TypeError, ValueError):
+                producer = None
+            if producer is None:
+                raise UseAdmissionError("voice_qa_original_producer_missing")
+            producers.append(producer)
+            rows.extend((producer_audio.model_dump_json(), producer.model_dump_json()))
+            profile_id = getattr(producer.payload, "voice_profile_id", None)
+            profile_row = self.db.connection.execute("SELECT * FROM voice_profiles WHERE id=?",
+                (str(profile_id),)).fetchone() if profile_id is not None else None
+            rows.append(None if profile_row is None else tuple(profile_row))
+            profile = VoiceProfileRepository(self.db).get(profile_id) if profile_id is not None else None
+            clip_ids = set([] if profile is None else profile.reference_clip_ids)
+            reference = getattr(producer.payload, "reference_window", None)
+            if reference is not None:
+                clip_ids.add(reference.clip_id)
+                hashes.update((reference.source_content_hash, reference.authorization_content_hash))
+            for clip_id in sorted(clip_ids, key=str):
+                row = self.db.connection.execute("SELECT * FROM clips WHERE id=?", (str(clip_id),)).fetchone()
+                rows.append(None if row is None else tuple(row))
+                if row:
+                    asset_id = json.loads(row["payload"])["asset_id"]
+                    asset = self.db.connection.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+                    rows.append(None if asset is None else tuple(asset))
+            hashes.add(producer_audio.content_hash)
+            if source_claim is not None:
+                qa_job = JobRepository(self.db).get(source_claim.job_id)
+                qa_scope = self.scopes.get("job", source_claim.job_id)
+                qa_call = ProviderCallRepository(self.db).get_by_idempotency_key(f"voice-evaluation-qa:{source_claim.job_id}")
+                rows.extend((None if qa_job is None else qa_job.model_dump_json(),
+                    None if qa_scope is None else qa_scope.model_dump_json(),
+                    None if qa_call is None else qa_call.model_dump_json()))
+                if qa_scope is not None:
+                    scopes.append(qa_scope)
+        for content_hash in sorted(hashes):
             scopes.extend(self.scopes.scopes_for_hash(content_hash))
             rows.append(tuple(tuple(r) for r in self.db.connection.execute(
                 "SELECT * FROM execution_use_content_origins WHERE content_hash=? ORDER BY subject_kind,subject_id", (content_hash,))))
-        for kind, identity in (("audio", audio.id), ("job", producer.id)):
+        scoped_subjects = [("audio", audio.id)]
+        scoped_subjects.extend(("audio", identity) for identity in source_ids)
+        scoped_subjects.extend(("job", producer.id) for producer in producers)
+        for kind, identity in scoped_subjects:
             scope = self.scopes.get(kind, identity)
             rows.append(None if scope is None else scope.model_dump_json())
             if scope: scopes.append(scope)
@@ -372,11 +612,12 @@ class VoiceEvaluationQAService:
                 rows.append(None if cap is None else tuple(cap))
                 setting = None if cap is None else self.db.connection.execute("SELECT * FROM provider_machine_settings WHERE scope_key=?", (cap["scope_key"],)).fetchone()
                 rows.append(None if setting is None else tuple(setting))
-        for table in ("voice_calibration_claims", "voice_draft_jobs"):
-            row = self.db.connection.execute(f"SELECT * FROM {table} WHERE job_id=?", (str(producer.id),)).fetchone()
-            rows.append(None if row is None else tuple(row))
-        call = ProviderCallRepository(self.db).get_by_idempotency_key(f"maintained-voice:{producer.id}")
-        rows.append(None if call is None else call.model_dump_json())
+        for producer in producers:
+            for table in ("voice_calibration_claims", "voice_draft_jobs"):
+                row = self.db.connection.execute(f"SELECT * FROM {table} WHERE job_id=?", (str(producer.id),)).fetchone()
+                rows.append(None if row is None else tuple(row))
+            call = ProviderCallRepository(self.db).get_by_idempotency_key(f"maintained-voice:{producer.id}")
+            rows.append(None if call is None else call.model_dump_json())
         return tuple(rows)
 
     def require_job(self, job, *, retained=False):
