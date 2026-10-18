@@ -22,6 +22,13 @@ DEFERRED = {"unknown_cost_requires_budget_authorization", "budget_call_limit", "
 DOWNSTREAM = ("evaluation_talking_execution_not_integrated", "evaluation_render_execution_not_integrated")
 
 
+def _same_composed_copy(saved, target):
+    from app.voice_qa import comparison_tokens
+    # Ignore paragraph formatting, but keep punctuation and spoken word breaks.
+    return ("".join(saved.split()) == "".join(target.split())
+            and comparison_tokens(saved) == comparison_tokens(target))
+
+
 def is_evaluation_master_run(db, run_id):
     from app.evaluation_composition import is_composition
     if is_composition(db,run_id=run_id):
@@ -86,14 +93,26 @@ class EvaluationMasterService:
         plan = build_production_preflight(self.db, project, draft, style_tokens=selection.style_tokens,
             repair_allowance=0)
         copy = draft.script or "\n\n".join(s.voice_text for s in sorted(draft.scenes, key=lambda s: s.order))
-        producer = JobRepository(self.db).get(UUID(audio.metadata["voice_generation"]["job_id"]))
-        if copy != state["target_text"] or copy != producer.payload.text:
+        producer_id = audio.metadata["voice_generation"].get("job_id")
+        producer = JobRepository(self.db).get(UUID(producer_id)) if producer_id else None
+        source_ids = claim.input_binding.composition_source_take_audio_ids
+        if producer is None:
+            # Completed QA already reopens these exact composed sources and
+            # their original permissions. Do not invent a single producer Job.
+            if producer_id or not source_ids or audio.metadata["voice_generation"].get("provider") != "composed_voice_takes":
+                raise UseAdmissionError("evaluation_master_origin_missing")
+            if not _same_composed_copy(copy, state["target_text"]):
+                raise UseAdmissionError("evaluation_master_copy_mismatch")
+        elif copy != state["target_text"] or copy != producer.payload.text:
             raise UseAdmissionError("evaluation_master_copy_mismatch")
-        if draft.narration_performance_plan and getattr(producer.payload, "speech_text", None) not in (None, copy):
+        if producer and draft.narration_performance_plan and getattr(producer.payload, "speech_text", None) not in (None, copy):
             raise UseAdmissionError("evaluation_master_transform_not_supported")
         values = list(self.scopes.scopes_for_hash(audio.content_hash))
-        for scope in (self.scopes.get("audio", audio.id), read_job_scope(self.db, producer),
-                      read_job_scope(self.db, JobRepository(self.db).get(claim.job_id))):
+        origin_scopes = [self.scopes.get("audio", audio.id),
+                         read_job_scope(self.db, JobRepository(self.db).get(claim.job_id))]
+        if producer:
+            origin_scopes.insert(1, read_job_scope(self.db, producer))
+        for scope in origin_scopes:
             if scope is None:
                 raise UseAdmissionError("evaluation_master_origin_missing")
             values.append(scope)
@@ -109,12 +128,15 @@ class EvaluationMasterService:
         proof = dict(audio_id=str(audio.id), audio_sha256=audio.content_hash,
             duration_ms=audio.duration_ms, start_ms=0, end_ms=audio.duration_ms,
             audio_format=dict(sample_rate_hz=audio.sample_rate, channels=audio.channels),
-            producer_job_id=str(producer.id), producer_job_sha256=job_use_identity(producer),
+            producer_job_id=None if producer is None else str(producer.id),
+            producer_job_sha256=None if producer is None else job_use_identity(producer),
             qa=record.binding(), human_record_id=str(record.id), human_record_sha256=digest(record.model_dump(mode="json")),
             origins=[s.model_dump(mode="json") for s in sorted({s.fingerprint: s for s in values}.values(), key=lambda s: s.fingerprint)],
             origin_membership=[list(row) for row in self.db.connection.execute(
                 "SELECT subject_kind,subject_id FROM execution_use_content_origins WHERE content_hash=? ORDER BY subject_kind,subject_id", (audio.content_hash,))],
             current_source_facts_sha256=digest(before[0]))
+        if producer is None:
+            proof["composition_source_take_audio_ids"] = [str(identity) for identity in source_ids]
         request = dict(policy=POLICY, purpose="internal_evaluation", project=project.model_dump(mode="json"),
             draft=draft.model_dump(mode="json"), copy=copy, copy_sha256=hashlib.sha256(copy.encode()).hexdigest(),
             style_tokens=selection.style_tokens.model_dump(mode="json"),

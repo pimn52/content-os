@@ -161,6 +161,13 @@ known assembly seam, not an intra-take pause detector or proof that words are
 correct. The compacted Master remains QA-pending until fresh full-copy QA and
 asset-specific U-Voice review.
 
+The existing internal Master consumer accepts a formally approved composed
+Master without a fabricated single producer Job. It reuses the current QA
+binding, ordered source-take identities and merged original-use scopes. Its
+saved-copy comparison permits whitespace formatting while retaining editorial
+punctuation and spoken word boundaries. This does not bypass explicit-use
+adoption or downstream material/source admission.
+
 The composition boundary persists the ordered source-take IDs and provisional
 timing on a QA-pending candidate. Its final timing and eligibility are replaced
 only by fresh independent master-level Voice QA; the candidate is not eligible

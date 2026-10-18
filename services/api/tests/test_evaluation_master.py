@@ -337,3 +337,67 @@ def test_normal_http_selection_preflight_create_and_saved_list_not_only_direct_s
         assert saved[0]["id"] == identity and saved[0]["evaluation_master"]["current_eligible"]
         assert client.get(f"/projects/{uuid4()}/production-runs/{identity}").status_code == 404
     assert protected(q.c.db) == before and q.calls == [1] and q.c.calls == [1]
+
+def test_composed_master_reuses_formal_review_and_all_source_origins_without_fake_job(qa_case, tmp_path):
+    from app.db import AudioAssetRepository, BudgetPolicyRepository, JobRepository, ProviderCallRepository
+    from app.domain.models import BudgetPolicy, ProviderUseLicenseReviewV4
+    from app.domain.asr_child import ASRChildResult
+    from app.voice_evaluation_qa import _original_proof
+    from test_voice_evaluation_qa import compose_qa_master
+
+    q=qa_case
+    run(q)
+    source,master=compose_qa_master(q,tmp_path)
+    binding,_=_original_proof(q.c.db,q.c.root,master,project_id=q.c.job.project_id)
+    fields=q.receipt.review.model_dump(mode='json');fields['input_binding']=binding.model_dump(mode='json')
+    report=ProviderUseLicenseReviewV4.model_validate_json(json.dumps(fields))
+    path=q.c.root/'composed-consumer-asr.json';path.write_text(report.model_dump_json(),encoding='utf-8')
+    receipt=ProviderUseAdmissionService(q.c.db,q.c.root).adopt(q.c.job.project_id,
+        idempotency_key='composed-consumer-asr',review_reference=path.name,
+        review_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),operator_key=OPERATOR_KEY)
+    BudgetPolicyRepository(q.c.db).save(BudgetPolicy(project_id=q.c.job.project_id,max_calls=4,
+        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
+    q.receipt=receipt;q.body.update(idempotency_key='composed-consumer-qa',narration_audio_id=master.id,
+        target_text=master.metadata['voice_generation']['target_text'],use_admission_id=str(receipt.id))
+    target=master.metadata['voice_generation']['target_text']
+    q.set_result(ASRChildResult.model_validate_json(json.dumps(dict(text=target,language='zh',
+        segments=[dict(start_ms=0,end_ms=max(1,master.duration_ms),text=target)],words=[]))))
+    master,job,_=run(q)
+    reviews=EvaluationVoiceReviewService(q.c.db,q.c.root)
+    reviews.record(job.project_id,master.id,typed(body(reviews,job.project_id,master.id)))
+    scene=_scene(str(job.project_id),text=target).model_copy(update={'preferred_sources':[SourceKind.TYPOGRAPHY]})
+    old=ProjectDraftRepository(q.c.db).get(job.project_id)
+    ProjectDraftRepository(q.c.db).save(ProjectDraft(project_id=job.project_id,version=old.version+1,
+        script_revision=old.script_revision+1,script='\n'+target+'\n',topic='same composition',scenes=[scene],
+        updated_at=datetime.now(timezone.utc)))
+    service=EvaluationMasterService(q.c.db,q.c.root)
+    selection=MasterSelection(policy=POLICY,purpose='internal_evaluation',audio_id=master.id)
+    count_before=q.c.db.connection.execute('select count(*) from jobs').fetchone()[0]
+    calls_before=len(ProviderCallRepository(q.c.db).list_for_project(job.project_id))
+    context=service._context(job.project_id,selection)
+    assert context['proof']['producer_job_id'] is None
+    assert context['proof']['producer_job_sha256'] is None
+    assert context['proof']['composition_source_take_audio_ids']==[str(source.id)]
+    assert context['proof']['human_record_id']==str(reviews.records.get_by_audio(master.id).id)
+    assert 'job_id' not in AudioAssetRepository(q.c.db).get(master.id).metadata['voice_generation']
+    selection,_=admit(q,service,selection,job.project_id)
+    result=service.create(job.project_id,start(service,job.project_id,selection,key='composed-master-run'))
+    assert result.status=='evaluation_master_bound' and result.voice_job_id is None
+    assert result.voice_qa_job_id is None and result.render_job_id is None
+    assert q.c.db.connection.execute('select count(*) from jobs').fetchone()[0]==count_before
+    assert len(ProviderCallRepository(q.c.db).list_for_project(job.project_id))==calls_before
+    saved=ProjectDraftRepository(q.c.db).get(job.project_id)
+    ProjectDraftRepository(q.c.db).save(saved.model_copy(update={'script':target+'changed','version':saved.version+1,'script_revision':saved.script_revision+1}))
+    with pytest.raises(UseAdmissionError,match='copy_mismatch'):
+        service._context(job.project_id,selection)
+
+@pytest.mark.parametrize('saved,target,expected', [
+    ('第一句。\n第二句。','第一句。 第二句。',True),
+    ('\nhello  world\n','hello world',True),
+    ('now here','nowhere',False),
+    ('第一句。','第一句，',False),
+    ('第一句。','第二句。',False),
+])
+def test_composed_copy_allows_formatting_without_changing_words_or_punctuation(saved,target,expected):
+    from app.evaluation_master import _same_composed_copy
+    assert _same_composed_copy(saved,target) is expected
