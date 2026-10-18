@@ -3,11 +3,20 @@ from __future__ import annotations
 
 import tempfile
 import hashlib
+import json
 from pathlib import Path
 from uuid import UUID
 
 from app.db import AudioAssetRepository, JobRepository
-from app.domain.models import AudioAsset, JobType, SourceKind, TranscriptSegment
+from app.domain.models import (
+    AudioAsset,
+    JobStatus,
+    JobType,
+    SourceKind,
+    TranscriptSegment,
+    VoiceGenerationJobPayload,
+    VoiceReferenceWindowSelection,
+)
 from app.media import AudioImportError, AudioImporter
 from app.voice_takes import VerifiedVoiceTake, VoiceTakeComposer, VoiceTakeCompositionError
 from app.voice_seam import VoiceSeamCompactionError, compact_measured_seam_quiet
@@ -32,6 +41,8 @@ class MasterNarrationComposer:
         authorizations = {take.audio.authorization_reference for take in takes}
         if len(authorizations) != 1:
             raise MasterNarrationCompositionError("MasterNarration takes must share one authorization record")
+        if len({self._voice_identity(take.audio) for take in takes}) != 1:
+            raise MasterNarrationCompositionError("MasterNarration takes must use one Voice profile, provider, model, and authorized reference")
         self.output_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="content-os-master-", dir=str(self.output_root)) as temporary:
             output = Path(temporary) / "raw-master.wav"
@@ -114,9 +125,47 @@ class MasterNarrationComposer:
             job = self.jobs.get(UUID(job_id)) if isinstance(job_id, str) else None
         except ValueError:
             job = None
-        if job is None or job.type is not JobType.GENERATE_VOICE or job.project_id != project_id:
+        if (job is None or job.type is not JobType.GENERATE_VOICE or job.status is not JobStatus.COMPLETED
+            or not isinstance(job.payload, VoiceGenerationJobPayload) or job.project_id != project_id):
             raise MasterNarrationCompositionError("MasterNarration takes must be generated for the selected project")
+        try:
+            recorded_reference = VoiceReferenceWindowSelection.model_validate(generation.get("reference_window"))
+        except ValueError as exc:
+            raise MasterNarrationCompositionError("MasterNarration takes require the exact generated authorized reference") from exc
+        if (
+            generation.get("job_id") != str(job.id)
+            or generation.get("project_id") != str(project_id)
+            or generation.get("target_text") != job.payload.text
+            or generation.get("voice_profile_id") != str(job.payload.voice_profile_id)
+            or audio.authorization_reference != job.payload.authorization_reference
+            or job.payload.reference_window is None
+            or recorded_reference != job.payload.reference_window
+            or (job.payload.expected_provider is not None and generation.get("provider") != job.payload.expected_provider)
+            or (job.payload.expected_model is not None and generation.get("model") != job.payload.expected_model)
+        ):
+            raise MasterNarrationCompositionError("MasterNarration take provenance does not match its completed Voice Job")
         return VerifiedVoiceTake(scene_id=f"take-{index}", audio=audio)
+
+    @staticmethod
+    def _voice_identity(audio: AudioAsset) -> tuple[str, str, str, str]:
+        generation = audio.metadata.get("voice_generation")
+        if not isinstance(generation, dict):
+            raise MasterNarrationCompositionError("MasterNarration take Voice identity is unavailable")
+        profile_id = generation.get("voice_profile_id")
+        provider = generation.get("provider")
+        model = generation.get("model")
+        reference = generation.get("reference_window")
+        if not all(isinstance(value, str) and value.strip() for value in (profile_id, provider, model)) or not isinstance(reference, dict):
+            raise MasterNarrationCompositionError("MasterNarration take Voice identity is incomplete")
+        selected = VoiceReferenceWindowSelection.model_validate(reference)
+        # A confirmed source may provide different verified windows (V50 did);
+        # each exact window is checked against its own Job above.
+        authorized_source = {
+            "clip_id": str(selected.clip_id), "asset_id": str(selected.asset_id),
+            "source_content_hash": selected.source_content_hash,
+            "source_timebase": selected.source_timebase, "asset_content_hash": selected.asset_content_hash,
+        }
+        return profile_id, provider, model, json.dumps(authorized_source, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _target_text(audio: AudioAsset) -> str:

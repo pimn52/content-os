@@ -8,7 +8,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import AudioAssetRepository, Database, IPProfileRepository, JobRepository, ProjectRepository
-from app.domain.models import AudioAsset, IPProfile, Job, JobType, Project, RationalFps, TranscriptSegment
+from app.domain.models import (
+    AudioAsset,
+    IPProfile,
+    Job,
+    JobStatus,
+    JobType,
+    Project,
+    RationalFps,
+    TranscriptSegment,
+    VoiceGenerationJobPayload,
+    VoiceReferenceWindowSelection,
+)
 from app.master_narration import MasterNarrationComposer, MasterNarrationCompositionError
 from app.main import create_app
 from app.voice_takes import ProvisionalMasterNarration
@@ -25,10 +36,24 @@ def test_composition_persists_pending_master_with_ordered_source_provenance(tmp_
         project = Project(ip_profile_id=profile.id, title="Master", topic="New", fps=RationalFps(numerator=25, denominator=1), created_at=NOW)
         ProjectRepository(db).create(project)
         takes: list[AudioAsset] = []
+        voice_profile_id = uuid4()
+        reference = VoiceReferenceWindowSelection(
+            clip_id=uuid4(), asset_id=uuid4(), source_content_hash="a" * 64,
+            start_ms=0, end_ms=6_000, transcript_sha256="b" * 64,
+        )
         for index, text in enumerate(("第一句", "第二句")):
-            job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, idempotency_key=f"voice-{index}", created_at=NOW, updated_at=NOW)
+            payload = VoiceGenerationJobPayload(
+                project_id=project.id, voice_profile_id=voice_profile_id, text=text,
+                authorization_reference="voice-consent", reference_window=reference,
+            )
+            job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, status=JobStatus.COMPLETED,
+                      idempotency_key=f"voice-{index}", created_at=NOW, updated_at=NOW, payload=payload)
             JobRepository(db).create(job)
-            take = AudioAsset(source_file=str(tmp_path / f"take-{index}.wav"), content_hash=(str(index + 1) * 64), duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent", imported_at=NOW, transcript_source="voice-qa:asr", transcript_segments=[TranscriptSegment(start_ms=0, end_ms=900, text=text)], metadata={"voice_generation": {"qa_state": "verified", "job_id": str(job.id), "target_text": text}})
+            take = AudioAsset(source_file=str(tmp_path / f"take-{index}.wav"), content_hash=(str(index + 1) * 64), duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent", imported_at=NOW, transcript_source="voice-qa:asr", transcript_segments=[TranscriptSegment(start_ms=0, end_ms=900, text=text)], metadata={"voice_generation": {
+                "qa_state": "verified", "job_id": str(job.id), "project_id": str(project.id), "target_text": text,
+                "voice_profile_id": str(voice_profile_id), "provider": "omnivoice", "model": "local-model",
+                "reference_window": reference.model_dump(mode="json"),
+            }})
             AudioAssetRepository(db).create(take)
             takes.append(take)
         imported = AudioAsset(source_file=str(tmp_path / "master.wav"), content_hash="f" * 64, duration_ms=2_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent", imported_at=NOW)
@@ -51,11 +76,49 @@ def test_composition_persists_pending_master_with_ordered_source_provenance(tmp_
         assert generation["composition"]["source_take_audio_ids"] == [str(take.id) for take in takes]
         assert result.transcript_source == "voice-take-composition:provisional-pending-master-qa"
         assert [(segment.start_ms, segment.end_ms) for segment in result.transcript_segments] == [(0, 900), (1000, 1900)]
+        first_generation = takes[0].metadata["voice_generation"]
+        alternate_generation = dict(first_generation)
+        alternate_generation["reference_window"] = reference.model_copy(update={
+            "start_ms": 1_000, "end_ms": 7_000, "transcript_sha256": "d" * 64,
+        }).model_dump(mode="json")
+        alternate_window_take = takes[0].model_copy(update={"metadata": {"voice_generation": alternate_generation}})
+        assert MasterNarrationComposer._voice_identity(takes[0]) == MasterNarrationComposer._voice_identity(alternate_window_take)
         class ExistingImporter:
             def import_path(self, *_args: object, **_kwargs: object) -> AudioAsset:
                 return result
         with pytest.raises(MasterNarrationCompositionError, match="refusing to overwrite"):
             MasterNarrationComposer(audios=AudioAssetRepository(db), jobs=JobRepository(db), importer=ExistingImporter(), composer=Composer(), output_root=tmp_path).compose(project.id, [take.id for take in takes])
+
+        other_reference = reference.model_copy(update={"clip_id": uuid4(), "asset_id": uuid4(), "source_content_hash": "c" * 64})
+        other_profile_id = uuid4()
+        other_text = "第三句"
+        other_payload = VoiceGenerationJobPayload(
+            project_id=project.id, voice_profile_id=other_profile_id, text=other_text,
+            authorization_reference="voice-consent", reference_window=other_reference,
+        )
+        other_job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, status=JobStatus.COMPLETED,
+                        idempotency_key="voice-other-profile", created_at=NOW, updated_at=NOW, payload=other_payload)
+        JobRepository(db).create(other_job)
+        other_take = AudioAsset(
+            source_file=str(tmp_path / "take-other.wav"), content_hash="c" * 64, duration_ms=1_000,
+            sample_rate=24_000, channels=1, authorization_reference="voice-consent", imported_at=NOW,
+            transcript_source="voice-qa:asr", transcript_segments=[TranscriptSegment(start_ms=0, end_ms=900, text=other_text)],
+            metadata={"voice_generation": {
+                "qa_state": "verified", "job_id": str(other_job.id), "project_id": str(project.id), "target_text": other_text,
+                "voice_profile_id": str(other_profile_id), "provider": "omnivoice", "model": "local-model",
+                "reference_window": other_reference.model_dump(mode="json"),
+            }},
+        )
+        AudioAssetRepository(db).create(other_take)
+        with pytest.raises(MasterNarrationCompositionError, match="one Voice profile"):
+            MasterNarrationComposer(audios=AudioAssetRepository(db), jobs=JobRepository(db), importer=Importer(), composer=Composer(), output_root=tmp_path).compose(project.id, [takes[0].id, other_take.id])
+
+        failed_generation = dict(takes[0].metadata["voice_generation"])
+        failed_generation["qa_state"] = "failed"
+        failed_audio = takes[0].model_copy(update={"metadata": {"voice_generation": failed_generation}})
+        AudioAssetRepository(db).update(failed_audio)
+        with pytest.raises(MasterNarrationCompositionError, match="QA-verified generated Voice asset"):
+            MasterNarrationComposer(audios=AudioAssetRepository(db), jobs=JobRepository(db), importer=Importer(), composer=Composer(), output_root=tmp_path).compose(project.id, [failed_audio.id])
     finally:
         db.close()
 
@@ -86,6 +149,11 @@ def test_explicit_master_seam_compaction_uses_real_wavs_and_retains_provenance(t
         project = Project(ip_profile_id=ip.id, title="Master", topic="New", fps=RationalFps(numerator=25, denominator=1), created_at=NOW)
         ProjectRepository(db).create(project)
         ids = []
+        voice_profile_id = uuid4()
+        reference = VoiceReferenceWindowSelection(
+            clip_id=uuid4(), asset_id=uuid4(), source_content_hash="a" * 64,
+            start_ms=0, end_ms=6_000, transcript_sha256="b" * 64,
+        )
         for index, samples in enumerate((
             [10_000] * (24_000 * 8 // 10) + [0] * (24_000 * 8 // 100),
             [0] * (24_000 * 8 // 100) + [10_000] * (24_000 * 8 // 10),
@@ -96,9 +164,19 @@ def test_explicit_master_seam_compaction_uses_real_wavs_and_retains_provenance(t
                 wav.setsampwidth(2)
                 wav.setframerate(24_000)
                 wav.writeframes(b"".join(value.to_bytes(2, "little", signed=True) for value in samples))
-            job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, idempotency_key=f"real-{index}", created_at=NOW, updated_at=NOW)
+            text = f"第{index}句"
+            payload = VoiceGenerationJobPayload(
+                project_id=project.id, voice_profile_id=voice_profile_id, text=text,
+                authorization_reference="voice-consent", reference_window=reference,
+            )
+            job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, status=JobStatus.COMPLETED,
+                      idempotency_key=f"real-{index}", created_at=NOW, updated_at=NOW, payload=payload)
             JobRepository(db).create(job)
-            take = AudioAsset(source_file=str(path), content_hash=hashlib.sha256(path.read_bytes()).hexdigest(), duration_ms=880, sample_rate=24_000, channels=1, authorization_reference="voice-consent", imported_at=NOW, transcript_source="voice-qa:asr", transcript_segments=[TranscriptSegment(start_ms=0 if index == 0 else 80, end_ms=800 if index == 0 else 880, text=f"第{index}句")], metadata={"voice_generation": {"qa_state": "verified", "job_id": str(job.id), "target_text": f"第{index}句"}})
+            take = AudioAsset(source_file=str(path), content_hash=hashlib.sha256(path.read_bytes()).hexdigest(), duration_ms=880, sample_rate=24_000, channels=1, authorization_reference="voice-consent", imported_at=NOW, transcript_source="voice-qa:asr", transcript_segments=[TranscriptSegment(start_ms=0 if index == 0 else 80, end_ms=800 if index == 0 else 880, text=text)], metadata={"voice_generation": {
+                "qa_state": "verified", "job_id": str(job.id), "project_id": str(project.id), "target_text": text,
+                "voice_profile_id": str(voice_profile_id), "provider": "omnivoice", "model": "local-model",
+                "reference_window": reference.model_dump(mode="json"),
+            }})
             AudioAssetRepository(db).create(take)
             ids.append(take.id)
         with TestClient(create_app(tmp_path / "real-master.sqlite")) as client:

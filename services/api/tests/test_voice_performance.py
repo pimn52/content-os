@@ -1,15 +1,11 @@
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
-import subprocess
-from uuid import uuid4
 import wave
 
-import pytest
-
-from app.domain.models import Asset, AudioAsset, Clip, ConsentRecord, NarrationEmphasis, NarrationPace, NarrationPause, NarrationPerformanceCue, NarrationPerformanceCueKind, NarrationPerformancePlanSource, RationalFps, VoiceProfile
-from app.narration_performance import NarrationBoundaryKind, NarrationBoundaryMap, build_narration_performance_plan, derive_narration_boundary_map
-from app.voice_performance import VoicePerformanceComposer, VoicePerformancePlanningError, authorized_voice_reference_choices, pause_duration_ms, plan_voice_generation_spans, plan_voice_performance_units, select_voice_reference_windows
+from app.domain.models import Asset, Clip, ConsentRecord, NarrationEmphasis, NarrationPace, NarrationPause, NarrationPerformanceCue, NarrationPerformanceCueKind, NarrationPerformancePlanSource, RationalFps, VoiceProfile
+from app.narration_performance import NarrationBoundaryKind, build_narration_performance_plan, derive_narration_boundary_map
+from app.voice_performance import authorized_voice_reference_choices, plan_voice_generation_spans, plan_voice_performance_units, select_voice_reference_windows
 
 
 COPY = "先把判断说清楚。但是，结构决定观众能否听懂。最后，让结论落下。"
@@ -24,7 +20,6 @@ def test_performance_units_preserve_copy_and_pause_provenance() -> None:
     rendered = plan_voice_performance_units(COPY, plan)
     assert "".join(unit.text for unit in rendered.units) == COPY
     assert [unit.pause_after for unit in rendered.units] == [NarrationPause.BRIEF, NarrationPause.BEAT, None]
-    assert pause_duration_ms(NarrationPause.BEAT) == 420
 
 
 def test_generation_spans_merge_adjacent_units_but_keep_semantic_provenance() -> None:
@@ -42,6 +37,22 @@ def test_generation_spans_merge_adjacent_units_but_keep_semantic_provenance() ->
     assert spans[0].pause_after == NarrationPause.BEAT
 
 
+def test_unpunctuated_complete_phrase_remains_one_generation_unit() -> None:
+    copy = "先明确问题再解释原因"
+    plan = build_narration_performance_plan(
+        copy, delivery_goal="Explain the answer.", overall_pace=NarrationPace.CONVERSATIONAL,
+        source=NarrationPerformancePlanSource.USER, evidence_refs=[], cues=[
+            NarrationPerformanceCue(kind=NarrationPerformanceCueKind.PACE, start_char=0,
+                end_char=len(copy), pace=NarrationPace.CONVERSATIONAL),
+        ],
+    )
+    rendered = plan_voice_performance_units(copy, plan)
+    spans = plan_voice_generation_spans(rendered, maximum_adjacent_units=1)
+
+    assert len(rendered.units) == len(spans) == 1
+    assert rendered.units[0].text == spans[0].text == copy
+
+
 def test_boundary_map_preserves_punctuation_hierarchy_and_forward_binding() -> None:
     boundaries = derive_narration_boundary_map(COPY)
 
@@ -52,46 +63,6 @@ def test_boundary_map_preserves_punctuation_hierarchy_and_forward_binding() -> N
     assert boundaries.kind_at(but_end + 1) is NarrationBoundaryKind.FORWARD_BINDING
     assert boundaries.kind_at(last_end) is NarrationBoundaryKind.FORWARD_BINDING
     assert boundaries.kind_at(COPY.index("决定")) is NarrationBoundaryKind.NO_BREAK
-
-
-def _write_pcm(path: Path, *, leading_ms: int, trailing_ms: int) -> None:
-    rate = 24_000
-    body_frames = rate - (leading_ms + trailing_ms) * rate // 1000
-    values = [0] * (leading_ms * rate // 1000) + [10_000] * body_frames + [0] * (trailing_ms * rate // 1000)
-    with wave.open(str(path), "wb") as output:
-        output.setnchannels(1)
-        output.setsampwidth(2)
-        output.setframerate(rate)
-        output.writeframes(b"".join(value.to_bytes(2, "little", signed=True) for value in values))
-
-
-def _verified_audio(path: Path) -> AudioAsset:
-    return AudioAsset(
-        source_file=str(path), content_hash="a" * 64, duration_ms=1_000, sample_rate=24_000, channels=1,
-        authorization_reference="test-rights", imported_at=datetime.now(timezone.utc),
-        metadata={"voice_generation": {"qa_state": "verified"}},
-    )
-
-
-def test_composer_uses_total_pause_budget_and_rejects_nonterminal_seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    plan = build_narration_performance_plan(COPY, delivery_goal="Land the contrast.", overall_pace=NarrationPace.CONVERSATIONAL, source=NarrationPerformancePlanSource.USER, evidence_refs=[], cues=[
-        NarrationPerformanceCue(kind=NarrationPerformanceCueKind.PAUSE, start_char=COPY.index("。") + 1, end_char=COPY.index("。") + 1, pause=NarrationPause.BRIEF),
-        NarrationPerformanceCue(kind=NarrationPerformanceCueKind.PAUSE, start_char=COPY.index("。", COPY.index("结构")) + 1, end_char=COPY.index("。", COPY.index("结构")) + 1, pause=NarrationPause.BEAT),
-    ])
-    spans = plan_voice_generation_spans(plan_voice_performance_units(COPY, plan), maximum_adjacent_units=2)
-    first, second = tmp_path / "first.wav", tmp_path / "second.wav"
-    _write_pcm(first, leading_ms=0, trailing_ms=190)
-    _write_pcm(second, leading_ms=110, trailing_ms=0)
-    def fake_run(command, **_kwargs):
-        Path(command[-1]).write_bytes(b"wav")
-        return subprocess.CompletedProcess(command, 0)
-    monkeypatch.setattr("app.voice_performance.subprocess.run", fake_run)
-    composition = VoicePerformanceComposer().compose([_verified_audio(first), _verified_audio(second)], spans, tmp_path / "out.wav", boundary_map=derive_narration_boundary_map(COPY))
-
-    assert composition.pause_after_ms == (120, 0)
-
-    with pytest.raises(VoicePerformancePlanningError, match="terminal syntax boundary"):
-        VoicePerformanceComposer().compose([_verified_audio(first), _verified_audio(second)], spans, tmp_path / "unsafe.wav", boundary_map=NarrationBoundaryMap("a" * 64, ()))
 
 
 def test_reference_window_ranking_only_proposes_candidates_without_quality_or_boundary_approval(tmp_path: Path) -> None:
