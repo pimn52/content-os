@@ -149,10 +149,13 @@ takes and must QA the resulting master again.
 
 Normal Master composition has an explicit measured-quiet seam option. It
 operates only at known joins between ordered, independently QA-verified takes:
-for 24 kHz mono PCM16, it may remove the interior of a measured low-energy
-interval spanning a join while retaining a margin on both sides. Absent or
-ambiguous quiet fails the option instead of inventing a speech boundary.
-The unmodified raw hash, final hash, child hashes and exact cuts are retained;
+for 24 kHz mono PCM16, it derives join roles from the exact ordered source
+copy using the existing structural boundary map. Sentence-ending, unclassified
+and forward-binding joins preserve their source PCM. Only a continuing-clause
+join may remove the interior of measured low-energy quiet while retaining a
+margin on both sides. Absent or ambiguous quiet at such a join fails the option
+instead of inventing a speech boundary. Derived roles, the unmodified raw hash,
+final hash, child hashes and exact cuts are retained;
 ordinary concat remains the default. This is a small publishability edit at a
 known assembly seam, not an intra-take pause detector or proof that words are
 correct. The compacted Master remains QA-pending until fresh full-copy QA and
@@ -435,11 +438,15 @@ eligible synthetic-pause or composition-seam position.
 The current VoiceTakeComposer concatenates independently verified takes to PCM
 and offsets their source transcript timing. It inserts no punctuation-derived
 silence and does not consume semantic pause cues. Optional seam compaction
-deletes only measured quiet at caller-known take joins. Its global margin and
-maximum-cut parameters are mechanical bounds, not calibrated punctuation
-durations; it has no per-boundary override yet. Semantic cues can carry local
-exact-copy intent, but that intent alone cannot repair a take-internal pause or
-prove an acoustic effect. Source audio, a compiled plan, technical QA and the
+uses the existing exact-copy structural map at caller-known take joins:
+terminal, forward-binding and unclassified joins retain their original quiet;
+continuing joins retain the existing bounded measured-quiet compaction. The
+saved roles are checked against source Job copy during normal Master QA.
+Legacy candidates retain their original numeric-only validation. There is no
+new user boundary override or punctuation-to-duration table. This prevents
+loss of existing boundary pauses; it does not lengthen an insufficient source
+pause, enforce a sentence/comma duration ratio, or repair take-internal audio.
+Semantic cues still carry intent rather than proof of an acoustic effect. Source audio, a compiled plan, technical QA and the
 human judgment remain distinct evidence.
 
 For the current OmniVoice route, exact-copy QA cannot certify natural phrasing.

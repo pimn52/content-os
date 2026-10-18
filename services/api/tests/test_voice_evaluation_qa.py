@@ -503,3 +503,23 @@ def test_initial_commercial_denial_retains_evaluation_manifest_for_explicit_audi
     allowed,source=AudioAccess(c.db,c.root).inspect(audio,project_id=job.project_id,purpose="internal_evaluation")
     assert allowed["state"]=="review_available" and source is not None
     assert q.calls==[1]
+
+@pytest.mark.parametrize('roles,cuts,duration,valid', [
+    (['terminal','continuing'], [{'seam_index':1,'start_ms':1950,'end_ms':2050}],2900,True),
+    (['terminal','continuing'], [],3000,True),
+    (['terminal','continuing'], [{'seam_index':0,'start_ms':950,'end_ms':1050}],2900,False),
+    (['continuing','continuing'], [],3000,False),
+    (['terminal'], [],3000,False),
+    (['terminal','continuing'], [{'seam_index':2,'start_ms':1950,'end_ms':2050}],2900,False),
+    (None,[{'seam_index':0,'start_ms':950,'end_ms':1050},{'seam_index':1,'start_ms':1950,'end_ms':2050}],2800,True),
+    (None,[],3000,False),
+    (['terminal','continuing'], [],2900,False),
+])
+def test_semantic_composition_seams_and_legacy_validation(roles,cuts,duration,valid):
+    from app.voice_evaluation_qa import _validate_composition_seams
+    seam=dict(method='pcm16_mono_24khz_10ms_rms_below_minus45dbfs',margin_ms_each_side=60,max_cut_ms=300,raw_duration_ms=3000,final_sha256='a'*64,cuts=cuts)
+    if roles is not None:seam['boundary_kinds']=roles
+    args=(seam,[1000,1000,1000],['第一句。','继续，','说明。'],duration,'a'*64)
+    if valid:_validate_composition_seams(*args)
+    else:
+        with pytest.raises(ValueError):_validate_composition_seams(*args)

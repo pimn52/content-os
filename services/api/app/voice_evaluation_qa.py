@@ -135,6 +135,52 @@ def _composed_source_scope(db, root, project_id, source_ids):
     return scope
 
 
+
+def _validate_composition_seams(seam, durations, target_parts, final_duration, audio_sha256):
+    """Retain legacy checks; semantic joins allow only derived continuing cuts."""
+    raw_duration = sum(durations)
+    cuts = seam["cuts"]
+    from app.voice_seam import take_boundary_kinds
+    from app.narration_performance import NarrationBoundaryKind
+    roles = seam.get("boundary_kinds")
+    expected_roles = [kind.value for kind in take_boundary_kinds(target_parts)]
+    if roles is not None and roles != expected_roles:
+        raise ValueError()
+    if (seam.get("method") != "pcm16_mono_24khz_10ms_rms_below_minus45dbfs"
+        or seam.get("margin_ms_each_side") != 60 or seam.get("max_cut_ms") != 300
+        or seam.get("raw_duration_ms") != raw_duration
+        or seam.get("final_sha256") != audio_sha256
+        or (roles is None and len(cuts) != len(durations) - 1)):
+        raise ValueError()
+    boundaries = []
+    elapsed = 0
+    for duration in durations[:-1]:
+        elapsed += duration
+        boundaries.append(elapsed)
+    total_cut = 0
+    prior_end = -1
+    prior_index = -1
+    for index, cut in enumerate(cuts):
+        seam_index = cut.get("seam_index")
+        if roles is not None:
+            if (type(seam_index) is not int or not prior_index < seam_index < len(boundaries)
+                or roles[seam_index] != NarrationBoundaryKind.CONTINUING.value):
+                raise ValueError()
+        elif seam_index != index:
+            raise ValueError()
+        boundary = boundaries[seam_index]
+        start, end = cut["start_ms"], cut["end_ms"]
+        if (type(start) is not int or type(end) is not int
+            or start < 0 or end <= start or end - start > 300 or start >= boundary or end <= boundary
+            or start < prior_end or end > raw_duration):
+            raise ValueError()
+        total_cut += end - start
+        prior_end = end
+        prior_index = seam_index
+    if raw_duration - total_cut != final_duration:
+        raise ValueError()
+
+
 def _composed_original_proof_unchecked(db, root, audio, *, project_id):
     from app.voice_qa import voice_copy_adjudication_is_valid, voice_take_copy_accepted
     from app.voice_plan import resolve_project_voice_profile
@@ -221,30 +267,8 @@ def _composed_original_proof_unchecked(db, root, audio, *, project_id):
     seam = composition.get("measured_seam_compaction")
     if seam is not None:
         try:
-            cuts = seam["cuts"]
-            if (seam.get("method") != "pcm16_mono_24khz_10ms_rms_below_minus45dbfs"
-                or seam.get("margin_ms_each_side") != 60 or seam.get("max_cut_ms") != 300
-                or seam.get("raw_duration_ms") != raw_duration
-                or seam.get("final_sha256") != audio.content_hash
-                or len(cuts) != len(sources) - 1):
-                raise ValueError()
-            boundaries = []
-            elapsed = 0
-            for source, _, _ in sources[:-1]:
-                elapsed += source.duration_ms
-                boundaries.append(elapsed)
-            total_cut = 0
-            prior_end = -1
-            for index, (cut, boundary) in enumerate(zip(cuts, boundaries)):
-                start, end = cut["start_ms"], cut["end_ms"]
-                if (cut.get("seam_index") != index or type(start) is not int or type(end) is not int
-                    or start < 0 or end <= start or end - start > 300 or start >= boundary or end <= boundary
-                    or start < prior_end or end > raw_duration):
-                    raise ValueError()
-                total_cut += end - start
-                prior_end = end
-            if raw_duration - total_cut != audio.duration_ms:
-                raise ValueError()
+            _validate_composition_seams(seam, [source.duration_ms for source, _, _ in sources],
+                target_parts, audio.duration_ms, audio.content_hash)
         except (KeyError, TypeError, ValueError):
             raise UseAdmissionError("voice_qa_composition_seam_evidence_invalid") from None
     elif raw_duration != audio.duration_ms:

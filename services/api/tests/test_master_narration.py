@@ -141,7 +141,13 @@ def test_composition_rejects_a_take_from_another_project(tmp_path: Path) -> None
         db.close()
 
 
-def test_explicit_master_seam_compaction_uses_real_wavs_and_retains_provenance(tmp_path: Path) -> None:
+@pytest.mark.parametrize("texts,role,duration,cuts", [
+    (("先拍动作，", "再检查构图。"), "continuing", 1720, [{"seam_index":0,"start_ms":860,"end_ms":900}]),
+    (("先拍动作。", "再检查构图。"), "terminal", 1760, []),
+    (("重物放背部；", "再检查背包平衡。"), "terminal", 1760, []),
+    (("未识别边界", "继续说明"), "no_break", 1760, []),
+])
+def test_explicit_master_seam_compaction_uses_real_wavs_and_retains_provenance(tmp_path: Path, texts, role, duration, cuts) -> None:
     db = Database(tmp_path / "real-master.sqlite")
     try:
         ip = IPProfile(creator_name="Creator")
@@ -164,7 +170,7 @@ def test_explicit_master_seam_compaction_uses_real_wavs_and_retains_provenance(t
                 wav.setsampwidth(2)
                 wav.setframerate(24_000)
                 wav.writeframes(b"".join(value.to_bytes(2, "little", signed=True) for value in samples))
-            text = f"第{index}句"
+            text = texts[index]
             payload = VoiceGenerationJobPayload(
                 project_id=project.id, voice_profile_id=voice_profile_id, text=text,
                 authorization_reference="voice-consent", reference_window=reference,
@@ -189,9 +195,11 @@ def test_explicit_master_seam_compaction_uses_real_wavs_and_retains_provenance(t
         compacted = evidence["measured_seam_compaction"]
         assert evidence["source_take_audio_ids"] == [str(item) for item in ids]
         assert len(evidence["source_take_content_hashes"]) == 2
-        assert compacted["cuts"] == [{"seam_index": 0, "start_ms": 860, "end_ms": 900}]
+        assert compacted["cuts"] == cuts
+        assert compacted["boundary_kinds"] == [role]
         assert compacted["final_sha256"] == candidate.content_hash
-        assert candidate.duration_ms == 1720 and evidence["expected_duration_ms"] == 1720
+        assert candidate.duration_ms == duration and evidence["expected_duration_ms"] == duration
+        assert candidate.transcript_segments[1].start_ms == duration - 800
         assert candidate.metadata["voice_generation"]["qa_state"] == "pending"
     finally:
         db.close()

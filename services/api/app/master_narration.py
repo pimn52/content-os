@@ -19,7 +19,7 @@ from app.domain.models import (
 )
 from app.media import AudioImportError, AudioImporter
 from app.voice_takes import VerifiedVoiceTake, VoiceTakeComposer, VoiceTakeCompositionError
-from app.voice_seam import VoiceSeamCompactionError, compact_measured_seam_quiet
+from app.voice_seam import VoiceSeamCompactionError, compact_measured_seam_quiet, take_boundary_kinds
 from app.voice_qa import voice_copy_adjudication_is_valid
 
 
@@ -53,7 +53,7 @@ class MasterNarrationComposer:
                 segments = list(provisional.transcript_segments)
                 expected_duration_ms = provisional.expected_duration_ms
                 seam_evidence = None
-                if compact_quiet_seams:
+                if compact_quiet_seams and len(takes) > 1:
                     boundaries = []
                     elapsed = 0
                     for take in takes[:-1]:
@@ -61,6 +61,7 @@ class MasterNarrationComposer:
                         boundaries.append(elapsed)
                     seam_evidence = compact_measured_seam_quiet(
                         provisional.output_path, Path(temporary) / "compacted-master.wav", boundaries,
+                        boundary_kinds=take_boundary_kinds([self._target_text(take.audio) for take in takes]),
                     )
                     source_to_import = seam_evidence.output_path
                     expected_duration_ms = seam_evidence.final_duration_ms
@@ -107,6 +108,8 @@ class MasterNarrationComposer:
                 "raw_sha256": seam_evidence.raw_sha256,
                 "final_sha256": seam_evidence.final_sha256,
                 "raw_duration_ms": seam_evidence.raw_duration_ms,
+                "boundary_kinds": [kind.value for kind in take_boundary_kinds(
+                    [self._target_text(take.audio) for take in takes])],
                 "cuts": [{"seam_index": index, "start_ms": start, "end_ms": end}
                          for index, start, end in seam_evidence.cuts],
             }

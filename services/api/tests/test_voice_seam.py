@@ -81,3 +81,47 @@ def test_compaction_leaves_take_internal_quiet_untouched_and_enforces_cut_limit(
     assert output == source_pcm[:1020 * 24 * 2] + source_pcm[1180 * 24 * 2:]
     assert output[400 * 24 * 2:560 * 24 * 2] == bytes(160 * 24 * 2)
     assert raw.read_bytes() == original
+
+@pytest.mark.parametrize('texts,role', [
+    (['先保留真实素材。', '再补充表达。'], 'terminal'),
+    (['先装重物；', '再检查背包平衡。'], 'terminal'),
+    (['先整理素材，', '再检查来源。'], 'continuing'),
+    (['没有边界', '继续说话'], 'no_break'),
+])
+def test_copy_roles_preserve_source_pause_without_duration_table(tmp_path, texts, role):
+    from app.voice_seam import take_boundary_kinds
+    raw, final = tmp_path/'raw.wav', tmp_path/'final.wav'
+    _wav(raw, [10000]*(800*24)+[0]*(280*24)+[10000]*(800*24))
+    kinds=take_boundary_kinds(texts)
+    assert [kind.value for kind in kinds]==[role]
+    result=compact_measured_seam_quiet(raw,final,[940],boundary_kinds=kinds)
+    with wave.open(str(raw),'rb') as w: original=w.readframes(w.getnframes())
+    with wave.open(str(final),'rb') as w: actual=w.readframes(w.getnframes())
+    assert actual==(original[:860*48]+original[1020*48:] if role=='continuing' else original)
+    assert result.final_duration_ms==(1720 if role=='continuing' else 1880)
+
+
+def test_mixed_roles_keep_original_seam_indices_and_unknown_joins(tmp_path):
+    from app.voice_seam import take_boundary_kinds
+    raw, final=tmp_path/'raw.wav',tmp_path/'final.wav'
+    _wav(raw,[10000]*(800*24)+[0]*(280*24)+[10000]*(800*24)+[0]*(280*24)+[10000]*(800*24))
+    kinds=take_boundary_kinds(['句末。','句内，','继续说明。'])
+    result=compact_measured_seam_quiet(raw,final,[940,2020],boundary_kinds=kinds)
+    assert result.cuts==((1,1940,2100),)
+    with pytest.raises(VoiceSeamCompactionError,match='roles must match'):
+        compact_measured_seam_quiet(raw,tmp_path/'bad.wav',[940,2020],boundary_kinds=kinds[:1])
+    assert not (tmp_path/'bad.wav').exists()
+
+def test_forward_binding_and_unclassified_joins_do_not_guess_acoustic_pauses(tmp_path):
+    from app.voice_seam import take_boundary_kinds
+    raw, final=tmp_path/'raw.wav',tmp_path/'final.wav'
+    _wav(raw,[10000]*(2000*24))
+    kinds=take_boundary_kinds(['但是，','要看源质量。'])
+    assert kinds[0].value=='forward_binding'
+    result=compact_measured_seam_quiet(raw,final,[1000],boundary_kinds=kinds)
+    assert result.cuts==() and result.raw_duration_ms==result.final_duration_ms==2000
+    with wave.open(str(final),'rb') as w:assert w.readframes(w.getnframes())==b'\x10\x27'*(2000*24)
+    with pytest.raises(VoiceSeamCompactionError,match='nonempty'):
+        take_boundary_kinds([' ', 'test'])
+    with pytest.raises(VoiceSeamCompactionError,match='roles must match'):
+        compact_measured_seam_quiet(raw,tmp_path/'invalid.wav',[1000],boundary_kinds=['unknown'])

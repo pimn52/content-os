@@ -8,6 +8,22 @@ from typing import Sequence
 import wave
 
 from app.voice_observation import VoiceObservationError, _pcm_quiet
+from app.narration_performance import NarrationBoundaryKind, derive_narration_boundary_map
+
+
+def take_boundary_kinds(texts: Sequence[str]) -> tuple[NarrationBoundaryKind, ...]:
+    """Derive join roles from exact editorial copy, never acoustic guesses."""
+    parts = [text.strip() for text in texts]
+    if not parts or any(not part for part in parts):
+        raise VoiceSeamCompactionError("Voice seam copy must be nonempty")
+    mapping = derive_narration_boundary_map(" ".join(parts))
+    offset = 0
+    kinds = []
+    for part in parts[:-1]:
+        offset += len(part)
+        kinds.append(mapping.kind_at(offset))
+        offset += 1
+    return tuple(kinds)
 
 
 class VoiceSeamCompactionError(ValueError):
@@ -27,6 +43,7 @@ class MeasuredSeamCompaction:
 def compact_measured_seam_quiet(
     source_path: str | Path, output_path: str | Path, boundaries_ms: Sequence[int], *,
     margin_ms: int = 60, max_cut_ms: int = 300,
+    boundary_kinds: Sequence[NarrationBoundaryKind] | None = None,
 ) -> MeasuredSeamCompaction:
     """Keep spoken frames byte-exact; delete only quiet inside a known seam.
 
@@ -51,11 +68,22 @@ def compact_measured_seam_quiet(
         raise VoiceSeamCompactionError("Voice seam PCM measurement failed") from exc
     if not boundaries_ms or len(set(boundaries_ms)) != len(boundaries_ms):
         raise VoiceSeamCompactionError("Voice seam compaction needs unique ordered take boundaries")
+    if boundary_kinds is not None and (
+        len(boundary_kinds) != len(boundaries_ms)
+        or any(not isinstance(kind, NarrationBoundaryKind) for kind in boundary_kinds)
+    ):
+        raise VoiceSeamCompactionError("Voice seam roles must match the ordered take boundaries")
     cuts: list[tuple[int, int, int]] = []
     previous = 0
     for index, boundary in enumerate(boundaries_ms):
         if boundary <= previous or boundary >= duration_ms:
             raise VoiceSeamCompactionError("Voice seam boundary is not an interior ordered point")
+        # Sentence closes and unknown/forward-binding joins retain source PCM.
+        # The old numeric-only utility remains available for legacy evidence;
+        # ordinary Master composition always supplies exact-copy roles.
+        if boundary_kinds is not None and boundary_kinds[index] is not NarrationBoundaryKind.CONTINUING:
+            previous = boundary
+            continue
         matching = [item for item in quiet if item["start_ms"] <= boundary <= item["end_ms"]]
         if len(matching) != 1:
             raise VoiceSeamCompactionError(f"Voice seam {index} lacks one measured quiet interval")
