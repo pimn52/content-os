@@ -18,7 +18,7 @@ from app.domain.asr_recipe import ASR_MODEL_FILES
 from app.execution_admission import ProviderUseAdmissionService, UseAdmissionError, configuration_digest
 from app.execution_scope import require_evaluation_lane_closed
 from app.main import VoiceQaJobRequest, create_app
-from app.media.audio_access import AudioAccess
+from app.media.audio_access import AudioAccess, file_digest
 from app.providers.maintained_asr_execution import (observe_asr_inventory, prepare_maintained_asr_child)
 from app.runtime_inventory import RuntimeInventoryStore
 from app.voice_evaluation_qa import (VoiceEvaluationQAService, _original_proof, retained_claim,
@@ -105,6 +105,41 @@ def run(q):
     audio=handler(job)
     job=job.model_copy(update=dict(status=JobStatus.COMPLETED)); JobRepository(q.c.db).update(job)
     return audio,job,handler
+
+def compose_qa_master(q, tmp_path):
+    """Build a composed-source asset through the existing composer contract; no FFmpeg or model child."""
+    import wave
+    from app.domain.models import AudioAsset
+    from app.master_narration import MasterNarrationComposer
+    from app.voice_takes import ProvisionalMasterNarration
+
+    source = AudioAssetRepository(q.c.db).get(q.audio.id)
+    assert source is not None and source.metadata["voice_generation"]["qa_state"] == "verified"
+
+    class Composer:
+        def compose(self, takes, output_path):
+            assert [take.audio.id for take in takes] == [source.id]
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(output_path), "wb") as output:
+                output.setparams((1, 2, 24_000, 0, "NONE", "not compressed"))
+                output.writeframes(b"\x01\x00" * 24)
+            return ProvisionalMasterNarration(output_path, source.duration_ms,
+                tuple(source.transcript_segments), (str(source.id),))
+
+    class Importer:
+        def import_path(self, path, authorization_reference, *, source_kind):
+            destination = tmp_path / "composed-master.wav"
+            destination.write_bytes(path.read_bytes())
+            content = destination.read_bytes()
+            audio = AudioAsset(source_file=str(destination), content_hash=hashlib.sha256(content).hexdigest(),
+                duration_ms=source.duration_ms, sample_rate=24_000, channels=1,
+                authorization_reference=authorization_reference, imported_at=datetime.now(timezone.utc))
+            return AudioAssetRepository(q.c.db).create(audio)
+
+    master = MasterNarrationComposer(audios=AudioAssetRepository(q.c.db), jobs=JobRepository(q.c.db),
+        importer=Importer(), composer=Composer(), output_root=tmp_path / "master-work").compose(
+            q.c.job.project_id, [source.id])
+    return source, master
 
 def test_normal_submission_owned_child_atomic_result_and_scoped_review(qa_case, monkeypatch):
     q=qa_case; c=q.c
@@ -200,6 +235,87 @@ def test_retained_qa_digest_uses_the_original_persisted_claim_shape():
             execution_sha256=claim.execution_sha256, configuration_sha256="c"*64, review_sha256="d"*64)))
     assert qa_call_digest(claim, receipt, claim_payload=stored_claim) == expected
     assert qa_call_digest(claim, receipt) != expected
+
+
+def test_composed_master_enters_existing_qa_claim_with_bound_source_and_authority(qa_case, tmp_path):
+    q=qa_case;source,_,_=run(q)
+    source,master=compose_qa_master(q,tmp_path)
+    binding,source_path=_original_proof(q.c.db,q.c.root,master,project_id=q.c.job.project_id)
+    composition=master.metadata["voice_generation"]["composition"]
+    assert binding.producer_job_id is None
+    assert binding.composition_source_take_audio_ids==(source.id,)
+    assert binding.audio_sha256==master.content_hash
+    assert binding.original_scope_fingerprint and binding.original_admissions
+    assert binding.target_text_sha256==hashlib.sha256(master.metadata["voice_generation"]["target_text"].encode()).hexdigest()
+    assert source_path==Path(master.source_file) and file_digest(source_path)==master.content_hash
+    assert composition["source_take_content_hashes"]==[source.content_hash]
+    assert composition["copy_adjudicated_source_take_audio_ids"]==[]
+    assert composition.get("measured_seam_compaction") is None
+
+    # Existing QA admission and Job path accepts the exact composition binding; it does not launch ASR here.
+    fields=q.receipt.review.model_dump(mode="json")
+    fields["input_binding"]=binding.model_dump(mode="json")
+    report=ProviderUseLicenseReviewV4.model_validate_json(json.dumps(fields))
+    report_path=q.c.root/"composed-asr-review.json"
+    report_path.write_text(report.model_dump_json(),encoding="utf-8")
+    receipt=ProviderUseAdmissionService(q.c.db,q.c.root).adopt(q.c.job.project_id,
+        idempotency_key="composed-master-asr",review_reference=report_path.name,
+        review_sha256=hashlib.sha256(report_path.read_bytes()).hexdigest(),operator_key=OPERATOR_KEY)
+    from app.db import BudgetPolicyRepository
+    from app.domain.models import BudgetPolicy
+    BudgetPolicyRepository(q.c.db).save(BudgetPolicy(project_id=q.c.job.project_id,max_calls=4,
+        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
+    q.receipt=receipt
+    q.body.update(idempotency_key="composed-master-qa",narration_audio_id=master.id,
+        target_text=master.metadata["voice_generation"]["target_text"],use_admission_id=str(receipt.id))
+    service=VoiceEvaluationQAService(q.c.db,q.c.root)
+    ready=service.status(q.c.job.project_id,master.id)
+    assert ready["state"]=="ready" and ready["choices"][0]["admission_id"]==str(receipt.id)
+    job=service.enqueue(q.c.job.project_id,VoiceQaJobRequest(**q.body))
+    claim=retained_claim(q.c.db,master.id)
+    assert job.status==JobStatus.PENDING and claim.input_binding==binding
+    assert q.calls==[1]  # only the source take's mocked QA ran; Master QA was queued, not dispatched.
+
+
+def test_composed_master_rejects_source_or_qa_proof_tampering(qa_case,tmp_path):
+    q=qa_case;run(q)
+    source,master=compose_qa_master(q,tmp_path)
+    generation=master.metadata["voice_generation"]
+    composition=generation["composition"]
+
+    def changed(*,generation_changes=None,composition_changes=None,authorization=None):
+        saved=dict(master.metadata["voice_generation"])
+        saved.update(generation_changes or {})
+        saved_composition=dict(composition)
+        saved_composition.update(composition_changes or {})
+        saved["composition"]=saved_composition
+        metadata={**master.metadata,"voice_generation":saved}
+        return master.model_copy(update={"metadata":metadata,
+            **({"authorization_reference":authorization} if authorization is not None else {})})
+
+    invalid=[
+        changed(composition_changes={"source_take_content_hashes":["0"*64]}),
+        changed(generation_changes={"target_text":generation["target_text"]+" changed"}),
+        changed(generation_changes={"voice_profile_id":str(uuid4())}),
+        changed(authorization="different-authorization"),
+        changed(composition_changes={"copy_adjudicated_source_take_audio_ids":[str(source.id)]}),
+        changed(composition_changes={"measured_seam_compaction":{"method":"unknown","cuts":[]}}),
+    ]
+    for candidate in invalid:
+        with pytest.raises(UseAdmissionError):
+            _original_proof(q.c.db,q.c.root,candidate,project_id=q.c.job.project_id)
+    with pytest.raises(UseAdmissionError):
+        _original_proof(q.c.db,q.c.root,changed(),project_id=uuid4())
+
+    # The take's persisted ASR result is part of its completed QA claim.
+    source_qa_claim=retained_claim(q.c.db,source.id)
+    call=ProviderCallRepository(q.c.db).get_by_idempotency_key(f"voice-evaluation-qa:{source_qa_claim.job_id}")
+    payload=json.loads(call.model_dump_json())
+    payload["result_payload"]["result"]["transcription"]["text"]="changed QA transcript"
+    q.c.db.connection.execute("UPDATE provider_call_records SET payload=? WHERE id=?",
+        (json.dumps(payload),str(call.id)))
+    with pytest.raises(UseAdmissionError):
+        _original_proof(q.c.db,q.c.root,master,project_id=q.c.job.project_id)
 
 
 def test_normal_http_entry_and_scoped_full_range_current_revocation(qa_case):
