@@ -21,7 +21,7 @@ from app.main import VoiceQaJobRequest, create_app
 from app.media.audio_access import AudioAccess, file_digest
 from app.providers.maintained_asr_execution import (observe_asr_inventory, prepare_maintained_asr_child)
 from app.runtime_inventory import RuntimeInventoryStore
-from app.voice_evaluation_qa import (VoiceEvaluationQAService, _original_proof, retained_claim,
+from app.voice_evaluation_qa import (QAClaim, VoiceEvaluationQAService, _original_proof, retained_claim,
     execute_evaluation_qa, require_completed_qa, REVIEW_POLICY, qa_call_digest)
 from app.jobs.voice_evaluation_qa_handler import MaintainedVoiceEvaluationQAHandler
 from app.jobs.runner import JobRunner
@@ -274,7 +274,66 @@ def test_composed_master_enters_existing_qa_claim_with_bound_source_and_authorit
     job=service.enqueue(q.c.job.project_id,VoiceQaJobRequest(**q.body))
     claim=retained_claim(q.c.db,master.id)
     assert job.status==JobStatus.PENDING and claim.input_binding==binding
-    assert q.calls==[1]  # only the source take's mocked QA ran; Master QA was queued, not dispatched.
+    assert q.calls==[1]  # only the source take's mocked QA ran before Master QA dispatch.
+
+    target=master.metadata["voice_generation"]["target_text"]
+    q.set_result(ASRChildResult.model_validate_json(json.dumps(dict(text=target,language="zh",
+        segments=[dict(start_ms=0,end_ms=max(1,master.duration_ms),text=target)],words=[]))))
+    verified,completed_job,_=run(q)
+    assert verified.id==master.id and verified.metadata["voice_generation"]["qa_state"]=="verified"
+    assert completed_job.status==JobStatus.COMPLETED and q.calls==[1,1]
+
+    endpoint=f"/projects/{q.c.job.project_id}/voice-assets/{master.id}/evaluation-human-review"
+    with TestClient(create_app(q.c.db.path)) as client:
+        response=client.get(endpoint,params={"purpose":"internal_evaluation"})
+        assert response.status_code==200,response.text
+        status=response.json()
+        assert status["state"]=="eligible" and status["current_eligible"] is True
+        assert status["expected_qa_fingerprint"] and len(status["expected_qa_fingerprint"])==64
+        assert status["audio_sha256"]==master.content_hash and status["target_text"]==target
+        assert status["record"] is None
+        assert status["quality_authorized"] is False
+        assert status["production_authorized"] is False and status["dispatch_authorized"] is False
+
+    # Tamper cases stay inside this synthetic DB; restore each row before the next check.
+    claim_row=q.c.db.connection.execute("SELECT * FROM voice_evaluation_qa_claims WHERE audio_id=?",
+        (str(master.id),)).fetchone()
+    saved_payload=claim_row["payload"]
+    saved_request_sha=claim_row["request_sha256"]
+    with pytest.raises(UseAdmissionError,match="voice_qa_claim_invalid"):
+        q.c.db.connection.execute("UPDATE voice_evaluation_qa_claims SET request_sha256=? WHERE audio_id=?",
+            ("0"*64,str(master.id)))
+        retained_claim(q.c.db,master.id)
+    q.c.db.connection.execute("UPDATE voice_evaluation_qa_claims SET request_sha256=? WHERE audio_id=?",
+        (saved_request_sha,str(master.id)))
+
+    parsed=QAClaim.model_validate_json(saved_payload)
+    original=parsed.original_audio
+    generation=dict(original.metadata["voice_generation"])
+    generation["target_text"] += " changed"
+    changed_metadata={**original.metadata,"voice_generation":generation}
+    altered=parsed.model_copy(update={"original_audio":original.model_copy(update={"metadata":changed_metadata})})
+    q.c.db.connection.execute("UPDATE voice_evaluation_qa_claims SET payload=? WHERE audio_id=?",
+        (altered.model_dump_json(),str(master.id)))
+    with pytest.raises(UseAdmissionError,match="voice_qa_claim_invalid"):
+        retained_claim(q.c.db,master.id)
+    altered=parsed.model_copy(update={"original_audio":original.model_copy(update={"content_hash":"0"*64})})
+    q.c.db.connection.execute("UPDATE voice_evaluation_qa_claims SET payload=? WHERE audio_id=?",
+        (altered.model_dump_json(),str(master.id)))
+    with pytest.raises(UseAdmissionError,match="voice_qa_claim_invalid"):
+        retained_claim(q.c.db,master.id)
+    q.c.db.connection.execute("UPDATE voice_evaluation_qa_claims SET payload=? WHERE audio_id=?",
+        (saved_payload,str(master.id)))
+
+    from app.voice_evaluation_qa import require_completed_qa
+    qa_call=ProviderCallRepository(q.c.db).get_by_idempotency_key(f"voice-evaluation-qa:{completed_job.id}")
+    altered_call=json.loads(qa_call.model_dump_json())
+    altered_call["result_payload"]["result"]["audio_id"]=str(uuid4())
+    q.c.db.connection.execute("UPDATE provider_call_records SET payload=? WHERE id=?",
+        (json.dumps(altered_call),str(qa_call.id)))
+    with pytest.raises(UseAdmissionError,match="voice_qa_result_unbound"):
+        require_completed_qa(q.c.db,q.c.root,verified,project_id=q.c.job.project_id,purpose="internal_evaluation")
+    assert q.calls==[1,1]
 
 
 def test_composed_master_rejects_source_or_qa_proof_tampering(qa_case,tmp_path):
