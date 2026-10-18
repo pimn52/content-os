@@ -432,13 +432,15 @@ lead-in and ordinary no-break position are distinct. A transition or summary
 lead-in such as “但是，” or “最后，” binds to the following claim; it is not an
 eligible synthetic-pause or composition-seam position.
 
-When independently verified Span takes are composed, a semantic pause is a
-local profile's **total seam budget**, not automatic extra silence. The
-Composer measures existing PCM edge silence and supplies only the deficit at an
-eligible terminal boundary; it never uses PCM to decide which words were
-spoken. This controls composition seams only. It does not claim to repair
-provider-take-internal pauses, word focus, sentence landing or rhetorical
-rhythm, all of which still require an adapter application receipt and U-Voice.
+The current VoiceTakeComposer concatenates independently verified takes to PCM
+and offsets their source transcript timing. It inserts no punctuation-derived
+silence and does not consume semantic pause cues. Optional seam compaction
+deletes only measured quiet at caller-known take joins. Its global margin and
+maximum-cut parameters are mechanical bounds, not calibrated punctuation
+durations; it has no per-boundary override yet. Semantic cues can carry local
+exact-copy intent, but that intent alone cannot repair a take-internal pause or
+prove an acoustic effect. Source audio, a compiled plan, technical QA and the
+human judgment remain distinct evidence.
 
 For the current OmniVoice route, exact-copy QA cannot certify natural phrasing.
 Punctuation-safe delivery text and measured seam compaction have improved
@@ -611,7 +613,12 @@ The current local configuration has **implemented Voice APIs and exact-asset run
 - immutable U-Voice review covers likeness, naturalness, emphasis, pace, pauses and rhetorical rhythm;
 - downstream Talking/VideoSpec reject generated narration that has not passed the required gates.
 
-An exact OmniVoice Master passed full-copy automated QA and six-dimension U-Voice; STATUS owns its identity. Retain this evidence and proceed with workflow integration. Perfect generalized emphasis/prosody control is not a separate prerequisite. The Web workspace does not yet orchestrate Master creation and downstream work as one normal creation action.
+Historical exact OmniVoice Masters have full-copy QA and U-Voice evidence within
+their own scope. STATUS owns the current active Master's identity and outcome;
+historical approval does not approve a different candidate. Perfect generalized
+emphasis/prosody control is not a separate prerequisite. The Web workspace does
+not yet orchestrate Master creation and downstream work as one normal creation
+action.
 
 ### Talking
 
@@ -629,6 +636,12 @@ The current local configuration has **implemented Talking APIs and an admitted, 
 An exact reviewed Run passed these gates and is consumable by VideoSpec; STATUS owns its identity. UI-driven source-forward series/Run orchestration and fresh-topic repeatability are not yet proven.
 
 ### Review consistency and target granularity
+
+Six-dimension human review currently serves internal Alpha development
+acceptance and quality calibration. The mature product target is default
+automated QA and automated production; these calibration forms do not define a
+mandatory approval step for every routine generation. Current admission gates
+remain in force until an explicit policy migration implements that target.
 
 Policy v1 series admission requires each child's human approval plus whole-run continuity. New planned policy-v2 collections instead require exact six-dimension whole-preview approval and current localized-concern evidence, as described above. Direct generated-child selection fails closed under either policy: production requires the admitted Run. The normal Web entry selects v2 for new Runs and preserves v1 controls for legacy Runs; this is fixture evidence, not real-media quality proof.
 

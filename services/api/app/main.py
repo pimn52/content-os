@@ -1145,13 +1145,17 @@ def create_app(
     audio_importer_factory: Callable[[Database, Path], AudioImporter] | None = None,
     render_output_root: str | Path | None = None,
     cost_estimator: ProviderCostEstimator | None = None,
+    database_startup_mode: Literal["migrate", "existing"] | None = None,
 ) -> FastAPI:
     """Create an app whose SQLite connection belongs to its lifespan thread."""
     selected_path = data_path or os.environ.get("CONTENT_OS_DB_PATH") or Path("content-os-data") / "content-os.sqlite3"
+    selected_startup_mode = database_startup_mode or os.environ.get("CONTENT_OS_DB_STARTUP_MODE", "migrate")
+    if selected_startup_mode not in ("migrate", "existing"):
+        raise ValueError("CONTENT_OS_DB_STARTUP_MODE must be 'migrate' or 'existing'")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        selected = Database(selected_path)
+        selected = Database(selected_path, startup_mode=selected_startup_mode)
         selected.data_root = application.state.data_root
         selected.render_output_root = application.state.render_output_root
         application.state.database = selected

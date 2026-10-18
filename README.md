@@ -48,6 +48,14 @@ Vite server is not required. Use `scripts/start.ps1 -NoWorker` to open the
 workspace without processing queued jobs. Temporary browser fixture servers
 are test-only and are not the normal product entry.
 
+For explicit access to an existing database without startup migrations, set
+`CONTENT_OS_DB_STARTUP_MODE=existing`, `CONTENT_OS_DB_PATH` to its absolute file
+path and `CONTENT_OS_DATA_ROOT` to its media root. This mode requires the complete
+current schema history and opens with SQLite `mode=rw`, so it cannot create a
+missing database. It skips migrations and journal/synchronous mode settings;
+ordinary API writes still require their existing admission checks. The default
+`migrate` startup behavior is unchanged. Use `-NoWorker` for review-only work.
+
 The evaluation Master panel reuses complete, reviewed narration through a
 separate operator-adopted exact-use receipt. It requires a matching saved
 copy/plan and retains current media authority checks. It does not dispatch

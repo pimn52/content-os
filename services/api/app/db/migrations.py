@@ -708,6 +708,9 @@ _MIGRATIONS += ((54, (
 )),)
 
 
+MIGRATION_VERSIONS = tuple(version for version, _ in _MIGRATIONS)
+
+
 def apply_migrations(connection: sqlite3.Connection) -> int:
     connection.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY NOT NULL,

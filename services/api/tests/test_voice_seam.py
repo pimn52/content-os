@@ -42,3 +42,42 @@ def test_compaction_rejects_nonquiet_or_same_output(tmp_path: Path) -> None:
     non_pcm.write_bytes(b"not a wave file")
     with pytest.raises(VoiceSeamCompactionError, match="could not read PCM WAV"):
         compact_measured_seam_quiet(non_pcm, tmp_path / "final.wav", [1_000])
+
+
+@pytest.mark.parametrize("margin_ms,retained_ms", [(60, 120), (100, 200), (140, 280)])
+def test_measured_margin_retains_existing_quiet_without_inserting_silence(
+    tmp_path: Path, margin_ms: int, retained_ms: int,
+) -> None:
+    # These are synthetic test values, not preferred punctuation durations.
+    pcm = [10_000] * (800 * 24) + [0] * (280 * 24) + [10_000] * (800 * 24)
+    raw, final = tmp_path / "raw.wav", tmp_path / "final.wav"
+    _wav(raw, pcm)
+    raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+    result = compact_measured_seam_quiet(raw, final, [940], margin_ms=margin_ms)
+    assert result.final_duration_ms == 1600 + retained_ms
+    assert result.cuts == (() if retained_ms == 280 else ((0, 800 + margin_ms, 1080 - margin_ms),))
+    with wave.open(str(final), "rb") as wav:
+        output = wav.readframes(wav.getnframes())
+    expected = [10_000] * (800 * 24) + [0] * (retained_ms * 24) + [10_000] * (800 * 24)
+    assert output == b"".join(value.to_bytes(2, "little", signed=True) for value in expected)
+    assert hashlib.sha256(raw.read_bytes()).hexdigest() == raw_sha
+
+
+def test_compaction_leaves_take_internal_quiet_untouched_and_enforces_cut_limit(tmp_path: Path) -> None:
+    pcm = ([10_000] * (400 * 24) + [0] * (160 * 24) + [10_000] * (400 * 24)
+           + [0] * (280 * 24) + [10_000] * (400 * 24))
+    raw, final = tmp_path / "raw.wav", tmp_path / "final.wav"
+    _wav(raw, pcm)
+    original = raw.read_bytes()
+    with pytest.raises(VoiceSeamCompactionError, match="bounded quiet cut"):
+        compact_measured_seam_quiet(raw, final, [1100], max_cut_ms=150)
+    assert not final.exists() and raw.read_bytes() == original
+
+    result = compact_measured_seam_quiet(raw, final, [1100])
+    assert result.cuts == ((0, 1020, 1180),)
+    with wave.open(str(final), "rb") as wav:
+        output = wav.readframes(wav.getnframes())
+    source_pcm = b"".join(value.to_bytes(2, "little", signed=True) for value in pcm)
+    assert output == source_pcm[:1020 * 24 * 2] + source_pcm[1180 * 24 * 2:]
+    assert output[400 * 24 * 2:560 * 24 * 2] == bytes(160 * 24 * 2)
+    assert raw.read_bytes() == original

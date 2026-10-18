@@ -4,7 +4,7 @@ from pathlib import Path
 import wave
 
 from app.domain.models import Asset, Clip, ConsentRecord, NarrationEmphasis, NarrationPace, NarrationPause, NarrationPerformanceCue, NarrationPerformanceCueKind, NarrationPerformancePlanSource, RationalFps, VoiceProfile
-from app.narration_performance import NarrationBoundaryKind, build_narration_performance_plan, derive_narration_boundary_map
+from app.narration_performance import NarrationBoundaryKind, build_narration_performance_plan, compile_narration_delivery_plan, derive_narration_boundary_map
 from app.voice_performance import authorized_voice_reference_choices, plan_voice_generation_spans, plan_voice_performance_units, select_voice_reference_windows
 
 
@@ -63,6 +63,58 @@ def test_boundary_map_preserves_punctuation_hierarchy_and_forward_binding() -> N
     assert boundaries.kind_at(but_end + 1) is NarrationBoundaryKind.FORWARD_BINDING
     assert boundaries.kind_at(last_end) is NarrationBoundaryKind.FORWARD_BINDING
     assert boundaries.kind_at(COPY.index("决定")) is NarrationBoundaryKind.NO_BREAK
+
+
+def test_punctuation_classification_does_not_create_numeric_or_automatic_pause_controls() -> None:
+    copy = "不是清晰度本身。源里已经丢失的细节，单纯提高码率无法恢复；判断画质，还要结合源质量。"
+    boundaries = derive_narration_boundary_map(copy)
+    assert boundaries.kind_at(copy.index("。") + 1) is NarrationBoundaryKind.TERMINAL
+    assert boundaries.kind_at(copy.index("；") + 1) is NarrationBoundaryKind.TERMINAL
+    assert boundaries.kind_at(copy.index("，") + 1) is NarrationBoundaryKind.CONTINUING
+    plan = build_narration_performance_plan(
+        copy, delivery_goal="Keep the reasoning intelligible.", overall_pace=NarrationPace.CONVERSATIONAL,
+        source=NarrationPerformancePlanSource.USER, evidence_refs=[], cues=[
+            NarrationPerformanceCue(kind=NarrationPerformanceCueKind.PACE, start_char=0,
+                end_char=len(copy), pace=NarrationPace.CONVERSATIONAL),
+        ],
+    )
+    delivery = compile_narration_delivery_plan(plan, copy)
+    assert "".join(segment.text for segment in delivery.segments) == copy
+    assert all(segment.pause_after is None for segment in delivery.segments)
+    assert delivery.opening_pause is None and delivery.closing_pause is None
+    assert {"duration_ms", "silence_ms", "provider"}.isdisjoint(delivery.model_dump())
+
+
+def test_local_pause_revision_moves_boundary_without_rewriting_copy_or_other_cues() -> None:
+    copy = "不是清晰度本身。源里已经丢失的细节，单纯提高码率无法恢复；判断画质，还要结合源质量。"
+    sentence_boundary = copy.index("源里")
+    before_judgment = copy.index("判断画质")
+    after_judgment = before_judgment + len("判断画质，")
+
+    def delivery_at(judgment_boundary: int):
+        plan = build_narration_performance_plan(
+            copy, delivery_goal="Review two local boundaries.", overall_pace=NarrationPace.CONVERSATIONAL,
+            source=NarrationPerformancePlanSource.USER, evidence_refs=["offline-test-only"], cues=[
+                NarrationPerformanceCue(kind=NarrationPerformanceCueKind.PAUSE, start_char=sentence_boundary,
+                    end_char=sentence_boundary, pause=NarrationPause.BEAT),
+                NarrationPerformanceCue(kind=NarrationPerformanceCueKind.PAUSE, start_char=judgment_boundary,
+                    end_char=judgment_boundary, pause=NarrationPause.BEAT),
+            ],
+        )
+        return compile_narration_delivery_plan(plan, copy), plan_voice_performance_units(copy, plan)
+
+    earlier, _ = delivery_at(after_judgment)
+    revised, units = delivery_at(before_judgment)
+    assert earlier.copy_fingerprint == revised.copy_fingerprint
+    assert earlier.performance_plan_fingerprint != revised.performance_plan_fingerprint
+    assert "".join(segment.text for segment in revised.segments) == copy
+    assert {s.end_char for s in earlier.segments if s.pause_after is not None} == {sentence_boundary, after_judgment}
+    assert {s.end_char for s in revised.segments if s.pause_after is not None} == {sentence_boundary, before_judgment}
+    assert units.units[-1].text.startswith("判断画质，")
+    spans = plan_voice_generation_spans(units, maximum_adjacent_units=2)
+    assert spans[0].units[0].pause_after is NarrationPause.BEAT
+    # An interior semantic cue remains intent, not a separately materialized gap.
+    assert "".join(span.text for span in spans) == copy
 
 
 def test_reference_window_ranking_only_proposes_candidates_without_quality_or_boundary_approval(tmp_path: Path) -> None:

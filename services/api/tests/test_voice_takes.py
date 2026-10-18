@@ -33,9 +33,16 @@ def test_composer_requires_independently_verified_timed_takes(tmp_path: Path) ->
         VoiceTakeComposer().compose([VerifiedVoiceTake("hook", unmapped)], tmp_path / "master.wav")
 
 
-def test_composer_offsets_source_timing_and_uses_pcm_concat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    first = _take(tmp_path / "one.wav", text="第一句", start=100, end=800)
-    second = _take(tmp_path / "two.wav", text="第二句", start=200, end=900)
+@pytest.mark.parametrize("first_text,second_text", [
+    ("第一句。", "第二句"),
+    ("前半句，", "后半句"),
+    ("前一判断；", "判断画质，还要结合源质量。"),
+])
+def test_composer_offsets_source_timing_and_uses_pcm_concat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_text: str, second_text: str,
+) -> None:
+    first = _take(tmp_path / "one.wav", text=first_text, start=100, end=800)
+    second = _take(tmp_path / "two.wav", text=second_text, start=200, end=900)
     received: list[str] = []
 
     class Result:
@@ -52,9 +59,13 @@ def test_composer_offsets_source_timing_and_uses_pcm_concat(tmp_path: Path, monk
         [VerifiedVoiceTake("hook", first), VerifiedVoiceTake("proof", second)], tmp_path / "master.wav",
     )
     assert "[0:a][1:a]concat=n=2:v=0:a=1[out]" in received
+    assert received[received.index("-ar") + 1] == "24000"
+    assert received[received.index("-ac") + 1] == "1"
+    assert received[received.index("-c:a") + 1] == "pcm_s16le"
+    assert received[received.index("-filter_complex") + 1] == "[0:a][1:a]concat=n=2:v=0:a=1[out]"
     assert result.expected_duration_ms == 2_000
     assert [(item.start_ms, item.end_ms, item.text) for item in result.transcript_segments] == [
-        (100, 800, "第一句"), (1_200, 1_900, "第二句"),
+        (100, 800, first_text), (1_200, 1_900, second_text),
     ]
     assert result.source_asset_ids == (str(first.id), str(second.id))
 
