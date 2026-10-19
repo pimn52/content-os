@@ -16,6 +16,7 @@ from app.domain.models import ExecutionArtifact, ExecutionMachineObservation, Ex
 from app.domain.talking_child import TalkingChildRequest
 from app.domain.talking_recipe import REQUIRED_TALKING_ARTIFACTS, VAE_CACHE, VAE_REVISION
 from app.execution_admission import configured_admission_actor, UseAdmissionError
+from app.runtime_inventory import RuntimeInventoryStore
 from .latentsync import LatentSyncProvider
 from .maintained_runtime import (_observe_inventory, _require_origin, _check_startup_roots,
     _distribution_versions, observe_host, _system_root, stop_maintained_process_tree)
@@ -122,6 +123,114 @@ def observe_talking(options):
             device_sha256=execution_canonical_sha256(host.model_dump(mode="json"))), parameters=options["parameters"])
 
 
+def _file_stamp(path):
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _artifact_path(options, name):
+    label, relative = name.split("/", 1)
+    if label == "checkpoint":
+        if relative != "model.pt":
+            raise ExecutionPreparationError("maintained_talking_artifact_missing")
+        return Path(options["checkpoint"])
+    if label not in ("vendor", "hf", "torch", "tools"):
+        raise ExecutionPreparationError("maintained_talking_artifact_missing")
+    return Path(options[label]) / relative
+
+
+def capture_admitted_talking_files(options, spec, *inventories):
+    """Hash the fixed recipe inputs and runtime entrypoints once per attempt."""
+    expected = {item.name: item for item in spec.model_artifacts}
+    if not REQUIRED_TALKING_ARTIFACTS.issubset(expected):
+        raise ExecutionPreparationError("maintained_talking_local_assets_missing")
+    paths = {_artifact_path(options, name): expected[name] for name in REQUIRED_TALKING_ARTIFACTS}
+    for inventory in inventories:
+        for row in inventory.files:
+            if row.role == "interpreter" or row.name in {
+                "environment/pyvenv.cfg", "engine/conda-meta/python.json",
+            }:
+                prefix, relative = row.name.split("/", 1)
+                roots = {"environment": Path(options["environment"]), "base": Path(options["base"]),
+                    "engine": Path(options.get("engine", options["base"]))}
+                root = roots.get(prefix)
+                if root is not None:
+                    paths[root / relative] = row
+    # Package-version admission depends on these small metadata files. Their
+    # version set is read once above; retain file identity for the rest of this
+    # attempt without reopening or hashing them at every execution fence.
+    for root in (Path(options["environment"]), Path(options["base"])):
+        for path in root.glob("Lib/site-packages/*.dist-info/METADATA"):
+            paths[path] = None
+    engine = options.get("engine")
+    if engine is not None:
+        engine = Path(engine)
+        for path in engine.glob("conda-meta/*.json"):
+            paths[path] = None
+        for path in engine.glob("Lib/site-packages/*.dist-info/METADATA"):
+            paths[path] = None
+    stamps = {}
+    for path, artifact in paths.items():
+        _exact_path(path, directory=False)
+        if artifact is not None:
+            size, sha = _digest(path, artifact.size_bytes + 1)
+            if (size, sha) != (artifact.size_bytes, artifact.sha256):
+                raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+        stamps[path] = _file_stamp(path)
+    return stamps
+
+
+def verify_admitted_talking_files(stamps):
+    for path, expected in stamps.items():
+        _exact_path(path, directory=False)
+        if _file_stamp(path) != expected:
+            raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+
+
+def _assert_admitted_v9_options(options, spec):
+    reference = options["origin_reference"]
+    if (spec.capability != "talking" or spec.provider != "latentsync" or spec.model != "LatentSync-1.5"
+        or spec.mode != "local" or spec.runtime != options["runtime_label"] or spec.machine_id != options["machine_id"]
+        or spec.timeout_seconds != options["timeout_seconds"] or spec.invocation_policy != "maintained-latentsync-cli-v1"
+        or spec.parameters != options["parameters"] or spec.runtime_origin != reference
+        or spec.machine.installation_id != UUID(str(options["installation_id"]))
+        or spec.host_runtime.gpu_uuid != options["gpu_uuid"]):
+        raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+    environment, base = Path(options["environment"]), Path(options["base"])
+    _exact_path(environment, directory=True)
+    _exact_path(base, directory=True)
+    cfg = (environment / "pyvenv.cfg").read_text()
+    versions = [line.split("=", 1)[1].strip() for line in cfg.splitlines()
+        if "=" in line and line.split("=", 1)[0].strip() == "version"]
+    if len(versions) != 1 or not versions[0].startswith("3.12."):
+        raise ExecutionPreparationError("maintained_talking_python_unsupported")
+    if any(path.exists() for path in (environment / "Scripts/python._pth", environment / "Scripts/python312._pth",
+        environment / "python._pth", environment / "python312._pth", base / "python._pth", base / "python312._pth")):
+        raise ExecutionPreparationError("maintained_talking_startup_override_unsupported")
+
+
+def _require_admitted_v9(options, spec):
+    if type(spec) is not ExecutionSpecificationV9:
+        raise ExecutionPreparationError("maintained_talking_execution_admission_required")
+    _assert_admitted_v9_options(options, spec)
+    reference = options["origin_reference"]
+    root = Path(options["data_root"])
+    inventory = RuntimeInventoryStore(root).read_v2(spec.runtime_inventory)
+    origin = require_talking_origin(root, reference, inventory)
+    if origin.network_isolation != "not_asserted" or configured_admission_actor(options["operator_key"]) != origin.actor:
+        raise ExecutionPreparationError("maintained_talking_operator_required")
+    _check_startup_roots(origin, Path(options["environment"]), Path(options["base"]))
+    if _distribution_versions(Path(options["environment"]), Path(options["base"])) != {
+        row.root + "/" + row.name.casefold(): row.version for row in origin.distributions
+    }:
+        raise ExecutionPreparationError("maintained_distribution_origin_mismatch")
+    host = observe_host(Path(options["environment"]), Path(options["base"]), Path(options["vendor"]), root,
+        device="cuda:0", gpu_uuid=options["gpu_uuid"])
+    if host != spec.host_runtime:
+        raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+    return inventory, origin
+
+
 def child_main():
     """Standard adapter in an owned process, no alternate lip-sync engine."""
     import json
@@ -153,9 +262,10 @@ def child_main():
 
 
 class PreparedMaintainedTalkingChild:
-    def __init__(self, temporary, options, spec, request):
+    def __init__(self, temporary, options, spec, request, file_stamps):
         self._temporary, self._options = temporary, options
         self._spec_json, self._request_raw = spec.model_dump_json(), request.model_dump_json().encode()
+        self._file_stamps = file_stamps
         self._state = "prepared"
         import json
         self._options_raw = json.dumps({k: str(v) if isinstance(v, Path) else v for k,v in options.items()
@@ -191,8 +301,8 @@ class PreparedMaintainedTalkingChild:
             self._verify_files()
             self.request_snapshot().verify_inputs(self._options["data_root"])
             require_reference_coverage(self.request_snapshot())
-            if observe_talking(self._options) != self.specification:
-                raise ValueError()
+            _assert_admitted_v9_options(self._options, self.specification)
+            verify_admitted_talking_files(self._file_stamps)
             return self.specification
         except Exception:
             self._state = "failed"
@@ -231,8 +341,8 @@ class PreparedMaintainedTalkingChild:
                 raise ExecutionPreparationError("maintained_talking_child_failed")
             self._verify_files()
             self.request_snapshot().verify_inputs(self._options["data_root"])
-            if observe_talking(self._options) != spec:
-                raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+            _assert_admitted_v9_options(self._options, spec)
+            verify_admitted_talking_files(self._file_stamps)
             output = private/"output.mp4"
             _exact_path(output, directory=False)
             if not 0 < output.stat().st_size <= 4*1024**3:
@@ -256,16 +366,18 @@ class PreparedMaintainedTalkingChild:
     def __exit__(self, *_args): self.close()
 
 
-def prepare_maintained_talking_child(*, request, **options):
+def prepare_maintained_talking_child(*, request, approved_spec, **options):
     temporary = None
     try:
         request = TalkingChildRequest.model_validate_json(request.model_dump_json())
         options = dict(options)
-        spec = observe_talking(options)
+        spec = ExecutionSpecificationV9.model_validate_json(approved_spec.model_dump_json())
+        inventory, _origin = _require_admitted_v9(options, spec)
+        file_stamps = capture_admitted_talking_files(options, spec, inventory)
         request.verify_inputs(options["data_root"])
         require_reference_coverage(request)
         temporary = TemporaryDirectory(prefix="maintained-talking-child-", dir=options["staging_parent"])
-        prepared = PreparedMaintainedTalkingChild(temporary, options, spec, request)
+        prepared = PreparedMaintainedTalkingChild(temporary, options, spec, request, file_stamps)
         prepared.verify()
         return prepared
     except Exception as exc:

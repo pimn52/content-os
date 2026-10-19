@@ -43,6 +43,13 @@ From new copy, Content OS should be able to produce:
 
 ### Normal evaluation Voice human-review record
 
+Binding a formally approved Master may retain explicitly selected future
+B-roll whose visual suitability remains unresolved. That uncertainty stays
+in whole-production preflight and does not authorize Talking or Render;
+current exact Talking source/use admission, technical QA and human quality
+judgments remain required. Missing or invalid footage choices still block
+their own stage rather than becoming a typography substitution.
+
 The normal exact Master consumer now has one real saved-copy observation: a23.2s
 Voice output with independent CPU/int8 QA and explicit six-dimensional user
 approval is retained as an unchanged Master for a five-scene saved plan. Normal
@@ -82,6 +89,18 @@ D029's `evaluation-run-voice-master-v1` has a normal code/API/component seam: se
 The normal Voice draft panel can use the selected project's saved full script, or ordered ScenePlan speech joined with blank lines when no script exists, without retyping. This source requires saved scenes and clean editor state; its text is read-only in the panel. The additive internal-evaluation request snapshot names draft version/script revision. The application checks exact saved text and the full draft snapshot again under the enqueue transaction before any Job insert. Original delivery/performance transformations are not applied through this entry. Existing receipt/reference/configuration/budget and once-only accounting checks remain mandatory; the standalone evaluation-text entry keeps its prior semantics. The existing immutable Job retains the complete target, and status exposes that text on saved-child recovery. A mismatching historical draft remains reviewable under its original authority, with an explicit mismatch message; matching text alone is not Master-use authority. Existing independent QA and human-review forms remain the next explicit stages. Plan/project/source changes fence pending responses and clear saved-plan generation selections; refresh never dispatches generation. Synthetic API and component evidence covers this source/recovery seam. No new real generation, live activation, browser-to-Worker journey, repeatability, parent-owned generation or Talking/render readiness is claimed.
 
 ### Approved next boundary: normal evaluation TalkingRun
+
+The internal consumer reads an exact, current, adopted full-interval source
+review before evaluating the reference brief. That review can supply source
+eligibility when legacy retrieval flags or visibility scores are absent;
+it never writes replacement scores. Known negative visibility, subtitle,
+duration, gaze and expression evidence still blocks the selected use. The
+ordinary selector without that adopted receipt retains its previous rules.
+The calibration-intent HTTP boundary uses the existing strict specification's
+JSON parsing semantics; strings do not replace numeric or boolean parameters.
+Exact Talking-use evidence remains hash-bound and limited to1,000,000 bytes,
+so a composed Master's retained source origins fit without omitting provenance;
+oversized or changed records are rejected.
 
 `evaluation-talking-run-v1` implements one normal internal-evaluation Talking dependency linked to an eligible saved Master. Selection requires an exact authorized source/speech interval, separate input/output-use and Talking execution receipts, current consent/source/capability/configuration and finite budget. Master bind, Voice and ASR receipts cannot grant Talking use. Original PCM, QA, human records and Master binding stay unchanged; new operation-owned Jobs carry execution authority separately from complete input-use proof. Output, preview and TalkingRun retain every upstream restriction. Unknown capability quality blocks; this lane introduces no first-calibration exception.
 
@@ -702,6 +721,8 @@ Reuse the reviewed local route for bounded integration proof where it satisfies 
 The separate internal `evaluation-talking-calibration-v1` flow can select a configured local candidate with unverified quality or duration only under an operator-adopted schema10/report5 grant. It binds an eligible saved Master, planned scene, consented suitable source, complete input permissions, exact execution/configuration and a finite trial envelope before one owned inference. The envelope is an authorization limit, not a verified operating range. Normal `evaluation-talking-run-v1` continues to require verified exact capability and duration.
 
 Calibration uses the same technical QA, authoritative Master-audio preview and six-dimension whole-preview review. Explicit admission reuses that completed preview as the existing evaluation TalkingRun and retains a server-built quality observation for the exact sample. It does not promote provider readiness, general quality or duration bounds, and it does not enable rendering or publication. The normal panel discloses configured candidates, adopted grants and limits, processing/failure/reload states, and sample evidence separately from general capability. One assisted activation through normal services and owned Workers now has real local generation, persisted technical QA, whole-preview, explicit all-six human U-Talking approval, same-output TalkingRun admission and normal API recovery evidence for a3.68s scene. Its quality observation applies only to that exact sample; user-operated normal UI creation, whole-topic downstream consumption, broader quality/duration capability and repeatability remain unproved. Repeated complete environment checks dominated the observed generation Job span, so that span is not pure model inference time.
+
+The maintained Talking child now reads the previously admitted application/engine manifests and validates its exact runtime identity, required model artifacts, user inputs and private child files without re-hashing the complete environment at each prepare/verify/snapshot/execute fence. Full environment observation remains an explicit registration or re-authorization step. Focused offline regressions pass; the current application bundle has not yet been re-authorized or run through real readiness, so no post-fix runtime time or generation result is claimed.
 
 1. Unify admission and generated-media selection without repeating valid asset-level human review.
 2. Plan visual feasibility and required production before dispatch; wire ordinary UI/application orchestration to existing Master/Run APIs.

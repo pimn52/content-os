@@ -46,10 +46,15 @@ def make_dual_case(talking_case,monkeypatch):
         generation_scope="evaluation_talking_run_only",accepts_local_operator_vendor_os_trust=True,no_concurrent_runtime_updates=True,
         accepts_talking_runtime_trust=True,network_isolation="not_asserted",components=components)
     path=root/"dual-origin.json";path.write_text(json.dumps(origin));o["origin_reference"]=reference(path,root)
+    from app.runtime_inventory import RuntimeInventoryStore
+    inventories={app.descriptor.sha256:app,engine.descriptor.sha256:engine}
+    monkeypatch.setattr(RuntimeInventoryStore,"read_v2",lambda _self,descriptor:inventories[descriptor.sha256])
     return SimpleNamespace(options=o,root=root,request=c.request,origin=origin,origin_path=path,app=app,engine=engine)
 
 
-def prepare(c):return dual.prepare_dual_talking_child(request=c.request,**c.options)
+def prepare(c):
+    approved=dual.observe_dual(c.options)
+    return dual.prepare_dual_talking_child(request=c.request,approved_spec=approved,**c.options)
 
 
 def test_distinct_schema_complete_roles_and_retained_origin(dual_case,monkeypatch):
@@ -66,6 +71,14 @@ def test_distinct_schema_complete_roles_and_retained_origin(dual_case,monkeypatc
         with pytest.raises(ExecutionPreparationError):dual.require_dual_origin(c.root,c.options["origin_reference"],c.engine,c.app)
         bad=spec.model_dump(mode="json");bad["schema_version"]=True
         with pytest.raises(ValidationError):ExecutionSpecificationV10.model_validate_json(json.dumps(bad))
+
+
+def test_prepared_child_reuses_admitted_spec_without_full_observation(dual_case,monkeypatch):
+    with prepare(dual_case) as child:
+        spec=child.specification
+        monkeypatch.setattr(dual,"observe_dual",lambda *_a,**_kw:pytest.fail("normal execution must not rescan the runtime"))
+        assert child.verify()==spec
+        assert child.execution_use_snapshot()["execution_sha256"]==spec.execution_sha256
 
 
 @pytest.mark.parametrize("mutation",["engine","conda","application","bootstrap","source","request","pth","distribution","compatibility","parameters"])

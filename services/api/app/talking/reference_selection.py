@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from uuid import UUID
 
 from app.domain.models import Clip, GazeDirection, TalkingPerformanceBrief, TalkingReferenceFit, TalkingReferenceSelection
 
@@ -9,6 +10,7 @@ from app.domain.models import Clip, GazeDirection, TalkingPerformanceBrief, Talk
 def select_talking_reference(
     references: Sequence[Clip],
     brief: TalkingPerformanceBrief,
+    *, adopted_full_interval_clip_ids: frozenset[UUID] = frozenset(),
 ) -> TalkingReferenceSelection:
     """Return the strongest evidenced reference, otherwise a small capture gap.
 
@@ -21,7 +23,7 @@ def select_talking_reference(
         raise ValueError("Talking reference selection requires one or more Clips")
     if not isinstance(brief, TalkingPerformanceBrief):
         raise TypeError("Talking reference selection requires a TalkingPerformanceBrief")
-    fits = [_fit(reference, brief) for reference in references]
+    fits = [_fit(reference, brief, adopted=reference.id in adopted_full_interval_clip_ids) for reference in references]
     eligible = [fit for fit in fits if fit.eligible]
     if eligible:
         selected = max(eligible, key=lambda fit: (fit.score, str(fit.clip_id)))
@@ -33,18 +35,18 @@ def select_talking_reference(
     )
 
 
-def _fit(clip: Clip, brief: TalkingPerformanceBrief) -> TalkingReferenceFit:
+def _fit(clip: Clip, brief: TalkingPerformanceBrief, *, adopted: bool = False) -> TalkingReferenceFit:
     if not isinstance(clip, Clip):
         raise TypeError("Talking references must be Clip contracts")
     reasons: list[str] = []
-    if not clip.talking_candidate:
+    if not clip.talking_candidate and not adopted:
         reasons.append("The clip is not marked as a Talking candidate.")
     duration_ms = clip.end_ms - clip.start_ms
     if duration_ms < brief.minimum_reference_duration_ms:
         reasons.append(f"Reference duration {duration_ms}ms is below the requested {brief.minimum_reference_duration_ms}ms.")
-    if clip.face_visibility is None or clip.face_visibility < 0.6:
+    if clip.face_visibility is None and not adopted or clip.face_visibility is not None and clip.face_visibility < 0.6:
         reasons.append("Face visibility is not sufficient evidence for a Talking reference.")
-    if clip.mouth_visibility is None or clip.mouth_visibility < 0.6:
+    if clip.mouth_visibility is None and not adopted or clip.mouth_visibility is not None and clip.mouth_visibility < 0.6:
         reasons.append("Mouth visibility is not sufficient evidence for lip-sync.")
     assessment = clip.talking_reference_assessment
     if assessment is None:

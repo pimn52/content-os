@@ -119,6 +119,13 @@ source suitability or final quality.
 
 ## Current capability
 
+Normal production preflight and retained composition consume saved explicit
+footage selections before lexical retrieval. Reuse rechecks Asset/Clip identity,
+source kind, interval length, configured use, rights reference, project scope
+and known crop rejection. An explicit selection is neither a semantic score
+nor source-suitability approval; missing indices do not force new capture,
+and source, Talking and render gates remain independent.
+
 Local import, hash dedupe, continuous Clips, transcript/analysis boundaries, candidate routing, optional Shoot Tasks, usage records and real-media-first selection are implemented foundations.
 
 In explicit lexical mode, token overlap is weaker retrieval evidence, not semantic or visual suitability verification. The router preserves the combined-score threshold. Below it, explicitly preferred typography or an explicitly declared `explanatory` scene allowing typography fallback can become the recommendation with a planning-intent reason. Preferred AI_VIDEO and declared `creator_speaking`/`action_evidence` block that substitution. Strong eligible video matches still take precedence. Typography appearing only in fallback_sources on an unknown scene does not establish adequacy.

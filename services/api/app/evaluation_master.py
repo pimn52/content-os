@@ -29,6 +29,15 @@ def _same_composed_copy(saved, target):
             and comparison_tokens(saved) == comparison_tokens(target))
 
 
+def _master_stage_blockers(context):
+    # Binding approved narration does not dispatch or approve future footage.
+    future_footage = {f"source_suitability_unknown:{s.scene_id}" for s in context["plan"].scenes
+        if s.production_need == "none" and s.selected_candidate in context["draft"].confirmed
+        and s.planned_source_kind.value in {"user_asset", "historical_asset"}}
+    return [r for r in context["plan"].stop_reasons
+        if r not in DEFERRED and r not in future_footage and not r.startswith("talking_source_not_admitted:")]
+
+
 def is_evaluation_master_run(db, run_id):
     from app.evaluation_composition import is_composition
     if is_composition(db,run_id=run_id):
@@ -226,7 +235,7 @@ class EvaluationMasterService:
             result.update(audio_id=str(c["audio"].id), duration_ms=c["audio"].duration_ms,
                 master_use_request_sha256=c["request_sha256"], proof=c["proof"],
                 draft_version=c["draft"].version, script_revision=c["draft"].script_revision)
-            blocked = [r for r in c["plan"].stop_reasons if r not in DEFERRED and not r.startswith("talking_source_not_admitted:")]
+            blocked = _master_stage_blockers(c)
             result["downstream_reasons"] = list(dict.fromkeys((*c["plan"].stop_reasons, *DOWNSTREAM)))
             result["reasons"] = blocked
             receipt = self._require_receipt(project_id, selection, c)
@@ -240,7 +249,7 @@ class EvaluationMasterService:
     def create(self, project_id, payload):
         c = self._context(project_id, payload)
         receipt = self._require_receipt(project_id, MasterSelection.model_validate(payload.model_dump(exclude={"idempotency_key", "expected_fingerprint"})), c)
-        blocked = [r for r in c["plan"].stop_reasons if r not in DEFERRED and not r.startswith("talking_source_not_admitted:")]
+        blocked = _master_stage_blockers(c)
         if blocked:
             raise UseAdmissionError(blocked[0])
         fingerprint = self._fingerprint(c, receipt)
@@ -313,7 +322,7 @@ class EvaluationMasterService:
             info["fingerprint_policy"] = "evaluation-master-proof-v2" if row["preflight_fingerprint"] == expected else "legacy-full-preflight-v1"
             if row["stage"] == "cancelled":
                 raise UseAdmissionError("evaluation_master_run_cancelled")
-            blockers = [r for r in c["plan"].stop_reasons if r not in DEFERRED and not r.startswith("talking_source_not_admitted:")]
+            blockers = _master_stage_blockers(c)
             if blockers:
                 raise UseAdmissionError(blockers[0])
             info.update(current_eligible=True, audio_id=str(c["audio"].id), audio_sha256=c["audio"].content_hash,

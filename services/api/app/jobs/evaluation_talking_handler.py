@@ -92,7 +92,8 @@ class MaintainedEvaluationTalkingHandler:
                 reference_sha256=context["source"].content_hash,reference_start_ms=context["clip"].start_ms,
                 reference_end_ms=context["clip"].end_ms,slice_plan=context["slice_plan"])
             factory = prepare_dual_talking_child if dual else prepare_maintained_talking_child
-            with factory(**options,data_root=self.root,staging_parent=staging,request=request) as prepared:
+            with factory(**options,data_root=self.root,staging_parent=staging,request=request,
+                approved_spec=context["execution"].review.execution_specification) as prepared:
                 return execute_evaluation_talking(db=self.db,root=self.root,job=job,prepared=prepared,cost_estimator=UnknownProviderCostEstimator())[0]
         except (ProviderExecutionInProgress,ProviderExecutionRecordedFailure):
             raise JobExecutionError("provider_call_reconciliation_required","已有 Talking 调用需要核对，不会重复生成",retryable=False) from None

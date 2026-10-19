@@ -1,4 +1,5 @@
 """Role-separated exact use of a saved Master for one evaluation TalkingRun."""
+import json
 from typing import Literal, Annotated
 from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, AwareDatetime, JsonValue, model_validator, field_validator, TypeAdapter
@@ -53,6 +54,13 @@ class TalkingCalibrationIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     selection: TalkingCalibrationCandidate
     execution_specification: ExecutionSpecificationV10
+
+    @field_validator("execution_specification", mode="before")
+    @classmethod
+    def specification_from_json_transport(cls, value):
+        # FastAPI supplies decoded JSON; preserve the strict contract's JSON
+        # semantics for tuples/UUIDs without coercing numeric/boolean fields.
+        return ExecutionSpecificationV10.model_validate_json(json.dumps(value)) if isinstance(value, dict) else value
 
 
 class TalkingCalibrationStart(TalkingCalibrationSelection):

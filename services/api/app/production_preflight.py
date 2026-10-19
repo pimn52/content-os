@@ -209,9 +209,11 @@ def build_production_preflight(
     need_analysis = False
 
     for scene in scenes:
-        candidate, need = _choose_candidate(scene, route_by_scene[scene.id].candidates, clips, assets)
+        explicit = router.explicit_footage(scene, draft.confirmed)
+        candidates = (explicit,) if explicit is not None else route_by_scene[scene.id].candidates
+        candidate, need = _choose_candidate(scene, candidates, clips, assets)
         if bound_talking_clips is not None and scene.id in bound_talking_clips:
-            candidate = next((item for item in route_by_scene[scene.id].candidates
+            candidate = next((item for item in candidates
                               if item.clip_id == bound_talking_clips[scene.id]
                               and item.source_kind is SourceKind.AI_VIDEO), None)
             if candidate is None:
@@ -219,7 +221,7 @@ def build_production_preflight(
             need = "none"
         excluded = []
         blocked_candidates = set()
-        for item in route_by_scene[scene.id].candidates:
+        for item in candidates:
             item_source = assets.get(item.asset_id) if item.asset_id is not None else None
             burned_state, _ = _subtitle_state(item_source)
             entry = _default_edit_plan(project, [scene], {scene.id: item}).scenes[0].model_copy(update={
@@ -238,7 +240,7 @@ def build_production_preflight(
             requires_talking = SourceKind.AI_VIDEO in scene.preferred_sources or candidate.source_kind is SourceKind.AI_VIDEO
             # No new source-admission authority: only an already supported,
             # explicitly allowed deterministic alternative qualifies here.
-            alternative = next((item for item in route_by_scene[scene.id].candidates
+            alternative = next((item for item in candidates
                 if (item.asset_id, item.clip_id, item.source_kind) not in blocked_candidates and item.source_kind is SourceKind.TYPOGRAPHY
                 and not requires_talking and scene.visual_requirement not in {"creator_speaking", "action_evidence"}
                 and SourceKind.TYPOGRAPHY in (*scene.preferred_sources, *scene.fallback_sources)), None)
@@ -246,7 +248,7 @@ def build_production_preflight(
                 from app.routing.asset_router import _typography_fallback
                 alternative = _typography_fallback(scene, recommended=True)
             if alternative is None and SourceKind.AI_VIDEO in (*scene.preferred_sources, *scene.fallback_sources):
-                alternative = next((item for item in route_by_scene[scene.id].candidates
+                alternative = next((item for item in candidates
                     if item.source_kind is SourceKind.AI_VIDEO
                     and (item.asset_id, item.clip_id, item.source_kind) not in blocked_candidates
                     and _reviewed_native_planned(db, project, scene, assets.get(item.asset_id), clips.get(item.clip_id), reusable_master)), None)
@@ -281,7 +283,7 @@ def build_production_preflight(
             stop.append(f"talking_source_not_admitted:{scene.scene_id}")
         elif need == "capture":
             reasons.append("creator capture or an explicit alternative is required")
-            capture = next((item for item in route_by_scene[scene.id].candidates if item.source_kind is SourceKind.CAPTURE), None)
+            capture = next((item for item in candidates if item.source_kind is SourceKind.CAPTURE), None)
             if capture is not None and WEAK_LEXICAL_ROUTE_REASON in capture.why:
                 reasons.append("weak lexical retrieval does not establish source unusability or capture necessity; resolve visual intent before dispatch")
                 stop.append(f"visual_route_unresolved:{scene.scene_id}")

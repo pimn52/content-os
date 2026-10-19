@@ -15,6 +15,69 @@ from test_evaluation_talking_dual_normal import talking_case, original_talking_c
 from test_evaluation_talking_normal_flow import save, http
 
 
+def test_normal_calibration_intent_http_accepts_json_spec_but_keeps_strict_values(normal_inputs):
+    c=normal_inputs
+    selected=TalkingCalibrationCandidate(**c.selection.model_dump(exclude={'policy','execution_admission_id','use_admission_id'}),
+        policy=CALIBRATION_POLICY,trial_duration_limit_ms=10000,trial_processing_limit_ms=12000)
+    payload=TalkingCalibrationIntent(selection=selected,execution_specification=c.spec).model_dump(mode='json')
+    response=http(c,'POST',f'/projects/{c.project}/evaluation-talking/calibration-intent',json=payload)
+    assert response.status_code==200,response.text
+    assert response.json()['trial_input_sha256']==c.service.calibration_intent(c.project,
+        TalkingCalibrationIntent.model_validate_json(json.dumps(payload)))['trial_input_sha256']
+    payload['execution_specification']['timeout_seconds']=str(payload['execution_specification']['timeout_seconds'])
+    assert http(c,'POST',f'/projects/{c.project}/evaluation-talking/calibration-intent',json=payload).status_code==422
+
+
+def test_current_adopted_source_supplies_unknown_retrieval_fields_without_writing_scores(normal_inputs):
+    from app.db import ClipRepository
+    c=normal_inputs;clips=ClipRepository(c.db)
+    unknown=c.clip.model_copy(update={'talking_candidate':False,'face_visibility':None,'mouth_visibility':None})
+    clips.update(unknown)
+    assert c.service._inputs(c.project,c.selection)['assessment'].id==c.sources.require_current(c.receipt).id
+    assert clips.get(unknown.id)==unknown
+    clips.update(unknown.model_copy(update={'mouth_visibility':0.2}))
+    with pytest.raises(UseAdmissionError,match='talking_reference_fit_not_verified'):
+        c.service._inputs(c.project,c.selection)
+    clips.update(unknown)
+    c.sources.revoke(c.receipt.id,actor_id='fixture-operator',reason='Synthetic revocation')
+    with pytest.raises(ValueError,match='revoked'):
+        c.service._inputs(c.project,c.selection)
+
+
+@pytest.mark.parametrize('normal_inputs',['calibration'],indirect=True)
+def test_composed_size_use_report_keeps_hash_and_one_megabyte_bound(calibration_flow):
+    c=calibration_flow
+    row=c.service.records.admission(c.selection.use_admission_id)
+    raw=(c.root/row.review_reference).read_bytes()
+    padded=b' '*310000+raw
+    assert 300000<len(padded)<1000000
+    path=c.root/'larger-real-contract.json';path.write_bytes(padded)
+    assert c.service._report(path.name,hashlib.sha256(padded).hexdigest())==row.review
+    with pytest.raises(UseAdmissionError,match='changed'):
+        c.service._report(path.name,'0'*64)
+    path.write_bytes(b' '*1000001)
+    with pytest.raises(UseAdmissionError,match='too_large'):
+        c.service._report(path.name,hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+@pytest.mark.parametrize('failure',['mouth','face','subtitle','gaze','expression','duration'])
+def test_adopted_source_never_overrides_known_negative_or_requested_performance(failure):
+    from app.domain.models import Clip,TalkingReferenceAssessment,TalkingPerformanceBrief
+    from app.talking import select_talking_reference
+    clip=Clip(asset_id=uuid4(),start_ms=0,end_ms=3200,asset_duration_ms=3200,
+        talking_reference_assessment=TalkingReferenceAssessment(burned_in_subtitles=False,evidence_reference='fixture-only'))
+    brief=TalkingPerformanceBrief(minimum_reference_duration_ms=2320)
+    assert select_talking_reference([clip],brief).selected_clip_id is None
+    assert select_talking_reference([clip],brief,adopted_full_interval_clip_ids=frozenset({clip.id})).selected_clip_id==clip.id
+    if failure=='mouth':clip=clip.model_copy(update={'mouth_visibility':0.2})
+    elif failure=='face':clip=clip.model_copy(update={'face_visibility':0.2})
+    elif failure=='subtitle':clip=clip.model_copy(update={'talking_reference_assessment':clip.talking_reference_assessment.model_copy(update={'burned_in_subtitles':True})})
+    elif failure=='gaze':brief=TalkingPerformanceBrief(minimum_reference_duration_ms=2320,start_gaze='camera')
+    elif failure=='expression':brief=brief.model_copy(update={'expression_labels':['smile']})
+    elif failure=='duration':brief=brief.model_copy(update={'minimum_reference_duration_ms':4000})
+    assert select_talking_reference([clip],brief,adopted_full_interval_clip_ids=frozenset({clip.id})).selected_clip_id is None
+
+
 @pytest.fixture
 def calibration_flow(normal_inputs):
     c=normal_inputs

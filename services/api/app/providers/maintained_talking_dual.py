@@ -20,8 +20,10 @@ from app.providers.prepared import ExecutionPreparationError
 from .maintained_runtime import (_observe_inventory, _distribution_versions, _evidence_bytes, _distinct_json,
     observe_host, _system_root, stop_maintained_process_tree)
 from .maintained_voice_bundle import bundle_bytes, BUNDLE_SLOT
-from .maintained_talking_execution import observe_talking_artifacts, require_reference_coverage
+from .maintained_talking_execution import (observe_talking_artifacts, require_reference_coverage,
+    capture_admitted_talking_files, verify_admitted_talking_files)
 from app.execution_admission import configured_admission_actor, UseAdmissionError
+from app.runtime_inventory import RuntimeInventoryStore
 
 ENGINE_SLOT = "entry/engine.pyz"
 ENGINE_MAX_BYTES = 128*1024
@@ -129,6 +131,11 @@ def _startup(options, application, engine):
     for inventory in (application,engine):
         if any(r.name.casefold().endswith("._pth") for r in inventory.files):
             raise ExecutionPreparationError("maintained_dual_no_site_pth_unsupported")
+    for path in (roots["environment"]/"Scripts/python._pth", roots["environment"]/"Scripts/python312._pth",
+        roots["environment"]/"python._pth", roots["environment"]/"python312._pth",
+        roots["engine"]/"python._pth", roots["engine"]/"python310._pth"):
+        if path.exists():
+            raise ExecutionPreparationError("maintained_dual_no_site_pth_unsupported")
     version=next((v.strip() for k,v in (line.split("=",1) for line in (roots["environment"]/"pyvenv.cfg").read_text().splitlines() if "=" in line) if k.strip()=="version"),"")
     if not version.startswith("3.12."): raise ExecutionPreparationError("maintained_application_python_unsupported")
     for p in (roots["environment"]/"Lib/site-packages",roots["base"]/"Lib",roots["base"]/"DLLs",
@@ -137,15 +144,21 @@ def _startup(options, application, engine):
     return DualTalkingStartup(policy="latentsync-dual-no-site-v1",**{k+"_root":str(p) for k,p in roots.items()})
 
 
-def observe_dual(options):
+def observe_dual(options, *, inventories=None):
     if options.get("invocation_policy")!="maintained-latentsync-dual-runtime-v1":
         raise ExecutionPreparationError("maintained_dual_policy_required")
     root,staging=Path(options["data_root"]),Path(options["staging_parent"])
     engine=Path(options["engine"]); _exact_path(root,directory=True); _exact_path(staging,directory=True)
     if not staging.is_relative_to(root) or any(staging.is_relative_to(Path(options[k])) or Path(options[k]).is_relative_to(staging) for k in ("environment","base","engine","vendor","hf","torch","tools")):
         raise ExecutionPreparationError("maintained_dual_layout_invalid")
-    app=observe_application_inventory(Path(options["environment"]),Path(options["base"]),max_bytes=options["max_bytes"])
-    eng=observe_engine_inventory(engine,max_bytes=options["max_bytes"]-app.descriptor.total_file_bytes)
+    if inventories is None:
+        app=observe_application_inventory(Path(options["environment"]),Path(options["base"]),max_bytes=options["max_bytes"])
+        eng=observe_engine_inventory(engine,max_bytes=options["max_bytes"]-app.descriptor.total_file_bytes)
+    else:
+        app,eng=inventories
+        if (type(app) is not MaintainedRuntimeInventory or type(eng) is not MaintainedRuntimeInventory
+            or app.descriptor.total_file_bytes + eng.descriptor.total_file_bytes > options["max_bytes"]):
+            raise ExecutionPreparationError("maintained_talking_inventory_invalid")
     startup=_startup(options,app,eng)
     origin=require_dual_origin(root,options["origin_reference"],app,eng)
     if configured_admission_actor(options["operator_key"])!=origin.actor:
@@ -166,6 +179,44 @@ def observe_dual(options):
             or r.name in {"vendor/checkpoints/whisper/tiny.pt","vendor/latentsync/utils/mask.png"}),
         machine=ExecutionMachineObservation(installation_id=options["installation_id"],host_sha256=host.host_sha256,
             device_sha256=execution_canonical_sha256(host.model_dump(mode="json"))),parameters=options["parameters"])
+
+
+def _assert_admitted_v10_options(options, spec):
+    reference = options["origin_reference"]
+    if (type(spec) is not ExecutionSpecificationV10 or spec.capability != "talking"
+        or spec.provider != "latentsync" or spec.model != "LatentSync-1.5" or spec.mode != "local"
+        or spec.runtime != options["runtime_label"] or spec.machine_id != options["machine_id"]
+        or spec.timeout_seconds != options["timeout_seconds"] or spec.invocation_policy != options["invocation_policy"]
+        or spec.parameters != options["parameters"] or spec.runtime_origin != reference
+        or spec.machine.installation_id != options["installation_id"]
+        or spec.host_runtime.gpu_uuid != options["gpu_uuid"]):
+        raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+
+
+def _require_admitted_v10(options, spec):
+    _assert_admitted_v10_options(options, spec)
+    root = Path(options["data_root"])
+    store = RuntimeInventoryStore(root)
+    application = store.read_v2(spec.runtime_inventory)
+    engine = store.read_v2(spec.engine_inventory)
+    origin = require_dual_origin(root, options["origin_reference"], application, engine)
+    if configured_admission_actor(options["operator_key"]) != origin.actor:
+        raise ExecutionPreparationError("maintained_talking_operator_required")
+    startup = _startup(options, application, engine)
+    if startup != spec.startup:
+        raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+    declared = {(d.root, d.kind, d.name.casefold()): (d.version, d.build)
+        for part in origin.components for d in part.distributions}
+    if declared != distributions(options):
+        raise ExecutionPreparationError("maintained_distribution_origin_mismatch")
+    host = observe_host(Path(options["environment"]), Path(options["base"]), Path(options["vendor"]), root,
+        device="cuda:0", gpu_uuid=options["gpu_uuid"])
+    host = host.model_copy(update={"layout_sha256": execution_canonical_sha256(
+        dict(observed=host.layout_sha256, startup=startup.model_dump(mode="json")))})
+    if host != spec.host_runtime:
+        raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+    stamps = capture_admitted_talking_files(options, spec, application, engine)
+    return application, engine, origin, stamps
 
 
 def _safe_copy(source,target,expected=None):
@@ -306,8 +357,10 @@ def child_main():
 
 
 class PreparedDualTalkingChild:
-    def __init__(self,temporary,options,spec,request):
+    def __init__(self,temporary,options,spec,request,application_inventory,engine_inventory,origin,file_stamps):
         self._temporary,self._options,self._spec_json,self._request_raw=temporary,options,spec.model_dump_json(),request.model_dump_json().encode()
+        self._application_inventory,self._engine_inventory,self._origin=application_inventory,engine_inventory,origin
+        self._file_stamps=file_stamps
         self._state="prepared"
         self._files={"application.pyz":application_bundle(),"engine.pyz":engine_bundle(),"request.json":self._request_raw,
             "startup.json":json.dumps(dict(policy="cpython312-no-site-v1",environment_root=str(options["environment"]),base_root=str(options["base"]))).encode()}
@@ -320,11 +373,19 @@ class PreparedDualTalkingChild:
         for name,raw in self._files.items():
             path=Path(self._temporary.name)/name;_exact_path(path,directory=False)
             if path.read_bytes()!=raw:raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+    def _verify_runtime_binding(self,spec):
+        _assert_admitted_v10_options(self._options,spec)
+        startup=_startup(self._options,self._application_inventory,self._engine_inventory)
+        if startup!=spec.startup or configured_admission_actor(self._options["operator_key"])!=self._origin.actor:
+            raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+        require_dual_origin(Path(self._options["data_root"]),self._options["origin_reference"],
+            self._application_inventory,self._engine_inventory,current=True)
+        verify_admitted_talking_files(self._file_stamps)
     def verify(self):
         if self._state!="prepared":raise ExecutionPreparationError("maintained_preparation_consumed")
         try:
             self._verify_files(); self.request_snapshot().verify_inputs(self._options["data_root"])
-            if observe_dual(self._options)!=self.specification:raise ValueError()
+            self._verify_runtime_binding(self.specification)
             return self.specification
         except Exception:
             self._state="failed";raise ExecutionPreparationError("maintained_talking_child_identity_changed") from None
@@ -355,7 +416,7 @@ class PreparedDualTalkingChild:
                     **({"creationflags":subprocess.CREATE_NEW_PROCESS_GROUP} if os.name=="nt" else {"start_new_session":True}))
                 if child.wait(timeout=max(.001,options["deadline"]-time.monotonic()))!=0:raise ExecutionPreparationError("maintained_talking_child_failed")
             self._verify_files();self.request_snapshot().verify_inputs(self._options["data_root"])
-            if observe_dual(self._options)!=spec:raise ExecutionPreparationError("maintained_talking_child_identity_changed")
+            self._verify_runtime_binding(spec)
             if time.monotonic()>options["deadline"]:raise ExecutionPreparationError("maintained_talking_child_timeout")
             output=private/"output.mp4";_exact_path(output,directory=False)
             if not 0<output.stat().st_size<=4*1024**3:raise ExecutionPreparationError("maintained_talking_output_limit")
@@ -390,13 +451,14 @@ class PreparedDualTalkingChild:
     def __exit__(self,*_args):self.close()
 
 
-def prepare_dual_talking_child(*,request,**options):
+def prepare_dual_talking_child(*,request,approved_spec,**options):
     temporary=None
     try:
-        options=dict(options);spec=observe_dual(options)
+        options=dict(options);spec=ExecutionSpecificationV10.model_validate_json(approved_spec.model_dump_json())
+        application,engine,origin,file_stamps=_require_admitted_v10(options,spec)
         request=TalkingChildRequest.model_validate_json(request.model_dump_json());request.verify_inputs(options["data_root"]);require_reference_coverage(request)
         temporary=TemporaryDirectory(prefix="maintained-dual-talking-",dir=options["staging_parent"])
-        prepared=PreparedDualTalkingChild(temporary,options,spec,request);prepared.verify();return prepared
+        prepared=PreparedDualTalkingChild(temporary,options,spec,request,application,engine,origin,file_stamps);prepared.verify();return prepared
     except Exception as exc:
         if temporary:temporary.cleanup()
         if isinstance(exc,ExecutionPreparationError):raise

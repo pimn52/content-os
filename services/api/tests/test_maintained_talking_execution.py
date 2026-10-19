@@ -34,6 +34,8 @@ def talking_case(candidate, monkeypatch):
     (root/"vendor/configs/unet/stage2.yaml").write_text("model:\n  cross_attention_dim: 384\n")
     (root/"hf"/VAE_CACHE/"refs/main").write_text(VAE_REVISION)
     inventory = runtime.observe_talking_inventory(options["environment"],options["base"],max_bytes=options["max_bytes"])
+    from app.runtime_inventory import RuntimeInventoryStore
+    monkeypatch.setattr(RuntimeInventoryStore,"read_v2",lambda _self,_descriptor:inventory)
     origin = {k:v for k,v in candidate["origin"].items() if k != "diagnostic_scope"}
     origin.update(origin_version=4,generation_scope="evaluation_talking_run_only",accepts_talking_runtime_trust=True,
         runtime_inventory_sha256=inventory.descriptor.sha256)
@@ -55,7 +57,14 @@ def talking_case(candidate, monkeypatch):
     return SimpleNamespace(options=options,request=request,origin=origin,origin_path=path,root=root)
 
 
-def prepare(case): return runtime.prepare_maintained_talking_child(request=case.request,**case.options)
+def prepare(case):
+    try:
+        approved = runtime.observe_talking(case.options)
+    except Exception as exc:
+        if isinstance(exc, ExecutionPreparationError):
+            raise
+        raise ExecutionPreparationError("maintained_talking_preparation_invalid") from None
+    return runtime.prepare_maintained_talking_child(request=case.request,approved_spec=approved,**case.options)
 
 
 def test_complete_resource_manifest_retains_empty_package_and_cache_files(talking_case):
@@ -87,7 +96,10 @@ def test_preparation_distinct_schema_and_no_subprocess(talking_case,monkeypatch)
         assert type(spec) is ExecutionSpecificationV9
         assert spec.capability == "talking"
         with pytest.raises(ValidationError): ExecutionSpecificationV6.model_validate_json(spec.model_dump_json())
+        monkeypatch.setattr(runtime,"observe_talking",lambda *_a,**_kw:pytest.fail("normal execution must reuse the admitted spec"))
+        assert prepared.verify() == spec
         snapshot = prepared.execution_use_snapshot()
+        assert snapshot["execution_sha256"] == spec.execution_sha256
         snapshot["execution_specification"]["parameters"]["seed"] = 100
         assert prepared.specification.parameters["seed"] == 7
 

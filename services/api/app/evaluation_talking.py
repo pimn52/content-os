@@ -119,8 +119,6 @@ class EvaluationTalkingService:
         if clip.end_ms-clip.start_ms < model_duration:
             raise UseAdmissionError("talking_reference_alignment_not_covered")
         brief = selection.brief.model_copy(update={"minimum_reference_duration_ms":max(selection.brief.minimum_reference_duration_ms,interval[1]-interval[0]),"require_no_burned_subtitles":True})
-        if select_talking_reference([clip],brief).selected_clip_id != clip.id:
-            raise UseAdmissionError("talking_reference_fit_not_verified")
         sources = TalkingSourceAdmissionRepository(self.db, self.root)
         receipt = sources.get(selection.source_admission_id)
         if receipt is None:
@@ -130,6 +128,11 @@ class EvaluationTalkingService:
             or (assessment.start_ms,assessment.end_ms) != (clip.start_ms,clip.end_ms) or assessment.presentation != "source_native_portrait"
             or clip.talking_reference_assessment is None or clip.talking_reference_assessment.burned_in_subtitles is not False):
             raise UseAdmissionError("talking_source_admission_mismatch")
+        # The exact adopted full-interval human review supplies source
+        # eligibility when old retrieval scores/flags were never populated.
+        # Do not fabricate persisted scores or override known negative scores.
+        if select_talking_reference([clip],brief,adopted_full_interval_clip_ids=frozenset({clip.id})).selected_clip_id != clip.id:
+            raise UseAdmissionError("talking_reference_fit_not_verified")
         for item in (audio,source):
             path = _source_path(item.source_file,self.root)
             with path.open("rb") as stream:
@@ -289,7 +292,9 @@ class EvaluationTalkingService:
             raise UseAdmissionError("talking_calibration_claim_changed")
 
     def _report(self, reference, sha):
-        raw = self.admissions._file(reference,maximum=300_000)
+        # A genuine multi-take Master carries every retained source origin.
+        # Keep the existing bounded evidence-file limit, not a single-take size.
+        raw = self.admissions._file(reference,maximum=1_000_000)
         if hashlib.sha256(raw).hexdigest() != sha:
             raise UseAdmissionError("evaluation_talking_use_evidence_changed")
         report = TypeAdapter(TalkingUseReviewRecord).validate_json(raw)

@@ -223,6 +223,23 @@ class AssetRouter:
             )
         return tuple(self.route(scene) for scene in ordered)
 
+    def explicit_footage(self, scene: ScenePlan, selections: Sequence[CandidateAsset]) -> CandidateAsset | None:
+        """Reopen a saved footage choice; selection is not suitability approval."""
+        choice = next((c for c in selections if c.scene_plan_id == scene.id), None)
+        if choice is None or choice.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}:
+            return None
+        asset = self.assets.get(choice.asset_id) if choice.asset_id else None
+        clip = ClipRepository(self.assets.db).get(choice.clip_id) if choice.clip_id else None
+        if (asset is None or clip is None or clip.asset_id != asset.id
+            or asset.source_kind != choice.source_kind or clip.asset_duration_ms != asset.duration_ms
+            or clip.end_ms > asset.duration_ms or clip.end_ms - clip.start_ms < scene.duration_target_ms
+            or not asset.authorization_reference.strip() or asset.metadata.get("r1_usage") != "production"
+            or asset.metadata.get("project_id") not in (None, str(scene.project_id))
+            or choice.source_kind not in (*scene.preferred_sources, *scene.fallback_sources)
+            or scene.visual_requirement == "creator_speaking" or self._known_bad_crop(scene, asset, clip)):
+            raise RoutingInputError("explicit_footage_selection_changed_or_not_authorized")
+        return choice
+
     def _score_hits(self, scene: ScenePlan, hits: Sequence[ClipSearchHit]) -> list[tuple[float, CandidateAsset]]:
         seen: set[UUID] = set()
         ranked: list[tuple[float, int, str, int, int, str, CandidateAsset]] = []

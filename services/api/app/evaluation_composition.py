@@ -158,7 +158,8 @@ class EvaluationCompositionService:
             if scene.visual_requirement != "creator_speaking":
                 from app.production_preflight import _choose_candidate
                 from app.domain.models import SourceKind
-                candidate, need = _choose_candidate(scene,router.route(scene).candidates,
+                explicit = router.explicit_footage(scene.model_copy(update={"duration_target_ms":interval[1]-interval[0]}),draft.confirmed)
+                candidate, need = _choose_candidate(scene,(explicit,) if explicit is not None else router.route(scene).candidates,
                     ClipRepository(self.db),AssetRepository(self.db))
                 if (need != "none" or candidate is None
                     or candidate.source_kind not in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET,SourceKind.TYPOGRAPHY}):
