@@ -104,12 +104,14 @@ contracts carry these decisions; see the media module for exact selection and
 evidence limits. Sampled source analysis and offline geometry tests do not
 establish full-interval visual quality or acceptance of a revised video.
 
-Comparison layout fits the two proportion-preserving panes to the full canvas
-height, leaving only centered side margins and a zero-pixel seam. It does not
-shrink the footage to reserve a bottom caption band. The active caption keeps
-its measured line wrapping on an opaque black plate at the bottom of the lower
-pane; no source pixels show through the plate. Unused canvas and letterbox
-regions around contained camera footage are pure black.
+Comparison layout maximizes the two proportion-preserving panes against the
+canvas, keeps a zero-pixel seam and centers the pair as one group. Caption text
+and timing do not affect pane geometry. Comparison captions keep the existing
+simple text treatment without an opaque board; an internal still may omit the
+overlay while retaining saved caption data. Ordinary horizontal footage
+without a designed graphic uses the same full-canvas `contain` presentation as
+other footage. Its visible source rectangle stays centered, and all unused
+canvas is pure black.
 
 The ordinary draft scene editor now exposes existing creator-speaking,
 action-evidence and explanatory requirements, their reasons and source

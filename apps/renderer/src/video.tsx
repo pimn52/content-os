@@ -68,6 +68,9 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
         throw new Error(`Missing staged source for scene ${scene.scene_id}`);
       }
       const captionPlan = captions[scene.scene_id] ?? {captions: [], fallbackCaption: null};
+      const editorialCaption = source.kind !== 'video' || source.portraitPresentation !== 'stacked_comparison'
+        ? 'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first', 'content-os-portrait-comparison'].includes(source.styleTokens?.name ?? '')
+        : false;
       return (
         <Sequence key={scene.scene_id} from={scene.start_frame} durationInFrames={scene.duration_frames}>
           <AbsoluteFill style={{overflow: 'hidden'}}>
@@ -76,22 +79,7 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
             ) : source.kind === 'video' && source.portraitPresentation === 'stacked_comparison' ? (
               <StackedComparisonPanel source={source} audioMode={audioMode} />
             ) : source.kind === 'video' ? (
-              <OffthreadVideo
-                src={staticFile(source.src)}
-                trimBefore={source.trimBefore}
-                trimAfter={source.trimAfter}
-                volume={audioMode === 'source' ? 1 : 0}
-                // Crop only when the persisted VideoSpec names an evidence-
-                // backed review decision. The default preserves the full
-                // frame, so the renderer never silently crops a face.
-                style={{
-                  width: '100%', height: '100%',
-                  objectFit: source.verticalReframeMode === 'center_crop' ? 'cover' : 'contain',
-                  objectPosition: source.sourceBottomCropRatio ? 'center top' : 'center',
-                  transform: source.sourceBottomCropRatio ? `scale(${1 / (1 - source.sourceBottomCropRatio)})` : undefined,
-                  transformOrigin: 'top center', backgroundColor: '#000000',
-                }}
-              />
+              <FullCanvasVideo source={source} audioMode={audioMode} />
             ) : source.kind === 'image' ? (
               <Img src={staticFile(source.src)} style={{width: '100%', height: '100%', objectFit: 'contain'}} />
             ) : (
@@ -102,14 +90,29 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
             {scene.subtitle_treatment !== 'none' && captionPlan.captions.length ? captionPlan.captions.map((caption) => {
               const startFrame = Math.max(0, Math.round(caption.start_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
               const endFrame = Math.max(startFrame + 1, Math.round(caption.end_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
-              return <Sequence key={`${caption.start_ms}-${caption.end_ms}-${caption.text}`} from={startFrame} durationInFrames={endFrame - startFrame}><Caption text={caption.text} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first', 'content-os-portrait-comparison'].includes(source.styleTokens?.name ?? '')} /></Sequence>;
-            }) : scene.subtitle_treatment !== 'none' && captionPlan.fallbackCaption && audioMode !== 'source' ? <Caption text={captionPlan.fallbackCaption} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first', 'content-os-portrait-comparison'].includes(source.styleTokens?.name ?? '')} /> : null}
+              return <Sequence key={`${caption.start_ms}-${caption.end_ms}-${caption.text}`} from={startFrame} durationInFrames={endFrame - startFrame}><Caption text={caption.text} editorial={editorialCaption} /></Sequence>;
+            }) : scene.subtitle_treatment !== 'none' && captionPlan.fallbackCaption && audioMode !== 'source' ? <Caption text={captionPlan.fallbackCaption} editorial={editorialCaption} /> : null}
           </AbsoluteFill>
         </Sequence>
       );
     })}
   </AbsoluteFill>;
 };
+
+const FullCanvasVideo: React.FC<{source: VideoSource; audioMode: RenderProps['audioMode']}> = ({source, audioMode}) => (
+  <OffthreadVideo
+    src={staticFile(source.src)} trimBefore={source.trimBefore} trimAfter={source.trimAfter}
+    volume={audioMode === 'source' ? 1 : 0}
+    // Crop only when the persisted VideoSpec names an evidence-backed decision.
+    style={{
+      width: '100%', height: '100%',
+      objectFit: source.verticalReframeMode === 'center_crop' ? 'cover' : 'contain',
+      objectPosition: source.sourceBottomCropRatio ? 'center top' : 'center',
+      transform: source.sourceBottomCropRatio ? `scale(${1 / (1 - source.sourceBottomCropRatio)})` : undefined,
+      transformOrigin: 'top center', backgroundColor: '#000000',
+    }}
+  />
+);
 
 // Opt-in assisted square layout: text occupies only the unused upper margin.
 // The source remains centered at its original size; gaps have no callout.
@@ -147,14 +150,8 @@ const PortraitPanel: React.FC<{source: VideoSource; audioMode: RenderProps['audi
   const tokens = source.styleTokens ?? {name: 'content-os-dark', background_color: '#172033', foreground_color: '#f8fbff', accent_color: '#65d3b4', font_family: 'Inter, ui-sans-serif, system-ui'};
   if (tokens.name === 'content-os-subject-first') return <SubjectFirstPanel source={source} audioMode={audioMode} tokens={tokens} />;
   if (tokens.name === 'content-os-editorial') return <EditorialPanel source={source} audioMode={audioMode} tokens={tokens} />;
-  return <AbsoluteFill style={{backgroundColor: tokens.background_color, color: tokens.foreground_color, fontFamily: tokens.font_family, padding: 44}}>
-    <div style={{position: 'absolute', top: 70, left: 44, right: 44, height: 640, backgroundColor: '#000000', border: `2px solid ${tokens.accent_color}`, borderRadius: 24, overflow: 'hidden'}}>
-      <OffthreadVideo
-        src={staticFile(source.src)} trimBefore={source.trimBefore} trimAfter={source.trimAfter}
-        volume={audioMode === 'source' ? 1 : 0}
-        style={{width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#000000'}}
-      />
-    </div>
+  return <AbsoluteFill style={{backgroundColor: '#000000', color: tokens.foreground_color, fontFamily: tokens.font_family}}>
+    <FullCanvasVideo source={source} audioMode={audioMode} />
     {source.graphicText && source.graphicTreatment !== 'none' ? <PanelText text={source.graphicText} treatment={source.graphicTreatment} tokens={tokens} /> : null}
   </AbsoluteFill>;
 };
@@ -177,7 +174,7 @@ const SubjectFirstPanel: React.FC<{source: VideoSource; audioMode: RenderProps['
   </AbsoluteFill>
 );
 
-// Fit both preserved comparison halves to full canvas height; captions use an opaque plate.
+// Maximize both preserved comparison halves against the canvas, independent of captions.
 const StackedComparisonPanel: React.FC<{source: VideoSource; audioMode: RenderProps['audioMode']}> = ({source, audioMode}) => {
   const {width, height} = useVideoConfig();
   const tokens = source.styleTokens ?? {name: 'content-os-portrait-comparison', background_color: '#000000', foreground_color: '#f8fbff', accent_color: '#ca4c2c', font_family: 'Inter, ui-sans-serif, system-ui'};

@@ -56,7 +56,7 @@ function wrapCaption(text: string, width: number, measureText: (value: string) =
   return output.join('\n');
 }
 
-/** Match caption wrapping to the displayed font so the opaque caption plate fits its text. */
+/** Wrap captions to the canvas width without reserving or changing video area. */
 export function captionLayout<T extends {start_ms: number; end_ms: number; text: string}>(
   captions: T[], fallbackCaption: string | null | undefined, enabled: boolean,
   fallbackEnabled: boolean, width: number, editorial: boolean,
@@ -73,15 +73,15 @@ export function captionLayout<T extends {start_ms: number; end_ms: number; text:
   };
 }
 
-/** Maximize adjacent comparison panes inside the full canvas while preserving source proportions. */
+/** Maximize proportion-preserving comparison panes and center the touching group. */
 export function stackedComparisonLayout(width: number, height: number, sourceAspect: number, bottomCrop: number) {
   if (![width, height, sourceAspect, bottomCrop].every(Number.isFinite)
       || width <= 0 || height <= 0 || sourceAspect <= 0 || bottomCrop < 0 || bottomCrop > .4
   ) throw new Error('Invalid comparison geometry');
   const halfAspect = sourceAspect / (2 * (1 - bottomCrop));
-  const paneHeight = Math.floor(Math.min(height / 2, width / halfAspect));
-  const paneWidth = Math.min(width, Math.round(paneHeight * halfAspect));
-  const firstTop = Math.floor((height - 2 * paneHeight) / 2);
+  const paneHeight = Math.min(height / 2, width / halfAspect);
+  const paneWidth = paneHeight * halfAspect;
+  const firstTop = (height - 2 * paneHeight) / 2;
   return {paneWidth, paneHeight, firstTop, secondTop: firstTop + paneHeight,
-    left: Math.floor((width - paneWidth) / 2), videoHeight: `${100 / (1 - bottomCrop)}%`};
+    left: (width - paneWidth) / 2, videoHeight: `${100 / (1 - bottomCrop)}%`};
 }
