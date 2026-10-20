@@ -298,12 +298,16 @@ class PresentationRepairService:
         return evidence
 
 
-def measure_render_output(output, spec):
+def measure_render_output(output, spec, *, frame_range=None):
     """Shared probe/full-decode measurement; writes no admission or review."""
     from app.media.ffprobe import FFProbeAdapter
     from app.runtime import resolve_local_executable
     probe = FFProbeAdapter(command=resolve_local_executable("ffprobe")).probe(output)
     frames = max(scene.start_frame + scene.duration_frames for scene in spec.scenes)
+    if frame_range is not None:
+        if not 0 <= frame_range[0] < frame_range[1] <= frames:
+            raise ProductionRunNotReady(("presentation_preview_interval_invalid",))
+        frames = frame_range[1]-frame_range[0]
     expected_ms = frames * 1000 * spec.fps.denominator / spec.fps.numerator
     frame_ms = 1000 * spec.fps.denominator / spec.fps.numerator
     video = next(stream for stream in probe.metadata["streams"] if stream.get("codec_type") == "video")
@@ -323,6 +327,9 @@ def measure_render_output(output, spec):
         raise ProductionRunNotReady(("presentation_output_decode_failed",))
     with Path(output).open("rb") as stream:
         sha = hashlib.file_digest(stream,"sha256").hexdigest()
-    return dict(state="verified",sha256=sha,width=probe.width,height=probe.height,duration_ms=probe.duration_ms,
+    result = dict(state="verified",sha256=sha,width=probe.width,height=probe.height,duration_ms=probe.duration_ms,
         fps=probe.fps.model_dump(mode="json"),has_audio=True,video_duration_ms=video_ms,video_frames=frames,
         audio_duration_ms=audio_ms,audio_padding_tolerance_ms=audio_padding_ms,decode="pass",scope="technical_only_final_u_product_required")
+    if frame_range is not None:
+        result["preview_frame_range"] = list(frame_range)
+    return result

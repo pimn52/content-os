@@ -18,6 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from app.domain.models import ClipIndexJobPayload
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
 from app.planning_feasibility import planning_feasibility, planning_identity_context
@@ -115,6 +116,7 @@ class JobEnqueueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     idempotency_key: str = Field(min_length=1, max_length=500)
     project_id: UUID | None = None
+    clip_ids: list[UUID] | None = Field(default=None, min_length=1)
 
 
 class JobResponse(BaseModel):
@@ -3463,8 +3465,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="asset not found")
         if payload.project_id is not None and ProjectRepository(db).get(payload.project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
+        scope = None
+        if payload.clip_ids is not None:
+            known = {clip.id for clip in ClipRepository(db).list_by_asset(asset_id)}
+            if (job_type is not JobType.INDEX_CLIPS or len(set(payload.clip_ids)) != len(payload.clip_ids)
+                or not set(payload.clip_ids) <= known):
+                raise HTTPException(status_code=422, detail="clip_ids must uniquely select existing Clips of this Asset for index_clips")
+            scope = ClipIndexJobPayload(clip_ids=payload.clip_ids)
         now = datetime.now(timezone.utc)
-        job = Job(id=uuid4(), project_id=payload.project_id, type=job_type, idempotency_key=payload.idempotency_key, created_at=now, updated_at=now)
+        job = Job(id=uuid4(), project_id=payload.project_id, type=job_type, idempotency_key=payload.idempotency_key, created_at=now, updated_at=now, payload=scope)
         try:
             persisted = AssetJobTargetStore(db).enqueue(job, asset_id)
         except AssetJobIdempotencyConflict as exc:

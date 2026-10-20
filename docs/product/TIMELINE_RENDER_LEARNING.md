@@ -17,6 +17,10 @@ mixing/concatenation. Visual trim endpoints use the same frame ceiling as the
 timeline, avoiding empty frames at fractional scene boundaries. These technical
 properties do not replace listening/viewing or final human quality review.
 
+Render failures retain one private JSON diagnostic per Job attempt under the configured data root: failure stage, exception type, subprocess exit code and a bounded error summary with credentials, URLs and absolute local paths removed. The public failure code and accounting remain unchanged; the first diagnostic is never overwritten. Captured stderr does not reach API errors, and diagnostics do not grant retries or output admission.
+
+A one-shot Composition Render may be replaced once only when its original Job and runtime ProviderCall are both terminal `failed`, the call matches that Job and Run, and no accepted or ambiguous output exists. The replacement uses a new Job and ProviderCall identity; uncertain execution, missing failure evidence, revoked use or an existing output remains blocked.
+
 ## EditPlan / Visual Direction
 
 Voice and Talking produce or process audio/person media. A-roll and B-roll are
@@ -86,6 +90,18 @@ reviewed original complete frame and require authorization for that actual
 selection. Source viewport creation remains separate in the ordinary media
 panel; no automatic crop, detection or new evidence is inferred.
 
+Source geometry is now consumed during ordinary planning, before Render. For
+semantic comparisons, current source-analysis layout and subtitle rectangles
+select adjacent, proportion-preserving upper/lower viewports and the minimum
+bottom clearance, including under the default style. The explicit comparison
+style remains available. Unknown source geometry stops the affected scene;
+fixed60px trimming and a gap between comparison panes are not used. Ordinary
+footage with no suitable portrait alternative or useful editorial graphic stays
+complete and centered. The existing source-selection and EditPlan/VideoSpec
+contracts carry these decisions; see the media module for exact selection and
+evidence limits. Sampled source analysis and offline geometry tests do not
+establish full-interval visual quality or acceptance of a revised video.
+
 The ordinary draft scene editor now exposes existing creator-speaking,
 action-evidence and explanatory requirements, their reasons and source
 references, plus legacy/static-card/unsupported graphic intent. An additive
@@ -141,11 +157,12 @@ Normal conditional-choice/automatic layout remains unimplemented; known rights,
 crop suitability and human quality gates remain distinct from aesthetic tradeoffs.
 
 The opt-in `content-os-subject-first` portrait panel gives eligible Talking media
-a larger contain viewport and an optional compact heading, with captions outside
-it. It preserves source aspect rather than stretching or implicitly cropping.
-The existing portrait-panel Talking restriction remains. Wide uncropped footage
-will still be wide: this layout does not supply missing crop evidence, tracking
-or higher effective resolution. Existing profiles retain their former layout.
+and authorized USER/HISTORICAL B-roll a styled contain viewport, with captions
+outside it. B-roll support reuses the existing panel and does not crop, stretch,
+alter source captions or add text. It preserves source aspect; wide footage stays
+wide. This presentation choice does not supply crop evidence, tracking, higher
+effective resolution or suitability approval. Existing default profiles retain
+their former layout, and the revised output still needs real visual review.
 
 For authorized horizontal Talking footage with known burned-in subtitles, EditPlan can use a source-preserving `portrait_panel`: the complete, uncropped source sits inside a styled vertical panel, while optional semantic text remains outside its bounds. This is a presentation treatment, not subtitle removal, inpainting or a mutation of the source Asset. Timed captions over that panel remain disallowed when source subtitles are known.
 
@@ -322,8 +339,24 @@ remain required; unmatched or too-short evidence footage stays unresolved.
 Saved-plan Voice generation and QA keep their existing separate admission paths.
 
 The ordinary Render Worker executes both ordinary and scoped retained renders
-in `RenderVideoJobHandler`, sharing completion accounting and failure handling;
-there is no second Composition handler or selection/start contract. Private
+in `RenderVideoJobHandler`, sharing completion accounting and failure handling.
+An operator-authorized short-preview request also reuses this executor. Its
+exact composition-use receipt, separate authorization and exclusive frame range
+(at most ten seconds, shorter than the full timeline) bind one `preview` slot
+in the existing batch, a new Job and an independent `assisted_test` ledger key.
+It preserves the completed full-render slot and all history. Duplicate requests
+return the same preview; changed grants cannot replenish that slot and a failed
+preview cannot retry. One separately authorized `preview_correction` slot can
+reference that exact completed preview only when its output is still verified,
+the composition fingerprint and VideoSpec have changed, and the new authorization
+differs. It preserves the original preview, uses a new Job and independent call,
+and cannot be replenished by more grants. Current use, budget, frame bounds and
+revocation are still checked; a failed or uncertain original cannot enter it.
+The original VideoSpec, subtitle timing and Master remain
+unchanged: Remotion renders the authorized frames and FFmpeg takes audio from
+the same Master interval. Technical QA checks that short output; visual quality
+and full-video acceptance remain separate. This is an internal operator preview,
+not a new ordinary creator approval gate or a second rendering implementation. Private
 output persistence and once-only allowance remain scoped. Normal render GET/HEAD/Range access checks the owned Run, current
 permission, project and actual result hash under explicit internal purpose.
 Selected generated input/output bytes retain their noncommercial restriction across

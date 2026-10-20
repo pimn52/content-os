@@ -1651,6 +1651,7 @@ class PortraitPresentation(StrEnum):
 
     FULL_CANVAS = "full_canvas"
     PORTRAIT_PANEL = "portrait_panel"
+    STACKED_COMPARISON = "stacked_comparison"
 
 
 class SubtitleTreatment(StrEnum):
@@ -1708,6 +1709,8 @@ class EditPlanScene(ContractModel):
     crop_safety_end_ms: NonNegativeMs | None = None
     subtitle_treatment: SubtitleTreatment = SubtitleTreatment.TIMED_CAPTIONS
     burned_in_subtitles: Literal["unknown", "present", "absent"] = "unknown"
+    source_bottom_crop_ratio: float = Field(default=0,ge=0,le=.4,exclude_if=lambda v:v==0)
+    source_subtitle_evidence_reference: str | None = Field(default=None,max_length=500,exclude_if=lambda v:v is None)
     graphic_treatment: GraphicTreatment = GraphicTreatment.NONE
     graphic_text: str | None = Field(default=None, min_length=1, max_length=10_000)
     transition_intent: Literal["cut"] = "cut"
@@ -1715,6 +1718,10 @@ class EditPlanScene(ContractModel):
 
     @model_validator(mode="after")
     def presentation_is_complete(self) -> "EditPlanScene":
+        if bool(self.source_bottom_crop_ratio) != bool(self.source_subtitle_evidence_reference):
+            raise ValueError("source subtitle clearance requires crop geometry and evidence together")
+        if self.source_bottom_crop_ratio and self.selected_source_kind not in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET}:
+            raise ValueError("source subtitle clearance is only available for original footage")
         source_requires_media = self.selected_source_kind in {
             SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO,
         }
@@ -1732,12 +1739,24 @@ class EditPlanScene(ContractModel):
                 raise ValueError("verified static crop interval must be valid")
         elif any(value is not None for value in crop_values):
             raise ValueError("crop safety evidence is only valid for verified_static_crop")
-        if self.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL and (
-            self.visual_role is not EditVisualRole.TALKING
-            or self.selected_source_kind is not SourceKind.AI_VIDEO
-            or self.framing_policy is not TalkingFramingPolicy.FACE_SAFE_CONTAIN
-        ):
-            raise ValueError("portrait_panel requires a face-safe Talking visual without a crop")
+        if self.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL:
+            talking_panel = (
+                self.visual_role is EditVisualRole.TALKING
+                and self.selected_source_kind is SourceKind.AI_VIDEO
+            )
+            footage_panel = (
+                self.visual_role is EditVisualRole.FOOTAGE
+                and self.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+            )
+            if (not (talking_panel or footage_panel)
+                or self.framing_policy is not TalkingFramingPolicy.FACE_SAFE_CONTAIN):
+                raise ValueError("portrait_panel requires complete-frame Talking or authorized footage without a crop")
+        if self.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
+            if (self.visual_role is not EditVisualRole.FOOTAGE
+                or self.selected_source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                or self.framing_policy is not TalkingFramingPolicy.FACE_SAFE_CONTAIN
+                or self.subtitle_treatment is not SubtitleTreatment.TIMED_CAPTIONS):
+                raise ValueError("stacked_comparison requires authorized footage and timed narration captions")
         if self.visual_role is EditVisualRole.GRAPHIC:
             if self.graphic_treatment is GraphicTreatment.NONE or self.graphic_text is None:
                 raise ValueError("graphic scenes require semantic treatment and display text")
@@ -2632,6 +2651,17 @@ class TalkingRun(ContractModel):
         return self
 
 
+class ClipIndexJobPayload(ContractModel):
+    clip_ids: list[UUID] = Field(min_length=1)
+
+    @field_validator("clip_ids")
+    @classmethod
+    def unique_clip_scope(cls, values):
+        if len(set(values)) != len(values):
+            raise ValueError("clip_ids must be unique")
+        return sorted(values, key=str)
+
+
 class Job(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID | None = None
@@ -2643,7 +2673,7 @@ class Job(ContractModel):
     updated_at: AwareDatetime
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | TalkingQaJobPayload | TalkingRunPreviewJobPayload | None = None
+    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | TalkingQaJobPayload | TalkingRunPreviewJobPayload | ClipIndexJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
@@ -2652,10 +2682,10 @@ class Job(ContractModel):
             # can reject RENDER as an unsupported asset job. The render API
             # always persists this typed payload, and the handler rejects a
             # missing payload before side effects.
-            if self.payload is not None and self.project_id != self.payload.project_id:
-                raise ValueError("render job project_id must match its payload")
             if self.payload is not None and not isinstance(self.payload, RenderVideoJobPayload):
                 raise ValueError("render job payload must be a RenderVideoJobPayload")
+            if self.payload is not None and self.project_id != self.payload.project_id:
+                raise ValueError("render job project_id must match its payload")
         elif self.type is JobType.GENERATE_VOICE:
             if self.payload is not None and not isinstance(self.payload, VoiceGenerationJobPayload):
                 raise ValueError("voice generation job payload must be a VoiceGenerationJobPayload")
@@ -2689,6 +2719,9 @@ class Job(ContractModel):
         elif self.type is JobType.PREPARE_TALKING_RUN_PREVIEW:
             if not isinstance(self.payload, TalkingRunPreviewJobPayload) or self.project_id != self.payload.project_id:
                 raise ValueError("Talking preview job requires matching typed project payload")
+        elif self.type is JobType.INDEX_CLIPS:
+            if self.payload is not None and not isinstance(self.payload, ClipIndexJobPayload):
+                raise ValueError("index_clips payload must be a ClipIndexJobPayload")
         elif self.payload is not None:
             raise ValueError("only declared typed jobs may contain a payload")
         return self

@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Mapping, Sequence
 from uuid import UUID
 
-from app.db import ClipRepository, Database
+from app.db import AssetRepository, ClipRepository, Database
 from app.domain.models import Clip
-from app.providers.vision import ClipVisualAnalysis
+from app.providers.vision import ClipVisualAnalysis, validate_visual_geometry
 
 
 class VisualMetadataError(RuntimeError):
@@ -39,6 +39,8 @@ class VisualMetadata:
     mouth_visibility: float | None = None
     talking_candidate: bool = False
     keyframe_path: str | None = None
+    comparison_layout: str = "unknown"
+    subtitle_regions: tuple[tuple[float,float,float,float], ...] | None = None
 
     @classmethod
     def for_clip(cls, clip: Clip, keyframe_path: str | Path, analysis: ClipVisualAnalysis) -> "VisualMetadata":
@@ -52,6 +54,7 @@ class VisualMetadata:
             shot_type=analysis.shot_type, quality_score=analysis.quality_score,
             face_visibility=analysis.face_visibility, mouth_visibility=analysis.mouth_visibility,
             talking_candidate=analysis.talking_candidate,
+            comparison_layout=analysis.comparison_layout,subtitle_regions=analysis.subtitle_regions,
         )
 
 
@@ -74,6 +77,16 @@ def map_visual_metadata(clip: Clip, result: VisualMetadata | Mapping[str, object
     return Clip.model_validate(merged)
 
 
+def selected_visual_clips(clips: Sequence[Clip], clip_ids: Sequence[UUID] | None) -> list[Clip]:
+    """Preserve stored ordering and reject unknown/duplicate explicit scopes."""
+    if clip_ids is None:
+        return list(clips)
+    wanted = set(clip_ids)
+    if not wanted or len(wanted) != len(clip_ids) or not wanted <= {clip.id for clip in clips}:
+        raise VisualMetadataMismatch("selected Clip scope must be nonempty, unique and belong to the Asset")
+    return [clip for clip in clips if clip.id in wanted]
+
+
 class ClipVisualMetadataPersistence:
     """Atomically apply one visual result and keyframe per persisted Clip."""
 
@@ -86,6 +99,7 @@ class ClipVisualMetadataPersistence:
         asset_id: UUID,
         results: Sequence[VisualMetadata | Mapping[str, object] | object],
         keyframe_paths: Sequence[str | Path],
+        *, selected_clip_ids: Sequence[UUID] | None = None,
     ) -> list[Clip]:
         normalized = [_coerce(result) for result in results]
         if len(normalized) != len(keyframe_paths):
@@ -98,7 +112,7 @@ class ClipVisualMetadataPersistence:
                 raise VisualMetadataMismatch("visual result keyframe does not match supplied keyframe")
         self.db.connection.execute("BEGIN IMMEDIATE")
         try:
-            clips = self.clips.list_by_asset(asset_id)
+            clips = selected_visual_clips(self.clips.list_by_asset(asset_id), selected_clip_ids)
             if not clips:
                 raise NoClipsForVisualMetadata(f"asset {asset_id} has no Clips")
             if len(normalized) != len(clips):
@@ -110,6 +124,15 @@ class ClipVisualMetadataPersistence:
             mapped = [map_visual_metadata(clip, result) for clip, result in zip(clips, normalized)]
             for clip in mapped:
                 self.clips.update(clip)
+            assets = AssetRepository(self.db)
+            asset = assets.get(asset_id)
+            if asset is not None:
+                geometry = dict(asset.metadata.get("visual_analysis",{}))
+                for clip,result in zip(clips,normalized):
+                    geometry[str(clip.id)] = dict(source_content_hash=asset.content_hash,start_ms=clip.start_ms,end_ms=clip.end_ms,
+                        comparison_layout=result.comparison_layout,subtitle_regions=None if result.subtitle_regions is None else [list(box) for box in result.subtitle_regions],
+                        evidence_reference=f"vision-keyframe:{clip.id}",coverage="sampled_keyframe")
+                assets.update(asset.model_copy(update={"metadata":{**asset.metadata,"visual_analysis":geometry}}))
             self.db.connection.commit()
             return mapped
         except BaseException:
@@ -140,12 +163,15 @@ def _coerce(result: VisualMetadata | Mapping[str, object] | object) -> VisualMet
     talking = value("talking_candidate", False)
     if not isinstance(talking, bool):
         raise ValueError("talking_candidate must be a boolean")
+    layout,regions=value("comparison_layout","unknown"),value("subtitle_regions")
+    validate_visual_geometry(layout,regions)
     return VisualMetadata(
         clip_id=clip_id, asset_id=asset_id,
         visual_description=_optional_text(value("visual_description"), 5_000), people=people, objects=objects,
         location=_optional_text(value("location"), 500), action=_optional_text(value("action"), 500), shot_type=_optional_text(value("shot_type"), 100),
         quality_score=scores["quality_score"], face_visibility=scores["face_visibility"], mouth_visibility=scores["mouth_visibility"],
         talking_candidate=talking, keyframe_path=None if value("keyframe_path") is None else str(value("keyframe_path")),
+        comparison_layout=layout,subtitle_regions=regions,
     )
 
 

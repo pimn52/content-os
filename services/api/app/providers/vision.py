@@ -66,6 +66,9 @@ class ClipVisualAnalysis:
     face_visibility: float | None
     mouth_visibility: float | None
     talking_candidate: bool
+    comparison_layout: str = "unknown"
+    # Normalized source coordinates; None means unknown, () means none observed.
+    subtitle_regions: tuple[tuple[float, float, float, float], ...] | None = None
 
     def __post_init__(self) -> None:
         _optional_text("visual_description", self.visual_description, 5_000)
@@ -79,6 +82,20 @@ class ClipVisualAnalysis:
         _score("mouth_visibility", self.mouth_visibility)
         if not isinstance(self.talking_candidate, bool):
             raise ValueError("talking_candidate must be a boolean")
+        validate_visual_geometry(self.comparison_layout, self.subtitle_regions)
+
+
+def validate_visual_geometry(layout, regions):
+    if layout not in {"unknown", "none", "side_by_side_equal_halves"}:
+        raise ValueError("unsupported comparison layout")
+    if regions is not None:
+        if not isinstance(regions, (tuple, list)) or len(regions) > 100:
+            raise ValueError("invalid subtitle regions")
+        for box in regions:
+            if (not isinstance(box, (tuple, list)) or len(box) != 4
+                or any(isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or not 0 <= v <= 1 for v in box)
+                or box[2] <= 0 or box[3] <= 0 or box[0]+box[2] > 1 or box[1]+box[3] > 1):
+                raise ValueError("invalid normalized subtitle rectangle")
 
 
 class VisionProvider(Protocol):
@@ -125,7 +142,7 @@ _REQUIRED = (
     "quality_score", "face_visibility", "mouth_visibility", "talking_candidate",
 )
 _ANALYSIS_SCHEMA: dict[str, object] = {
-    "type": "object", "additionalProperties": False, "required": list(_REQUIRED),
+    "type": "object", "additionalProperties": False, "required": [*_REQUIRED,"comparison_layout","subtitle_regions"],
     "properties": {
         "visual_description": {"type": ["string", "null"], "maxLength": 5_000},
         "people": {"type": "array", "maxItems": 30, "items": {"type": "string", "minLength": 1, "maxLength": 500}},
@@ -137,13 +154,19 @@ _ANALYSIS_SCHEMA: dict[str, object] = {
         "face_visibility": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "mouth_visibility": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "talking_candidate": {"type": "boolean"},
+        "comparison_layout": {"type":"string","enum":["unknown","none","side_by_side_equal_halves"]},
+        "subtitle_regions": {"type":["array","null"],"maxItems":100,"items":{"type":"array","minItems":4,"maxItems":4,
+            "items":{"type":"number","minimum":0,"maximum":1}}},
     },
 }
 _FIXED_PROMPT = (
     "Analyze this single local video keyframe for media-library retrieval. Return only the requested JSON schema. "
     "Describe visible people only with non-identifying visual roles or appearance. Do not identify, name, recognize, "
     "or guess identity. Do not infer sensitive attributes, including race, ethnicity, nationality, religion, health, "
-    "disability, age, gender identity, sexual orientation, or mental state. Only state what is visibly supported."
+    "disability, age, gender identity, sexual orientation, or mental state. Only state what is visibly supported. "
+    "Report equal left/right comparison panes only when visible. Locate burned-in subtitle rectangles as normalized "
+    "[x,y,width,height], including outlines/shadows; [] means none observed and null means unknown. "
+    "Do not include bitrate labels or other evidence labels as subtitles. These are sampled frame facts, not crop-safety approval."
 )
 
 
@@ -263,7 +286,8 @@ def _parse_response(body: bytes) -> ClipVisualAnalysis:
         value = json.loads(texts[0])
     except json.JSONDecodeError as exc:
         raise VisionProviderResponseError("vision provider returned invalid structured output") from exc
-    if not isinstance(value, dict) or set(value) != set(_REQUIRED):
+    if (not isinstance(value, dict) or not set(_REQUIRED) <= set(value)
+        or set(value)-set(_REQUIRED)-{"comparison_layout","subtitle_regions"}):
         raise VisionProviderResponseError("vision provider returned an incomplete visual analysis")
     try:
         return ClipVisualAnalysis(
@@ -272,6 +296,8 @@ def _parse_response(body: bytes) -> ClipVisualAnalysis:
             shot_type=value["shot_type"], quality_score=value["quality_score"],
             face_visibility=value["face_visibility"], mouth_visibility=value["mouth_visibility"],
             talking_candidate=value["talking_candidate"],
+            comparison_layout=value.get("comparison_layout","unknown"),
+            subtitle_regions=value.get("subtitle_regions"),
         )
     except (TypeError, ValueError) as exc:
         raise VisionProviderResponseError("vision provider returned an invalid visual analysis") from exc

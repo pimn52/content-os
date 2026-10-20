@@ -47,6 +47,41 @@ class _Provider:
         return ClipVisualAnalysis(f"new scene {index}", ("person",), ("desk",), "office", "working", "medium", 0.8, 0.7, 0.6, False)
 
 
+def test_source_geometry_is_persisted_once_and_consumed_by_normal_edit_plan(tmp_path):
+    from dataclasses import replace
+    from app.assembly.edit_plan import presentation_for_style,_default_edit_plan
+    from app.assembly.video_spec import _talking_visual_treatment
+    from app.domain.models import CandidateAsset,CostCategory,Project,UsageCost,VisualStyleTokens,VisualIntent
+    from test_video_spec_assembly import _scene
+    db,asset,clips,paths=_fixture(tmp_path)
+    asset=AssetRepository(db).update(asset.model_copy(update={'width':1280,'height':720}))
+    class Geometry(_Provider):
+        def analyze(self,path):
+            return replace(super().analyze(path),comparison_layout='side_by_side_equal_halves',subtitle_regions=((.3,.88,.4,.08),))
+    try:
+        MediaVisionPipeline(db,Geometry()).process(asset,clips,paths)
+        stored=AssetRepository(db).get(asset.id)
+        facts=stored.metadata['visual_analysis'][str(clips[0].id)]
+        assert facts['source_content_hash']==asset.content_hash and facts['start_ms']==0 and facts['end_ms']==1000
+        assert facts['coverage']=='sampled_keyframe'
+        project=Project(title='Geometry',topic='Geometry',ip_profile_id=__import__('uuid').uuid4(),fps=asset.fps,created_at=asset.imported_at)
+        scene=_scene(project,0).model_copy(update={'visual_intent':VisualIntent(subject='bitrate comparison',action='compare')})
+        candidate=CandidateAsset(scene_plan_id=scene.id,source_kind=asset.source_kind,asset_id=asset.id,clip_id=clips[0].id,
+            match_score=1,why=['synthetic source'],estimated_cost=UsageCost(category=CostCategory.USER_ASSET,amount=None))
+        entry=_default_edit_plan(project,[scene],{scene.id:candidate}).scenes[0]
+        planned=presentation_for_style(entry,VisualStyleTokens(),stored,scene_plan=scene,clip=clips[0])
+        mode,ref,ratio=_talking_visual_treatment(stored,planned)
+        assert planned.portrait_presentation.value=='stacked_comparison' and mode.value=='bottom_crop_contain'
+        assert ref==facts['evidence_reference'] and 0<ratio<.2
+        assert ClipRepository(db).get(clips[0].id).transcript=='keep one'
+        assert 'source_bottom_crop_ratio' not in entry.model_dump(mode='json')  # Historical default serialization stays stable.
+        changed=stored.model_copy(update={'content_hash':'b'*64})
+        import pytest
+        with pytest.raises(ValueError,match='geometry_unknown'):
+            presentation_for_style(entry,VisualStyleTokens(name='content-os-portrait-comparison'),changed,scene_plan=scene,clip=clips[0])
+    finally:db.close()
+
+
 def test_pipeline_provider_order_and_persistence(tmp_path: Path):
     db, asset, clips, paths = _fixture(tmp_path)
     try:
@@ -57,6 +92,43 @@ def test_pipeline_provider_order_and_persistence(tmp_path: Path):
         persisted = ClipRepository(db).list_by_asset(asset.id)
         assert persisted == list(result.clips)
         assert [clip.transcript for clip in persisted] == ["keep one", "keep two"]
+    finally:
+        db.close()
+
+
+def test_explicit_clip_refresh_preserves_unselected_clip_and_geometry(tmp_path):
+    db, asset, clips, paths = _fixture(tmp_path)
+    try:
+        full = MediaVisionPipeline(db, _Provider()).process(asset, clips, paths)
+        untouched = ClipRepository(db).get(clips[0].id)
+        old_facts = full.asset.metadata['visual_analysis'][str(clips[0].id)]
+        provider = _Provider()
+        refreshed = MediaVisionPipeline(db, provider).process(full.asset, clips[1:], paths[1:],
+            selected_clip_ids=[clips[1].id])
+        assert provider.paths == [paths[1]]
+        assert [clip.id for clip in refreshed.clips] == [clips[1].id]
+        assert ClipRepository(db).get(clips[0].id) == untouched
+        assert refreshed.asset.metadata['visual_analysis'][str(clips[0].id)] == old_facts
+        from uuid import uuid4
+        from app.media.vision import VisualMetadataMismatch
+        for scope in ([], [clips[1].id, clips[1].id], [uuid4()]):
+            with pytest.raises(VisualMetadataMismatch):
+                MediaVisionPipeline(db, provider).process(full.asset, clips[1:], paths[1:], selected_clip_ids=scope)
+        assert provider.paths == [paths[1]]
+    finally:
+        db.close()
+
+
+def test_scoped_provider_failure_preserves_all_source_facts(tmp_path):
+    db, asset, clips, paths = _fixture(tmp_path)
+    try:
+        initial = MediaVisionPipeline(db, _Provider()).process(asset, clips, paths)
+        before = ClipRepository(db).list_by_asset(asset.id)
+        with pytest.raises(RuntimeError, match='provider failure'):
+            MediaVisionPipeline(db, _Provider(fail_at=1)).process(initial.asset, before[1:], paths[1:],
+                selected_clip_ids=[clips[1].id])
+        assert ClipRepository(db).list_by_asset(asset.id) == before
+        assert AssetRepository(db).get(asset.id) == initial.asset
     finally:
         db.close()
 

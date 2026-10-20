@@ -221,6 +221,7 @@ def build_production_preflight(
             need = "none"
         excluded = []
         blocked_candidates = set()
+        presentation_failures = {}
         for item in candidates:
             item_source = assets.get(item.asset_id) if item.asset_id is not None else None
             burned_state, _ = _subtitle_state(item_source)
@@ -228,7 +229,12 @@ def build_production_preflight(
                 "burned_in_subtitles": burned_state,
                 "subtitle_treatment": SubtitleTreatment.NONE if burned_state == "present" else SubtitleTreatment.TIMED_CAPTIONS,
             })
-            entry = presentation_for_style(entry, style_tokens, item_source)
+            try:
+                entry = presentation_for_style(entry, style_tokens, item_source, scene_plan=scene,
+                    clip=clips.get(item.clip_id) if item.clip_id else None)
+            except EditPlanPreflightError as exc:
+                presentation_failures[(item.asset_id,item.clip_id,item.source_kind)] = str(exc)
+                continue
             matches = use_service.evaluate(item, presentation(entry, width=project.resolution_width,
                 height=project.resolution_height, style=style_tokens), use_records)
             if matches:
@@ -267,6 +273,12 @@ def build_production_preflight(
         if reviewed_native and burned == "unknown":
             subtitle = SubtitleTreatment.NONE
         reasons: list[str] = []
+        if candidate is not None and (candidate.asset_id,candidate.clip_id,candidate.source_kind) in presentation_failures:
+            failure = presentation_failures[(candidate.asset_id,candidate.clip_id,candidate.source_kind)]
+            stop.append(f"visual_presentation_unresolved:{scene.scene_id}:{failure}")
+            reasons.append(failure)
+        if asset is not None and role is EditVisualRole.FOOTAGE and asset.width > asset.height:
+            reasons.append("prefer compatible portrait or verified same-interval derivative; without a safe alternative preserve full source centered, no empty top panel")
         if crop_outcomes.get(str(scene.id)) == "unusable":
             reasons.append("proposed interval/crop has persisted face-boundary failure; use another visual route")
         if subtitle_reason:
@@ -378,18 +390,25 @@ def build_production_preflight(
         try:
             base_plan = resolve_edit_plan(project, scenes, selections, clip_intervals=intervals, supplied=None)
             by_scene = {decision.scene_plan_id: decision for decision in decisions}
+            scene_by_id = {scene.id: scene for scene in scenes}
             preliminary_edit_plan = EditPlan(
                 project_id=project.id, style_tokens=style_tokens,
                 scenes=[presentation_for_style(entry.model_copy(update={
                     "subtitle_treatment": by_scene[entry.scene_plan_id].subtitle_treatment,
                     "burned_in_subtitles": by_scene[entry.scene_plan_id].burned_in_subtitles,
                 }), style_tokens, assets.get(selections[entry.scene_plan_id].asset_id)
-                    if selections[entry.scene_plan_id].asset_id is not None else None) for entry in base_plan.scenes],
+                    if selections[entry.scene_plan_id].asset_id is not None else None,
+                    scene_plan=scene_by_id[entry.scene_plan_id],clip=clips.get(entry.selected_clip_id) if entry.selected_clip_id else None) for entry in base_plan.scenes],
             )
             resolve_edit_plan(project, scenes, selections, clip_intervals=intervals, supplied=preliminary_edit_plan)
-        except (EditPlanPreflightError, ValueError):
+            planned={entry.scene_plan_id:entry for entry in preliminary_edit_plan.scenes}
+            decisions=[decision.model_copy(update={
+                "subtitle_treatment":planned[decision.scene_plan_id].subtitle_treatment,
+                "burned_in_subtitles":planned[decision.scene_plan_id].burned_in_subtitles,
+            }) for decision in decisions]
+        except (EditPlanPreflightError, ValueError) as exc:
             preliminary_edit_plan = None
-            stop.append("preliminary_edit_plan_conflict")
+            stop.extend(("preliminary_edit_plan_conflict",f"visual_presentation_unresolved:{exc}"))
     cost = estimate_whole_production(selected, required_scene_count=len(scenes), actions=actions)
     policy_repo = BudgetPolicyRepository(db)
     policies = [policy for policy in (policy_repo.get_by_project(None), policy_repo.get_by_project(project.id)) if policy is not None]
@@ -459,6 +478,9 @@ def _retained_preflight(consumer,project,draft,context,expected_fingerprint):
         reviewed = True
         consumer.retained_batch(project.id,context["selection"])
         consumer._check_render_budget(project.id,context)
+        blocker = consumer.render_dispatch_blocker(project.id,context["selection"])
+        if blocker:
+            stop.append(blocker)
     except ValueError as exc:
         stop.append(str(exc))
     if expected_fingerprint is not None and expected_fingerprint != context["request_sha256"]:
@@ -475,7 +497,9 @@ def _retained_preflight(consumer,project,draft,context,expected_fingerprint):
             source_authorization_reference=None if item["asset"] is None else item["asset"].authorization_reference,production_need="none",
             suitability="reviewed_talking_run" if item["run"] is not None else "known_deterministic" if kind is SourceKind.TYPOGRAPHY else "reviewed_retained_media" if reviewed else "unknown",
             subtitle_treatment=entry.subtitle_treatment,burned_in_subtitles=entry.burned_in_subtitles,
-            graphic_treatment=entry.graphic_treatment,reasons=tuple(candidate.why),
+            graphic_treatment=entry.graphic_treatment,reasons=tuple(candidate.why)+(
+                ("no compatible safe portrait source; preserve full landscape footage centered",)
+                if item["asset"] is not None and item["asset"].width>item["asset"].height and entry.portrait_presentation.value=="full_canvas" else ()),
             visual_dependency_fingerprint=_digest(next(p for p in context["proof"]["inputs"] if p["scene_id"]==str(scene.id)))))
     actions = (_action("voice",None,False,0,"reuse approved Master without generation",CostCategory.VOICE,Decimal("0"),context["request_sha256"]),
         _action("render",None,True,1,"existing once-only local retained-media render",CostCategory.RENDER,Decimal("0"),context["request_sha256"]))
@@ -522,6 +546,41 @@ def _choose_candidate(scene: ScenePlan, candidates: tuple[CandidateAsset, ...], 
     recommended = next((candidate for candidate in candidates if candidate.recommended), candidates[0])
     if recommended.requires_capture or recommended.source_kind is SourceKind.CAPTURE:
         return None, "capture"
+    if recommended.source_kind in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET}:
+        source = assets.get(recommended.asset_id)
+        original = clips.get(recommended.clip_id)
+        if source is not None and original is not None and source.width > source.height:
+            # Reuse an existing exact-source portrait derivative before
+            # proposing another crop or asking for different footage.
+            for asset in assets.list():
+                meta = asset.metadata.get("source_derivation",{})
+                interval = meta.get("source_interval",{})
+                if (asset.source_kind is not source.source_kind or asset.width>asset.height or meta.get("source_asset_id")!=str(source.id)
+                    or meta.get("source_content_hash")!=source.content_hash
+                    or interval.get("start_ms")!=original.start_ms
+                    or interval.get("end_ms")!=original.end_ms):
+                    continue
+                # Cropping one half out of a comparison destroys its evidence.
+                intent=" ".join((scene.purpose,scene.visual_intent.description or "",scene.visual_intent.action or "")).lower()
+                if any(t in intent for t in ("对比","比较","comparison","contrast")) and meta.get("crop_window",{}).get("width")!=source.width:
+                    continue
+                from app.media import VerticalSourceDerivationService,MediaImporter,FFProbeAdapter
+                for derived in clips.list_by_asset(asset.id):
+                    try:
+                        root=getattr(assets.db,"data_root",None)
+                        if root is None:continue
+                        VerticalSourceDerivationService(assets.db,root,MediaImporter(assets.db,root,FFProbeAdapter())).verify_existing(asset,derived)
+                    except (ValueError,RuntimeError,OSError,KeyError):
+                        continue
+                    if derived.end_ms-derived.start_ms>=scene.duration_target_ms:
+                        return recommended.model_copy(update=dict(asset_id=asset.id,clip_id=derived.id,source_kind=asset.source_kind,
+                            why=[*recommended.why,"verified same-source same-interval portrait derivative"])),"none"
+            for item in candidates:
+                asset=assets.get(item.asset_id) if item.asset_id else None
+                if (item.source_kind in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET}
+                    and item.match_score>=recommended.match_score and asset is not None and asset.width<=asset.height
+                    and not asset.metadata.get("source_derivation")):
+                    return item.model_copy(update={"why":[*item.why,"equally relevant native portrait footage preferred before rendering"]}),"none"
     return recommended, "none"
 
 

@@ -90,10 +90,39 @@ class RuntimeInventoryStore:
     def read(self, descriptor: RuntimeInventoryDescriptor) -> RuntimeInventory:
         return self._read(self._descriptor(descriptor), RuntimeInventory)
 
-    def read_v2(self, descriptor: MaintainedRuntimeInventoryDescriptor) -> MaintainedRuntimeInventory:
-        return self._read(self._descriptor(descriptor, MaintainedRuntimeInventoryDescriptor), MaintainedRuntimeInventory)
+    def read_v2(self, descriptor: MaintainedRuntimeInventoryDescriptor, *, parsed_cache=None) -> MaintainedRuntimeInventory:
+        """Read a v2 manifest, optionally reusing its parse within one caller scope.
+
+        Cache hits still read and hash the content-addressed file. The cache
+        contains only immutable parsed data and must not outlive its validation.
+        """
+        descriptor = self._descriptor(descriptor, MaintainedRuntimeInventoryDescriptor)
+        key = (descriptor.sha256, descriptor.size_bytes, descriptor.file_count,
+            descriptor.directory_count, descriptor.total_file_bytes)
+        if parsed_cache is not None and key in parsed_cache:
+            inventory = parsed_cache[key]
+            if type(inventory) is not MaintainedRuntimeInventory:
+                raise RuntimeInventoryError("execution_runtime_inventory_invalid")
+            self._verify_bytes(descriptor)
+            return inventory
+        inventory = self._read(descriptor, MaintainedRuntimeInventory)
+        if parsed_cache is not None:
+            parsed_cache[key] = inventory
+        return inventory
 
     def _read(self, descriptor, inventory_type):
+        raw = self._verify_bytes(descriptor)
+        try:
+            inventory = inventory_type.model_validate_json(raw)
+            # Also rejects duplicate JSON keys, noncanonical numbers/whitespace
+            # and traversal order variants on disk. Producers canonicalize once.
+            if inventory.canonical_bytes() != raw or inventory.descriptor != descriptor:
+                raise ValueError()
+            return inventory
+        except (ValueError, TypeError):
+            raise RuntimeInventoryError("execution_runtime_inventory_invalid") from None
+
+    def _verify_bytes(self, descriptor):
         path = self._path(descriptor)
         try:
             if not stat.S_ISREG(path.lstat().st_mode):
@@ -104,15 +133,7 @@ class RuntimeInventoryStore:
             raise RuntimeInventoryError("execution_runtime_inventory_unavailable") from None
         if len(raw) != descriptor.size_bytes or hashlib.sha256(raw).hexdigest() != descriptor.sha256:
             raise RuntimeInventoryError("execution_runtime_inventory_changed")
-        try:
-            inventory = inventory_type.model_validate_json(raw)
-            # Also rejects duplicate JSON keys, noncanonical numbers/whitespace
-            # and traversal order variants on disk. Producers canonicalize once.
-            if inventory.canonical_bytes() != raw or inventory.descriptor != descriptor:
-                raise ValueError()
-            return inventory
-        except (ValueError, TypeError):
-            raise RuntimeInventoryError("execution_runtime_inventory_invalid") from None
+        return raw
 
     def install(self, inventory: RuntimeInventory) -> RuntimeInventoryDescriptor:
         """Publish complete bytes atomically without overwriting existing hashes.

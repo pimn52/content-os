@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, ImageAssetRepository
-from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, MasterNarration, PortraitPresentation, ProjectFormat, RationalFps, SourceKind, TranscriptSegment, VideoScene, VideoSpec, VideoVisual
+from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, MasterNarration, PortraitPresentation, ProjectFormat, RationalFps, SourceKind, SubtitleTreatment, TranscriptSegment, VideoScene, VideoSpec, VideoVisual
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, UnauthorizedVisualError
 
 
@@ -350,13 +350,66 @@ def test_remotion_adapter_rejects_remote_unauthorized_and_unsupported_visuals(tm
         db.close()
 
 
-def test_remotion_adapter_rejects_a_portrait_panel_for_non_talking_media(tmp_path: Path) -> None:
+def test_remotion_adapter_renders_authorized_footage_in_a_portrait_panel_without_cropping(tmp_path: Path) -> None:
     db, _, _, spec = _setup(tmp_path)
+    runner = _Runner()
     try:
-        panel = spec.model_copy(update={"scenes": [spec.scenes[0].model_copy(update={"portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})]})
+        asset = AssetRepository(db).get(spec.scenes[0].visual.asset_id)
+        asset=AssetRepository(db).update(asset.model_copy(update={"width": 1920, "height": 1080}))
+        panel_scene = spec.scenes[0].model_copy(update={"portrait_presentation": PortraitPresentation.PORTRAIT_PANEL})
+        panel = spec.model_copy(update={"scenes": [panel_scene]})
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner).render(
+            panel, tmp_path / "panel.mp4"
+        )
+        props = runner.calls[0][3]["sceneSources"]["scene_01"]
+        assert props["portraitPresentation"] == "portrait_panel"
+        assert props["verticalReframeMode"] == "contain"
+        assert runner.staged_bytes[props["src"]] == Path(asset.source_file).read_bytes()
+
+        asset=AssetRepository(db).update(asset.model_copy(update={"metadata":{**asset.metadata,'visual_analysis':{
+            str(spec.scenes[0].visual.clip_id):dict(source_content_hash=asset.content_hash,start_ms=0,end_ms=asset.duration_ms,
+                comparison_layout='side_by_side_equal_halves',subtitle_regions=[],evidence_reference='synthetic-geometry')}}}))
+        stacked_scene = panel_scene.model_copy(update={
+            "portrait_presentation": PortraitPresentation.STACKED_COMPARISON,
+            "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
+        })
+        stacked_runner = _Runner()
+        RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "stacked-renderer"), runner=stacked_runner).render(
+            panel.model_copy(update={"scenes": [stacked_scene]}), tmp_path / "stacked.mp4"
+        )
+        stacked_props = stacked_runner.calls[0][3]["sceneSources"]["scene_01"]
+        assert stacked_props["portraitPresentation"] == "stacked_comparison"
+        assert stacked_props["verticalReframeMode"] == "contain"
+        assert stacked_runner.staged_bytes[stacked_props["src"]] == Path(asset.source_file).read_bytes()
+        assert stacked_props['sourceAspectRatio']==16/9
+        facts=asset.metadata['visual_analysis'][str(spec.scenes[0].visual.clip_id)]
+        facts['subtitle_regions']=[[.3,.88,.4,.08]]
+        AssetRepository(db).update(asset)
+        from app.assembly.edit_plan import comparison_clearance
+        ratio,reference=comparison_clearance(asset,ClipRepository(db).get(spec.scenes[0].visual.clip_id))
+        cropped=stacked_scene.model_copy(update={'visual':VideoVisual.model_validate({**stacked_scene.visual.model_dump(),
+            'vertical_reframe_mode':'bottom_crop_contain','source_bottom_crop_ratio':ratio,'vertical_reframe_evidence_reference':reference})})
+        cropped_runner=_Runner()
+        RemotionRenderer(AssetRepository(db),ClipRepository(db),renderer_dir=_renderer_project(tmp_path/'cropped-stack'),runner=cropped_runner).render(
+            panel.model_copy(update={'scenes':[cropped]}),tmp_path/'cropped-stack.mp4')
+        assert len(cropped_runner.calls)==1  # CSS clipping, no whole-asset FFmpeg transcode.
+        cropped_props=cropped_runner.calls[0][3]['sceneSources']['scene_01']
+        assert cropped_props['sourceBottomCropRatio']==ratio and cropped_props['sourceAspectRatio']==16/9
+        facts['subtitle_regions']=[];AssetRepository(db).update(asset)
+        AssetRepository(db).update(asset.model_copy(update={"width": 1280, "height": 800}))
+        with pytest.raises(RenderInputError, match="requires a 16:9 source"):
+            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "non-16-9-renderer"), runner=_Runner()).render(
+                panel.model_copy(update={"scenes": [stacked_scene]}), tmp_path / "non-16-9.mp4"
+            )
+
+        unsafe_scene = panel_scene.model_copy(update={"visual": panel_scene.visual.model_copy(update={
+            "vertical_reframe_mode": "bottom_crop_contain",
+            "source_bottom_crop_ratio": 0.1,
+            "vertical_reframe_evidence_reference": "old-sampled-sheet",
+        })})
         with pytest.raises(RenderInputError, match="portrait_panel"):
-            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "renderer"), runner=_Runner()).render(
-                panel, tmp_path / "panel.mp4"
+            RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "unsafe-renderer"), runner=_Runner()).render(
+                panel.model_copy(update={"scenes": [unsafe_scene]}), tmp_path / "unsafe.mp4"
             )
     finally:
         db.close()
@@ -370,11 +423,55 @@ def test_remotion_adapter_cleans_generated_staging_after_process_failure(tmp_pat
         with pytest.raises(RenderProcessError) as raised:
             RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=root, runner=runner).render(spec, tmp_path / "failed.mp4")
         assert raised.value.returncode == 7
+        assert raised.value.render_stage == "remotion_video"
+        assert raised.value.stderr == b"private renderer stderr"
         assert list((root / "public" / "content-os-renders").iterdir()) == []
         with pytest.raises(RenderInputError, match=".mp4"):
             RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=root, runner=runner).render(spec, tmp_path / "bad.avi")
     finally:
         db.close()
+
+
+def test_staging_failure_keeps_stage_without_launching_subprocess(tmp_path: Path, monkeypatch) -> None:
+    db, _, _, spec = _setup(tmp_path)
+    runner = _Runner()
+    def denied_tempfile(**kwargs):
+        raise PermissionError("props directory denied")
+    monkeypatch.setattr("app.renderer.remotion.tempfile.NamedTemporaryFile", denied_tempfile)
+    try:
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db),
+            renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner)
+        with pytest.raises(PermissionError) as raised:
+            renderer.render(spec, tmp_path / "failed.mp4")
+        assert raised.value.render_stage == "input_staging"
+        assert not runner.calls
+    finally:
+        db.close()
+
+
+def test_render_failure_diagnostic_redacts_private_data_and_keeps_first_failure(tmp_path: Path, monkeypatch) -> None:
+    from app.domain.models import Job, JobType
+    from app.jobs.handlers import _write_render_failure_diagnostic
+    job = Job(type=JobType.RENDER, attempt=1, created_at=NOW, updated_at=NOW, idempotency_key="diagnostic")
+    monkeypatch.setenv("CONTENT_OS_DIAGNOSTIC_TEST_TOKEN", "environment-secret")
+    error = RenderProcessError(9, stderr=(
+        "environment-secret\nAuthorization: Bearer other-token\napi_key=unconfigured-secret\n"
+        "C:\\Users\\Owner\\private clip.mp4\n/home/owner/private.wav\nhttps://user:pass@private/video\nmux failed"))
+    error.render_stage = "ffmpeg_audio_mux"
+    assert _write_render_failure_diagnostic(job, tmp_path, "renderer", error)
+    path = tmp_path / "render-diagnostics" / str(job.id) / "attempt-1.json"
+    raw = path.read_text(encoding="utf-8")
+    report = json.loads(raw)
+    assert report["stage"] == "ffmpeg_audio_mux"
+    assert report["exception_type"] == "RenderProcessError" and report["returncode"] == 9
+    for private in ("environment-secret", "other-token", "unconfigured-secret", "C:\\Users", "/home/owner", "user:pass"):
+        assert private not in raw
+    assert "mux failed" in report["error_summary"]
+    assert _write_render_failure_diagnostic(job, tmp_path, "dispatch", ValueError("later failure"))
+    assert path.read_text(encoding="utf-8") == raw
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("fixture", encoding="utf-8")
+    assert not _write_render_failure_diagnostic(job, blocked, "dispatch", error)
 
 
 def test_remotion_adapter_renders_typography_without_staging_media(tmp_path: Path) -> None:
@@ -478,7 +575,8 @@ def test_remotion_adapter_mixes_authorized_narration_audio(tmp_path: Path) -> No
         db.close()
 
 
-def test_remotion_adapter_encodes_master_once_without_intermediate_aac_or_source_audio(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mux_returncode", [0, 9])
+def test_remotion_adapter_encodes_master_once_without_intermediate_aac_or_source_audio(tmp_path: Path, mux_returncode: int) -> None:
     db, _, _, spec = _setup(tmp_path)
     audio_source = tmp_path / "full-voice.wav"
     audio_source.write_bytes(b"master-voice-bytes")
@@ -498,7 +596,14 @@ def test_remotion_adapter_encodes_master_once_without_intermediate_aac_or_source
         transcript_source="provider-alignment:render-test",
     )
     AudioAssetRepository(db).create(audio)
-    runner = _Runner()
+    class MuxRunner(_Runner):
+        def run(self, argv, *, cwd, timeout_seconds):
+            if "-map" in argv and mux_returncode:
+                self.calls.append((argv, cwd, timeout_seconds, {}))
+                return subprocess.CompletedProcess(argv, mux_returncode, b"", b"mux rejected input")
+            return super().run(argv, cwd=cwd, timeout_seconds=timeout_seconds)
+
+    runner = MuxRunner()
     try:
         root = _renderer_project(tmp_path / "renderer")
         first = spec.scenes[0].model_copy(update={
@@ -526,9 +631,15 @@ def test_remotion_adapter_encodes_master_once_without_intermediate_aac_or_source
                 transcript_segments=audio.transcript_segments,
             ),
         })
-        RemotionRenderer(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db), renderer_dir=root, runner=runner).render(
-            master_spec, tmp_path / "output" / "master.mp4"
-        )
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db), renderer_dir=root, runner=runner)
+        if mux_returncode:
+            with pytest.raises(RenderProcessError) as raised:
+                renderer.render(master_spec, tmp_path / "output" / "master.mp4")
+            assert raised.value.render_stage == "ffmpeg_audio_mux"
+            assert raised.value.returncode == mux_returncode
+            assert raised.value.stderr == b"mux rejected input"
+        else:
+            renderer.render(master_spec, tmp_path / "output" / "master.mp4")
         props = runner.calls[0][3]
         assert props["audioMode"] == "master_narration"
         assert "masterNarration" not in props
@@ -581,3 +692,5 @@ def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_sourc
     assert "scene.caption && audioMode !== 'source'" in timeline
     assert "headline" in timeline and "key_point" in timeline and "contrast" in timeline and "GraphicCard" in timeline
     assert "portrait_panel" in timeline and "PortraitPanel" in timeline and "PanelText" in timeline
+    assert "stacked_comparison" in timeline and "StackedComparisonPanel" in timeline
+    assert "trimBefore={source.trimBefore}" in timeline and "trimAfter={source.trimAfter}" in timeline

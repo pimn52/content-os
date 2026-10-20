@@ -313,7 +313,7 @@ def _original_proof(db, root, audio, *, project_id):
         raise UseAdmissionError("voice_qa_original_authority_invalid") from None
 
 
-def _retained_asr_report(service, receipt):
+def _retained_asr_report(service, receipt, *, parsed_inventory_cache=None):
     from app.domain.maintained_runtime import MaintainedASROrigin
     from app.providers.maintained_runtime import _require_origin
     from app.providers.maintained_voice_bundle import BUNDLE_SLOT, BUNDLE_MAX_BYTES
@@ -325,7 +325,8 @@ def _retained_asr_report(service, receipt):
     if report != receipt.review:
         raise UseAdmissionError("provider_use_binding_changed")
     spec = report.execution_specification
-    inventory = RuntimeInventoryStore(service.root).read_v2(spec.runtime_inventory)
+    inventory = RuntimeInventoryStore(service.root).read_v2(
+        spec.runtime_inventory, parsed_cache=parsed_inventory_cache)
     _require_origin(service.root, spec.runtime_origin, inventory, MaintainedASROrigin)
     entries = [r for r in inventory.files if r.role == "entrypoint"]
     if len(entries) != 1 or entries[0].name != BUNDLE_SLOT or not 0 < entries[0].size_bytes <= BUNDLE_MAX_BYTES:

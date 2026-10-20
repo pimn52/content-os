@@ -1,6 +1,7 @@
 import React from 'react';
-import {AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame} from 'remotion';
+import {AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {InformationDiagram} from './InformationDiagram';
+import {stackedComparisonLayout} from './presentation';
 
 type VideoScene = {
   scene_id: string;
@@ -15,7 +16,7 @@ type StyleTokens = {name: string; background_color: string; foreground_color: st
 type GraphicTreatment = 'none' | 'headline' | 'key_point' | 'contrast' | 'diagram_flow' | 'diagram_loss' | 'diagram_factors';
 type PresentationCue = {startFrame: number; durationFrames: number; label: string; title: string; treatment: GraphicTreatment; text: string; stepFrames?: number[]};
 
-type VideoSource = {kind: 'video'; src: string; trimBefore: number; trimAfter: number; verticalReframeMode?: 'contain' | 'center_crop' | 'bottom_crop_contain'; portraitPresentation?: 'full_canvas' | 'portrait_panel'; sourceBottomCropRatio?: number; graphicText?: string | null; graphicTreatment?: GraphicTreatment; styleTokens?: StyleTokens; narrationSrc?: string; narrationStartFrame?: number; presentationCues?: PresentationCue[]};
+type VideoSource = {kind: 'video'; src: string; trimBefore: number; trimAfter: number; verticalReframeMode?: 'contain' | 'center_crop' | 'bottom_crop_contain'; portraitPresentation?: 'full_canvas' | 'portrait_panel' | 'stacked_comparison'; sourceBottomCropRatio?: number; sourceAspectRatio?: number; graphicText?: string | null; graphicTreatment?: GraphicTreatment; styleTokens?: StyleTokens; narrationSrc?: string; narrationStartFrame?: number; presentationCues?: PresentationCue[]};
 type SceneSource =
   | VideoSource
   | {kind: 'image'; src: string; narrationSrc?: string; narrationStartFrame?: number}
@@ -50,6 +51,8 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
           <AbsoluteFill style={{overflow: 'hidden'}}>
             {source.kind === 'video' && source.portraitPresentation === 'portrait_panel' ? (
               <PortraitPanel source={source} audioMode={audioMode} />
+            ) : source.kind === 'video' && source.portraitPresentation === 'stacked_comparison' ? (
+              <StackedComparisonPanel source={source} audioMode={audioMode} captionReserve={scene.subtitle_treatment !== 'none' && (scene.captions?.length || (scene.caption && audioMode !== 'source')) ? videoSpec.height * .12 : 0} />
             ) : source.kind === 'video' ? (
               <OffthreadVideo
                 src={staticFile(source.src)}
@@ -77,7 +80,7 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
             {scene.subtitle_treatment !== 'none' && scene.captions?.length ? scene.captions.map((caption) => {
               const startFrame = Math.max(0, Math.round(caption.start_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
               const endFrame = Math.max(startFrame + 1, Math.round(caption.end_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
-              return <Sequence key={`${caption.start_ms}-${caption.end_ms}-${caption.text}`} from={startFrame} durationInFrames={endFrame - startFrame}><Caption text={caption.text} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first'].includes(source.styleTokens?.name ?? '')} /></Sequence>;
+              return <Sequence key={`${caption.start_ms}-${caption.end_ms}-${caption.text}`} from={startFrame} durationInFrames={endFrame - startFrame}><Caption text={caption.text} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first', 'content-os-portrait-comparison'].includes(source.styleTokens?.name ?? '')} /></Sequence>;
             }) : scene.subtitle_treatment !== 'none' && scene.caption && audioMode !== 'source' ? <Caption text={scene.caption} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first'].includes(source.styleTokens?.name ?? '')} /> : null}
           </AbsoluteFill>
         </Sequence>
@@ -151,6 +154,21 @@ const SubjectFirstPanel: React.FC<{source: VideoSource; audioMode: RenderProps['
     </div>
   </AbsoluteFill>
 );
+
+// Source analysis supplies subtitle bounds. No fixed source-pixel trim or gap.
+const StackedComparisonPanel: React.FC<{source: VideoSource; audioMode: RenderProps['audioMode']; captionReserve: number}> = ({source, audioMode, captionReserve}) => {
+  const {width, height} = useVideoConfig();
+  const tokens = source.styleTokens ?? {name: 'content-os-portrait-comparison', background_color: '#f3efe5', foreground_color: '#172033', accent_color: '#ca4c2c', font_family: 'Inter, ui-sans-serif, system-ui'};
+  const {paneWidth, paneHeight, firstTop, secondTop, left, videoHeight} = stackedComparisonLayout(
+    width, height, source.sourceAspectRatio ?? 16 / 9, source.sourceBottomCropRatio ?? 0, captionReserve);
+  return <AbsoluteFill style={{backgroundColor: tokens.background_color, color: tokens.foreground_color, fontFamily: tokens.font_family}}>
+    {(['left', 'right'] as const).map((side, index) => <div key={side} style={{position: 'absolute', left, top: index === 0 ? firstTop : secondTop, width: paneWidth, height: paneHeight, overflow: 'hidden', backgroundColor: '#111'}}>
+      <OffthreadVideo src={staticFile(source.src)} trimBefore={source.trimBefore} trimAfter={source.trimAfter}
+        volume={index === 0 && audioMode === 'source' ? 1 : 0}
+        style={{position: 'absolute', top: 0, left: side === 'left' ? 0 : undefined, right: side === 'right' ? 0 : undefined, width: '200%', height: videoHeight, objectFit: 'fill'}} />
+    </div>)}
+  </AbsoluteFill>;
+};
 
 const Caption: React.FC<{text: string; editorial?: boolean}> = ({text, editorial}) => (
   <div style={{position: 'absolute', bottom: 96, left: 56, right: 56, color: 'white', ...(editorial ? {backgroundColor: '#172033', borderRadius: 14, padding: '18px 24px'} : {}), fontSize: 48, fontWeight: 700, textAlign: 'center', textShadow: '0 2px 8px black'}}>

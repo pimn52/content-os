@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import os
+import re
 import tempfile
 from typing import Callable, Literal, Protocol, Sequence
 from uuid import UUID
@@ -162,6 +164,36 @@ def _require_closed_evaluation_lane(db, job: Job) -> None:
         raise JobExecutionError(str(exc), str(exc), retryable=False) from None
 
 
+def _write_render_failure_diagnostic(job: Job, root: Path, stage: str, error: Exception) -> bool:
+    """One private failure file per attempt; never expose argv or raw stderr."""
+    stderr = getattr(error, "stderr", None) or ""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    summary = (str(error) + "\n" + str(stderr))[-8192:]
+    for name, value in os.environ.items():
+        if value and re.search(r"key|token|secret|password|credential|authorization", name, re.I):
+            summary = summary.replace(value, "[redacted]")
+    summary = re.sub(r"(?i)bearer\s+[^\s\"']+", "Bearer [redacted]", summary)
+    summary = re.sub(r"(?im)authorization\s*[:=][^\r\n]*", "Authorization: [redacted]", summary)
+    summary = re.sub(r"(?i)(api[_-]?key|(?:access[_-]?)?token|password|secret)[\"']?\s*[:=]\s*[\"']?[^\s\"'&,;]+", r"\1=[redacted]", summary)
+    summary = re.sub(r"(?i)https?://[^\s\"'<>]+", "[url]", summary)
+    summary = re.sub(r"(?i)(?:[a-z]:[\\/]|\\\\)[^\r\n\"'<>|]*", "[local-path]", summary)
+    summary = re.sub(r"(?<![\w:])/(?:[^\s\"'<>]+)", "[local-path]", summary)
+    report = dict(job_id=str(job.id), attempt=job.attempt,
+        stage=getattr(error, "render_stage", stage), exception_type=type(error).__name__,
+        returncode=getattr(error, "returncode", None), error_summary=summary.strip()[-2000:])
+    path = Path(root) / "render-diagnostics" / str(job.id) / f"attempt-{job.attempt}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as target:
+            json.dump(report, target, ensure_ascii=False, indent=2)
+        return True
+    except FileExistsError:
+        return path.is_file()  # A blocked parent is not a saved diagnostic.
+    except OSError:
+        return False
+
+
 class RenderVideoJobHandler:
     """Render one persisted VideoSpec to its fixed local output path."""
 
@@ -207,6 +239,7 @@ class RenderVideoJobHandler:
                     SourceUseConstraintService(database, getattr(self._renderer, "data_root", None)).require_render_snapshot(job)
                 except ValueError:
                     raise JobExecutionError("use_constraint_render_plan_changed_replan", "source-use policy or evidence changed; replan required", retryable=False) from None
+        stage = "dispatch"
         try:
             if database is not None and payload.video_spec.master_narration is not None:
                 from app.voice_plan import require_project_voice_audio
@@ -217,7 +250,7 @@ class RenderVideoJobHandler:
                 context = self.require_dispatch(job)
                 owner = consumer.records.owner(job_id=job.id)
                 ledger = ProviderCallLedger(database)
-                key = f"composition:{owner['batch_id']}:render"
+                key = consumer.provider_call_key(job)
                 old = ProviderCallRepository(database).get_by_idempotency_key(key)
                 if old is not None:
                     if old.status == "completed":
@@ -225,14 +258,17 @@ class RenderVideoJobHandler:
                         return
                     raise UseAdmissionError("composition_render_reconciliation_required")
                 cost = payload.video_spec.estimated_cost
-                reserved = ledger.reserve_execution(project_id=job.project_id,idempotency_key=key,operation="render",mode="runtime",
+                stage = "provider_reservation"
+                reserved = ledger.reserve_execution(project_id=job.project_id,idempotency_key=key,operation="render",
+                    mode="assisted_test" if context.get("preview_frame_range") is not None else "runtime",
                     provider="local-render",model="remotion-ffmpeg",input_source=f"render:{owner['render_id']}",
-                    input_digest=owner["request_sha256"],estimated_cost=cost,allow_existing_unknown_cost=True,
+                    input_digest=context.get("execution_sha256",owner["request_sha256"]),estimated_cost=cost,allow_existing_unknown_cost=True,
                     reservation_guard=lambda: consumer._fence(context["token"]))
                 if not reserved.owner:
                     raise UseAdmissionError("composition_render_reconciliation_required")
                 call = reserved.record
                 output = consumer.output_path(owner).with_name("staged.mp4")
+                stage = "renderer"
                 self._renderer.render_composition(job.id,output)
             else:
                 _require_closed_evaluation_lane(database, job)
@@ -246,10 +282,18 @@ class RenderVideoJobHandler:
                         call = repair_service.reserve_render(job)
                     except (ProductionRunNotReady, BudgetLimitError, ProviderCallError, ValueError):
                         raise JobExecutionError("presentation_repair_not_admitted", "presentation repair admission or budget changed", retryable=False) from None
+                stage = "renderer"
                 self._renderer.render(payload.video_spec, output)
             if consumer is not None or repair_service is not None:
                 from app.presentation_repair import measure_render_output
-                evidence = measure_render_output(output,payload.video_spec) if consumer is not None else repair_service.verify_output(job)
+                stage = "output_qa"
+                if consumer is not None:
+                    preview_range = context.get("preview_frame_range")
+                    evidence = (measure_render_output(output,payload.video_spec,frame_range=preview_range)
+                        if preview_range is not None else measure_render_output(output,payload.video_spec))
+                else:
+                    evidence = repair_service.verify_output(job)
+                stage = "output_admission"
                 context = require_current_use_constraints()
                 def persist():
                     consumer._fence(context["token"])
@@ -260,16 +304,20 @@ class RenderVideoJobHandler:
                     database.connection.execute("INSERT INTO execution_use_content_origins(content_hash,subject_kind,subject_id) VALUES (?,'render',?)",
                         (evidence["sha256"],owner["render_id"]))
                     consumer.records.save("result",owner["run_id"],dict(project_id=str(job.project_id),evidence=evidence))
+                stage = "result_persistence"
                 ledger.finish(project_id=job.project_id, call_id=call.id, status="completed", usage_observable=False,
                     actual_cost=cost if consumer is not None else UsageCost(category=CostCategory.RENDER, amount=Decimal("0"), currency="USD", note="external charge zero; local compute unknown"),
                     result_payload=evidence,persist_result=persist if consumer is not None else None)
             else:
                 require_current_use_constraints()
         except Exception as exc:
+            diagnostic_saved = _write_render_failure_diagnostic(
+                job, getattr(self._renderer, "data_root", self._output_root.parent), stage, exc)
             if consumer is not None:
                 _finish_job_provider_call(ledger,job,call,status="failed",error_code="composition_render_failed")
                 code = str(exc) if isinstance(exc,UseAdmissionError) else "composition_render_failed"
-                raise JobExecutionError(code,code,retryable=False) from None
+                message = code if diagnostic_saved else code + "; local_diagnostic_unavailable"
+                raise JobExecutionError(code,message,retryable=False) from None
             if isinstance(exc,JobExecutionError):
                 raise
             if isinstance(exc,(RenderTimeout,RenderProcessError,RenderInputError,LocalResourceError,UnauthorizedVisualError)):
@@ -1119,6 +1167,13 @@ class AssetVisionJobHandler:
     def __call__(self, job: Job) -> None:
         asset = _resolve_asset_job(job, JobType.INDEX_CLIPS, self._target_store, self._assets)
         clips = self._clips.list_by_asset(asset.id)
+        scope = None if job.payload is None else job.payload.clip_ids
+        if scope is not None:
+            from app.media.vision import selected_visual_clips
+            try:
+                clips = selected_visual_clips(clips, scope)
+            except (ValueError, TypeError, VisualMetadataError):
+                raise JobExecutionError("vision_clip_scope_invalid", "selected Clips do not match this Asset", retryable=False) from None
         if not clips:
             raise JobExecutionError("clips_missing", "asset has no clips available for visual analysis", retryable=False)
         try:
@@ -1133,7 +1188,8 @@ class AssetVisionJobHandler:
             raise JobExecutionError("keyframes_missing", "keyframes are unavailable for visual analysis", retryable=False) from None
         try:
             if self._ledger is None:
-                result = self._pipeline.process(asset, clips, paths)
+                result = (self._pipeline.process(asset, clips, paths) if scope is None else
+                    self._pipeline.process(asset, clips, paths, selected_clip_ids=[clip.id for clip in clips]))
             else:
                 vision_provider = _MeteredVisionProvider(
                     self._pipeline.provider,
@@ -1143,7 +1199,8 @@ class AssetVisionJobHandler:
                     self._provider_name,
                     self._vision_model,
                 )
-                result = self._pipeline.process(asset, clips, paths, provider=vision_provider)
+                result = self._pipeline.process(asset, clips, paths, provider=vision_provider,
+                    **({} if scope is None else {"selected_clip_ids": [clip.id for clip in clips]}))
         except (VisionRateLimitError, VisionTimeout, VisionConnectionError):
             raise JobExecutionError("vision_temporarily_unavailable", "vision provider is temporarily unavailable", retryable=True) from None
         except VisionHTTPError as error:
@@ -1197,6 +1254,7 @@ class AssetVisionJobHandler:
         ):
             _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code="embedding_invalid")
             raise JobExecutionError("embedding_invalid", "Clip embeddings cannot be produced or persisted", retryable=False) from None
+        _finish_job_provider_call(self._ledger, job, embedding_call, status="completed")
 
 
 def _reserve_job_provider_call(

@@ -170,6 +170,7 @@ class EvaluationTalkingService:
         output_scope = _make_scope(project_id,"internal_evaluation",tuple(all_bindings[k] for k in sorted(all_bindings,key=str)))
         # Authenticate every retained input receipt and term without treating
         # spent Voice generation as permission to run another inference.
+        retained_inventory_cache = {}
         for item in output_scope.bindings:
             value = self.admissions.get(project_id,item.admission_id)
             if value is None or value.revoked_at or value.review_sha256 != item.review_sha256:
@@ -179,7 +180,8 @@ class EvaluationTalkingService:
                 reviewed = _retained_completed_report(self.admissions,value)
             elif type(value.review) is ProviderUseLicenseReviewV4:
                 from app.voice_evaluation_qa import _retained_asr_report
-                reviewed = _retained_asr_report(self.admissions,value)
+                reviewed = _retained_asr_report(self.admissions,value,
+                    parsed_inventory_cache=retained_inventory_cache)
             else:
                 reviewed = self.admissions._report(value.review_reference,value.review_sha256)
             if reviewed != value.review:
@@ -738,6 +740,7 @@ class EvaluationTalkingService:
         if execution_scope is None or execution_scope.fingerprint != operation.execution_scope_fingerprint:
             raise UseAdmissionError("evaluation_talking_job_scope_changed")
         from app.evaluation_talking_execution import retained_talking_report
+        retained_inventory_cache = {}
         for item in output_scope.bindings:
             value = self.admissions.get(operation.project_id,item.admission_id)
             if (value is None or value.revoked_at or value.review_sha256 != item.review_sha256
@@ -748,7 +751,8 @@ class EvaluationTalkingService:
                 reviewed = _retained_completed_report(self.admissions,value)
             elif type(value.review) is ProviderUseLicenseReviewV4:
                 from app.voice_evaluation_qa import _retained_asr_report
-                reviewed = _retained_asr_report(self.admissions,value)
+                reviewed = _retained_asr_report(self.admissions,value,
+                    parsed_inventory_cache=retained_inventory_cache)
             elif type(value.review) in (ProviderUseLicenseReviewV2, ProviderUseLicenseReviewV5) and type(value.review.execution_specification) in (ExecutionSpecificationV9, ExecutionSpecificationV10):
                 reviewed = retained_talking_report(self.admissions,value)
             else:

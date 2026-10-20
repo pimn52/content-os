@@ -39,6 +39,15 @@ def _response(analysis: dict[str, object] | None = None) -> dict[str, object]:
     return {"output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(analysis or _analysis())}]}]}
 
 
+def test_source_layout_and_subtitle_bounds_survive_structured_output():
+    from app.providers.vision import _parse_response
+    value={**_analysis(),'comparison_layout':'side_by_side_equal_halves','subtitle_regions':[[.3,.88,.4,.08]]}
+    observed=_parse_response(json.dumps(_response(value)).encode())
+    assert observed.comparison_layout=='side_by_side_equal_halves' and observed.subtitle_regions==[[.3,.88,.4,.08]]
+    for regions in [[[.3,.88,.8,.08]],[[0,float('nan'),.1,.1]],[[0,.9,.1,-.2]]]:
+        with pytest.raises(VisionProviderResponseError):_parse_response(json.dumps(_response({**value,'subtitle_regions':regions})).encode())
+
+
 @contextmanager
 def _fake_server(
     status: int,

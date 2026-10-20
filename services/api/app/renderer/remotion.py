@@ -22,7 +22,7 @@ from app.media.local_paths import resolve_local_media_path
 from uuid import UUID, uuid4
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, ImageAssetRepository
-from app.domain.models import Asset, AudioAsset, Clip, ImageAsset, PortraitPresentation, ProjectFormat, RationalFps, SourceKind, VerticalReframeMode, VideoScene, VideoSpec
+from app.domain.models import Asset, AudioAsset, Clip, EditVisualRole, ImageAsset, PortraitPresentation, ProjectFormat, RationalFps, SourceKind, SubtitleTreatment, VerticalReframeMode, VideoScene, VideoSpec
 from app.talking.admission import talking_visual_blocker
 
 
@@ -47,8 +47,9 @@ class RenderTimeout(RendererError):
 
 
 class RenderProcessError(RendererError):
-    def __init__(self, returncode: int) -> None:
+    def __init__(self, returncode: int, *, stderr: bytes | str | None = None) -> None:
         self.returncode = returncode
+        self.stderr = stderr
         super().__init__(f"local renderer exited with status {returncode}")
 
 
@@ -66,9 +67,11 @@ class SubprocessRenderCommandRunner:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
         except subprocess.TimeoutExpired as exc:
-            raise RenderTimeout("local renderer timed out") from exc
+            error = RenderTimeout("local renderer timed out")
+            error.stderr = exc.stderr
+            raise error from exc
         except OSError as exc:
-            raise RenderProcessError(-1) from exc
+            raise RenderProcessError(-1, stderr=str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,8 @@ class _PreparedVisual:
     vertical_reframe_mode: str = "contain"
     portrait_presentation: str = "full_canvas"
     source_bottom_crop_ratio: float = 0
+    source_width: int = 0
+    source_height: int = 0
     graphic_treatment: str = "key_point"
     graphic_text: str | None = None
     style_tokens: dict[str, str] | None = None
@@ -138,8 +143,8 @@ class RemotionRenderer:
         service = EvaluationCompositionService(self.assets.db,self.data_root)
         job = JobRepository(self.assets.db).get(job_id)
         context = service.require_current_job(job)
-        _,owner,_ = service.require_job_identity(job)
-        call = ProviderCallRepository(self.assets.db).get_by_idempotency_key(f"composition:{owner['batch_id']}:render")
+        binding,owner,_ = service.require_job_identity(job)
+        call = ProviderCallRepository(self.assets.db).get_by_idempotency_key(service.provider_call_key(job))
         if job.status != JobStatus.RUNNING or job.attempt != 1 or call is None or call.status != "running":
             raise UnauthorizedVisualError("composition_owned_once_call_required")
         expected = service.output_path(owner).with_name("staged.mp4")
@@ -147,80 +152,105 @@ class RemotionRenderer:
             raise UnauthorizedVisualError("composition_private_output_required")
         with self.assets.db.transaction(immediate=True):
             service._fence(context["token"])
-            if service.records.get("launch",owner["run_id"]) is not None:
+            launch_id = (job.id if binding.get("recovery",{}).get("replacement_job_id") == str(job.id)
+                else UUID(owner["run_id"]))
+            if service.records.get("launch",launch_id) is not None:
                 raise UnauthorizedVisualError("composition_render_already_launched")
-            service.records.save("launch",owner["run_id"],dict(project_id=str(job.project_id),
+            service.records.save("launch",launch_id,dict(project_id=str(job.project_id),
                 job_id=str(job.id),call_id=str(call.id),job_sha256=owner["job_sha256"]))
-        return self._render(context["spec"],expected,composition_job_id=job_id)
+        return self._render(context["spec"],expected,composition_job_id=job_id,
+            frame_range=context.get("preview_frame_range"))
 
-    def _render(self, spec: VideoSpec, output_path: str | Path, *, composition_job_id: UUID | None = None) -> Path:
-        if not isinstance(spec, VideoSpec):
-            raise RenderInputError("renderer requires a VideoSpec contract")
-        if spec.format != ProjectFormat.VERTICAL or spec.width * 16 != spec.height * 9:
-            raise RenderInputError("minimal renderer accepts only 9:16 vertical VideoSpecs")
-        output = _output_path(output_path)
-        _renderer_project(self.renderer_dir)
-        master_narration = self._validate_master_narration(spec, spec.fps, composition_job_id=composition_job_id)
-        prepared = {
-            scene.scene_id: self._validate_scene(
-                scene, spec.fps, project_id=spec.project_id,
-                master_audio_id=None if spec.master_narration is None else spec.master_narration.audio_asset_id,
-                validate_scene_narration=master_narration is None,
-                composition_job_id=composition_job_id,
-            )
-            for scene in spec.scenes
-        }
-        input_sources = {visual.source for visual in prepared.values() if visual.source is not None}
-        if master_narration is not None:
-            input_sources.add(master_narration)
-        if output in input_sources:
-            raise RenderInputError("render output must not overwrite a source media file")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        public_root = self.renderer_dir / "public" / "content-os-renders"
-        public_root.mkdir(parents=True, exist_ok=True)
-        run_id = uuid4().hex
-        staging = public_root / run_id
+    def _render(self, spec: VideoSpec, output_path: str | Path, *, composition_job_id: UUID | None = None,
+                frame_range: tuple[int,int] | None = None) -> Path:
+        stage = "input_validation"
+        staging: Path | None = None
         props_path: Path | None = None
         try:
+            if not isinstance(spec, VideoSpec):
+                raise RenderInputError("renderer requires a VideoSpec contract")
+            if spec.format != ProjectFormat.VERTICAL or spec.width * 16 != spec.height * 9:
+                raise RenderInputError("minimal renderer accepts only 9:16 vertical VideoSpecs")
+            output = _output_path(output_path)
+            _renderer_project(self.renderer_dir)
+            master_narration = self._validate_master_narration(spec, spec.fps, composition_job_id=composition_job_id)
+            if frame_range is not None:
+                total = max(s.start_frame+s.duration_frames for s in spec.scenes)
+                if (composition_job_id is None or master_narration is None
+                    or not 0 <= frame_range[0] < frame_range[1] <= total):
+                    raise RenderInputError("preview requires an owned narration timeline interval")
+            prepared = {
+                scene.scene_id: self._validate_scene(
+                    scene, spec.fps, project_id=spec.project_id,
+                    master_audio_id=None if spec.master_narration is None else spec.master_narration.audio_asset_id,
+                    validate_scene_narration=master_narration is None,
+                    composition_job_id=composition_job_id,
+                )
+                for scene in spec.scenes
+            }
+            input_sources = {visual.source for visual in prepared.values() if visual.source is not None}
+            if master_narration is not None:
+                input_sources.add(master_narration)
+            if output in input_sources:
+                raise RenderInputError("render output must not overwrite a source media file")
+            stage = "input_staging"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            public_root = self.renderer_dir / "public" / "content-os-renders"
+            public_root.mkdir(parents=True, exist_ok=True)
+            run_id = uuid4().hex
+            staging = public_root / run_id
             staging.mkdir()
             props = self._stage_props(spec, prepared, staging, run_id, master_narration)
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", prefix="content-os-remotion-", delete=False) as handle:
                 json.dump(props, handle, ensure_ascii=False, separators=(",", ":"))
                 props_path = Path(handle.name)
             visual_output = staging / "visual.mp4" if master_narration is not None else output
+            stage = "remotion_video"
             argv = [
                 self.npm_command, "exec", "--", "remotion", "render", "src/index.ts", "ContentOSVideo", str(visual_output),
                 f"--props={props_path}",
             ]
             if master_narration is not None:
                 argv.append("--muted")
+            if frame_range is not None:
+                argv.append(f"--frames={frame_range[0]}-{frame_range[1]-1}")
             completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
             if completed.returncode != 0:
-                raise RenderProcessError(completed.returncode)
+                raise RenderProcessError(completed.returncode, stderr=completed.stderr)
             if master_narration is not None:
+                stage = "ffmpeg_audio_mux"
                 from app.runtime import resolve_local_executable
 
                 # Encode the approved Master once, directly into MP4. Remotion's
                 # intermediate AAC/concat path retains encoder priming as speech
                 # delay; container-duration tolerance cannot detect that error.
                 master = spec.master_narration
+                audio_start, audio_end = master.start_ms/1000, master.end_ms/1000
+                if frame_range is not None:
+                    frame_seconds = spec.fps.denominator/spec.fps.numerator
+                    audio_start += frame_range[0]*frame_seconds
+                    audio_end = min(audio_end,master.start_ms/1000+frame_range[1]*frame_seconds)
                 argv = [resolve_local_executable("ffmpeg"), "-nostdin", "-v", "error",
                     "-i", str(visual_output), "-i", str(master_narration),
                     "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
-                    "-af", f"atrim=start={master.start_ms / 1000}:end={master.end_ms / 1000},asetpts=PTS-STARTPTS",
+                    "-af", f"atrim=start={audio_start}:end={audio_end},asetpts=PTS-STARTPTS",
                     "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", str(output)]
                 completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
                 if completed.returncode != 0:
-                    raise RenderProcessError(completed.returncode)
+                    raise RenderProcessError(completed.returncode, stderr=completed.stderr)
+            stage = "output_validation"
             if not output.is_file() or output.stat().st_size == 0:
                 raise RenderProcessError(-1)
             return output
+        except Exception as exc:
+            exc.render_stage = stage
+            raise
         finally:
             if props_path is not None:
                 props_path.unlink(missing_ok=True)
             # This directory is generated with a random run ID beneath the
             # fixed renderer public root; no user source path is ever removed.
-            if staging.exists():
+            if staging is not None and staging.exists():
                 shutil.rmtree(staging)
 
     def _validate_scene(
@@ -236,12 +266,25 @@ class RemotionRenderer:
         visual = scene.visual
         if scene.transition != "cut":
             raise RenderInputError("minimal renderer supports only cut transitions")
-        if scene.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL and (
-            visual.source_kind is not SourceKind.AI_VIDEO or visual.vertical_reframe_mode not in {
-                VerticalReframeMode.CONTAIN, VerticalReframeMode.BOTTOM_CROP_CONTAIN,
-            }
-        ):
-            raise RenderInputError("portrait_panel requires a complete-width Talking visual")
+        if scene.portrait_presentation is PortraitPresentation.PORTRAIT_PANEL:
+            talking_panel = (
+                visual.source_kind is SourceKind.AI_VIDEO
+                and visual.vertical_reframe_mode in {
+                    VerticalReframeMode.CONTAIN, VerticalReframeMode.BOTTOM_CROP_CONTAIN,
+                }
+            )
+            footage_panel = (
+                visual.source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                and visual.vertical_reframe_mode is VerticalReframeMode.CONTAIN
+            )
+            if not (talking_panel or footage_panel):
+                raise RenderInputError("portrait_panel requires complete-frame Talking or authorized footage")
+        if scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
+            if (visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                or scene.visual_role is not EditVisualRole.FOOTAGE
+                or visual.vertical_reframe_mode not in {VerticalReframeMode.CONTAIN,VerticalReframeMode.BOTTOM_CROP_CONTAIN}
+                or scene.subtitle_treatment is not SubtitleTreatment.TIMED_CAPTIONS):
+                raise RenderInputError("stacked_comparison requires authorized 16:9 comparison footage and timed narration captions")
         narration_source, narration_start_frame = (
             self._validate_narration(scene, composition_fps) if validate_scene_narration else (None, 0)
         )
@@ -275,6 +318,18 @@ class RemotionRenderer:
         clip = self.clips.get(visual.clip_id)
         if asset is None or clip is None:
             raise LocalResourceError("referenced local media is unavailable")
+        if scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
+            from app.assembly.edit_plan import comparison_clearance
+            try:
+                ratio,reference=comparison_clearance(asset,clip)
+            except ValueError as exc:
+                raise RenderInputError(str(exc)) from None
+            if (abs(ratio-visual.source_bottom_crop_ratio)>1e-9
+                or reference!=visual.vertical_reframe_evidence_reference):
+                raise RenderInputError("comparison subtitle geometry changed; replan required")
+        if (scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON
+            and asset.width * 9 != asset.height * 16):
+            raise RenderInputError("stacked_comparison requires a 16:9 source")
         self._require_commercial_content(asset, composition_job_id=composition_job_id)
         if (
             clip.asset_id != asset.id
@@ -319,6 +374,7 @@ class RemotionRenderer:
             vertical_reframe_mode=visual.vertical_reframe_mode.value,
             portrait_presentation=scene.portrait_presentation.value,
             source_bottom_crop_ratio=visual.source_bottom_crop_ratio,
+            source_width=asset.width,source_height=asset.height,
             graphic_treatment=scene.graphic_treatment.value,
             graphic_text=scene.graphic_text,
             style_tokens=scene.style_tokens.model_dump(),
@@ -399,7 +455,8 @@ class RemotionRenderer:
                     scene_sources[scene.scene_id]["narrationSrc"] = narration_relative
                     scene_sources[scene.scene_id]["narrationStartFrame"] = visual.narration_start_frame
                 continue
-            bottom_crop = visual.source_bottom_crop_ratio if visual.vertical_reframe_mode == "bottom_crop_contain" else 0
+            bottom_crop = (visual.source_bottom_crop_ratio if visual.vertical_reframe_mode == "bottom_crop_contain"
+                and visual.portrait_presentation != "stacked_comparison" else 0)
             source_key = (visual.source, bottom_crop)
             relative = staged_by_source.get(source_key)
             if relative is None:
@@ -418,7 +475,7 @@ class RemotionRenderer:
                             "-movflags", "+faststart", str(destination)]
                     completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
                     if completed.returncode != 0 or not destination.is_file() or destination.stat().st_size == 0:
-                        raise RenderProcessError(completed.returncode or -1)
+                        raise RenderProcessError(completed.returncode or -1, stderr=completed.stderr)
                 else:
                     shutil.copy2(visual.source, destination)
                 relative = f"content-os-renders/{run_id}/{filename}".replace("\\", "/")
@@ -431,6 +488,7 @@ class RemotionRenderer:
                 "verticalReframeMode": visual.vertical_reframe_mode,
                 "portraitPresentation": visual.portrait_presentation,
                 "sourceBottomCropRatio": 0 if bottom_crop else visual.source_bottom_crop_ratio,
+                "sourceAspectRatio": visual.source_width/(visual.source_height*(1-bottom_crop)) if visual.source_height else None,
                 "graphicText": visual.graphic_text,
                 "graphicTreatment": visual.graphic_treatment,
                 "styleTokens": visual.style_tokens or scene.style_tokens.model_dump(),

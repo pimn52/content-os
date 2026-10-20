@@ -75,9 +75,9 @@ def presentation(entry: EditPlanScene, *, width: int, height: int,
     """Normalize only reconstructable effective visual fields, not record IDs.
 
     Preliminary timed captions have no measured tracks: explicitly unresolved.
-    Crop geometry is not contained in EditPlan: do not invent it.
+    Unsupported crop presentations remain unresolved; do not label them contain.
     """
-    if (entry.burned_in_subtitles == "unknown" or entry.framing_policy.value != "face_safe_contain"
+    if (entry.burned_in_subtitles == "unknown" or entry.framing_policy.value != "face_safe_contain" or entry.source_bottom_crop_ratio
         or transition != "cut"):
         return None
     if visual is not None and (visual.vertical_reframe_mode.value != "contain" or visual.source_bottom_crop_ratio):

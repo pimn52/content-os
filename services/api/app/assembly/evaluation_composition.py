@@ -1,7 +1,7 @@
 """Named exact-input assembly using existing EditPlan and timing contracts."""
 import re
 from app.assembly.edit_plan import resolve_edit_plan, presentation_for_style
-from app.assembly.video_spec import _audio_captions_for_interval, _master_offset_to_frames as timeline_frame, _edit_scene_fields
+from app.assembly.video_spec import _audio_captions_for_interval, _master_offset_to_frames as timeline_frame, _edit_scene_fields, _talking_visual_treatment
 from app.domain.models import (CostCategory, MasterNarration,
     SourceKind, SubtitleTreatment, UsageCost, VideoCaption, VideoScene, VideoSpec, VideoVisual)
 
@@ -57,10 +57,11 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=None)
     # Retain the reviewed complete frame. Unknown source subtitles never
     # authorize another overlay, even when a legacy source is landscape.
+    scene_by_id = {scene.id: scene for scene, _, _ in intervals}
     entries = [presentation_for_style(e.model_copy(update={
         "subtitle_treatment":SubtitleTreatment.TIMED_CAPTIONS if inputs[e.scene_plan_id]["asset"] is None or "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else SubtitleTreatment.NONE,
         "burned_in_subtitles":"absent" if inputs[e.scene_plan_id]["asset"] is None or "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else "unknown"}),style,
-        inputs[e.scene_plan_id]["asset"]) for e in plan.scenes]
+        inputs[e.scene_plan_id]["asset"],scene_plan=scene_by_id[e.scene_plan_id],clip=inputs[e.scene_plan_id]["clip"]) for e in plan.scenes]
     plan = plan.model_copy(update={"scenes": entries, "style_tokens": style})
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=plan)
     scenes = []
@@ -75,6 +76,7 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
             raise ValueError("composition_source_has_no_complete_frame")
         captions = _approved_scene_captions(audio,ordered,scene,start,end) if approved_display else _audio_captions_for_interval(audio,start,end)
         fields = _edit_scene_fields(entry,plan)
+        treatment = ("contain",None,0) if asset is None else _talking_visual_treatment(asset,entry)
         if approved_display and not captions:
             fields["subtitle_treatment"] = SubtitleTreatment.NONE
         scenes.append(VideoScene(scene_id=scene.scene_id, start_frame=first, duration_frames=last-first,
@@ -82,7 +84,8 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
                 authorization_reference="local-typography" if asset is None else asset.authorization_reference,
                 asset_id=None if asset is None else asset.id, clip_id=None if clip is None else clip.id,
                 clip_start_ms=None if clip is None else clip.start_ms,
-                clip_end_ms=None if clip is None else clip.end_ms, source_duration_ms=None if asset is None else asset.duration_ms),
+                clip_end_ms=None if clip is None else clip.end_ms, source_duration_ms=None if asset is None else asset.duration_ms,
+                vertical_reframe_mode=treatment[0],vertical_reframe_evidence_reference=treatment[1],source_bottom_crop_ratio=treatment[2]),
             narration_asset_id=audio.id, narration_start_ms=start, narration_end_ms=end,
             caption=scene.voice_text, captions=captions,
             **fields))

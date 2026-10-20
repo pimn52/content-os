@@ -67,7 +67,7 @@ def legacy(tmp_path, admit_talking_run, monkeypatch):
     db.close()
 
 
-def use_and_batch(service,pid,context,key):
+def use_and_batch(service,pid,context,key,*,suffix=''):
     root=service.root;terms=root/'synthetic-terms.txt';terms.write_text('Synthetic fixture permission, never runtime license evidence')
     evidence=dict(source='synthetic',version='fixture',terms_reference=terms.name,terms_sha256=hashlib.sha256(terms.read_bytes()).hexdigest(),
         applicability='synthetic exact test use',permits_intended_activity=True)
@@ -81,7 +81,7 @@ def use_and_batch(service,pid,context,key):
         license_evidence=[dict(evidence,admission_id=str(b.admission_id)) for b in context['scope'].bindings],
         findings=['No real rights or quality claims'],
         dependency_findings=[dict(evidence,dependency=d) for d in ['retained_media_composition','local_renderer_and_tools',*context['proof']['dependencies']]])
-    use=service.adopt(pid,save('use.json',report),key)
+    use=service.adopt(pid,save('use'+suffix+'.json',report),key)
     service.adopt_batch(pid,save('batch.json',dict(policy='evaluation-composition-v1',project_id=str(pid),master_audio_id=str(context['audio'].id),
         authorization_reference=terms.name,authorization_sha256=evidence['terms_sha256'],scene_ids=[],max_renders=1,findings=['Synthetic one-render grant'])),key)
     return use
@@ -225,6 +225,13 @@ def test_one_normal_worker_preserves_private_result_accounting_and_once_only(leg
     runner=JobRunner(JobStore(db),{JobType.RENDER:selected},worker_id='normal-render',lease_duration=timedelta(minutes=5),max_attempts=1)
     finished=runner.run_once(job_id=job.id)
     assert finished.status==(JobStatus.COMPLETED if outcome=='completed' else JobStatus.FAILED)
+    diagnostic=db.data_root/'render-diagnostics'/str(job.id)/'attempt-1.json'
+    if outcome=='renderer_failure':
+        report=json.loads(diagnostic.read_text(encoding='utf-8'))
+        assert report['stage']=='remotion_video'
+        assert report['exception_type']=='RenderProcessError' and report['returncode']==1
+    else:
+        assert not diagnostic.exists()
     assert runner.run_once(job_id=job.id) is None
     assert start('another-key').id==run.id
     calls=ProviderCallRepository(db).list_all()
@@ -236,7 +243,8 @@ def test_one_normal_worker_preserves_private_result_accounting_and_once_only(leg
             assert calls[0].actual_cost == job.payload.video_spec.estimated_cost
             assert calls[0].actual_cost.amount is None and calls[0].actual_cost.currency is None
         else:
-            with pytest.raises(UseAdmissionError):runs.resume(pid,run.id)
+            from app.budget import BudgetLimitError
+            with pytest.raises(BudgetLimitError):runs.resume(pid,run.id)
     assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
     if outcome!='completed':
         assert runs.get(pid,run.id).status=='render_failed'
@@ -257,6 +265,129 @@ def test_one_normal_worker_preserves_private_result_accounting_and_once_only(leg
     with pytest.raises(UseAdmissionError):service.media(pid,run.id,'internal_evaluation')
 
 
+@pytest.mark.parametrize('preview_fails',[False,True])
+def test_official_short_preview_keeps_completed_history_and_one_independent_call(legacy,monkeypatch,preview_fails):
+    import asyncio
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from app.evaluation_composition_api import preview as preview_endpoint
+    from app.domain.evaluation_master import MasterAdoption
+    from app.main import create_app
+    from app.db import BudgetPolicyRepository,ProviderCallRepository
+    from app.domain.models import BudgetPolicy
+    from app.renderer import RemotionRenderer
+    from app.jobs.handlers import RenderVideoJobHandler
+    from app.jobs.runner import JobRunner
+    from app.jobs.store import JobStore
+    from app import presentation_repair
+    from test_remotion_renderer import _Runner,_renderer_project
+    db,pid,_,audio,_,_,key=legacy
+    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',max_calls=2,
+        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
+    service=EvaluationCompositionService(db,db.data_root)
+    c=service._context(pid,service.retained_selection(pid,VisualStyleTokens()))
+    use_and_batch(service,pid,c,key)
+    original=ProductionRunService(db,db.data_root).start(pid,idempotency_key='original-complete',
+        expected_fingerprint=c['request_sha256'],style_tokens=VisualStyleTokens(),purpose='internal_evaluation')
+    fake=_Runner();renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
+        renderer_dir=_renderer_project(db.data_root/'preview-renderer'),runner=fake)
+    runner=JobRunner(JobStore(db),{JobType.RENDER:RenderVideoJobHandler(ProjectRepository(db),renderer,db.data_root/'renders')},
+        worker_id='preview-fixture',lease_duration=timedelta(minutes=5),max_attempts=1)
+    ranges=[]
+    def qa(path,spec,**kwargs):
+        ranges.append(kwargs.get('frame_range'))
+        return dict(state='verified',sha256=hashlib.sha256(path.read_bytes()).hexdigest(),scope='synthetic_technical_only')
+    monkeypatch.setattr(presentation_repair,'measure_render_output',qa)
+    assert runner.run_once(job_id=original.render_job_id).status is JobStatus.COMPLETED
+    old_job=tuple(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(original.render_job_id),)).fetchone())
+    old_call=ProviderCallRepository(db).list_all()[0].model_dump(mode='json')
+    full_slot=tuple(db.connection.execute("SELECT * FROM evaluation_composition_slots WHERE slot='render'").fetchone())
+    old_binding=service.records.get('binding',original.id)
+    style=VisualStyleTokens(name='content-os-portrait-comparison')
+    c=service._context(pid,service.retained_selection(pid,style));use=use_and_batch(service,pid,c,key,suffix='-preview')
+    report=dict(policy='evaluation-composition-v1',project_id=str(pid),selection=c['selection'].model_dump(mode='json'),
+        request_sha256=c['request_sha256'],authorization_reference='synthetic-terms.txt',
+        authorization_sha256=hashlib.sha256((db.data_root/'synthetic-terms.txt').read_bytes()).hexdigest(),
+        start_frame=30,end_frame=60,max_renders=1)
+    path=db.data_root/'preview.json';path.write_text(json.dumps(report),encoding='utf-8')
+    body=dict(review_reference=path.name,review_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),idempotency_key='preview-once')
+    monkeypatch.setenv('CONTENT_OS_DATA_ROOT',str(db.data_root));app=create_app(db.path,database_startup_mode='existing');app.state.database=db
+    def post(body,operator=key):
+        request=Request({'type':'http','app':app,'headers':[(b'x-content-os-execution-admission-key',operator.encode())]})
+        return asyncio.run(preview_endpoint(pid,MasterAdoption.model_validate(body),request))
+    with pytest.raises(HTTPException) as invalid:post(body,'invalid')
+    assert invalid.value.status_code==409
+    preview=post(body);job=JobRepository(db).get(UUID(preview['render_job_id']))
+    assert job.payload.video_spec==c['spec'] and job.id!=original.render_job_id
+    assert post(dict(body,idempotency_key='another-key'))['id']==preview['id']
+    assert len(ProviderCallRepository(db).list_all())==1
+    bad=db.data_root/'bad-preview.json'
+    for end in [30,9999]:
+        bad.write_text(json.dumps(dict(report,end_frame=end)),encoding='utf-8')
+        with pytest.raises(ValueError):service.start_preview(pid,MasterAdoption(review_reference=bad.name,
+            review_sha256=hashlib.sha256(bad.read_bytes()).hexdigest(),idempotency_key='bad'),key)
+    bad.write_text(json.dumps(dict(report,start_frame=31)),encoding='utf-8')
+    with pytest.raises(UseAdmissionError,match='allowance_spent'):service.start_preview(pid,MasterAdoption(
+        review_reference=bad.name,review_sha256=hashlib.sha256(bad.read_bytes()).hexdigest(),idempotency_key='new-grant'),key)
+    fake.returncode=1 if preview_fails else 0
+    finished=runner.run_once(job_id=job.id)
+    assert finished.status is (JobStatus.FAILED if preview_fails else JobStatus.COMPLETED)
+    calls=ProviderCallRepository(db).list_all();assert len(calls)==2
+    call=next(v for v in calls if v.id!=UUID(old_call['id']))
+    assert call.mode=='assisted_test' and call.idempotency_key==job.idempotency_key
+    assert call.idempotency_key!=old_call['idempotency_key'] and runner.run_once(job_id=job.id) is None
+    if preview_fails:
+        with pytest.raises(UseAdmissionError,match='no_retry'):service.reconcile(pid,UUID(preview['id']))
+    else:
+        assert ranges==[None,(30,60)]
+        assert any('--frames=30-59' in a[0] for a in fake.calls)
+        assert any('atrim=start=1.0:end=2.0,asetpts=PTS-STARTPTS' in a[0] for a in fake.calls)
+        assert service.require_result(finished)[0].is_file()
+    correction_c=service._context(pid,service.retained_selection(pid,VisualStyleTokens(name='content-os-subject-first')))
+    correction_use=use_and_batch(service,pid,correction_c,key,suffix='-correction')
+    authorization=db.data_root/'correction-authorization.txt';authorization.write_text('Explicit synthetic second-preview permission')
+    correction_report=dict(report,selection=correction_c['selection'].model_dump(mode='json'),
+        request_sha256=correction_c['request_sha256'],correction_of=preview['id'],
+        authorization_reference=authorization.name,authorization_sha256=hashlib.sha256(authorization.read_bytes()).hexdigest())
+    def correction_request(name,changes=None):
+        target=db.data_root/(name+'.json');target.write_text(json.dumps(dict(correction_report,**(changes or {}))),encoding='utf-8')
+        return MasterAdoption(review_reference=target.name,review_sha256=hashlib.sha256(target.read_bytes()).hexdigest(),idempotency_key=name)
+    corrected_body=correction_request('correction-once')
+    if preview_fails:
+        with pytest.raises(UseAdmissionError,match='requires_completed_changed_plan'):
+            service.start_preview(pid,corrected_body,key)
+    else:
+        with pytest.raises(UseAdmissionError,match='new_authorization_required'):
+            service.start_preview(pid,correction_request('old-authorization',dict(
+                authorization_reference=report['authorization_reference'],authorization_sha256=report['authorization_sha256'])),key)
+        with pytest.raises(UseAdmissionError,match='requires_completed_changed_plan'):
+            unchanged=correction_request('unchanged-plan',dict(selection=c['selection'].model_dump(mode='json'),request_sha256=c['request_sha256']))
+            service._preview_report(pid,unchanged.review_reference,unchanged.review_sha256,c)
+        from app.budget import BudgetLimitError
+        from app.db import BudgetPolicyRepository
+        with pytest.raises(BudgetLimitError):service.start_preview(pid,corrected_body,key)
+        policies=BudgetPolicyRepository(db)
+        policies.save(policies.get_by_project(pid).model_copy(update={'max_calls':3}))
+        correction_id=service.start_preview(pid,corrected_body,key)
+        assert service.start_preview(pid,corrected_body.model_copy(update={'idempotency_key':'repeat-correction'}),key)==correction_id
+        corrected_job=JobRepository(db).get(UUID(service.records.owner(run_id=correction_id)['job_id']))
+        assert corrected_job.idempotency_key!=job.idempotency_key
+        assert ':preview_correction:' in corrected_job.idempotency_key
+        assert runner.run_once(job_id=corrected_job.id).status is JobStatus.COMPLETED
+        assert service.require_result(JobRepository(db).get(corrected_job.id))[0].is_file()
+        assert len(ProviderCallRepository(db).list_all())==3
+        with pytest.raises(UseAdmissionError,match='allowance_spent'):
+            service.start_preview(pid,correction_request('second-correction-grant',{'start_frame':31}),key)
+        service.revoke(pid,correction_use.id,'Fixture correction revocation',key)
+        with pytest.raises(UseAdmissionError):service.require_current_job(corrected_job)
+    assert tuple(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(original.render_job_id),)).fetchone())==old_job
+    assert ProviderCallRepository(db).get(UUID(old_call['id'])).model_dump(mode='json')==old_call
+    assert tuple(db.connection.execute("SELECT * FROM evaluation_composition_slots WHERE slot='render'").fetchone())==full_slot
+    assert service.records.get('binding',original.id)==old_binding
+    service.revoke(pid,use.id,'Fixture revocation',key)
+    with pytest.raises(UseAdmissionError):service.require_current_job(job)
+
+
 def test_retained_budget_and_immutable_selection_reject_before_job_creation(legacy):
     from app.db import BudgetPolicyRepository
     from app.production_runs import ProductionRunNotReady
@@ -270,7 +401,7 @@ def test_retained_budget_and_immutable_selection_reject_before_job_creation(lega
     assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
 
 
-def test_explicit_resume_replaces_only_one_unreserved_failure_preserving_history(legacy):
+def test_explicit_resume_does_not_replace_failure_without_provider_call(legacy):
     db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
     context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
     runs=ProductionRunService(db,db.data_root)
@@ -278,14 +409,100 @@ def test_explicit_resume_replaces_only_one_unreserved_failure_preserving_history
     jobs=JobRepository(db);old=jobs.get(run.render_job_id)
     jobs.update(old.model_copy(update=dict(status=JobStatus.FAILED,attempt=1,error_code='composition_render_failed')))
     history=dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())
-    resumed=runs.resume(pid,run.id);new=jobs.get(resumed.render_job_id)
-    assert new.id!=old.id and new.status==JobStatus.PENDING and new.attempt==0 and new.payload==old.payload
-    assert runs.resume(pid,run.id).render_job_id==new.id
-    service.require_current_job(new)
+    plan=build_production_preflight(db,ProjectRepository(db).get(pid),ProjectDraftRepository(db).get(pid),
+        style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
+    assert plan.status=='blocked' and 'composition_render_reconciliation_required' in plan.stop_reasons
+    with pytest.raises(UseAdmissionError,match='composition_render_reconciliation_required'):
+        runs.resume(pid,run.id)
     assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==history
+    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
     assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
-    jobs.update(new.model_copy(update=dict(status=JobStatus.FAILED,attempt=1)))
+
+
+def test_explicit_resume_replaces_failed_provider_call_once_and_result_is_readable(legacy,monkeypatch):
+    """A failed real reservation gets one independent synthetic Worker completion."""
+    from app.db import BudgetPolicyRepository,ProviderCallRepository
+    from app.domain.models import BudgetPolicy
+    from app.renderer import RemotionRenderer
+    from app.jobs.handlers import RenderVideoJobHandler
+    from app.jobs.runner import JobRunner
+    from app.jobs.store import JobStore
+    from app import presentation_repair
+    from test_remotion_renderer import _Runner,_renderer_project
+
+    db,pid,_,_,_,draft,key=legacy
+    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',max_calls=2,
+        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
+    service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
+    runs=ProductionRunService(db,db.data_root)
+    run=runs.start(pid,idempotency_key='recorded-call-recovery',expected_fingerprint=context['request_sha256'],
+        style_tokens=style,purpose='internal_evaluation')
+    old=JobRepository(db).get(run.render_job_id)
+    def worker(renderer):
+        handler=RenderVideoJobHandler(ProjectRepository(db),renderer,db.data_root/'renders')
+        return JobRunner(JobStore(db),{JobType.RENDER:handler},worker_id='recovery-test',
+            lease_duration=timedelta(minutes=5),max_attempts=1)
+    qa=lambda path,spec:dict(state='verified',sha256=hashlib.sha256(path.read_bytes()).hexdigest(),scope='synthetic_technical_only')
+    monkeypatch.setattr(presentation_repair,'measure_render_output',qa)
+    failed_renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
+        renderer_dir=_renderer_project(db.data_root/'recovery-failed-renderer'),runner=_Runner(returncode=1))
+    assert worker(failed_renderer).run_once(job_id=old.id).status is JobStatus.FAILED
+    old_job_history=dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())
+    calls=ProviderCallRepository(db)
+    old_call=calls.get_by_idempotency_key(old.idempotency_key)
+    assert old_call is not None and old_call.status=='failed'
+    old_call_history=old_call.model_dump(mode='json')
+    plan=build_production_preflight(db,ProjectRepository(db).get(pid),ProjectDraftRepository(db).get(pid),
+        style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
+    assert plan.status=='blocked' and 'composition_render_recovery_requires_resume' in plan.stop_reasons
+
+    replacement_run=runs.resume(pid,run.id);replacement=JobRepository(db).get(replacement_run.render_job_id)
+    assert replacement.id!=old.id and replacement.status is JobStatus.PENDING
+    assert replacement.idempotency_key==old.idempotency_key+':recovery'
+    assert replacement.payload.video_spec==old.payload.video_spec and replacement.payload.render_id!=old.payload.render_id
+    assert runs.resume(pid,run.id).render_job_id==replacement.id
+    assert len(calls.list_for_project(pid))==1
+    assert calls.get_by_idempotency_key(old.idempotency_key).model_dump(mode='json')==old_call_history
+    assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==old_job_history
+    pending_plan=build_production_preflight(db,ProjectRepository(db).get(pid),ProjectDraftRepository(db).get(pid),
+        style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
+    assert pending_plan.status=='blocked' and 'composition_render_already_dispatched' in pending_plan.stop_reasons
+
+    completed_renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
+        renderer_dir=_renderer_project(db.data_root/'recovery-complete-renderer'),runner=_Runner())
+    assert worker(completed_renderer).run_once(job_id=replacement.id).status is JobStatus.COMPLETED
+    new_call=calls.get_by_idempotency_key(replacement.idempotency_key)
+    assert new_call is not None and new_call.status=='completed' and new_call.id!=old_call.id
+    assert calls.get_by_idempotency_key(old.idempotency_key).model_dump(mode='json')==old_call_history
+    assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==old_job_history
+    saved_path,evidence=service.require_result(replacement)
+    assert saved_path.read_bytes()==b'minimal-muxed-mp4'
+    assert evidence['evidence']['sha256']==hashlib.sha256(saved_path.read_bytes()).hexdigest()
+    assert service.media(pid,run.id,'internal_evaluation')==saved_path
+    assert runs.resume(pid,run.id).render_job_id==replacement.id
+    assert len(calls.list_for_project(pid))==2
+
+
+def test_failed_composition_recovery_rejects_revoked_permission_and_unregistered_output(legacy):
+    db,pid,_,_,_,draft,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
+    context=service._context(pid,service.retained_selection(pid,style));receipt=use_and_batch(service,pid,context,key)
+    runs=ProductionRunService(db,db.data_root)
+    run=runs.start(pid,idempotency_key='blocked-recovery',expected_fingerprint=context['request_sha256'],
+        style_tokens=style,purpose='internal_evaluation')
+    job=JobRepository(db).get(run.render_job_id)
+    JobRepository(db).update(job.model_copy(update=dict(status=JobStatus.FAILED,attempt=1,error_code='composition_render_failed')))
+    staged=service.output_path(service.records.owner(run_id=run.id)).with_name('staged.mp4')
+    staged.parent.mkdir(parents=True,exist_ok=True);staged.write_bytes(b'unregistered partial output')
+    with pytest.raises(UseAdmissionError,match='composition_render_reconciliation_required'):
+        runs.resume(pid,run.id)
+    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
+    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
+    staged.unlink()
+    service.revoke(pid,receipt.id,'Synthetic permission withdrawn',key)
     with pytest.raises(UseAdmissionError):runs.resume(pid,run.id)
+    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
+    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
 
 
 def test_known_cny_cost_still_obeys_amount_limit(legacy):

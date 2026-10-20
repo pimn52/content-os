@@ -53,6 +53,7 @@ class AssetJobTargetStore:
                     or existing.project_id != job.project_id
                     or target is None
                     or target.asset_id != asset_id
+                    or existing.payload != job.payload
                 ):
                     raise AssetJobIdempotencyConflict("idempotency key is already bound to a different job type or asset")
                 self.db.connection.commit()

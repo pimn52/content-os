@@ -119,4 +119,25 @@ class CompositionAdmission(BaseModel):
     revocation_reason: str | None = None
 
 
+class CompositionPreviewReview(BaseModel):
+    """One separately authorized short preview, never another full render."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    policy: Literal["evaluation-composition-v1"] = POLICY
+    project_id: UUID
+    selection: CompositionSelection
+    request_sha256: Sha256
+    authorization_reference: str = Field(min_length=1, max_length=1000)
+    authorization_sha256: Sha256
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(gt=0)  # Exclusive; the original timeline is retained.
+    max_renders: Literal[1]
+    correction_of: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def bounded_interval(self):
+        if self.end_frame <= self.start_frame or type(self.max_renders) is not int:
+            raise ValueError("composition_preview_interval_invalid")
+        return self
+
+
 CompositionAdoption = MasterAdoption

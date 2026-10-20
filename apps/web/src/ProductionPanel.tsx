@@ -15,7 +15,7 @@ export function ProductionPanel({ projectId, draftVersion, scriptRevision, hasSc
   const [run, setRun] = useState<ProductionRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [presentation, setPresentation] = useState<"default" | "subject_first" | "editorial">("default");
+  const [presentation, setPresentation] = useState<"default" | "subject_first" | "editorial" | "comparison_stack">("default");
   const [execution, setExecution] = useState<ExecutionChoice>(commercialChoice);
   const executionRef = useRef(execution); executionRef.current = execution;
   const presentationRef = useRef(presentation); presentationRef.current = presentation;
@@ -86,8 +86,8 @@ export function ProductionPanel({ projectId, draftVersion, scriptRevision, hasSc
     <ExecutionPurposeControl lane="existing-master" key={projectId} projectId={projectId} value={execution} request={request} disabled={busy || !!run && run.status !== "cancelled"} onChange={value => {
       executionRef.current = value; setExecution(value); ++epoch.current; setPlan(null); setError(""); setBusy(false); locked.current = false;
     }} />
-    <label>新执行的成片人物呈现<select value={presentation} disabled={busy || !!run && run.status !== "cancelled"} onChange={event => { ++epoch.current; locked.current = false; setBusy(false); setPresentation(event.target.value as "default" | "subject_first" | "editorial"); setPlan(null); setError(""); }}><option value="default">现有默认布局</option><option value="subject_first">人物优先 · 大画面、紧凑可选文字</option><option value="editorial">语义标题排版 · 需已保存的场景图文计划</option></select></label>
-    <small>构图合适的全屏竖屏画面仍是首选。人物优先适用于已准入 Talking 的完整画面 contain，方形或宽视口是素材受限时的折中；横向素材仍可能留白，先在素材比例适配中评估可用裁剪。它不自动裁切、不新增人物审核，也不能保证成片达标。选择变化后须重新预检；已建立执行保留原样式。</small>
+    <label>新执行的成片画面呈现<select value={presentation} disabled={busy || !!run && run.status !== "cancelled"} onChange={event => { ++epoch.current; locked.current = false; setBusy(false); setPresentation(event.target.value as "default" | "subject_first" | "editorial" | "comparison_stack"); setPlan(null); setError(""); }}><option value="default">现有默认布局</option><option value="subject_first">人物优先 · 大画面、紧凑可选文字</option><option value="comparison_stack">左右对比横屏素材 → 上下排布</option><option value="editorial">语义标题排版 · 需已保存的场景图文计划</option></select></label>
+    <small>“左右对比 → 上下排布”只适用于 16:9 横屏、左右各一幅且底部烧录字幕的对比素材；它保留两侧标签、裁掉底部字幕条，并使用旁白时间轴字幕。其他授权横向 B-roll 沿用现有人物优先整帧面板。下沿画面可能被裁切，需检查短片实际效果；全屏竖屏素材仍是首选。选择变化后须重新预检；已建立执行保留原样式。</small>
     {execution.purpose === "internal_evaluation" && plan && !plan.retained_media && <EvaluationMasterPanel projectId={projectId} draftVersion={draftVersion} scriptRevision={scriptRevision} draftDirty={draftDirty} styleTokens={presentationStyle(presentation)} request={request} />}
     {execution.purpose === "internal_evaluation" && plan && !plan.retained_media && <EvaluationTalkingPanel projectId={projectId} draftVersion={draftVersion} scriptRevision={scriptRevision} draftDirty={draftDirty} styleTokens={presentationStyle(presentation)} request={request} />}
     {execution.purpose === "internal_evaluation" && <EvaluationCompositionPanel projectId={projectId} draftVersion={draftVersion} scriptRevision={scriptRevision} draftDirty={draftDirty} request={request} onAdopt={() => {++epoch.current;setPlan(null);locked.current=false;setBusy(false);}} enableGenerationRecovery={!!plan && !plan.retained_media} />}

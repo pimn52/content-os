@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 from collections.abc import Mapping, Sequence
 from uuid import UUID
 
@@ -25,20 +26,104 @@ class EditPlanPreflightError(ValueError):
     """A visual plan is unsafe or contradictory before renderer work begins."""
 
 
-def presentation_for_style(entry, style, asset=None):
+def footage_geometry(asset, clip):
+    """Read existing source-analysis facts; stale or unrelated intervals are unknown."""
+    if asset is None or clip is None:
+        return {}
+    analysis=asset.metadata.get("visual_analysis",{})
+    facts=analysis.get(str(clip.id),{}) if isinstance(analysis,dict) else {}
+    if not isinstance(facts,dict):return {}
+    if (facts.get("source_content_hash") != asset.content_hash
+        or facts.get("start_ms",clip.start_ms+1)>clip.start_ms or facts.get("end_ms",0)<clip.end_ms):
+        return {}
+    return facts
+
+
+def comparison_clearance(asset, clip):
+    facts=footage_geometry(asset,clip)
+    if facts.get("comparison_layout")!="side_by_side_equal_halves" or facts.get("subtitle_regions") is None:
+        raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
+    regions=facts["subtitle_regions"]
+    if not regions:
+        return 0,None
+    top=min(box[1] for box in regions)
+    if top<.75:
+        raise EditPlanPreflightError("comparison_subtitles_overlap_required_picture")
+    keep=max(1,math.floor(top*asset.height)-2)
+    return 1-keep/asset.height,facts["evidence_reference"]
+
+
+def presentation_for_style(entry, style, asset=None, scene_plan=None, clip=None):
     """Select existing layouts without inventing a crop or editorial content."""
-    if (style.name in {"content-os-subject-first","content-os-editorial"}
-        and entry.selected_source_kind is SourceKind.AI_VIDEO
+    comparison_style = style.name == "content-os-portrait-comparison"
+    facts = footage_geometry(asset,clip)
+    comparison_intent = False
+    if scene_plan is not None:
+        intent_text = " ".join(str(value or "") for value in (
+            scene_plan.purpose,
+            scene_plan.visual_intent.subject,
+            scene_plan.visual_intent.action,
+            scene_plan.visual_intent.description,
+        )).casefold()
+        comparison_intent = any(token in intent_text for token in ("对比", "比較", "比较", "comparison", "contrast"))
+    if (comparison_intent and entry.visual_role is EditVisualRole.FOOTAGE
+        and entry.selected_source_kind in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET}
+        and asset is not None and asset.width>asset.height
+        and facts.get("comparison_layout","unknown")=="unknown"):
+        raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
+    comparison_candidate = (
+        (comparison_style or facts.get("comparison_layout")=="side_by_side_equal_halves")
+        and comparison_intent
+        and entry.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+        and entry.visual_role is EditVisualRole.FOOTAGE
+    )
+    if comparison_candidate and asset is not None and asset.width > asset.height and asset.width * 9 != asset.height * 16:
+        raise EditPlanPreflightError("portrait_comparison_requires_16_9_source")
+    comparison_source = (
+        comparison_candidate
+        and asset is not None
+        and asset.width * 9 == asset.height * 16
+        and entry.framing_policy is TalkingFramingPolicy.FACE_SAFE_CONTAIN
+    )
+    if comparison_source:
+        ratio,reference = comparison_clearance(asset,clip)
+        updates = {}
+        if ratio:
+            updates = dict(source_bottom_crop_ratio=ratio,
+                source_subtitle_evidence_reference=reference,burned_in_subtitles="present")
+        return entry.model_copy(update={
+            "portrait_presentation": PortraitPresentation.STACKED_COMPARISON,
+            "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
+            **updates,
+        })
+
+    panel_style = style.name in {
+        "content-os-subject-first", "content-os-editorial", "content-os-portrait-comparison",
+    }
+    talking_panel = (
+        entry.selected_source_kind is SourceKind.AI_VIDEO
         and entry.visual_role is EditVisualRole.TALKING
+    )
+    subject_first_footage_panel = (
+        style.name in {"content-os-subject-first", "content-os-portrait-comparison"}
+        and entry.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+        and entry.visual_role is EditVisualRole.FOOTAGE
+    )
+    if (panel_style and (talking_panel or subject_first_footage_panel)
         and entry.framing_policy is TalkingFramingPolicy.FACE_SAFE_CONTAIN):
+        if subject_first_footage_panel and not entry.graphic_text:
+            # No useful editorial content and no evidenced crop: preserve the
+            # largest complete frame, centered, rather than an empty top panel.
+            return entry.model_copy(update={"portrait_presentation":PortraitPresentation.FULL_CANVAS})
         if style.name == "content-os-editorial" and not entry.graphic_text:
             raise EditPlanPreflightError("editorial_semantic_plan_required")
-        if entry.graphic_text and (len(entry.graphic_text)>32 or len(entry.graphic_text.splitlines())>2):
+        if talking_panel and entry.graphic_text and (len(entry.graphic_text)>32 or len(entry.graphic_text.splitlines())>2):
             raise EditPlanPreflightError("talking_panel_graphics_exceed_header")
         if asset is not None and asset.width < asset.height:
-            if entry.graphic_text:
+            if talking_panel and entry.graphic_text:
                 raise EditPlanPreflightError("portrait_graphic_margin_unavailable")
-            return entry
+            if not subject_first_footage_panel:
+                return entry
         return entry.model_copy(update={"portrait_presentation":PortraitPresentation.PORTRAIT_PANEL})
     return entry
 
@@ -154,7 +239,7 @@ def _preflight(
                 raise EditPlanPreflightError(
                     f"verified_static_crop evidence does not cover the full selected interval for {scene.scene_id!r}"
                 )
-        if entry.burned_in_subtitles == "present" and entry.subtitle_treatment is SubtitleTreatment.TIMED_CAPTIONS:
+        if entry.burned_in_subtitles == "present" and entry.subtitle_treatment is SubtitleTreatment.TIMED_CAPTIONS and not entry.source_bottom_crop_ratio:
             raise EditPlanPreflightError(f"known burned-in subtitles conflict with timed captions for {scene.scene_id!r}")
         if (
             entry.subtitle_treatment is SubtitleTreatment.TIMED_CAPTIONS

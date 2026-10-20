@@ -115,6 +115,30 @@ def test_store_explicit_versions_and_conflict(tmp_path):
     assert path.read_bytes() == b"conflicting retained bytes"
 
 
+def test_v2_request_cache_reuses_parse_but_rechecks_content(tmp_path, monkeypatch):
+    value, store, cache = v2(), RuntimeInventoryStore(tmp_path), {}
+    descriptor = value.descriptor
+    path = store._path(descriptor)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(value.canonical_bytes())
+    reads = 0
+    original = store._read
+
+    def count_parse(*args):
+        nonlocal reads
+        reads += 1
+        return original(*args)
+
+    monkeypatch.setattr(store, "_read", count_parse)
+    first = store.read_v2(descriptor, parsed_cache=cache)
+    second = store.read_v2(descriptor, parsed_cache=cache)
+    assert first is second and reads == 1
+
+    path.write_bytes(b"changed after first validation")
+    with pytest.raises(RuntimeInventoryError, match="inventory_changed"):
+        store.read_v2(descriptor, parsed_cache=cache)
+
+
 @pytest.mark.parametrize("variant", ["duplicate", "whitespace", "version", "counts"])
 def test_store_rejects_mixed_or_noncanonical_payload(tmp_path, variant):
     value, store = v2(), RuntimeInventoryStore(tmp_path)

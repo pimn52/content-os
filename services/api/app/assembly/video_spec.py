@@ -672,6 +672,8 @@ def _talking_visual_treatment(asset: Asset, edit: EditPlanScene) -> tuple[Vertic
     """Lower the accepted provider-neutral framing decision into VideoSpec."""
     if asset.source_kind is SourceKind.AI_VIDEO and edit.framing_policy is TalkingFramingPolicy.VERIFIED_STATIC_CROP:
         return VerticalReframeMode.CENTER_CROP, edit.crop_safety_evidence_reference, 0
+    if edit.source_bottom_crop_ratio:
+        return VerticalReframeMode.BOTTOM_CROP_CONTAIN,edit.source_subtitle_evidence_reference,edit.source_bottom_crop_ratio
     # Old generated-media metadata may describe a subtitle crop experiment,
     # but it is not full-interval face-safe framing evidence.  Fail closed.
     return VerticalReframeMode.CONTAIN, None, 0

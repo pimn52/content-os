@@ -11,7 +11,7 @@ from app.domain.models import Asset, Clip
 from app.providers.vision import ClipVisualAnalysis, VisionProvider
 
 from .pipeline import MediaAnalysisResult
-from .vision import ClipVisualMetadataPersistence, VisualMetadata
+from .vision import ClipVisualMetadataPersistence, VisualMetadata, selected_visual_clips
 
 
 class VisionPipelineError(RuntimeError):
@@ -35,7 +35,8 @@ class VisionKeyframeMismatch(VisionPipelineError):
 
 
 class _VisualPersistence(Protocol):
-    def apply(self, asset_id: UUID, results: Sequence[VisualMetadata], keyframe_paths: Sequence[Path]) -> list[Clip]: ...
+    def apply(self, asset_id: UUID, results: Sequence[VisualMetadata], keyframe_paths: Sequence[Path],
+        *, selected_clip_ids: Sequence[UUID] | None = None) -> list[Clip]: ...
 
 
 @dataclass(frozen=True)
@@ -67,10 +68,11 @@ class MediaVisionPipeline:
         keyframe_paths: Sequence[str | Path] | None = None,
         *,
         provider: VisionProvider | None = None,
+        selected_clip_ids: Sequence[UUID] | None = None,
     ) -> VisionAnalysisResult:
         asset, input_clips, paths = self._inputs(asset_or_analysis, clips, keyframe_paths)
         stored_asset = self._stored_asset(asset)
-        stored_clips = self.clips.list_by_asset(stored_asset.id)
+        stored_clips = selected_visual_clips(self.clips.list_by_asset(stored_asset.id), selected_clip_ids)
         self._validate_clip_identity(stored_asset, stored_clips, input_clips)
         normalized_paths = self._validate_paths(paths, stored_clips)
 
@@ -81,8 +83,10 @@ class MediaVisionPipeline:
             _metadata_for(clip, path, active_provider.analyze(path))
             for clip, path in zip(stored_clips, normalized_paths)
         )
-        updated = self.persistence.apply(stored_asset.id, metadata, normalized_paths)
-        return VisionAnalysisResult(stored_asset, tuple(updated), normalized_paths)
+        updated = (self.persistence.apply(stored_asset.id, metadata, normalized_paths)
+            if selected_clip_ids is None else self.persistence.apply(stored_asset.id, metadata, normalized_paths,
+                selected_clip_ids=selected_clip_ids))
+        return VisionAnalysisResult(self.assets.get(stored_asset.id), tuple(updated), normalized_paths)
 
     def analyze(
         self,

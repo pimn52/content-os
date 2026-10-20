@@ -17,27 +17,34 @@ function setup(preflightOverride) {
   return { h, calls };
 }
 test('normal preflight and start carry identical subject-first tokens; changing choice requires fresh preflight', async () => {
-  const s = setup(); await s.h.flush(); await s.h.change('成片人物呈现', 'subject_first'); await s.h.click('预检整条方案');
+  const s = setup(); await s.h.flush(); await s.h.change('新执行的成片画面呈现', 'subject_first'); await s.h.click('预检整条方案');
   const before = s.calls[0].body.style_tokens; assert.equal(before.name, 'content-os-subject-first');
   await s.h.click('保存 / 启动'); assert.deepEqual(s.calls[1].body.style_tokens, before);
   assert.equal(s.calls[1].body.expected_fingerprint, plan.fingerprint); assert.equal(s.calls[1].body.talking_review_policy_version, 2);
-  await s.h.change('成片人物呈现', 'default'); assert.equal(s.h.nodes('button').some(node => String(node.props.children).includes('保存 / 启动')), false);
+  await s.h.change('新执行的成片画面呈现', 'default'); assert.equal(s.h.nodes('button').some(node => String(node.props.children).includes('保存 / 启动')), false);
   await s.h.click('预检整条方案'); assert.deepEqual(s.calls[2].body.style_tokens, {});
 });
 test('late preflight cannot reinstate a changed presentation; project change clears choice', async () => {
   let resolve; const pending = new Promise(r => { resolve = r; }); const s = setup(() => pending);
-  await s.h.flush(); await s.h.click('预检整条方案'); await s.h.change('成片人物呈现', 'subject_first');
+  await s.h.flush(); await s.h.click('预检整条方案'); await s.h.change('新执行的成片画面呈现', 'subject_first');
   resolve(plan); await s.h.flush(); assert.equal(s.h.nodes('button').some(node => String(node.props.children).includes('保存 / 启动')), false);
   assert.equal(s.h.find('button', '预检整条方案').props.disabled, false);
-  s.h.setProps({ projectId: 'Q' }); await s.h.flush(); assert.equal(s.h.input('成片人物呈现').props.value, 'default');
+  s.h.setProps({ projectId: 'Q' }); await s.h.flush(); assert.equal(s.h.input('新执行的成片画面呈现').props.value, 'default');
 });
 
 test('normal editorial choice carries the existing profile through preflight and start', async () => {
-  const s = setup(); await s.h.flush(); await s.h.change('成片人物呈现', 'editorial');
+  const s = setup(); await s.h.flush(); await s.h.change('新执行的成片画面呈现', 'editorial');
   await s.h.click('预检整条方案'); await s.h.click('保存 / 启动');
   assert.equal(s.calls[0].body.style_tokens.name, 'content-os-editorial');
   assert.deepEqual(s.calls[1].body.style_tokens, s.calls[0].body.style_tokens);
   assert.equal(s.calls[1].body.expected_fingerprint, plan.fingerprint);
+});
+
+test('comparison-stack choice persists through preflight and start', async () => {
+  const s = setup(); await s.h.flush(); await s.h.change('新执行的成片画面呈现', 'comparison_stack');
+  await s.h.click('预检整条方案'); await s.h.click('保存 / 启动');
+  assert.equal(s.calls[0].body.style_tokens.name, 'content-os-portrait-comparison');
+  assert.deepEqual(s.calls[1].body.style_tokens, s.calls[0].body.style_tokens);
 });
 
 test('unsaved editorial changes invalidate the inspected plan and block preflight until save', async () => {

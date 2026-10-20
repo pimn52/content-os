@@ -19,13 +19,18 @@ from app.main import create_app
 from app.assembly.edit_plan import presentation_for_style
 
 
-def test_subject_first_selects_only_supported_talking_panel_and_preserves_default():
+def test_subject_first_selects_supported_talking_and_footage_panels_and_preserves_default():
     from app.assembly.edit_plan import _default_edit_plan
     from app.domain.models import CandidateAsset, CostCategory, Project, UsageCost, VisualStyleTokens
     project = Project(title="Style", topic="Style", ip_profile_id=uuid4(), fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc))
     scene = _scene(str(project.id))
     # This is presentation geometry only, not asset admission.
-    for kind, expected in ((SourceKind.AI_VIDEO, "portrait_panel"), (SourceKind.USER_ASSET, "full_canvas"), (SourceKind.TYPOGRAPHY, "full_canvas")):
+    for kind, expected in (
+        (SourceKind.AI_VIDEO, "portrait_panel"),
+        (SourceKind.USER_ASSET, "full_canvas"),
+        (SourceKind.HISTORICAL_ASSET, "full_canvas"),
+        (SourceKind.TYPOGRAPHY, "full_canvas"),
+    ):
         candidate = CandidateAsset(scene_plan_id=scene.id, source_kind=kind,
             asset_id=uuid4() if kind is not SourceKind.TYPOGRAPHY else None,
             clip_id=uuid4() if kind is not SourceKind.TYPOGRAPHY else None,
@@ -38,6 +43,107 @@ def test_subject_first_selects_only_supported_talking_panel_and_preserves_defaul
         assert chosen.selected_clip_id == entry.selected_clip_id
         assert chosen.framing_policy == entry.framing_policy
         assert chosen.graphic_text == entry.graphic_text
+
+
+def test_comparison_stack_requires_an_explicit_comparison_scene_and_16_9_media():
+    import pytest
+    from types import SimpleNamespace
+    from app.assembly.edit_plan import _default_edit_plan
+    from app.domain.models import CandidateAsset, CostCategory, Project, UsageCost, VisualStyleTokens
+
+    project = Project(title="Style", topic="Style", ip_profile_id=uuid4(), fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc))
+    scene = _scene(str(project.id)).model_copy(update={"visual_intent": VisualIntent(
+        subject="same action bitrate comparison", action="left and right comparison, preserve labels",
+        description="two side-by-side views",
+    )})
+    candidate = CandidateAsset(scene_plan_id=scene.id, source_kind=SourceKind.USER_ASSET,
+        asset_id=uuid4(), clip_id=uuid4(), match_score=1, why=["fixture"],
+        estimated_cost=UsageCost(category=CostCategory.RENDER, amount=None))
+    entry = _default_edit_plan(project, [scene], {scene.id: candidate}).scenes[0]
+    style = VisualStyleTokens(name="content-os-portrait-comparison")
+
+    clip=SimpleNamespace(id=candidate.clip_id,start_ms=0,end_ms=5000)
+    asset=SimpleNamespace(width=1280,height=720,content_hash='a'*64,metadata={'visual_analysis':{str(clip.id):dict(
+        source_content_hash='a'*64,start_ms=0,end_ms=5000,comparison_layout='side_by_side_equal_halves',
+        subtitle_regions=[],evidence_reference='synthetic-source-geometry')}})
+    selected = presentation_for_style(entry, style, asset, scene_plan=scene,clip=clip)
+    assert selected.portrait_presentation.value == "stacked_comparison"
+    assert selected.subtitle_treatment.value == "timed_captions"
+    assert selected.selected_asset_id == candidate.asset_id
+
+    non_comparison = scene.model_copy(update={"visual_intent": VisualIntent(subject="camera", action="recording a scene")})
+    assert presentation_for_style(entry, style, asset, scene_plan=non_comparison,clip=clip).portrait_presentation.value == "full_canvas"
+    assert presentation_for_style(entry, VisualStyleTokens(), asset, scene_plan=scene,clip=clip).portrait_presentation.value == "stacked_comparison"
+    with pytest.raises(ValueError,match='geometry_unknown'):
+        presentation_for_style(entry,style,SimpleNamespace(width=1280,height=720),scene_plan=scene)
+    facts=asset.metadata['visual_analysis'][str(clip.id)]
+    facts['subtitle_regions']=[[.3,.88,.4,.08]]
+    cropped=presentation_for_style(entry,style,asset,scene_plan=scene,clip=clip)
+    assert cropped.source_bottom_crop_ratio==pytest.approx((720-(int(.88*720)-2))/720)
+    assert cropped.source_subtitle_evidence_reference=='synthetic-source-geometry'
+    facts['source_content_hash']='b'*64
+    with pytest.raises(ValueError,match='geometry_unknown'):presentation_for_style(entry,style,asset,scene_plan=scene,clip=clip)
+    with pytest.raises(ValueError, match="portrait_comparison_requires_16_9_source"):
+        facts['source_content_hash']='a'*64
+        presentation_for_style(entry, style, SimpleNamespace(width=1280,height=800,content_hash='a'*64,metadata=asset.metadata), scene_plan=scene,clip=clip)
+
+
+def test_source_planning_prefers_existing_portrait_before_centered_landscape(tmp_path):
+    from app.production_preflight import _choose_candidate
+    from app.domain.models import CandidateAsset,CostCategory,UsageCost
+    from test_remotion_renderer import _setup
+    db,source,clip,spec=_setup(tmp_path);db.data_root=tmp_path
+    try:
+        source=AssetRepository(db).update(source.model_copy(update={'width':1920,'height':1080}))
+        scene=_scene(str(spec.project_id)).model_copy(update={'duration_target_ms':1000})
+        raw=CandidateAsset(scene_plan_id=scene.id,source_kind=SourceKind.USER_ASSET,asset_id=source.id,clip_id=clip.id,
+            match_score=.9,recommended=True,why=['same semantic score'],estimated_cost=UsageCost(category=CostCategory.USER_ASSET,amount=None))
+        native=AssetRepository(db).create(source.model_copy(update={'id':uuid4(),'width':1080,'height':1920,'content_hash':'b'*64}))
+        native_clip=ClipRepository(db).create(clip.model_copy(update={'id':uuid4(),'asset_id':native.id}))
+        portrait=raw.model_copy(update={'asset_id':native.id,'clip_id':native_clip.id,'recommended':False})
+        selected,need=_choose_candidate(scene,(raw,portrait),ClipRepository(db),AssetRepository(db))
+        assert selected.asset_id==native.id and need=='none'
+        assert _choose_candidate(scene,(raw,portrait.model_copy(update={'match_score':.1})),ClipRepository(db),AssetRepository(db))[0].asset_id==source.id
+        assert _choose_candidate(scene,(raw,),ClipRepository(db),AssetRepository(db))[0].asset_id==source.id
+    finally:db.close()
+
+
+def test_source_planning_reuses_only_verified_portrait_for_the_selected_interval(tmp_path):
+    import hashlib
+    from app.production_preflight import _choose_candidate
+    from app.domain.models import CandidateAsset,CostCategory,UsageCost,SourceCropWindow,VerifiedVerticalDerivationRequest,VerifiedVerticalDerivationEvidence
+    from app.media import VerticalSourceDerivationService,MediaImporter,ProbeMetadata
+    from test_remotion_renderer import _setup
+    db,source,clip,spec=_setup(tmp_path);db.data_root=tmp_path
+    try:
+        source=AssetRepository(db).create(source.model_copy(update={'id':uuid4(),'width':1920,'height':1080,
+            'content_hash':hashlib.sha256(Path(source.source_file).read_bytes()).hexdigest()}))
+        clip=ClipRepository(db).create(clip.model_copy(update={'id':uuid4(),'asset_id':source.id}))
+        crop=SourceCropWindow(x=420,y=0,width=1080,height=1080)
+        evidence=VerifiedVerticalDerivationEvidence(source_asset_id=source.id,source_clip_id=clip.id,source_content_hash=source.content_hash,
+            crop_window=crop,covered_start_ms=clip.start_ms,covered_end_ms=clip.end_ms,
+            face_head_clearance_verified=True,crop_stability_verified=True,source_subtitle_clearance_verified=True,
+            method='human_full_interval_review',method_version='fixture',coverage='full_interval_continuous',confidence='reviewed',
+            evidence_reference='Synthetic test only; no actual media quality claim')
+        request=VerifiedVerticalDerivationRequest(idempotency_key='fixture-portrait',source_asset_id=source.id,source_clip_id=clip.id,
+            start_ms=clip.start_ms,end_ms=clip.end_ms,crop_window=crop,output_height=1080,source_subtitle_state='not_observed',evidence=evidence)
+        class Probe:
+            def probe(self,path):return ProbeMetadata(duration_ms=1001,width=1080,height=1080,fps=source.fps,has_audio=False,metadata={})
+        derived=VerticalSourceDerivationService(db,tmp_path,MediaImporter(db,tmp_path,Probe()),runner=lambda a:Path(a[-1]).write_bytes(b'fixture-derived')).derive(request)
+        scene=_scene(str(spec.project_id)).model_copy(update={'duration_target_ms':1000})
+        raw=CandidateAsset(scene_plan_id=scene.id,source_kind=source.source_kind,asset_id=source.id,clip_id=clip.id,
+            match_score=.9,recommended=True,why=['exact source'],estimated_cost=UsageCost(category=CostCategory.USER_ASSET,amount=None))
+        assert _choose_candidate(scene,(raw,),ClipRepository(db),AssetRepository(db))[0].asset_id==derived.asset.id
+        other=ClipRepository(db).create(clip.model_copy(update={'id':uuid4(),'start_ms':0,'end_ms':1001}))
+        outside=raw.model_copy(update={'clip_id':other.id})
+        assert _choose_candidate(scene,(outside,),ClipRepository(db),AssetRepository(db))[0].asset_id==source.id
+        shifted=ClipRepository(db).create(clip.model_copy(update={'id':uuid4(),'start_ms':clip.start_ms+1}))
+        # A containing derivative starts at a different source moment; selecting
+        # its first frame would silently shift the requested evidence interval.
+        assert _choose_candidate(scene,(raw.model_copy(update={'clip_id':shifted.id}),),ClipRepository(db),AssetRepository(db))[0].asset_id==source.id
+        Path(derived.asset.source_file).write_bytes(b'changed-derived-bytes')
+        assert _choose_candidate(scene,(raw,),ClipRepository(db),AssetRepository(db))[0].asset_id==source.id
+    finally:db.close()
 
 
 def test_editorial_requires_real_bounded_headline_and_safe_margin():
@@ -126,7 +232,9 @@ def test_weak_text_match_does_not_prove_capture_or_waive_other_gates(tmp_path):
         graphic = scene.model_copy(update={"preferred_sources": [SourceKind.USER_ASSET, SourceKind.TYPOGRAPHY]})
         client.put(f"/projects/{project_id}/draft", json={"script": scene.voice_text, "topic": "New topic",
             "scenes": [graphic.model_dump(mode="json")]}).raise_for_status()
-        response = client.post(f"/projects/{project_id}/production-preflight", json={})
+        response = client.post(f"/projects/{project_id}/production-preflight", json={
+            "style_tokens": {"name": "content-os-subject-first"},
+        })
         assert response.status_code == 200, response.text
         second = response.json()
         assert second["scenes"][0]["planned_source_kind"] == "typography"
@@ -224,6 +332,7 @@ def test_preflight_exposes_horizontal_subtitle_and_transform_unknowns(tmp_path: 
         assert decision["suitability"] == "unknown"
         assert body["preliminary_edit_plan"] is not None
         assert body["preliminary_edit_plan"]["scenes"][0]["subtitle_treatment"] == "none"
+        assert body["preliminary_edit_plan"]["scenes"][0]["portrait_presentation"] == "full_canvas"
         assert {action["kind"] for action in body["actions"]} == {
             "voice", "analysis", "transform", "render", "repair_allowance",
         }
@@ -232,7 +341,7 @@ def test_preflight_exposes_horizontal_subtitle_and_transform_unknowns(tmp_path: 
         assert client.get(f"/projects/{project_id}/provider-calls").json() == []
 
 
-def test_preflight_reuses_exact_approved_master_without_new_voice_or_review(tmp_path: Path) -> None:
+def test_preflight_rejects_unbound_master_claim_without_generation_evidence(tmp_path: Path) -> None:
     path = tmp_path / "master-reuse.sqlite"
     with TestClient(create_app(path)) as client:
         project_id, scene = _create_draft(client, talking=True)
@@ -260,11 +369,12 @@ def test_preflight_reuses_exact_approved_master_without_new_voice_or_review(tmp_
         response = client.post(f"/projects/{project_id}/production-preflight", json={})
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["reusable_master_audio_id"] == str(master.id)
+        # A metadata-only fixture has no bound generation/QA or VoiceProfile.
+        # Actual approved retained-Master reuse is covered in retained-production.
+        assert body["reusable_master_audio_id"] is None
         voice = next(action for action in body["actions"] if action["kind"] == "voice")
-        assert voice["required"] is False and voice["cost"]["amount"] == "0"
-        assert "voice_consent" not in body["authorization_needs"]
-        assert "voice_capability_not_verified" not in body["stop_reasons"]
+        assert voice["required"] is True
+        assert "voice_consent" in body["authorization_needs"]
         assert client.get(f"/projects/{project_id}/provider-calls").json() == []
 
 

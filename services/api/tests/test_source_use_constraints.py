@@ -375,18 +375,23 @@ def test_creator_scope_concurrency_and_idempotency_conflict(tmp_path):
 
 def test_render_snapshot_fences_adoption_disable_and_late_changes(tmp_path):
     from app.db import JobRepository
+    from app.domain.models import Job,JobType,RenderVideoJobPayload,RationalFps
     from app.jobs.handlers import RenderVideoJobHandler
     from app.jobs.runner import JobExecutionError
-    from test_production_runs import _ready_fixture
     path = tmp_path / "worker.sqlite"
     with TestClient(create_app(path)) as client:
-        project, _, _ = _ready_fixture(client, path)
-        plan = preview(client, project)
-        response = client.post(f"/projects/{project}/production-runs", json={
-            "expected_fingerprint": plan["fingerprint"], "idempotency_key": "render"})
-        assert response.status_code == 201, response.text
+        project=client.post('/projects',json={'title':'Worker guard fixture','topic':'Fixture'}).json()['id']
         with Database(path) as db:
-            job = JobRepository(db).get(UUID(response.json()["render_job_id"]))
+            # Isolate this policy guard from unrelated Voice-generation admission.
+            # This Job is a fixture, never a production dispatch or actual render.
+            spec=VideoSpec(project_id=project,format='vertical',width=1080,height=1920,fps=RationalFps(numerator=30,denominator=1),
+                scenes=[VideoScene(scene_id='fixture',start_frame=0,duration_frames=30,
+                    visual=VideoVisual(source_kind='typography',authorization_reference='synthetic-only'),
+                    visual_role='graphic',graphic_treatment='key_point',graphic_text='Fixture',subtitle_treatment='none')])
+            now=datetime.now(timezone.utc)
+            job=JobRepository(db).create(Job(project_id=project,type=JobType.RENDER,idempotency_key='fixture-source-policy',
+                created_at=now,updated_at=now,payload=RenderVideoJobPayload(project_id=project,render_id=uuid4(),video_spec=spec)))
+            SourceUseConstraintService(db).snapshot_render(UUID(project),job.id)
             assert db.connection.execute("SELECT fingerprint FROM render_use_constraint_snapshots WHERE job_id=?", (str(job.id),)).fetchone()
             service = SourceUseConstraintService(db)
             service.require_render_snapshot(job)

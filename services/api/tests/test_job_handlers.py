@@ -423,6 +423,54 @@ def test_local_asr_handler_uses_known_zero_cost_and_records_provenance(tmp_path:
         db.close()
 
 
+@pytest.mark.parametrize('scope_valid', [True, False])
+def test_scoped_vision_handler_limits_extraction_indexing_and_metered_calls(tmp_path, scope_valid):
+    from uuid import uuid4
+    from app.media.vision_pipeline import MediaVisionPipeline
+    from app.providers.vision import ClipVisualAnalysis
+    from app.domain.models import ClipIndexJobPayload
+    with Database(tmp_path / 'scoped-handler.sqlite') as db:
+        asset = _asset(db, tmp_path, has_audio=False)
+        profile = IPProfileRepository(db).create(IPProfile(creator_name='Fixture'))
+        project = ProjectRepository(db).create(Project(ip_profile_id=profile.id, title='Scoped fixture',
+            topic='No runtime inference', fps=asset.fps, created_at=datetime.now(timezone.utc)))
+        BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=True,
+            max_calls=2, updated_at=datetime.now(timezone.utc)))
+        clips = [ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=i*1000,
+            end_ms=(i+1)*1000,asset_duration_ms=2000)) for i in range(2)]
+        frame = tmp_path / 'frame.jpg'; frame.write_bytes(b'fixture')
+        seen = []
+        class Resolver:
+            def resolve(self, candidate, supplied):
+                assert [c.id for c in supplied] == [clips[1].id]
+                seen.append('extract')
+                return [frame]
+        class Provider:
+            def analyze(self, path):
+                seen.append('vision')
+                return ClipVisualAnalysis('scoped',(),(),None,None,None,.8,None,None,False)
+        class Indexer:
+            def index_clips(self, supplied):
+                assert [c.id for c in supplied] == [clips[1].id]
+                seen.append('index')
+        scope = [clips[1].id] if scope_valid else [uuid4()]
+        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS,'scoped-handler').model_copy(update={
+            'project_id':project.id,'payload':ClipIndexJobPayload(clip_ids=scope)}),asset.id)
+        handler = AssetVisionJobHandler(AssetJobTargetStore(db),AssetRepository(db),ClipRepository(db),
+            Resolver(),MediaVisionPipeline(db,Provider()),Indexer(),ProviderCallLedger(db))
+        result = _runner(JobStore(db),{JobType.INDEX_CLIPS:handler}).run_once()
+        calls = ProviderCallRepository(db).list_for_project(project.id)
+        if scope_valid:
+            assert result.status is JobStatus.COMPLETED
+            assert seen == ['extract','vision','index']
+            assert len(calls)==2 and {c.operation for c in calls}=={'vision','embedding'}
+            assert all(c.status=='completed' for c in calls)
+            assert ClipRepository(db).get(clips[0].id)==clips[0]
+        else:
+            assert result.status is JobStatus.FAILED and result.error_code=='vision_clip_scope_invalid'
+            assert seen==[] and calls==[]
+
+
 def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -> None:
     db = Database(tmp_path / "vision-handler.sqlite")
     try:

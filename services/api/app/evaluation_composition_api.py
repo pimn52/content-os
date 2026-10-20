@@ -43,6 +43,13 @@ async def batch(project_id: UUID, payload: CompositionAdoption, request: Request
     return action(lambda: service(request).adopt_batch(project_id,payload,request.headers.get("x-content-os-execution-admission-key")))
 
 
+@router.post("/previews",status_code=201)
+async def preview(project_id: UUID, payload: CompositionAdoption, request: Request):
+    s = service(request)
+    identity = action(lambda: s.start_preview(project_id,payload,request.headers.get("x-content-os-execution-admission-key")))
+    return action(lambda: s.get(project_id,identity))
+
+
 @router.get("/runs")
 async def runs(project_id: UUID, request: Request):
     # Ordinary production has no history-list equivalent yet; retain discovery,

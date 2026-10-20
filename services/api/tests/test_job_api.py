@@ -10,6 +10,30 @@ from app.domain.models import Asset, RationalFps
 from app.main import create_app
 
 
+def test_index_clip_scope_is_asset_bound_and_part_of_idempotency(tmp_path):
+    from app.db import ClipRepository, JobRepository
+    from app.domain.models import Clip
+    path = tmp_path / 'scoped-api.sqlite'
+    with Database(path) as db:
+        asset = _asset(db, tmp_path)
+        clips = [ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=i*500,
+            end_ms=(i+1)*500, asset_duration_ms=1000)) for i in range(2)]
+    with TestClient(create_app(path)) as client:
+        url = f'/assets/{asset.id}/jobs/index_clips'
+        data = {'idempotency_key':'scoped', 'clip_ids':[str(clips[1].id)]}
+        first = client.post(url, json=data)
+        assert first.status_code == 201
+        assert client.post(url, json=data).json()['id'] == first.json()['id']
+        assert client.post(url, json={**data,'clip_ids':[str(clips[0].id)]}).status_code == 409
+        assert client.post(url, json={'idempotency_key':'scoped'}).status_code == 409
+        for ids in ([], [str(uuid4())], [str(clips[1].id)]*2):
+            assert client.post(url,json={**data,'idempotency_key':'invalid','clip_ids':ids}).status_code == 422
+        assert client.post(f'/assets/{asset.id}/jobs/analyze_asset',json=data).status_code == 422
+        with Database(path, startup_mode='existing') as db:
+            stored = JobRepository(db).get(first.json()['id'])
+            assert stored.payload.clip_ids == [clips[1].id]
+
+
 def _asset(db: Database, root: Path) -> Asset:
     path = root / "asset.mp4"
     path.write_bytes(b"asset")

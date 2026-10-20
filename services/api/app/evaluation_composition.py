@@ -317,14 +317,81 @@ class EvaluationCompositionService:
             result["reasons"] = [str(exc) if isinstance(exc,ValueError) else "composition_evidence_invalid"]
         return result
 
-    def _check_render_budget(self, project_id, c):
+    def _check_render_budget(self, project_id, c, *, idempotency_key=None):
         from app.budget import ProviderCallLedger
         from app.db import ProviderCallRepository
         row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND (master_run_id=? OR master_audio_id=?)",
             (str(project_id),str(c["selection"].parent_id),str(c["selection"].parent_id))).fetchone()
-        if row and ProviderCallRepository(self.db).get_by_idempotency_key(f"composition:{row[0]}:render") is not None:
+        key = idempotency_key or (None if row is None else f"composition:{row[0]}:render")
+        if key and ProviderCallRepository(self.db).get_by_idempotency_key(key) is not None:
             return  # A spent slot may only recover, never reserve again.
         ProviderCallLedger(self.db).check_reservation(project_id=project_id,estimated_cost=c["spec"].estimated_cost)
+
+    def render_dispatch_blocker(self, project_id, selection):
+        """Keep a consumed one-shot out of ordinary preflight dispatch."""
+        row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND (master_run_id=? OR master_audio_id=?)",
+            (str(project_id),str(selection.parent_id),str(selection.parent_id))).fetchone()
+        if row is None:
+            return None
+        slot = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",
+            (row[0],)).fetchone()
+        if slot is None:
+            return None
+        owner = self.records.owner(run_id=slot[0])
+        if owner is None or owner["project_id"] != str(project_id):
+            return "composition_render_owner_missing"
+        job = JobRepository(self.db).get(UUID(owner["job_id"]))
+        if job is None:
+            return "composition_render_job_missing"
+        if self.records.get("result",slot[0]) is not None:
+            return "composition_render_already_completed"
+        if job.status in (JobStatus.PENDING,JobStatus.RUNNING):
+            return "composition_render_already_dispatched"
+        if job.status != JobStatus.FAILED:
+            return "composition_render_reconciliation_required"
+        binding = self.records.get("binding",slot[0])
+        if binding is None:
+            return "composition_render_reconciliation_required"
+        if binding.get("recovery") is not None:
+            return "composition_render_recovery_allowance_spent"
+        base_key = f"composition:{owner['batch_id']}:render"
+        if job.idempotency_key != base_key:
+            return "composition_render_reconciliation_required"
+        if self._recovery_attempt_exists(project_id,owner["batch_id"]):
+            return "composition_render_recovery_allowance_spent"
+        try:
+            self._failed_call(project_id,owner,job,slot[0])
+        except UseAdmissionError as exc:
+            return str(exc)
+        if self.output_path(owner).exists() or self.output_path(owner).with_name("staged.mp4").exists():
+            return "composition_render_reconciliation_required"
+        return "composition_render_recovery_requires_resume"
+
+    def _failed_call(self, project_id, owner, job, run_id):
+        from app.db import ProviderCallRepository
+        call = ProviderCallRepository(self.db).get_by_idempotency_key(job.idempotency_key)
+        launch = self.records.get("launch",run_id)
+        if call is None:
+            # This recovery is limited to a confirmed failed provider-backed
+            # render. A failure before reservation is a separate case and has
+            # no authorization in this one-use allowance.
+            raise UseAdmissionError("composition_render_reconciliation_required")
+        if (call.status != "failed" or call.project_id != project_id or call.operation != "render"
+            or call.mode != "runtime" or call.provider != "local-render" or call.model != "remotion-ffmpeg"
+            or call.input_source != f"render:{owner['render_id']}" or call.input_digest != owner["request_sha256"]
+            or call.estimated_cost != job.payload.video_spec.estimated_cost or call.result_payload is not None
+            or (launch is not None and launch.get("call_id") != str(call.id))):
+            raise UseAdmissionError("composition_render_reconciliation_required")
+        return call
+
+    def _recovery_attempt_exists(self, project_id, batch_id):
+        key = f"composition:{batch_id}:render:recovery"
+        job = self.db.connection.execute("SELECT 1 FROM jobs WHERE project_id=? AND idempotency_key=? LIMIT 1",
+            (str(project_id),key)).fetchone()
+        if job is not None:
+            return True
+        from app.db import ProviderCallRepository
+        return ProviderCallRepository(self.db).get_by_idempotency_key(key) is not None
 
     def reconcile(self, project_id, identity):
         owner = self.records.owner(run_id=identity)
@@ -333,30 +400,48 @@ class EvaluationCompositionService:
         job = JobRepository(self.db).get(UUID(owner["job_id"]))
         c = self.require_current_job(job)
         if self.records.get("result",identity) is None:
-            # Explicit resume may replace one failure before reservation. Keep
-            # the failed Job intact; a reserved call is never replayed here.
-            from app.db import ProviderCallRepository
-            key = f"composition:{owner['batch_id']}:render"
-            replacement_key = key + ":recovery"
+            if self.records.get("binding",identity).get("preview") is not None:
+                raise UseAdmissionError("composition_preview_no_retry")
+            # A single explicitly resumed terminal failure gets one new Job and
+            # one independent ledger key. The failed Job and call stay intact.
+            binding = self.records.get("binding",identity)
+            base_key = f"composition:{owner['batch_id']}:render"
+            replacement_key = base_key + ":recovery"
+            if job.status in (JobStatus.PENDING,JobStatus.RUNNING):
+                return
+            if binding is None:
+                raise UseAdmissionError("composition_render_reconciliation_required")
+            if binding.get("recovery") is not None:
+                raise UseAdmissionError("composition_render_recovery_allowance_spent")
+            if job.status != JobStatus.FAILED or job.idempotency_key != base_key:
+                raise UseAdmissionError("composition_render_reconciliation_required")
+            if self._recovery_attempt_exists(project_id,owner["batch_id"]):
+                raise UseAdmissionError("composition_render_recovery_allowance_spent")
+            old_call = self._failed_call(project_id,owner,job,identity)
+            if (self.output_path(owner).exists()
+                or self.output_path(owner).with_name("staged.mp4").exists()):
+                raise UseAdmissionError("composition_render_reconciliation_required")
             with self.db.transaction(immediate=True):
                 self._fence(c["token"])
-                if (job.status != JobStatus.FAILED or job.idempotency_key != key
-                    or ProviderCallRepository(self.db).get_by_idempotency_key(key) is not None
-                    or self.output_path(owner).exists()
-                    or self.output_path(owner).with_name("staged.mp4").exists()):
-                    raise UseAdmissionError("composition_render_reconciliation_required")
-                self._check_render_budget(project_id,c)
+                if self._recovery_attempt_exists(project_id,owner["batch_id"]):
+                    raise UseAdmissionError("composition_render_recovery_allowance_spent")
+                self._check_render_budget(project_id,c,idempotency_key=replacement_key)
                 now = datetime.now(timezone.utc)
+                render_id = uuid4()
                 replacement = Job(project_id=project_id,type=JobType.RENDER,idempotency_key=replacement_key,
-                    created_at=now,updated_at=now,payload=job.payload)
+                    created_at=now,updated_at=now,payload=job.payload.model_copy(update={"render_id":render_id}))
                 JobRepository(self.db).create(replacement)
                 self.db.connection.execute("UPDATE production_runs SET render_job_id=? WHERE id=?",(str(replacement.id),str(identity)))
-                self.db.connection.execute("UPDATE evaluation_composition_owners SET job_id=?,job_sha256=? WHERE run_id=?",
-                    (str(replacement.id),job_use_identity(replacement),str(identity)))
+                self.db.connection.execute("UPDATE evaluation_composition_owners SET job_id=?,render_id=?,job_sha256=? WHERE run_id=?",
+                    (str(replacement.id),str(render_id),job_use_identity(replacement),str(identity)))
                 self.db.connection.execute("INSERT INTO execution_use_scopes(subject_kind,subject_id,project_id,fingerprint,payload,subject_sha256) VALUES ('job',?,?,?,?,?)",
                     (str(replacement.id),str(project_id),c["scope"].fingerprint,c["scope"].model_dump_json(),job_use_identity(replacement)))
-                binding = self.records.get("binding",identity)
-                self.records.save("binding",identity,dict(binding,recovered_from_job_id=str(job.id)),update=True)
+                self.db.connection.execute("INSERT INTO execution_use_scopes(subject_kind,subject_id,project_id,fingerprint,payload,subject_sha256) VALUES ('render',?,?,?,?,?)",
+                    (str(render_id),str(project_id),c["scope"].fingerprint,c["scope"].model_dump_json(),c["request_sha256"]))
+                recovery = dict(original_job_id=str(job.id),original_render_id=owner["render_id"],
+                    original_call_id=None if old_call is None else str(old_call.id),replacement_job_id=str(replacement.id),
+                    replacement_render_id=str(render_id),idempotency_key=replacement_key,created_at=now.isoformat())
+                self.records.save("binding",identity,dict(binding,recovery=recovery),update=True)
                 from app.source_use_constraints import SourceUseConstraintService
                 SourceUseConstraintService(self.db,self.root).snapshot_render(project_id,replacement.id)
             return
@@ -470,6 +555,52 @@ class EvaluationCompositionService:
         self._match(project_id,value.review,c)
         return value
 
+    def _preview_report(self, project_id, reference, sha, c):
+        from app.domain.evaluation_composition import CompositionPreviewReview
+        review = CompositionPreviewReview.model_validate_json(self._file(reference,sha))
+        self._file(review.authorization_reference,review.authorization_sha256)
+        spec = c["spec"]
+        total = 0 if spec is None else max(s.start_frame+s.duration_frames for s in spec.scenes)
+        if (review.project_id != project_id or review.selection != c["selection"]
+            or review.request_sha256 != c["request_sha256"] or c["missing"]
+            or review.end_frame > total or review.end_frame-review.start_frame >= total
+            or (review.end_frame-review.start_frame)*spec.fps.denominator > 10*spec.fps.numerator):
+            raise UseAdmissionError("composition_preview_scope_changed")
+        if review.correction_of is not None:
+            old_owner = self.records.owner(run_id=review.correction_of)
+            old_binding = self.records.get("binding",review.correction_of)
+            batch = self.retained_batch(project_id,review.selection)
+            old_slot = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='preview'",
+                (batch['id'],)).fetchone()
+            if (old_owner is None or old_owner['project_id'] != str(project_id) or old_slot is None
+                or old_slot[0] != str(review.correction_of) or old_binding is None or not old_binding.get('preview')):
+                raise UseAdmissionError("composition_preview_correction_original_invalid")
+            old_job = JobRepository(self.db).get(UUID(old_owner['job_id']))
+            if (old_job is None or old_job.status is not JobStatus.COMPLETED
+                or old_owner['request_sha256'] == c['request_sha256'] or old_job.payload.video_spec == spec):
+                raise UseAdmissionError("composition_preview_correction_requires_completed_changed_plan")
+            self.require_result(old_job)
+            old_review = CompositionPreviewReview.model_validate_json(self._file(
+                old_binding['preview']['review_reference'],old_binding['preview']['review_sha256']))
+            if old_review.authorization_sha256 == review.authorization_sha256:
+                raise UseAdmissionError("composition_preview_correction_new_authorization_required")
+        return review
+
+    def start_preview(self, project_id, payload, key):
+        from app.domain.evaluation_composition import CompositionPreviewReview
+        actor = configured_admission_actor(key)
+        if actor is None:
+            raise UseAdmissionError("execution_admission_operator_required")
+        report = CompositionPreviewReview.model_validate_json(self._file(payload.review_reference,payload.review_sha256))
+        c = self._context(project_id,report.selection)
+        self._preview_report(project_id,payload.review_reference,payload.review_sha256,c)
+        use = self.current_use(project_id,c)
+        batch = self.retained_batch(project_id,report.selection)
+        preview = dict(review_reference=payload.review_reference,review_sha256=payload.review_sha256,actor_id=actor)
+        if report.correction_of is not None:
+            preview['slot'] = 'preview_correction'
+        return self._create(project_id,c,use,batch,payload.idempotency_key,preview=preview)
+
     def revoke(self, project_id, identity, reason, key):
         actor = configured_admission_actor(key)
         if actor is None or not reason.strip():
@@ -484,24 +615,28 @@ class EvaluationCompositionService:
                 self.records.save("admission",identity,dict(raw,value=value.model_dump(mode="json")),update=True)
             return value
 
-    def _create(self, project_id, c, receipt, batch, idempotency_key):
-        previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(batch["id"],)).fetchone()
+    def _create(self, project_id, c, receipt, batch, idempotency_key, *, preview=None):
+        slot = preview.get('slot','preview') if preview is not None else "render"
+        call_key = f"composition:{batch['id']}:{slot}" + (":"+preview["review_sha256"] if preview is not None else "")
+        previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",(batch["id"],slot)).fetchone()
         if previous:
             owner = self.records.owner(run_id=previous[0])
-            if owner is None or owner["request_sha256"] != c["request_sha256"]:
+            binding = self.records.get("binding",previous[0])
+            if (owner is None or owner["request_sha256"] != c["request_sha256"]
+                or binding is None or binding.get("preview") != preview):
                 raise UseAdmissionError("composition_render_allowance_spent")
             return UUID(previous[0])
         with self.db.transaction(immediate=True):
             self._fence(c["token"])
-            previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(batch["id"],)).fetchone()
+            previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",(batch["id"],slot)).fetchone()
             if previous:
                 raise UseAdmissionError("composition_concurrent_submission_reload")
             if self.db.connection.execute("SELECT 1 FROM production_runs WHERE idempotency_key=?",(idempotency_key,)).fetchone():
                 raise UseAdmissionError("composition_run_key_conflict")
-            self._check_render_budget(project_id,c)
+            self._check_render_budget(project_id,c,idempotency_key=call_key)
             run_id,job_id,render_id = uuid4(),uuid4(),uuid4()
             now = datetime.now(timezone.utc)
-            job = Job(id=job_id,project_id=project_id,type=JobType.RENDER,idempotency_key=f"composition:{batch['id']}:render",
+            job = Job(id=job_id,project_id=project_id,type=JobType.RENDER,idempotency_key=call_key,
                 created_at=now,updated_at=now,payload=RenderVideoJobPayload(project_id=project_id,render_id=render_id,video_spec=c["spec"]))
             JobRepository(self.db).create(job)
             self.db.connection.execute("""INSERT INTO production_runs(id,project_id,idempotency_key,preflight_fingerprint,
@@ -509,12 +644,15 @@ class EvaluationCompositionService:
                 VALUES (?,?,?,?,?,?,?,0,'evaluation_composition',?,?,?)""",(str(run_id),str(project_id),idempotency_key,c["request_sha256"],
                 c["draft"].version,c["draft"].script_revision,c["spec"].edit_plan.style_tokens.model_dump_json(),str(job_id),now.isoformat(),
                 min((v["run"].review_policy_version for v in c["inputs"].values() if v["run"] is not None),default=1)))
-            self.db.connection.execute("INSERT INTO evaluation_composition_slots VALUES (?,'render',?)",(batch["id"],str(run_id)))
+            self.db.connection.execute("INSERT INTO evaluation_composition_slots VALUES (?,?,?)",(batch["id"],slot,str(run_id)))
             self.db.connection.execute("INSERT INTO evaluation_composition_owners VALUES (?,?,?,?,?,?,?,?)",
                 (str(run_id),str(project_id),str(job_id),str(render_id),batch["id"],c["request_sha256"],job_use_identity(job),c["scope"].fingerprint))
-            self.records.save("binding",run_id,dict(project_id=str(project_id),selection=c["selection"].model_dump(mode="json"),
+            binding = dict(project_id=str(project_id),selection=c["selection"].model_dump(mode="json"),
                 admission_id=str(receipt.id),admission_sha256=digest(receipt.model_dump(mode="json")),batch_id=batch["id"],
-                request_sha256=c["request_sha256"],proof=c["proof"]))
+                request_sha256=c["request_sha256"],proof=c["proof"])
+            if preview is not None:
+                binding["preview"] = preview
+            self.records.save("binding",run_id,binding)
             for kind,identity,sha in (("run",run_id,c["request_sha256"]),("job",job_id,job_use_identity(job)),("render",render_id,c["request_sha256"])):
                 self.db.connection.execute("INSERT INTO execution_use_scopes(subject_kind,subject_id,project_id,fingerprint,payload,subject_sha256) VALUES (?,?,?,?,?,?)",
                     (kind,str(identity),str(project_id),c["scope"].fingerprint,c["scope"].model_dump_json(),sha))
@@ -538,8 +676,19 @@ class EvaluationCompositionService:
         binding = self.records.get("binding",owner["run_id"])
         row = self.db.connection.execute("SELECT * FROM production_runs WHERE id=?",(owner["run_id"],)).fetchone()
         scope = read_subject_scope(self.db,"job",job.id)
-        slot = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(owner["batch_id"],)).fetchone()
-        if (binding is None or row is None or row["stage"] != "evaluation_composition" or row["render_job_id"] != str(job.id)
+        slot_name = binding['preview'].get('slot','preview') if binding is not None and binding.get("preview") is not None else "render"
+        if slot_name not in {'render','preview','preview_correction'}:
+            raise UseAdmissionError("composition_preview_slot_invalid")
+        slot = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",(owner["batch_id"],slot_name)).fetchone()
+        recovery = None if binding is None else binding.get("recovery")
+        expected_call_key = f"composition:{owner['batch_id']}:{slot_name}"
+        if slot_name in {"preview","preview_correction"}:
+            expected_call_key += ":"+binding["preview"]["review_sha256"]
+        if recovery is not None:
+            expected_call_key += ":recovery"
+            self._require_recovery_lineage(binding,owner,job,recovery)
+        if (binding is None or job.idempotency_key != expected_call_key
+            or row is None or row["stage"] != "evaluation_composition" or row["render_job_id"] != str(job.id)
             or row["project_id"] != str(job.project_id) or owner["project_id"] != str(job.project_id)
             or job.type != JobType.RENDER or not isinstance(job.payload,RenderVideoJobPayload)
             or str(job.payload.render_id) != owner["render_id"] or job_use_identity(job) != owner["job_sha256"]
@@ -576,7 +725,33 @@ class EvaluationCompositionService:
             raise UseAdmissionError("composition_current_proof_changed")
         from app.source_use_constraints import SourceUseConstraintService
         SourceUseConstraintService(self.db,self.root).require_render_snapshot(job)
+        preview = binding.get("preview")
+        if preview is not None:
+            report = self._preview_report(job.project_id,preview["review_reference"],preview["review_sha256"],c)
+            c["preview_frame_range"] = (report.start_frame,report.end_frame)
+            c["execution_sha256"] = digest(dict(request=c["request_sha256"],preview=preview["review_sha256"]))
         return c
+
+    def provider_call_key(self, job):
+        """Return the persisted once-only call identity after validating its Job."""
+        self.require_job_identity(job)
+        return job.idempotency_key
+
+    def _require_recovery_lineage(self, binding, owner, job, recovery):
+        from app.db import ProviderCallRepository
+        base_key = f"composition:{owner['batch_id']}:render"
+        if (recovery.get("replacement_job_id") != str(job.id)
+            or recovery.get("idempotency_key") != base_key + ":recovery"):
+            raise UseAdmissionError("composition_render_recovery_identity_changed")
+        original = JobRepository(self.db).get(UUID(recovery["original_job_id"]))
+        if (original is None or original.status != JobStatus.FAILED or original.idempotency_key != base_key
+            or str(original.payload.render_id) != recovery.get("original_render_id")
+            or original.payload.video_spec != job.payload.video_spec):
+            raise UseAdmissionError("composition_render_recovery_history_changed")
+        call = self._failed_call(job.project_id,dict(owner,render_id=recovery["original_render_id"]),original,owner["run_id"])
+        expected_call_id = recovery.get("original_call_id")
+        if (None if call is None else str(call.id)) != expected_call_id:
+            raise UseAdmissionError("composition_render_recovery_history_changed")
 
     def get(self, project_id, identity):
         owner = self.records.owner(run_id=identity)
@@ -601,7 +776,7 @@ class EvaluationCompositionService:
         from app.db import ProviderCallRepository
         binding,owner,scope = self.require_job_identity(job)
         value = self.records.get("result",owner["run_id"])
-        call = ProviderCallRepository(self.db).get_by_idempotency_key(f"composition:{owner['batch_id']}:render")
+        call = ProviderCallRepository(self.db).get_by_idempotency_key(job.idempotency_key)
         if value is None or call is None or call.status != "completed" or call.result_payload != value["evidence"]:
             raise UseAdmissionError("composition_completed_result_required")
         path = self.output_path(owner)
