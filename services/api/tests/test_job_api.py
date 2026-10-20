@@ -32,6 +32,18 @@ def test_index_clip_scope_is_asset_bound_and_part_of_idempotency(tmp_path):
         with Database(path, startup_mode='existing') as db:
             stored = JobRepository(db).get(first.json()['id'])
             assert stored.payload.clip_ids == [clips[1].id]
+        visual = client.post(url,json={**data,'idempotency_key':'visual-only','index_embeddings':False})
+        assert visual.status_code==201
+        assert client.post(url,json={**data,'index_embeddings':False}).status_code==409
+        with Database(path,startup_mode='existing') as db:
+            from app.domain.models import JobStatus
+            job=JobRepository(db).get(visual.json()['id'])
+            assert not job.payload.index_embeddings
+            JobRepository(db).update(job.model_copy(update={'status':JobStatus.COMPLETED}))
+        readiness=client.get(f'/assets/{asset.id}/readiness').json()['stages']
+        assert readiness['visual']['status']=='completed'
+        assert readiness['index']['status']=='pending'  # Earlier requested indexing, not a false completion.
+        assert client.post(url,json={'idempotency_key':'unscoped-visual','index_embeddings':False}).status_code==422
 
 
 def _asset(db: Database, root: Path) -> Asset:

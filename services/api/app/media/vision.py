@@ -129,7 +129,7 @@ class ClipVisualMetadataPersistence:
             if asset is not None:
                 geometry = dict(asset.metadata.get("visual_analysis",{}))
                 for clip,result in zip(clips,normalized):
-                    geometry[str(clip.id)] = dict(source_content_hash=asset.content_hash,start_ms=clip.start_ms,end_ms=clip.end_ms,
+                    geometry[str(clip.id)] = dict(source_content_hash=asset.content_hash,clip_interval=dict(start_ms=clip.start_ms,end_ms=clip.end_ms),
                         comparison_layout=result.comparison_layout,subtitle_regions=None if result.subtitle_regions is None else [list(box) for box in result.subtitle_regions],
                         evidence_reference=f"vision-keyframe:{clip.id}",coverage="sampled_keyframe")
                 assets.update(asset.model_copy(update={"metadata":{**asset.metadata,"visual_analysis":geometry}}))

@@ -183,29 +183,32 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             detail=os.environ.get("CONTENT_OS_VISION_DETAIL", "low"),
         )
         embedding_key = os.environ.get("CONTENT_OS_EMBEDDING_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not embedding_key:
-            raise EmbeddingConfigurationError("embedding API key must be supplied at runtime")
-        raw_dimensions = os.environ.get("CONTENT_OS_EMBEDDING_DIMENSIONS")
-        try:
-            dimensions = None if raw_dimensions is None else int(raw_dimensions)
-        except ValueError as exc:
-            raise EmbeddingConfigurationError("embedding dimensions must be an integer") from exc
-        embedding_provider = OpenAICompatibleEmbeddingProvider(
-            embedding_key,
-            base_url=os.environ.get("CONTENT_OS_EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model=os.environ.get("CONTENT_OS_EMBEDDING_MODEL", "text-embedding-3-small"),
-            dimensions=dimensions,
-        )
+        indexer = None
+        embedding_model = "unconfigured"
+        if embedding_key:
+            raw_dimensions = os.environ.get("CONTENT_OS_EMBEDDING_DIMENSIONS")
+            try:
+                dimensions = None if raw_dimensions is None else int(raw_dimensions)
+            except ValueError as exc:
+                raise EmbeddingConfigurationError("embedding dimensions must be an integer") from exc
+            embedding_provider = OpenAICompatibleEmbeddingProvider(
+                embedding_key,
+                base_url=os.environ.get("CONTENT_OS_EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                model=os.environ.get("CONTENT_OS_EMBEDDING_MODEL", "text-embedding-3-small"),
+                dimensions=dimensions,
+            )
+            indexer = ClipEmbeddingIndexer(db, embedding_provider)
+            embedding_model = embedding_provider.model
         handlers[JobType.INDEX_CLIPS] = AssetVisionJobHandler(
             targets,
             assets,
             ClipRepository(db),
             ExtractedKeyframeResolver(extractor),
             MediaVisionPipeline(db, provider),
-            ClipEmbeddingIndexer(db, embedding_provider),
+            indexer,
             ProviderCallLedger(db),
             vision_model=provider.model,
-            embedding_model=embedding_provider.model,
+            embedding_model=embedding_model,
         )
     if JobType.RENDER in config.job_types:
         renderer_dir = Path(__file__).resolve().parents[3] / "apps" / "renderer"

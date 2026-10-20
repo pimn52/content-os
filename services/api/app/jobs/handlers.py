@@ -1176,6 +1176,9 @@ class AssetVisionJobHandler:
                 raise JobExecutionError("vision_clip_scope_invalid", "selected Clips do not match this Asset", retryable=False) from None
         if not clips:
             raise JobExecutionError("clips_missing", "asset has no clips available for visual analysis", retryable=False)
+        index_embeddings = job.payload is None or job.payload.index_embeddings
+        if index_embeddings and self._indexer is None:
+            raise JobExecutionError("embedding_not_configured", "indexing requested but Embedding is not configured", retryable=False)
         try:
             paths = self._keyframes.resolve(asset, clips)
         except ExtractionTimeout:
@@ -1221,7 +1224,7 @@ class AssetVisionJobHandler:
             VisualMetadataError,
         ):
             raise JobExecutionError("vision_invalid", "visual analysis input is not processable", retryable=False) from None
-        if self._indexer is None:
+        if not index_embeddings:
             return
         embedding_call = _reserve_job_provider_call(
             self._ledger,

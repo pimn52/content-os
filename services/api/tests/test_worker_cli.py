@@ -108,6 +108,8 @@ def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Pat
         with pytest.raises(VisionConfigurationError, match="supplied at runtime"):
             build_runner(config, db)
         monkeypatch.setenv("CONTENT_OS_VISION_API_KEY", "runtime-only-test-key")
+        visual_only = build_runner(config, db)
+        assert visual_only._handlers[JobType.INDEX_CLIPS]._indexer is None
         monkeypatch.setenv("CONTENT_OS_EMBEDDING_API_KEY", "runtime-only-embedding-key")
         runner = build_runner(config, db)
         assert runner.handler_types == {JobType.INDEX_CLIPS}

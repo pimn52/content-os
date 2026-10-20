@@ -2653,6 +2653,7 @@ class TalkingRun(ContractModel):
 
 class ClipIndexJobPayload(ContractModel):
     clip_ids: list[UUID] = Field(min_length=1)
+    index_embeddings: bool = Field(default=True, exclude_if=lambda value: value is True)
 
     @field_validator("clip_ids")
     @classmethod

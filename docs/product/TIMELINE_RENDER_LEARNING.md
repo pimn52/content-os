@@ -92,8 +92,10 @@ panel; no automatic crop, detection or new evidence is inferred.
 
 Source geometry is now consumed during ordinary planning, before Render. For
 semantic comparisons, current source-analysis layout and subtitle rectangles
-select adjacent, proportion-preserving upper/lower viewports and the minimum
-bottom clearance, including under the default style. The explicit comparison
+provide candidate geometry. Only full selected-interval coverage can select
+adjacent, proportion-preserving upper/lower viewports and bottom clearance,
+including under the default style. A sampled keyframe cannot authorize an
+interval-wide crop; Renderer rechecks the same coverage before execution. The explicit comparison
 style remains available. Unknown source geometry stops the affected scene;
 fixed60px trimming and a gap between comparison panes are not used. Ordinary
 footage with no suitable portrait alternative or useful editorial graphic stays
@@ -101,6 +103,12 @@ complete and centered. The existing source-selection and EditPlan/VideoSpec
 contracts carry these decisions; see the media module for exact selection and
 evidence limits. Sampled source analysis and offline geometry tests do not
 establish full-interval visual quality or acceptance of a revised video.
+
+Comparison layout reserves the height of the longest active caption in that
+scene, using the same measured line wrapping as the rendered caption. It does
+not reserve a fixed percentage of the canvas. Comparison panes fill and center
+inside that caption-safe area with zero gap; unused canvas is pure black, as are
+the letterbox regions around contained camera footage.
 
 The ordinary draft scene editor now exposes existing creator-speaking,
 action-evidence and explanatory requirements, their reasons and source

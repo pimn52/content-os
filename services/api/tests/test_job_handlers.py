@@ -424,7 +424,8 @@ def test_local_asr_handler_uses_known_zero_cost_and_records_provenance(tmp_path:
 
 
 @pytest.mark.parametrize('scope_valid', [True, False])
-def test_scoped_vision_handler_limits_extraction_indexing_and_metered_calls(tmp_path, scope_valid):
+@pytest.mark.parametrize('index_embeddings', [True, False])
+def test_scoped_vision_handler_limits_extraction_indexing_and_metered_calls(tmp_path, scope_valid, index_embeddings):
     from uuid import uuid4
     from app.media.vision_pipeline import MediaVisionPipeline
     from app.providers.vision import ClipVisualAnalysis
@@ -455,15 +456,16 @@ def test_scoped_vision_handler_limits_extraction_indexing_and_metered_calls(tmp_
                 seen.append('index')
         scope = [clips[1].id] if scope_valid else [uuid4()]
         AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS,'scoped-handler').model_copy(update={
-            'project_id':project.id,'payload':ClipIndexJobPayload(clip_ids=scope)}),asset.id)
+            'project_id':project.id,'payload':ClipIndexJobPayload(clip_ids=scope,index_embeddings=index_embeddings)}),asset.id)
         handler = AssetVisionJobHandler(AssetJobTargetStore(db),AssetRepository(db),ClipRepository(db),
-            Resolver(),MediaVisionPipeline(db,Provider()),Indexer(),ProviderCallLedger(db))
+            Resolver(),MediaVisionPipeline(db,Provider()),Indexer() if index_embeddings else None,ProviderCallLedger(db))
         result = _runner(JobStore(db),{JobType.INDEX_CLIPS:handler}).run_once()
         calls = ProviderCallRepository(db).list_for_project(project.id)
         if scope_valid:
             assert result.status is JobStatus.COMPLETED
-            assert seen == ['extract','vision','index']
-            assert len(calls)==2 and {c.operation for c in calls}=={'vision','embedding'}
+            assert seen == (['extract','vision','index'] if index_embeddings else ['extract','vision'])
+            assert len(calls)==(2 if index_embeddings else 1)
+            assert {c.operation for c in calls}==({'vision','embedding'} if index_embeddings else {'vision'})
             assert all(c.status=='completed' for c in calls)
             assert ClipRepository(db).get(clips[0].id)==clips[0]
         else:
@@ -471,7 +473,20 @@ def test_scoped_vision_handler_limits_extraction_indexing_and_metered_calls(tmp_
             assert seen==[] and calls==[]
 
 
+def test_requested_indexing_without_embedding_fails_before_vision(tmp_path):
+    with Database(tmp_path/'no-embedding.sqlite') as db:
+        asset=_asset(db,tmp_path,has_audio=False)
+        ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=0,end_ms=2000,asset_duration_ms=2000))
+        job=AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS,'no-embedding'),asset.id)
+        class Never:
+            def resolve(self,*args):raise AssertionError('must reject before extraction/provider')
+        handler=AssetVisionJobHandler(AssetJobTargetStore(db),AssetRepository(db),ClipRepository(db),Never(),object())
+        result=_runner(JobStore(db),{JobType.INDEX_CLIPS:handler}).run_once(job_id=job.id)
+        assert result.status is JobStatus.FAILED and result.error_code=='embedding_not_configured'
+
+
 def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -> None:
+    from app.domain.models import ClipIndexJobPayload
     db = Database(tmp_path / "vision-handler.sqlite")
     try:
         asset = _asset(db, tmp_path, has_audio=False)
@@ -482,7 +497,8 @@ def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -
         repository = ClipRepository(db)
         for clip in clips:
             repository.create(clip)
-        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS, "vision-success"), asset.id)
+        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS, "vision-success").model_copy(update={
+            'payload':ClipIndexJobPayload(clip_ids=[c.id for c in clips],index_embeddings=False)}), asset.id)
         keyframes = []
         for index in range(2):
             path = tmp_path / f"frame-{index}.jpg"
@@ -498,7 +514,7 @@ def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -
                 return keyframes
 
         class Pipeline:
-            def process(self, candidate: Asset, supplied: list[Clip], paths: list[str]) -> object:
+            def process(self, candidate: Asset, supplied: list[Clip], paths: list[str], **kwargs) -> object:
                 assert not db.connection.in_transaction
                 seen.append((candidate.id, [clip.id for clip in supplied], paths))
                 return object()
@@ -522,13 +538,15 @@ def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -
 def test_vision_handler_classifies_provider_failures_without_leaking_details(
     tmp_path: Path, failure: Exception, expected_status: JobStatus, expected_code: str
 ) -> None:
+    from app.domain.models import ClipIndexJobPayload
     db = Database(tmp_path / f"vision-{expected_code}-{expected_status.value}.sqlite")
     try:
         asset = _asset(db, tmp_path, has_audio=False)
         clip = Clip(asset_id=asset.id, start_ms=0, end_ms=2_000, asset_duration_ms=2_000)
         clips = ClipRepository(db)
         clips.create(clip)
-        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS, f"{expected_code}-{expected_status.value}"), asset.id)
+        AssetJobTargetStore(db).enqueue(_job(JobType.INDEX_CLIPS, f"{expected_code}-{expected_status.value}").model_copy(update={
+            'payload':ClipIndexJobPayload(clip_ids=[clip.id],index_embeddings=False)}), asset.id)
         frame = tmp_path / "frame.jpg"
         frame.write_bytes(b"frame")
 
@@ -537,7 +555,7 @@ def test_vision_handler_classifies_provider_failures_without_leaking_details(
                 return [str(frame)]
 
         class Pipeline:
-            def process(self, candidate: Asset, supplied: list[Clip], paths: list[str]) -> object:
+            def process(self, candidate: Asset, supplied: list[Clip], paths: list[str], **kwargs) -> object:
                 raise failure
 
         handler = AssetVisionJobHandler(AssetJobTargetStore(db), AssetRepository(db), clips, Resolver(), Pipeline())  # type: ignore[arg-type]

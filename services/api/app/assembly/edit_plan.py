@@ -33,8 +33,9 @@ def footage_geometry(asset, clip):
     analysis=asset.metadata.get("visual_analysis",{})
     facts=analysis.get(str(clip.id),{}) if isinstance(analysis,dict) else {}
     if not isinstance(facts,dict):return {}
+    interval = facts.get("clip_interval",facts)
     if (facts.get("source_content_hash") != asset.content_hash
-        or facts.get("start_ms",clip.start_ms+1)>clip.start_ms or facts.get("end_ms",0)<clip.end_ms):
+        or interval.get("start_ms",clip.start_ms+1)>clip.start_ms or interval.get("end_ms",0)<clip.end_ms):
         return {}
     return facts
 
@@ -43,6 +44,10 @@ def comparison_clearance(asset, clip):
     facts=footage_geometry(asset,clip)
     if facts.get("comparison_layout")!="side_by_side_equal_halves" or facts.get("subtitle_regions") is None:
         raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
+    if (facts.get("coverage") != "full_interval_continuous"
+        or facts.get("covered_start_ms",clip.end_ms) > clip.start_ms
+        or facts.get("covered_end_ms",clip.start_ms) < clip.end_ms):
+        raise EditPlanPreflightError("comparison_full_interval_clearance_required")
     regions=facts["subtitle_regions"]
     if not regions:
         return 0,None

@@ -65,7 +65,8 @@ def test_comparison_stack_requires_an_explicit_comparison_scene_and_16_9_media()
     clip=SimpleNamespace(id=candidate.clip_id,start_ms=0,end_ms=5000)
     asset=SimpleNamespace(width=1280,height=720,content_hash='a'*64,metadata={'visual_analysis':{str(clip.id):dict(
         source_content_hash='a'*64,start_ms=0,end_ms=5000,comparison_layout='side_by_side_equal_halves',
-        subtitle_regions=[],evidence_reference='synthetic-source-geometry')}})
+        subtitle_regions=[],evidence_reference='synthetic-source-geometry',coverage='full_interval_continuous',
+        covered_start_ms=0,covered_end_ms=5000)}})
     selected = presentation_for_style(entry, style, asset, scene_plan=scene,clip=clip)
     assert selected.portrait_presentation.value == "stacked_comparison"
     assert selected.subtitle_treatment.value == "timed_captions"
@@ -77,6 +78,11 @@ def test_comparison_stack_requires_an_explicit_comparison_scene_and_16_9_media()
     with pytest.raises(ValueError,match='geometry_unknown'):
         presentation_for_style(entry,style,SimpleNamespace(width=1280,height=720),scene_plan=scene)
     facts=asset.metadata['visual_analysis'][str(clip.id)]
+    for changes in ({'coverage':'sampled_keyframe'}, {'covered_start_ms':1}, {'covered_end_ms':4999}):
+        original=dict(facts);facts.update(changes)
+        with pytest.raises(ValueError,match='full_interval_clearance_required'):
+            presentation_for_style(entry,style,asset,scene_plan=scene,clip=clip)
+        facts.clear();facts.update(original)
     facts['subtitle_regions']=[[.3,.88,.4,.08]]
     cropped=presentation_for_style(entry,style,asset,scene_plan=scene,clip=clip)
     assert cropped.source_bottom_crop_ratio==pytest.approx((720-(int(.88*720)-2))/720)

@@ -368,7 +368,8 @@ def test_remotion_adapter_renders_authorized_footage_in_a_portrait_panel_without
 
         asset=AssetRepository(db).update(asset.model_copy(update={"metadata":{**asset.metadata,'visual_analysis':{
             str(spec.scenes[0].visual.clip_id):dict(source_content_hash=asset.content_hash,start_ms=0,end_ms=asset.duration_ms,
-                comparison_layout='side_by_side_equal_halves',subtitle_regions=[],evidence_reference='synthetic-geometry')}}}))
+                comparison_layout='side_by_side_equal_halves',subtitle_regions=[],evidence_reference='synthetic-geometry',
+                coverage='full_interval_continuous',covered_start_ms=0,covered_end_ms=asset.duration_ms)}}}))
         stacked_scene = panel_scene.model_copy(update={
             "portrait_presentation": PortraitPresentation.STACKED_COMPARISON,
             "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
@@ -395,6 +396,13 @@ def test_remotion_adapter_renders_authorized_footage_in_a_portrait_panel_without
         assert len(cropped_runner.calls)==1  # CSS clipping, no whole-asset FFmpeg transcode.
         cropped_props=cropped_runner.calls[0][3]['sceneSources']['scene_01']
         assert cropped_props['sourceBottomCropRatio']==ratio and cropped_props['sourceAspectRatio']==16/9
+        facts['coverage']='sampled_keyframe';AssetRepository(db).update(asset)
+        rejected_runner=_Runner()
+        with pytest.raises(RenderInputError,match='full_interval_clearance_required'):
+            RemotionRenderer(AssetRepository(db),ClipRepository(db),renderer_dir=_renderer_project(tmp_path/'sampled-stack'),
+                runner=rejected_runner).render(panel.model_copy(update={'scenes':[cropped]}),tmp_path/'sampled-stack.mp4')
+        assert rejected_runner.calls==[]
+        facts['coverage']='full_interval_continuous'
         facts['subtitle_regions']=[];AssetRepository(db).update(asset)
         AssetRepository(db).update(asset.model_copy(update={"width": 1280, "height": 800}))
         with pytest.raises(RenderInputError, match="requires a 16:9 source"):
@@ -689,7 +697,8 @@ def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_sourc
     assert "scene.caption" in timeline and "scene.captions" in timeline and "masterNarration" in timeline
     assert "objectFit: 'contain'" in timeline
     assert "objectFit: 'cover'" not in timeline
-    assert "scene.caption && audioMode !== 'source'" in timeline
+    assert "captionPlan.fallbackCaption && audioMode !== 'source'" in timeline
+    assert "backgroundColor: '#000000'" in timeline
     assert "headline" in timeline and "key_point" in timeline and "contrast" in timeline and "GraphicCard" in timeline
     assert "portrait_panel" in timeline and "PortraitPanel" in timeline and "PanelText" in timeline
     assert "stacked_comparison" in timeline and "StackedComparisonPanel" in timeline

@@ -117,6 +117,7 @@ class JobEnqueueRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     project_id: UUID | None = None
     clip_ids: list[UUID] | None = Field(default=None, min_length=1)
+    index_embeddings: bool = Field(default=True, strict=True)
 
 
 class JobResponse(BaseModel):
@@ -2910,8 +2911,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="asset not found")
         jobs = JobRepository(db).list_for_asset(asset_id)
 
-        def stage(job_type: JobType) -> AssetStageResponse:
-            matching = [job for job in jobs if job.type is job_type]
+        def stage(job_type: JobType, *, embeddings: bool = False) -> AssetStageResponse:
+            matching = [job for job in jobs if job.type is job_type
+                and (not embeddings or job.payload is None or job.payload.index_embeddings)]
             if not matching:
                 return AssetStageResponse(status="not_started")
             job = matching[-1]
@@ -2925,7 +2927,7 @@ def create_app(
                 "preprocessed": stage(JobType.ANALYZE_ASSET),
                 "transcript": stage(JobType.TRANSCRIBE_AUDIO),
                 "visual": indexed,
-                "index": indexed,
+                "index": stage(JobType.INDEX_CLIPS, embeddings=True),
             },
         )
 
@@ -3466,12 +3468,14 @@ def create_app(
         if payload.project_id is not None and ProjectRepository(db).get(payload.project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
         scope = None
+        if not payload.index_embeddings and payload.clip_ids is None:
+            raise HTTPException(status_code=422, detail="visual-only refresh requires explicit clip_ids")
         if payload.clip_ids is not None:
             known = {clip.id for clip in ClipRepository(db).list_by_asset(asset_id)}
             if (job_type is not JobType.INDEX_CLIPS or len(set(payload.clip_ids)) != len(payload.clip_ids)
                 or not set(payload.clip_ids) <= known):
                 raise HTTPException(status_code=422, detail="clip_ids must uniquely select existing Clips of this Asset for index_clips")
-            scope = ClipIndexJobPayload(clip_ids=payload.clip_ids)
+            scope = ClipIndexJobPayload(clip_ids=payload.clip_ids, index_embeddings=payload.index_embeddings)
         now = datetime.now(timezone.utc)
         job = Job(id=uuid4(), project_id=payload.project_id, type=job_type, idempotency_key=payload.idempotency_key, created_at=now, updated_at=now, payload=scope)
         try:
