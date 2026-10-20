@@ -699,6 +699,7 @@ def test_remotion_manifest_is_exact_and_timeline_declares_trim_caption_and_sourc
     assert "objectFit: 'cover'" not in timeline
     assert "captionPlan.fallbackCaption && audioMode !== 'source'" in timeline
     assert "backgroundColor: '#000000'" in timeline
+    assert "captionReserve" not in timeline
     assert "headline" in timeline and "key_point" in timeline and "contrast" in timeline and "GraphicCard" in timeline
     assert "portrait_panel" in timeline and "PortraitPanel" in timeline and "PanelText" in timeline
     assert "stacked_comparison" in timeline and "StackedComparisonPanel" in timeline

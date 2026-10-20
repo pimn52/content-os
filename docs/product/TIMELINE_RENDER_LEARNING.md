@@ -104,11 +104,12 @@ contracts carry these decisions; see the media module for exact selection and
 evidence limits. Sampled source analysis and offline geometry tests do not
 establish full-interval visual quality or acceptance of a revised video.
 
-Comparison layout reserves the height of the longest active caption in that
-scene, using the same measured line wrapping as the rendered caption. It does
-not reserve a fixed percentage of the canvas. Comparison panes fill and center
-inside that caption-safe area with zero gap; unused canvas is pure black, as are
-the letterbox regions around contained camera footage.
+Comparison layout fits the two proportion-preserving panes to the full canvas
+height, leaving only centered side margins and a zero-pixel seam. It does not
+shrink the footage to reserve a bottom caption band. The active caption keeps
+its measured line wrapping on an opaque black plate at the bottom of the lower
+pane; no source pixels show through the plate. Unused canvas and letterbox
+regions around contained camera footage are pure black.
 
 The ordinary draft scene editor now exposes existing creator-speaking,
 action-evidence and explanatory requirements, their reasons and source

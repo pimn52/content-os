@@ -56,37 +56,32 @@ function wrapCaption(text: string, width: number, measureText: (value: string) =
   return output.join('\n');
 }
 
-/** Match the displayed caption wrapping and reserve only its measured occupied height. */
+/** Match caption wrapping to the displayed font so the opaque caption plate fits its text. */
 export function captionLayout<T extends {start_ms: number; end_ms: number; text: string}>(
   captions: T[], fallbackCaption: string | null | undefined, enabled: boolean,
   fallbackEnabled: boolean, width: number, editorial: boolean,
   measureText: (value: string) => number = fallbackCaptionMeasure,
 ) {
   const source = captions.length ? captions : fallbackEnabled && fallbackCaption ? [{start_ms: 0, end_ms: 0, text: fallbackCaption} as T] : [];
-  if (!enabled || source.length === 0) return {captions: source, fallbackCaption: null, reserve: 0};
+  if (!enabled || source.length === 0) return {captions: source, fallbackCaption: null};
   const textWidth = width - CAPTION_SIDE_INSET * 2 - (editorial ? CAPTION_HORIZONTAL_PADDING * 2 : 0);
   if (textWidth <= 0) throw new Error('Invalid caption geometry');
   const wrapped = source.map(caption => ({...caption, text: wrapCaption(caption.text, textWidth, measureText)}));
-  const maximumLines = Math.max(1, ...wrapped.map(caption => caption.text.split('\n').length));
-  const boxHeight = maximumLines * CAPTION_FONT_SIZE * CAPTION_LINE_HEIGHT
-    + (editorial ? CAPTION_VERTICAL_PADDING * 2 : 0);
   return {
     captions: captions.length ? wrapped : [],
     fallbackCaption: captions.length ? null : wrapped[0]?.text ?? null,
-    reserve: Math.ceil(CAPTION_BOTTOM + boxHeight),
   };
 }
 
-/** Maximize adjacent comparison panes inside the actual caption-safe canvas. */
-export function stackedComparisonLayout(width: number, height: number, sourceAspect: number, bottomCrop: number, captionReserve: number) {
-  if (![width, height, sourceAspect, bottomCrop, captionReserve].every(Number.isFinite)
+/** Maximize adjacent comparison panes inside the full canvas while preserving source proportions. */
+export function stackedComparisonLayout(width: number, height: number, sourceAspect: number, bottomCrop: number) {
+  if (![width, height, sourceAspect, bottomCrop].every(Number.isFinite)
       || width <= 0 || height <= 0 || sourceAspect <= 0 || bottomCrop < 0 || bottomCrop > .4
-      || captionReserve < 0 || captionReserve >= height) throw new Error('Invalid comparison geometry');
+  ) throw new Error('Invalid comparison geometry');
   const halfAspect = sourceAspect / (2 * (1 - bottomCrop));
-  const available = height - captionReserve;
-  const paneHeight = Math.floor(Math.min(available / 2, width / halfAspect));
+  const paneHeight = Math.floor(Math.min(height / 2, width / halfAspect));
   const paneWidth = Math.min(width, Math.round(paneHeight * halfAspect));
-  const firstTop = Math.floor((available - 2 * paneHeight) / 2);
+  const firstTop = Math.floor((height - 2 * paneHeight) / 2);
   return {paneWidth, paneHeight, firstTop, secondTop: firstTop + paneHeight,
     left: Math.floor((width - paneWidth) / 2), videoHeight: `${100 / (1 - bottomCrop)}%`};
 }

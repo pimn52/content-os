@@ -1,7 +1,7 @@
 import React from 'react';
 import {AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {InformationDiagram} from './InformationDiagram';
-import {CAPTION_FONT_SIZE, captionLayout, stackedComparisonLayout} from './presentation';
+import {CAPTION_BOTTOM, CAPTION_FONT_SIZE, CAPTION_HORIZONTAL_PADDING, CAPTION_LINE_HEIGHT, CAPTION_SIDE_INSET, CAPTION_VERTICAL_PADDING, captionLayout, stackedComparisonLayout} from './presentation';
 
 type VideoScene = {
   scene_id: string;
@@ -67,14 +67,14 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
       if (!source) {
         throw new Error(`Missing staged source for scene ${scene.scene_id}`);
       }
-      const captionPlan = captions[scene.scene_id] ?? {captions: [], fallbackCaption: null, reserve: 0};
+      const captionPlan = captions[scene.scene_id] ?? {captions: [], fallbackCaption: null};
       return (
         <Sequence key={scene.scene_id} from={scene.start_frame} durationInFrames={scene.duration_frames}>
           <AbsoluteFill style={{overflow: 'hidden'}}>
             {source.kind === 'video' && source.portraitPresentation === 'portrait_panel' ? (
               <PortraitPanel source={source} audioMode={audioMode} />
             ) : source.kind === 'video' && source.portraitPresentation === 'stacked_comparison' ? (
-              <StackedComparisonPanel source={source} audioMode={audioMode} captionReserve={captionPlan.reserve} />
+              <StackedComparisonPanel source={source} audioMode={audioMode} />
             ) : source.kind === 'video' ? (
               <OffthreadVideo
                 src={staticFile(source.src)}
@@ -103,7 +103,7 @@ export const ContentOSVideo: React.FC<RenderProps> = ({videoSpec, sceneSources, 
               const startFrame = Math.max(0, Math.round(caption.start_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
               const endFrame = Math.max(startFrame + 1, Math.round(caption.end_ms * videoSpec.fps.numerator / (1000 * videoSpec.fps.denominator)));
               return <Sequence key={`${caption.start_ms}-${caption.end_ms}-${caption.text}`} from={startFrame} durationInFrames={endFrame - startFrame}><Caption text={caption.text} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first', 'content-os-portrait-comparison'].includes(source.styleTokens?.name ?? '')} /></Sequence>;
-            }) : scene.subtitle_treatment !== 'none' && captionPlan.fallbackCaption && audioMode !== 'source' ? <Caption text={captionPlan.fallbackCaption} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first'].includes(source.styleTokens?.name ?? '')} /> : null}
+            }) : scene.subtitle_treatment !== 'none' && captionPlan.fallbackCaption && audioMode !== 'source' ? <Caption text={captionPlan.fallbackCaption} editorial={'styleTokens' in source && ['content-os-editorial', 'content-os-subject-first', 'content-os-portrait-comparison'].includes(source.styleTokens?.name ?? '')} /> : null}
           </AbsoluteFill>
         </Sequence>
       );
@@ -177,12 +177,12 @@ const SubjectFirstPanel: React.FC<{source: VideoSource; audioMode: RenderProps['
   </AbsoluteFill>
 );
 
-// Source analysis supplies subtitle bounds. No fixed source-pixel trim or gap.
-const StackedComparisonPanel: React.FC<{source: VideoSource; audioMode: RenderProps['audioMode']; captionReserve: number}> = ({source, audioMode, captionReserve}) => {
+// Fit both preserved comparison halves to full canvas height; captions use an opaque plate.
+const StackedComparisonPanel: React.FC<{source: VideoSource; audioMode: RenderProps['audioMode']}> = ({source, audioMode}) => {
   const {width, height} = useVideoConfig();
   const tokens = source.styleTokens ?? {name: 'content-os-portrait-comparison', background_color: '#000000', foreground_color: '#f8fbff', accent_color: '#ca4c2c', font_family: 'Inter, ui-sans-serif, system-ui'};
   const {paneWidth, paneHeight, firstTop, secondTop, left, videoHeight} = stackedComparisonLayout(
-    width, height, source.sourceAspectRatio ?? 16 / 9, source.sourceBottomCropRatio ?? 0, captionReserve);
+    width, height, source.sourceAspectRatio ?? 16 / 9, source.sourceBottomCropRatio ?? 0);
   return <AbsoluteFill style={{backgroundColor: '#000000', color: tokens.foreground_color, fontFamily: tokens.font_family}}>
     {(['left', 'right'] as const).map((side, index) => <div key={side} style={{position: 'absolute', left, top: index === 0 ? firstTop : secondTop, width: paneWidth, height: paneHeight, overflow: 'hidden', backgroundColor: '#000000'}}>
       <OffthreadVideo src={staticFile(source.src)} trimBefore={source.trimBefore} trimAfter={source.trimAfter}
@@ -193,7 +193,7 @@ const StackedComparisonPanel: React.FC<{source: VideoSource; audioMode: RenderPr
 };
 
 const Caption: React.FC<{text: string; editorial?: boolean}> = ({text, editorial}) => (
-  <div style={{position: 'absolute', bottom: 96, left: 56, right: 56, color: 'white', ...(editorial ? {backgroundColor: '#000000', borderRadius: 14, padding: '18px 24px'} : {}), fontFamily: 'Arial, sans-serif', fontSize: CAPTION_FONT_SIZE, fontWeight: 700, lineHeight: 1.15, textAlign: 'center', textShadow: '0 2px 8px black', whiteSpace: 'pre-line', overflowWrap: 'anywhere'}}>
+  <div style={{position: 'absolute', bottom: CAPTION_BOTTOM, left: CAPTION_SIDE_INSET, right: CAPTION_SIDE_INSET, color: 'white', ...(editorial ? {backgroundColor: '#000000', borderRadius: 14, padding: `${CAPTION_VERTICAL_PADDING}px ${CAPTION_HORIZONTAL_PADDING}px`} : {}), fontFamily: 'Arial, sans-serif', fontSize: CAPTION_FONT_SIZE, fontWeight: 700, lineHeight: CAPTION_LINE_HEIGHT, textAlign: 'center', textShadow: '0 2px 8px black', whiteSpace: 'pre-line', overflowWrap: 'anywhere'}}>
     {text}
   </div>
 );
