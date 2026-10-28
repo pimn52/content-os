@@ -1,6 +1,6 @@
 """Named exact-input assembly using existing EditPlan and timing contracts."""
 import re
-from app.assembly.edit_plan import resolve_edit_plan, presentation_for_style
+from app.assembly.edit_plan import resolve_edit_plan, presentation_for_style, source_frame_interval_ms
 from app.assembly.video_spec import _audio_captions_for_interval, _master_offset_to_frames as timeline_frame, _edit_scene_fields, _talking_visual_treatment
 from app.domain.models import (CostCategory, MasterNarration,
     SourceKind, SubtitleTreatment, UsageCost, VideoCaption, VideoScene, VideoSpec, VideoVisual)
@@ -58,10 +58,20 @@ def assemble_retained_composition(project, audio, intervals, inputs, style):
     # Retain the reviewed complete frame. Unknown source subtitles never
     # authorize another overlay, even when a legacy source is landscape.
     scene_by_id = {scene.id: scene for scene, _, _ in intervals}
-    entries = [presentation_for_style(e.model_copy(update={
-        "subtitle_treatment":SubtitleTreatment.TIMED_CAPTIONS if inputs[e.scene_plan_id]["asset"] is None or "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else SubtitleTreatment.NONE,
-        "burned_in_subtitles":"absent" if inputs[e.scene_plan_id]["asset"] is None or "source_derivation" in inputs[e.scene_plan_id]["asset"].metadata else "unknown"}),style,
-        inputs[e.scene_plan_id]["asset"],scene_plan=scene_by_id[e.scene_plan_id],clip=inputs[e.scene_plan_id]["clip"]) for e in plan.scenes]
+    speech_intervals = {scene.id:(start,end) for scene,start,end in intervals}
+    entries = []
+    for e in plan.scenes:
+        item = inputs[e.scene_plan_id]
+        asset, clip = item["asset"], item["clip"]
+        playback_interval_ms = None
+        if clip is not None:
+            start,end = speech_intervals[e.scene_plan_id]
+            duration_frames = timeline_frame(end,project.fps)-timeline_frame(start,project.fps)
+            playback_interval_ms = source_frame_interval_ms(clip.start_ms,duration_frames,project.fps,clip.end_ms)
+        entries.append(presentation_for_style(e.model_copy(update={
+            "subtitle_treatment":SubtitleTreatment.TIMED_CAPTIONS if asset is None or "source_derivation" in asset.metadata else SubtitleTreatment.NONE,
+            "burned_in_subtitles":"absent" if asset is None or "source_derivation" in asset.metadata else "unknown"}),style,
+            asset,scene_plan=scene_by_id[e.scene_plan_id],clip=clip,playback_interval_ms=playback_interval_ms))
     plan = plan.model_copy(update={"scenes": entries, "style_tokens": style})
     plan = resolve_edit_plan(project, ordered, choices, clip_intervals=clips, supplied=plan)
     scenes = []

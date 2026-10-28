@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.db import Database, JobRepository, ProjectRepository, ProviderCallRepository
+from app.db import Database, JobRepository, ProjectRepository, ProviderCallRepository, AudioAssetRepository, AssetRepository
 from app.domain.models import JobStatus, VideoSpec
 from app.jobs.handlers import RenderVideoJobHandler
 from app.jobs.runner import JobExecutionError
@@ -83,6 +83,43 @@ def repair_body(client, root, observation):
         "idempotency_key": "repair-once", "confirmed_action": "render_revision", "reason": "explicit synthetic correction"}
 
 
+@pytest.mark.parametrize('corrupt',[False,True])
+def test_ordinary_automatic_render_runs_whole_output_technical_qa_and_preserves_inputs(tmp_path,corrupt):
+    path=tmp_path/'automatic-output.sqlite'
+    with TestClient(create_app(path)) as client:
+        pid,_,_=_ready_fixture(client,path)
+        plan=client.post(f'/projects/{pid}/production-preflight',json={}).json()
+        result=client.post(f'/projects/{pid}/production-runs',json={
+            'idempotency_key':'ordinary-output','expected_fingerprint':plan['fingerprint']})
+        assert result.status_code==201,result.text
+        run=result.json()
+    with Database(path) as db:
+        db.data_root=tmp_path
+        db.connection.execute('UPDATE production_runs SET automatic=1 WHERE id=?',(run['id'],))
+        job=JobRepository(db).get(UUID(run['render_job_id']))
+        job=job.model_copy(update={'status':JobStatus.RUNNING})
+        JobRepository(db).update(job)
+        master=AudioAssetRepository(db).get(job.payload.video_spec.master_narration.audio_asset_id)
+        class Renderer:
+            data_root=tmp_path
+            def render(self,spec,output,**kwargs):
+                output.parent.mkdir(parents=True,exist_ok=True)
+                if corrupt:output.write_bytes(b'invalid rendered output')
+                else:synthetic_video(output,spec)
+        handler=RenderVideoJobHandler(ProjectRepository(db),Renderer(),tmp_path/'renders')
+        if corrupt:
+            with pytest.raises(JobExecutionError) as failure:handler(job)
+            assert not failure.value.retryable
+            assert (tmp_path/'renders'/pid/f'{job.payload.render_id}.mp4').read_bytes()==b'invalid rendered output'
+            assert not (tmp_path/'render-diagnostics'/str(job.id)/'output-qa.json').exists()
+        else:
+            handler(job)
+            evidence=json.loads((tmp_path/'render-diagnostics'/str(job.id)/'output-qa.json').read_text(encoding='utf-8'))
+            assert evidence['decode']=='pass' and evidence['scope']=='technical_only_final_u_product_required'
+        assert AudioAssetRepository(db).get(master.id)==master
+        assert ProviderCallRepository(db).list_for_project(UUID(pid))==[]
+
+
 def test_revision_replay_restart_preserves_master_and_predecessor(tmp_path):
     path = tmp_path / "presentation.sqlite"
     with TestClient(create_app(path)) as client:
@@ -133,7 +170,7 @@ def test_worker_measured_output_fresh_qa_and_one_render_limit(tmp_path):
             job = JobRepository(db).get(UUID(record["replacement_job_id"])).model_copy(update={"status": JobStatus.RUNNING})
             class SyntheticRenderer:
                 data_root = tmp_path
-                def render(self, spec, output):
+                def render(self, spec, output, *, production_run_id=None):
                     assert spec.scenes[0].graphic_text == "A fresh point"
                     synthetic_video(output, spec)
             handler = RenderVideoJobHandler(ProjectRepository(db), SyntheticRenderer(), tmp_path / "renders")
@@ -219,9 +256,23 @@ def test_unchanged_reviewed_talking_candidate_caption_or_panel(tmp_path, monkeyp
         candidate = plan["candidate_spec"]["scenes"][0]
         assert candidate["visual"] == scene["visual"]
         assert candidate["caption"] == scene["caption"] and candidate["captions"] == scene["captions"]
+        assert plan["candidate_spec"]["master_narration"] == old.payload.video_spec.master_narration.model_dump(mode="json")
         if finding == "known_subtitle_conflict": assert candidate["subtitle_treatment"] == "none"
         else: assert candidate["portrait_presentation"] == "portrait_panel"
-        assert client.post(root + "/presentation-repair", json=request).status_code == 201
+        with Database(path) as db:
+            before_jobs = {job.id: job for job in JobRepository(db).list()}
+            before_bindings = client.get(root).json()["talking_source_bindings"]
+            before_master = AudioAssetRepository(db).get(UUID(bound["master_audio_id"]))
+            before_talking = AssetRepository(db).get(UUID(bound["talking_output_asset_id"]))
+        repaired = client.post(root + "/presentation-repair", json=request)
+        assert repaired.status_code == 201, repaired.text
+        assert client.get(root).json()["talking_source_bindings"] == before_bindings
+        with Database(path) as db:
+            after_jobs = {job.id: job for job in JobRepository(db).list()}
+            assert set(after_jobs) - set(before_jobs) == {UUID(repaired.json()["replacement_job_id"])}
+            assert all(after_jobs[key] == job for key, job in before_jobs.items())
+            assert AudioAssetRepository(db).get(before_master.id) == before_master
+            assert AssetRepository(db).get(before_talking.id) == before_talking
         assert plan["voice_calls"] == plan["talking_calls"] == 0
 
 
@@ -299,7 +350,7 @@ def test_failed_output_qa_keeps_old_render_and_never_retries(tmp_path, change):
             job = JobRepository(db).get(UUID(record["replacement_job_id"])).model_copy(update={"status": JobStatus.RUNNING})
             class InvalidRenderer:
                 data_root = tmp_path
-                def render(self, spec, output):
+                def render(self, spec, output, *, production_run_id=None):
                     if change == "corrupt":
                         output.parent.mkdir(parents=True, exist_ok=True)
                         output.write_bytes(b"invalid encoded output")

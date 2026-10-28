@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,8 @@ def test_extraction_rebases_only_planned_master_intervals(tmp_path, monkeypatch:
         (0, 1_380, "第二句"), (1_620, 3_180, "第三句"),
     ]
     assert sliced.metadata["talking_slice"]["master_audio_id"] == str(master.id)
+    assert sliced.content_hash == hashlib.sha256(b"slice").hexdigest()
+    assert master.content_hash == "m" * 64
 
 
 def test_extraction_rejects_a_plan_from_another_master(tmp_path) -> None:

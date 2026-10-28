@@ -103,14 +103,26 @@ def test_voice_job_rejects_admitted_model_mismatch_before_provider_call(tmp_path
         assert ProviderCallRepository(db).list_for_project(project.id) == []
 
 
-def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("capability_license", [None, "non_commercial_only"])
+def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path, capability_license) -> None:
     db = Database(tmp_path / "voice.sqlite")
     try:
         project, profile = _project_and_profile(db, tmp_path)
         with db.transaction():
             BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=False, updated_at=datetime.now(timezone.utc)))
-        payload = VoiceGenerationJobPayload(project_id=project.id, voice_profile_id=profile.id, text="这是新的旁白。", authorization_reference="voice-consent-1", language="zh")
         now = datetime.now(timezone.utc)
+        capability = None
+        if capability_license:
+            capability = ProviderMachineCapabilityProfile(capability="voice", mode="local",
+                provider="test-voice", model="test-model", runtime="configured-runtime", machine_id="local",
+                readiness="configured", quality_status="unknown", commercial_status=capability_license,
+                license_evidence_reference="fixture:local-model-license", evidence_reference="fixture:installed-runtime",
+                provenance_source="fixture", updated_at=now)
+            ProviderMachineCapabilityProfileRepository(db).save(capability)
+        payload = VoiceGenerationJobPayload(project_id=project.id, voice_profile_id=profile.id, text="这是新的旁白。", authorization_reference="voice-consent-1", language="zh",
+            expected_provider=None if capability is None else capability.provider,
+            expected_model=None if capability is None else capability.model,
+            execution_capability_profile_id=None if capability is None else capability.id)
         job = Job(project_id=project.id, type=JobType.GENERATE_VOICE, idempotency_key="voice-one", created_at=now, updated_at=now, payload=payload)
         JobStore(db).enqueue(job)
 
@@ -151,6 +163,13 @@ def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path) -> 
         call = ProviderCallRepository(db).list_for_project(project.id)[0]
         assert call.operation == "tts" and call.status == "completed"
         assert call.estimated_cost.amount == Decimal("0")
+        if capability is not None:
+            assert audio.metadata["model_usage"] == [{"provider": "test-voice", "model": "test-model",
+                "commercial_status": "non_commercial_only", "license_evidence_reference": "fixture:local-model-license",
+                "usage_restrictions": ["non_commercial_only"]}]
+            assert ProviderMachineCapabilityProfileRepository(db).get(capability.id).quality_status == "unknown"
+            with pytest.raises(GeneratedNarrationQaPending):
+                _require_generated_voice_qa(audio)
     finally:
         db.close()
 
@@ -308,13 +327,24 @@ def test_voice_job_api_is_typed_and_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "voice-api.sqlite"
     db = Database(path)
     project, profile = _project_and_profile(db, tmp_path)
+    from app.db import AssetRepository
+    from app.domain.models import Asset, TranscriptSegment
+    source=tmp_path/"confirmed-reference.mp4"
+    source.write_bytes(b"synthetic admitted reference")
+    asset=AssetRepository(db).create(Asset(source_file=str(source),content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
+        duration_ms=1000,width=1080,height=1920,fps=project.fps,has_audio=True,
+        authorization_reference="voice-consent-1",imported_at=project.created_at))
+    ClipRepository(db).create(Clip(id=profile.reference_clip_ids[0],asset_id=asset.id,start_ms=0,end_ms=1000,
+        asset_duration_ms=1000,voice_candidate=True,transcript="参考",transcript_source="owner-confirmed-reference:fixture",
+        transcript_segments=[TranscriptSegment(start_ms=0,end_ms=1000,text="参考")]))
+    profile=VoiceProfileRepository(db).update(profile.model_copy(update={"consent":profile.consent.model_copy(update={"authorization_reference":"voice-consent-1"})}))
     db.close()
     request = {
-        "idempotency_key": "voice-api", "voice_profile_id": str(profile.id), "text": "新的文本", "authorization_reference": "voice-consent-1", "language": "zh",
+        "idempotency_key": "voice-api", "voice_profile_id": str(profile.id), "text": "新的文本", "language": "zh",
     }
     with TestClient(create_app(path)) as client:
         first = client.post(f"/projects/{project.id}/voice-jobs", json=request)
-        assert first.status_code == 201
+        assert first.status_code == 201, first.text
         repeated = client.post(f"/projects/{project.id}/voice-jobs", json=request)
         assert repeated.status_code == 201 and repeated.json()["id"] == first.json()["id"]
         assert client.post(f"/projects/{project.id}/voice-jobs", json={**request, "text": "different"}).status_code == 409
@@ -409,6 +439,72 @@ def test_voice_qa_worker_rejects_changed_portable_source_before_asr(tmp_path: Pa
         assert ProviderCallRepository(db).list_for_project(project.id) == []
 
 
+@pytest.mark.parametrize("fault", [None, "part_changed", "master_changed", "copy_missing"])
+def test_segmented_voice_qa_checks_exact_pcm_and_never_prompts_or_retries(tmp_path, fault):
+    from app.voice_qa import generated_voice_qa_parts
+    from app.providers.asr import FasterWhisperASRProvider
+    with Database(tmp_path / "parts.sqlite") as db:
+        project, _ = _project_and_profile(db, tmp_path)
+        parts = []; raw_parts = []; text = "第一段。\n\n第二段。"
+        for index, (first, last) in enumerate(((0, 4), (6, 10))):
+            source = tmp_path / f"part-{index}.wav"
+            raw = struct.pack("<h", 1000 + index) * 24_000
+            with wave.open(str(source), "wb") as output:
+                output.setparams((1, 2, 24_000, 0, "NONE", "not compressed")); output.writeframes(raw)
+            raw_parts.append(raw)
+            parts.append(dict(source_file=source.name, sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                start_char=first, end_char=last, start_sample=index*24_000, end_sample=(index+1)*24_000))
+        master = tmp_path / "master.wav"
+        with wave.open(str(master), "wb") as output:
+            output.setparams((1, 2, 24_000, 0, "NONE", "not compressed")); output.writeframes(b"".join(raw_parts))
+        audio = AudioAsset(source_file=str(master), content_hash=hashlib.sha256(master.read_bytes()).hexdigest(),
+            duration_ms=2000, sample_rate=24_000, channels=1, language="zh", authorization_reference="fixture:consent",
+            imported_at=datetime.now(timezone.utc), metadata={"voice_generation":{
+                "target_text":text,"qa_state":"pending","generation_segments":parts}})
+        assert len(generated_voice_qa_parts(audio, tmp_path)) == 2
+        if fault == "part_changed":
+            (tmp_path / parts[0]["source_file"]).write_bytes(b"changed")
+        if fault == "master_changed":
+            # Even metadata naming the current Master cannot substitute different PCM for its parts.
+            with wave.open(str(master), "wb") as output:
+                output.setparams((1, 2, 24_000, 0, "NONE", "not compressed")); output.writeframes(b"\x01\x00"*48_000)
+            audio=audio.model_copy(update={"content_hash":hashlib.sha256(master.read_bytes()).hexdigest()})
+        AudioAssetRepository(db).create(audio)
+        BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, max_calls=1, updated_at=datetime.now(timezone.utc)))
+        seen=[]; loads=[]
+        class Model:
+            def transcribe(self, path, **kwargs):
+                assert kwargs["initial_prompt"] is None
+                index=int(Path(path).stem[-1]);seen.append(index)
+                copy="一段。" if fault=="copy_missing" and index==0 else ("第一段。","第二段。")[index]
+                return iter([type("S",(),dict(start=0,end=.9,text=copy))()]), type("Info",(),{"language":"zh"})()
+        def factory(*args,**kwargs):loads.append(1);return Model()
+        asr=FasterWhisperASRProvider("fixture",model_factory=factory)
+        now=datetime.now(timezone.utc)
+        job=Job(project_id=project.id,type=JobType.VERIFY_VOICE,status=JobStatus.RUNNING,
+            idempotency_key="segmented-qa",created_at=now,updated_at=now,
+            payload=VoiceQaJobPayload(project_id=project.id,narration_audio_id=audio.id,target_text=text))
+        handler=VoiceQaJobHandler(AudioAssetRepository(db),asr,ProviderCallLedger(db),
+            provider_name="faster-whisper",provider_model="fixture",data_root=tmp_path)
+        if fault:
+            with pytest.raises(JobExecutionError):handler(job)
+        else:handler(job)
+        calls=ProviderCallRepository(db).list_for_project(project.id)
+        if fault in {"part_changed","master_changed"}:
+            assert seen==loads==calls==[]
+        else:
+            assert seen==[0,1] and loads==[1] and len(calls)==1 and calls[0].status=="completed"
+            saved=AudioAssetRepository(db).get(audio.id)
+            qa=saved.metadata["voice_generation"]["qa"]
+            assert qa["source_part_count"]==2 and qa["transcription_scope"]=="generation_parts"
+            assert len(qa["generation_part_reports"]) == 2
+            assert [entry["report"]["qa_state"] for entry in qa["generation_part_reports"]] == (
+                ["failed", "verified"] if fault == "copy_missing" else ["verified", "verified"])
+            assert [entry["source_sha256"] for entry in qa["generation_part_reports"]] == [part["sha256"] for part in parts]
+            assert qa["missing_token_count"]==(1 if fault=="copy_missing" else 0)
+            assert [(s.start_ms,s.end_ms) for s in saved.transcript_segments]==[(0,900),(1000,1900)]
+
+
 def test_voice_qa_job_api_requires_matching_generated_copy(tmp_path: Path) -> None:
     path = tmp_path / "voice-qa-api.sqlite"
     db = Database(path)
@@ -432,6 +528,7 @@ def test_voice_qa_job_api_requires_matching_generated_copy(tmp_path: Path) -> No
 
 
 def test_generated_voice_is_blocked_from_assembly_until_qa_is_verified() -> None:
+    from app.production_runs import has_approved_voice_quality
     audio = AudioAsset(
         source_file="generated.wav", content_hash="b" * 64, duration_ms=1_000, sample_rate=24_000, channels=1,
         authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
@@ -439,12 +536,15 @@ def test_generated_voice_is_blocked_from_assembly_until_qa_is_verified() -> None
     )
     with pytest.raises(GeneratedNarrationQaPending):
         _require_generated_voice_qa(audio)
+    assert not has_approved_voice_quality(None, audio)
     technical = audio.model_copy(update={"metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "verified"}}})
     with pytest.raises(GeneratedNarrationQaPending, match="U-Voice"):
         _require_generated_voice_qa(technical)
+    assert not has_approved_voice_quality(None, technical)
     approved = apply_voice_human_review(technical, _approved_u_voice_review())
     assert voice_human_review_status(approved) == "approved"
     _require_generated_voice_qa(approved)
+    assert has_approved_voice_quality(None, approved)
 
 
 def test_voice_human_review_api_persists_all_dimensions_and_cannot_be_overwritten(tmp_path: Path) -> None:

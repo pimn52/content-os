@@ -26,7 +26,7 @@ def legacy_talking_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONTENT_OS_ALLOW_LEGACY_TALKING_EVALUATION", "1")
 
 
-def test_preexisting_direct_talking_job_is_blocked_by_default_before_provider_call(
+def test_preexisting_direct_talking_job_requires_real_profile_consent_before_provider_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("CONTENT_OS_ALLOW_LEGACY_TALKING_EVALUATION")
@@ -45,13 +45,14 @@ def test_preexisting_direct_talking_job_is_blocked_by_default_before_provider_ca
             TalkingProfileRepository(db), AudioAssetRepository(db), AssetRepository(db),
             object(), object(), tmp_path / "generated", ProviderCallLedger(db),  # type: ignore[arg-type]
         )
-        with pytest.raises(JobExecutionError, match="explicit local evaluation mode") as error:
+        with pytest.raises(JobExecutionError, match="consented talking profile") as error:
             handler(job)
-        assert error.value.code == "legacy_talking_evaluation_disabled"
+        assert error.value.code == "talking_profile_not_authorized"
         assert ProviderCallRepository(db).list_for_project(job.project_id) == []
 
 
-def test_talking_job_requires_verified_new_narration_and_persists_video_provenance(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reference_fits", [True, False])
+def test_talking_job_requires_verified_new_narration_and_persists_video_provenance(tmp_path: Path, reference_fits) -> None:
     db = Database(tmp_path / "talking.sqlite")
     try:
         ip = IPProfile(creator_name="Creator")
@@ -125,7 +126,14 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
             model = "test-model"
             is_local = True
 
+            def validate_reference_duration(self, narration_duration_ms, reference_duration_ms):
+                assert (narration_duration_ms,reference_duration_ms)==(1000,1000)
+                if not reference_fits:
+                    from app.providers.talking import TalkingInputError
+                    raise TalkingInputError("synthetic frame alignment exceeds reference")
+
             def synthesize(self, received: TalkingProfile, received_narration: AudioAsset, reference: TalkingReference, output_path: Path, options: TalkingExecutionOptions) -> TalkingSynthesisResult:
+                assert reference_fits, "不能在参考覆盖不足时调用提供商"
                 assert received.id == profile.id and received_narration.id == narration.id
                 assert Path(received_narration.source_file) == narration_path
                 assert reference.clip_id == reference_clip.id and reference.source_path == reference_path
@@ -157,6 +165,11 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
             tmp_path / "generated", ProviderCallLedger(db)  # type: ignore[arg-type]
         )
         result = JobRunner(JobStore(db), {JobType.GENERATE_TALKING: handler}, worker_id="talking-worker", lease_duration=timedelta(minutes=1), max_attempts=2).run_once()
+        if not reference_fits:
+            assert result is not None and result.status is JobStatus.FAILED
+            assert result.error_code=="talking_reference_alignment_not_covered"
+            assert ProviderCallRepository(db).list_for_project(project.id)==[]
+            return
         assert result is not None and result.status is JobStatus.COMPLETED
         video = next(value for value in AssetRepository(db).list() if value.source_kind is SourceKind.AI_VIDEO)
         assert video.metadata["talking_generation"]["provider"] == "test-talking"
@@ -244,158 +257,15 @@ def test_talking_slice_payload_requires_a_complete_resolved_execution_plan() -> 
         )
 
 
-def test_talking_job_api_is_typed_idempotent_and_requires_verified_narration(tmp_path: Path) -> None:
-    path = tmp_path / "talking-api.sqlite"
-    db = Database(path)
-    try:
-        ip = IPProfile(creator_name="Creator")
-        IPProfileRepository(db).create(ip)
-        project = Project(ip_profile_id=ip.id, title="Talking", topic="New words", fps=RationalFps(numerator=25, denominator=1), created_at=datetime.now(timezone.utc))
-        ProjectRepository(db).create(project)
-        reference_path = tmp_path / "api-reference.mp4"
-        reference_path.write_bytes(b"authorized reference")
-        asset = Asset(source_file=str(reference_path), content_hash="h" * 64, duration_ms=7_000, width=720, height=1_280, fps=RationalFps(numerator=25, denominator=1), has_audio=True, authorization_reference="talking-consent-1", imported_at=datetime.now(timezone.utc))
-        AssetRepository(db).create(asset)
-        from app.db import ClipRepository
-        reference_clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=7_000, asset_duration_ms=7_000, talking_candidate=True, face_visibility=0.9, mouth_visibility=0.9))
-        profile = TalkingProfile(name="Creator talking", provider="latentsync", reference_clip_ids=[reference_clip.id], consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=datetime.now(timezone.utc)), created_at=datetime.now(timezone.utc))
-        TalkingProfileRepository(db).create(profile)
-        unsupported_profile = profile.model_copy(update={"id": uuid4(), "provider": "not-admitted"})
-        TalkingProfileRepository(db).create(unsupported_profile)
-        verified = AudioAsset(source_file=str(tmp_path / "verified.wav"), content_hash="d" * 64, duration_ms=1_000, sample_rate=24_000, channels=1, authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc), metadata={"voice_generation": {
-            "provider": "test-voice",
-            "qa_state": "verified",
-            "human_review_state": "approved",
-            "human_review": {
-                "approved": True,
-                "evidence_reference": "u-voice:talking-api-fixture",
-                "findings": ["Narration is approved for Talking API fixture execution."],
-                "likeness": "pass",
-                "naturalness": "pass",
-                "emphasis": "pass",
-                "pace": "pass",
-                "pauses": "pass",
-                "rhythm": "pass",
-                "reviewed_at": datetime.now(timezone.utc).isoformat(),
-            },
-        }}, transcript_segments=[TranscriptSegment(start_ms=0, end_ms=1_000, text="verified speech")], transcript_source="voice-qa:test-asr")
-        pending = verified.model_copy(update={"id": uuid4(), "content_hash": "e" * 64, "metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "pending"}}})
-        series_narration = verified.model_copy(update={
-            "id": uuid4(),
-            "content_hash": "f" * 64,
-            "duration_ms": 6_000,
-            "transcript_segments": [
-                TranscriptSegment(start_ms=0, end_ms=2_000, text="第一句"),
-                TranscriptSegment(start_ms=2_100, end_ms=4_000, text="第二句"),
-                TranscriptSegment(start_ms=4_100, end_ms=6_000, text="第三句"),
-            ],
-        })
-        AudioAssetRepository(db).create(verified)
-        AudioAssetRepository(db).create(pending)
-        AudioAssetRepository(db).create(series_narration)
-        unreviewed = verified.model_copy(update={
-            "id": uuid4(),
-            "content_hash": "a" * 64,
-            "metadata": {"voice_generation": {"provider": "test-voice", "qa_state": "verified"}},
-        })
-        AudioAssetRepository(db).create(unreviewed)
-    finally:
-        db.close()
-
-    request = {"idempotency_key": "talking-api", "talking_profile_id": str(profile.id), "reference_clip_id": str(reference_clip.id), "narration_audio_id": str(verified.id), "authorization_reference": "talking-consent-1"}
+def test_removed_direct_talking_endpoints_cannot_bypass_production_run(tmp_path: Path) -> None:
+    path=tmp_path / "ordinary-only.sqlite3"
     with TestClient(create_app(path)) as client:
-        first = client.post(f"/projects/{project.id}/talking-jobs", json=request)
-        assert first.status_code == 201
-        repeated = client.post(f"/projects/{project.id}/talking-jobs", json=request)
-        assert repeated.status_code == 201 and repeated.json()["id"] == first.json()["id"]
-        assert client.post(f"/projects/{project.id}/talking-jobs", json={**request, "authorization_reference": "different"}).status_code == 409
-        assert client.post(f"/projects/{project.id}/talking-jobs", json={**request, "idempotency_key": "talking-pending", "narration_audio_id": str(pending.id)}).status_code == 422
-        slice_job = client.post(f"/projects/{project.id}/talking-jobs", json={
-            **request,
-            "idempotency_key": "talking-short-slice",
-            "execution_machine_id": "asus-rtx3060-laptop-6gb",
-            "slice_start_segment_index": 0,
-            "slice_end_segment_index": 1,
-        })
-        assert slice_job.status_code == 201
-        unknown_slice = client.post(f"/projects/{project.id}/talking-jobs", json={
-            **request,
-            "idempotency_key": "talking-short-slice-unknown",
-            "execution_machine_id": "unverified-machine",
-            "slice_start_segment_index": 0,
-            "slice_end_segment_index": 1,
-        })
-        assert unknown_slice.status_code == 422
-        assert "no verified short-Talking duration bound" in unknown_slice.json()["detail"]
-        series_request = {
-            "idempotency_key": "talking-series",
-            "talking_profile_id": str(profile.id),
-            "reference_clip_id": str(reference_clip.id),
-            "narration_audio_id": str(series_narration.id),
-            "authorization_reference": "talking-consent-1",
-            "execution_machine_id": "asus-rtx3060-laptop-6gb",
-        }
-        no_voice_approval = client.post(f"/projects/{project.id}/talking-slice-series-jobs", json={
-            **series_request,
-            "idempotency_key": "talking-series-unreviewed",
-            "narration_audio_id": str(unreviewed.id),
-        })
-        assert no_voice_approval.status_code == 422
-        assert "approved U-Voice" in no_voice_approval.json()["detail"]
-        series = client.post(f"/projects/{project.id}/talking-slice-series-jobs", json=series_request)
-        assert series.status_code == 201
-        assert len(series.json()["jobs"]) == 2
-        assert series.json()["continuity_boundaries_ms"] == [[4_000, 4_100]]
-        review = client.get(f"/projects/{project.id}/talking-slice-series/{series.json()['id']}")
-        assert review.status_code == 200
-        assert review.json()["readiness"] == "waiting_for_child_jobs"
-        assert review.json()["ready_for_human_continuity_review"] is False
-        replay = client.post(f"/projects/{project.id}/talking-slice-series-jobs", json=series_request)
-        assert replay.status_code == 201
-        assert replay.json()["id"] == series.json()["id"]
-        assert replay.json()["jobs"] == series.json()["jobs"]
-        assert client.post(f"/projects/{project.id}/talking-slice-series-jobs", json={
-            **series_request, "authorization_reference": "different",
-        }).status_code == 409
-        terminal = client.post(f"/projects/{project.id}/talking-jobs", json={
-            **request,
-            "idempotency_key": "talking-terminal-closeout",
-            "terminal_face_closeout": True,
-            "execution_machine_id": "test-machine",
-        })
-        assert terminal.status_code == 201
-        rejected = client.post(f"/projects/{project.id}/talking-jobs", json={
-            **request,
-            "idempotency_key": "talking-terminal-unsupported",
-            "talking_profile_id": str(unsupported_profile.id),
-            "terminal_face_closeout": True,
-            "execution_machine_id": "test-machine",
-        })
-        assert rejected.status_code == 422
-        assert "not yet adapted to Content OS terminal face-closeout protection" in rejected.json()["detail"]
-
-    check_db = Database(path)
-    try:
-        stored = JobRepository(check_db).get(UUID(terminal.json()["id"]))
-        assert stored is not None and isinstance(stored.payload, TalkingGenerationJobPayload)
-        assert stored.payload.terminal_face_closeout is True
-        assert stored.payload.terminal_delivery_end_ms == 1_000
-        assert stored.payload.execution_parameters == {"trailing_silence_lookahead_ms": 600}
-        assert stored.payload.execution_parameter_sources == {"trailing_silence_lookahead_ms": "provider_default"}
-        assert stored.payload.execution_profile_reference == "talking:local:latentsync:LatentSync-1.5:local-compatibility:test-machine"
-        stored_slice = JobRepository(check_db).get(UUID(slice_job.json()["id"]))
-        assert stored_slice is not None and isinstance(stored_slice.payload, TalkingGenerationJobPayload)
-        assert stored_slice.payload.slice_start_segment_index == 0
-        assert stored_slice.payload.slice_end_segment_index == 1
-        assert stored_slice.payload.slice_max_duration_ms == 4_460
-        assert stored_slice.payload.slice_limit_source == "local_verified"
-        series_jobs = [JobRepository(check_db).get(UUID(item["id"])) for item in series.json()["jobs"]]
-        assert all(item is not None and isinstance(item.payload, TalkingGenerationJobPayload) for item in series_jobs)
-        assert [item.payload.slice_series_index for item in series_jobs if item is not None] == [0, 1]
-        assert {item.payload.slice_series_id for item in series_jobs if item is not None} == {UUID(series.json()["id"])}
-        assert [(item.payload.reference_window_start_ms, item.payload.reference_window_end_ms) for item in series_jobs if item is not None] == [(0, 4_640), (4_100, 6_640)]
-    finally:
-        check_db.close()
+        for route in ("talking-jobs", "talking-slice-series-jobs"):
+            response=client.post(f"/projects/{uuid4()}/{route}",json={})
+            assert response.status_code==404
+    with Database(path) as db:
+        assert JobRepository(db).list()==[]
+        assert ProviderCallRepository(db).list()==[]
 
 
 def test_talking_slice_series_children_run_only_after_the_predecessor_completes(tmp_path: Path) -> None:

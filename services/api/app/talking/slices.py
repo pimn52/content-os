@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import subprocess
 from uuid import UUID
@@ -272,8 +273,11 @@ def extract_talking_audio_slice(
         "end_ms": plan.end_ms,
         "transcript_source": plan.transcript_source,
     }
+    with output.open("rb") as stream:
+        content_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     return master.model_copy(update={
         "source_file": str(output),
+        "content_hash": content_hash,
         "duration_ms": plan.duration_ms,
         "metadata": metadata,
         "transcript_segments": segments,

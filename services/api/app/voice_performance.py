@@ -275,7 +275,7 @@ def authorized_voice_reference_choices(
                     or clip.reference_source_content_hash is None
                     or clip.reference_source_duration_ms is None
                     or asset.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
-                    or not asset.has_audio or not asset.authorization_reference.strip()
+                    or not asset.has_audio
                     or asset.metadata.get("ip_profile_id") not in (None, str(profile.ip_profile_id))):
                 continue
             source_timebase = "analysis_wav"

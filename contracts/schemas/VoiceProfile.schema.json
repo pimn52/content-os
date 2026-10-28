@@ -72,6 +72,19 @@
       "title": "Id",
       "type": "string"
     },
+    "ip_profile_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ip Profile Id"
+    },
     "name": {
       "maxLength": 200,
       "minLength": 1,

@@ -17,6 +17,37 @@ from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError,
 NOW = datetime(2026, 9, 8, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("frames,accepted", [(80, True), (79, False)])
+def test_talking_master_interval_uses_speech_time_across_fractional_frame_boundaries(tmp_path, monkeypatch, frames, accepted):
+    db, original, clip, spec = _setup(tmp_path)
+    try:
+        asset = original.model_copy(update={"source_kind": SourceKind.AI_VIDEO})
+        AssetRepository(db).update(asset)
+        clip = clip.model_copy(update={"start_ms": 0, "end_ms": 2680})
+        ClipRepository(db).update(clip)
+        audio_id = uuid4()
+        visual = spec.scenes[0].visual.model_copy(update={"source_kind": SourceKind.AI_VIDEO,
+            "clip_start_ms": 0, "clip_end_ms": 2680})
+        scene = spec.scenes[0].model_copy(update={"duration_frames": frames, "visual": visual,
+            "narration_asset_id": audio_id, "narration_start_ms": 8220, "narration_end_ms": 10900})
+        observed = []
+        monkeypatch.setattr("app.renderer.remotion.talking_visual_blocker", lambda *args, **kwargs: observed.append(kwargs))
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=tmp_path)
+        def validate():
+            return renderer._validate_scene(scene, RationalFps(numerator=30, denominator=1),
+                project_id=spec.project_id, master_audio_id=audio_id, validate_scene_narration=False)
+        if accepted:
+            assert validate().trim_after == 81
+            assert observed[0]["selected_duration_ms"] == 2680
+            assert observed[0]["master_interval"] == (8220, 10900)
+        else:
+            with pytest.raises(RenderInputError, match="narration interval"):
+                validate()
+            assert observed == []
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize("changes", [
     {"vertical_reframe_mode": "bottom_crop_contain"},
     {"vertical_reframe_mode": "bottom_crop_contain", "source_bottom_crop_ratio": .15},
@@ -217,6 +248,27 @@ def test_remotion_adapter_stages_local_clip_trims_and_preserves_source(tmp_path:
         db.close()
 
 
+def test_imported_stock_uses_existing_renderer_and_exports_exact_source_credit(tmp_path):
+    db, asset, _, spec = _setup(tmp_path)
+    try:
+        credit = "Galaxy — NASA · CC BY 4.0 · https://commons.wikimedia.org/wiki/File:Galaxy.webm"
+        stock = asset.model_copy(update={"source_kind": SourceKind.STOCK,
+            "metadata": {"external_sources": [{"candidate": {"attribution": credit}}]}})
+        AssetRepository(db).update(stock)
+        visual = spec.scenes[0].visual.model_copy(update={"source_kind": SourceKind.STOCK})
+        scene = spec.scenes[0].model_copy(update={"visual": visual})
+        runner = _Runner()
+        output = RemotionRenderer(AssetRepository(db), ClipRepository(db),
+            renderer_dir=_renderer_project(tmp_path / "renderer"), runner=runner).render(
+                spec.model_copy(update={"scenes": [scene]}), tmp_path / "stock.mp4")
+        assert len(runner.calls) == 1
+        assert Path(asset.source_file).read_bytes() == b"original-media-bytes"
+        credits = output.with_suffix(".credits.txt").read_text(encoding="utf-8")
+        assert credit in credits and "剪辑" in credits
+    finally:
+        db.close()
+
+
 def test_remotion_adapter_accepts_authorized_subinterval_inside_clip(tmp_path: Path) -> None:
     db, asset, clip, spec = _setup(tmp_path)
     runner = _Runner()
@@ -342,10 +394,26 @@ def test_remotion_adapter_rejects_remote_unauthorized_and_unsupported_visuals(tm
         unsupported = spec.model_copy(update={"scenes": [spec.scenes[0].model_copy(update={"transition": "fade"})]})
         with pytest.raises(RenderInputError, match="cut"):
             renderer.render(unsupported, tmp_path / "bad.mp4")
-        horizontal = spec.model_copy(update={"format": ProjectFormat.HORIZONTAL, "width": 1920, "height": 1080})
+        horizontal = spec.model_copy(update={"format": ProjectFormat.SQUARE, "width": 1080, "height": 1080})
         with pytest.raises(RenderInputError, match="9:16"):
             renderer.render(horizontal, tmp_path / "bad.mp4")
         assert runner.calls == []
+    finally:
+        db.close()
+
+
+def test_remotion_adapter_preserves_footage_and_stages_horizontal_canvas(tmp_path):
+    db,asset,clip,spec=_setup(tmp_path)
+    runner=_Runner()
+    try:
+        AssetRepository(db).update(asset.model_copy(update={"width":1920,"height":1080}))
+        horizontal=spec.model_copy(update={"format":ProjectFormat.HORIZONTAL,"width":1920,"height":1080})
+        RemotionRenderer(AssetRepository(db),ClipRepository(db),renderer_dir=_renderer_project(tmp_path/"renderer"),runner=runner).render(horizontal,tmp_path/"horizontal.mp4")
+        props=runner.calls[0][3]
+        assert (props["videoSpec"]["width"],props["videoSpec"]["height"])==(1920,1080)
+        visual=props["sceneSources"]["scene_01"]
+        assert visual["verticalReframeMode"]=="contain" and visual["portraitPresentation"]=="full_canvas"
+        assert runner.staged_bytes[visual["src"]]==Path(asset.source_file).read_bytes()
     finally:
         db.close()
 
@@ -367,9 +435,11 @@ def test_remotion_adapter_renders_authorized_footage_in_a_portrait_panel_without
         assert runner.staged_bytes[props["src"]] == Path(asset.source_file).read_bytes()
 
         asset=AssetRepository(db).update(asset.model_copy(update={"metadata":{**asset.metadata,'visual_analysis':{
-            str(spec.scenes[0].visual.clip_id):dict(source_content_hash=asset.content_hash,start_ms=0,end_ms=asset.duration_ms,
+            str(spec.scenes[0].visual.clip_id):dict(source_content_hash=asset.content_hash,
+                start_ms=spec.scenes[0].visual.clip_start_ms,end_ms=spec.scenes[0].visual.clip_end_ms,
                 comparison_layout='side_by_side_equal_halves',subtitle_regions=[],evidence_reference='synthetic-geometry',
-                coverage='full_interval_continuous',covered_start_ms=0,covered_end_ms=asset.duration_ms)}}}))
+                coverage='full_interval_continuous',covered_start_ms=spec.scenes[0].visual.clip_start_ms,
+                covered_end_ms=spec.scenes[0].visual.clip_end_ms)}}}))
         stacked_scene = panel_scene.model_copy(update={
             "portrait_presentation": PortraitPresentation.STACKED_COMPARISON,
             "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
@@ -419,6 +489,122 @@ def test_remotion_adapter_renders_authorized_footage_in_a_portrait_panel_without
             RemotionRenderer(AssetRepository(db), ClipRepository(db), renderer_dir=_renderer_project(tmp_path / "unsafe-renderer"), runner=_Runner()).render(
                 panel.model_copy(update={"scenes": [unsafe_scene]}), tmp_path / "unsafe.mp4"
             )
+    finally:
+        db.close()
+
+
+def test_remotion_comparison_clearance_is_bound_to_the_played_scene_interval(tmp_path: Path) -> None:
+    db, asset, clip, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        asset = AssetRepository(db).update(asset.model_copy(update={"width": 1280, "height": 720}))
+        full_clip = ClipRepository(db).create(Clip(
+            asset_id=asset.id, start_ms=clip.start_ms, end_ms=asset.duration_ms,
+            asset_duration_ms=asset.duration_ms,
+        ))
+        from app.assembly.edit_plan import comparison_clearance, source_frame_interval_ms
+        playback = source_frame_interval_ms(clip.start_ms, spec.scenes[0].duration_frames, spec.fps, full_clip.end_ms)
+        assert playback == (1001, 2002)
+        asset = AssetRepository(db).update(asset.model_copy(update={"metadata": {
+            **asset.metadata, "visual_analysis": {str(full_clip.id): {
+                "source_content_hash": asset.content_hash,
+                "clip_interval": {"start_ms": playback[0], "end_ms": playback[1]},
+                "comparison_layout": "side_by_side_equal_halves", "subtitle_regions": [[.3, .9, .4, .08]],
+                "evidence_reference": "synthetic-used-interval", "coverage": "full_interval_continuous",
+                "covered_start_ms": playback[0], "covered_end_ms": playback[1],
+            }},
+        }}))
+        with pytest.raises(ValueError, match="comparison_source_layout_or_subtitle_geometry_unknown"):
+            comparison_clearance(asset, full_clip)
+        ratio, reference = comparison_clearance(asset, full_clip, playback)
+        visual = VideoVisual.model_validate({
+            **spec.scenes[0].visual.model_dump(), "clip_id": full_clip.id,
+            "clip_start_ms": full_clip.start_ms, "clip_end_ms": full_clip.end_ms,
+            "vertical_reframe_mode": "bottom_crop_contain", "source_bottom_crop_ratio": ratio,
+            "vertical_reframe_evidence_reference": reference,
+        })
+        scene = spec.scenes[0].model_copy(update={
+            "visual": visual, "portrait_presentation": PortraitPresentation.STACKED_COMPARISON,
+            "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
+        })
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db),
+            renderer_dir=_renderer_project(tmp_path / "used-interval-renderer"), runner=runner)
+        renderer.render(spec.model_copy(update={"scenes": [scene]}), tmp_path / "used-interval.mp4")
+        props = runner.calls[0][3]["sceneSources"][scene.scene_id]
+        assert props["sourceBottomCropRatio"] == ratio
+
+        facts = asset.metadata["visual_analysis"][str(full_clip.id)]
+        facts["coverage"] = "sampled_keyframe"
+        AssetRepository(db).update(asset)
+        rejected = _Runner()
+        with pytest.raises(RenderInputError, match="full_interval_clearance_required"):
+            RemotionRenderer(AssetRepository(db), ClipRepository(db),
+                renderer_dir=_renderer_project(tmp_path / "sampled-used-interval-renderer"), runner=rejected).render(
+                    spec.model_copy(update={"scenes": [scene]}), tmp_path / "sampled-used-interval.mp4")
+        assert rejected.calls == []
+    finally:
+        db.close()
+
+
+def test_remotion_comparison_uses_owner_review_bound_to_asset_clip_and_crop(tmp_path: Path) -> None:
+    db, asset, clip, spec = _setup(tmp_path)
+    runner = _Runner()
+    try:
+        asset = AssetRepository(db).update(asset.model_copy(update={"width": 1280, "height": 720}))
+        full_clip = ClipRepository(db).create(Clip(
+            asset_id=asset.id, start_ms=clip.start_ms, end_ms=asset.duration_ms,
+            asset_duration_ms=asset.duration_ms,
+        ))
+        from app.assembly.edit_plan import comparison_clearance, source_frame_interval_ms
+        playback = source_frame_interval_ms(clip.start_ms, spec.scenes[0].duration_frames, spec.fps, full_clip.end_ms)
+        assert playback == (1001, 2002)
+        review = {
+            "source_asset_id": str(asset.id),
+            "source_clip_id": str(full_clip.id),
+            "source_content_hash": asset.content_hash,
+            "clip_interval": {"start_ms": playback[0], "end_ms": playback[1]},
+            "covered_start_ms": playback[0], "covered_end_ms": playback[1],
+            "coverage": "full_interval_continuous",
+            "method": "human_full_interval_review", "decision": "approved",
+            "reviewer_reference": "owner-conversation:comparison-2-pass",
+            "comparison_layout": "side_by_side_equal_halves",
+            "crop_window": {"x": 0, "y": 0, "width": 1280, "height": 650},
+            "source_subtitle_clearance_verified": True,
+            "evidence_reference": "evaluation-evidence/comparison-2-used-interval.mp4",
+            "evidence_sha256": "f" * 64,
+        }
+        asset = AssetRepository(db).update(asset.model_copy(update={
+            "metadata": {**asset.metadata, "source_presentation_reviews": {str(full_clip.id): review}},
+        }))
+        ratio, reference = comparison_clearance(asset, full_clip, playback)
+        assert ratio == pytest.approx(70 / 720)
+        assert reference == review["evidence_reference"]
+        visual = VideoVisual.model_validate({
+            **spec.scenes[0].visual.model_dump(), "clip_id": full_clip.id,
+            "clip_start_ms": full_clip.start_ms, "clip_end_ms": full_clip.end_ms,
+            "vertical_reframe_mode": "bottom_crop_contain", "source_bottom_crop_ratio": ratio,
+            "vertical_reframe_evidence_reference": reference,
+        })
+        scene = spec.scenes[0].model_copy(update={
+            "visual": visual, "portrait_presentation": PortraitPresentation.STACKED_COMPARISON,
+            "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
+        })
+        renderer = RemotionRenderer(AssetRepository(db), ClipRepository(db),
+            renderer_dir=_renderer_project(tmp_path / "human-review-renderer"), runner=runner)
+        renderer.render(spec.model_copy(update={"scenes": [scene]}), tmp_path / "human-review.mp4")
+        props = runner.calls[0][3]["sceneSources"][scene.scene_id]
+        assert props["sourceBottomCropRatio"] == pytest.approx(70 / 720)
+
+        review["source_content_hash"] = "0" * 64
+        stale_asset = AssetRepository(db).update(asset.model_copy(update={
+            "metadata": {**asset.metadata, "source_presentation_reviews": {str(full_clip.id): review}},
+        }))
+        rejected = _Runner()
+        with pytest.raises(RenderInputError, match="comparison_source_layout_or_subtitle_geometry_unknown"):
+            RemotionRenderer(AssetRepository(db), ClipRepository(db),
+                renderer_dir=_renderer_project(tmp_path / "stale-human-review-renderer"), runner=rejected).render(
+                    spec.model_copy(update={"scenes": [scene]}), tmp_path / "stale-human-review.mp4")
+        assert rejected.calls == []
     finally:
         db.close()
 

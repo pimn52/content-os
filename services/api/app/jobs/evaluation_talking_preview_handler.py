@@ -170,7 +170,7 @@ class EvaluationTalkingPreviewHandler:
                     or service.records.result(operation.id,"preview") is not None
                     or JobRepository(self.db).get(operation.qa_job_id).status != JobStatus.COMPLETED):
                     raise UseAdmissionError("evaluation_talking_preview_input_changed")
-                item._retain_evaluation_talking(service,operation,job,context,metadata)
+                service.retain_output(item,operation,job,context,metadata)
                 service.records.save_result(operation.id,"preview",result.model_dump(mode="json"))
             return asset
         except BaseException:

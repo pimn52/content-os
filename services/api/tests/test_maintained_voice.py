@@ -1,5 +1,6 @@
 """Synthetic model/SoundFile; real NumPy + std-library PCM, no model inference."""
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import wave
@@ -65,6 +66,39 @@ def recipe(candidate, monkeypatch):
 def execute(case):
     return execute_maintained_clone(data_root=case.root, model_root=case.model,
         parameters=case.parameters, inputs=case.inputs)
+
+
+def test_scene_generation_preserves_copy_order_loads_once_and_records_sample_ranges(recipe):
+    from app.providers.maintained_voice_provider import read_generation_segments
+    c=recipe;c.inputs=LocalCloneInputV2.model_validate({**c.inputs.model_dump(),'text':'  先看这组对比\n\n左边是高码率，右边是低码率。  '})
+    result=execute(c)
+    texts=[value['text'] for name,value in c.calls if name=='generate']
+    assert texts==['先看这组对比','左边是高码率，右边是低码率。']
+    assert len([name for name,_ in c.calls if name=='load'])==1
+    segments=read_generation_segments(result,c.inputs.text,c.root)
+    assert [(s['start_sample'],s['end_sample']) for s in segments]==[(0,3),(3,6)]
+    assert [c.inputs.text[s['start_char']:s['end_char']] for s in segments]==texts
+    assert all((c.root/s['source_file']).is_file() for s in segments)
+    with wave.open(str(result),'rb') as audio:assert audio.getnframes()==6
+    part=c.root/segments[0]['source_file'];part.write_bytes(part.read_bytes()+b'changed')
+    with pytest.raises(Exception,match='segment_provenance_invalid'):read_generation_segments(result,c.inputs.text,c.root)
+
+
+def test_scene_generation_failure_keeps_prior_part_and_does_not_retry_or_write_master(recipe):
+    c=recipe;c.inputs=c.inputs.model_copy(update={'text':'第一段完整表达\n\n第二段完整表达\n\n第三段完整表达'})
+    calls=[]
+    def generate(**kwargs):
+        calls.append(kwargs['text'])
+        if len(calls)==2:raise RuntimeError('synthetic failure')
+        return [c.output]
+    c.loaded.generate=generate
+    with pytest.raises(ExecutionPreparationError,match='maintained_clone_failed'):execute(c)
+    assert calls==['第一段完整表达','第二段完整表达']
+    target=Path(c.inputs.output_path)
+    assert not target.exists()
+    manifest=json.loads(target.with_suffix('.segments.json').read_text(encoding='utf8'))
+    assert manifest['state']=='running' and len(manifest['segments'])==1
+    assert (c.root/manifest['segments'][0]['source_file']).is_file()
 
 
 def test_fixed_vendor_loader_complete_settings_and_bounded_pcm_export(recipe):

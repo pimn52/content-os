@@ -794,6 +794,17 @@ class EvaluationTalkingService:
         self.db.connection.execute("INSERT INTO execution_use_content_origins(content_hash,subject_kind,subject_id) VALUES (?,'asset',?)",
             (asset.content_hash,str(asset.id)))
 
+    def retain_output(self, prepared, operation, job, context, metadata):
+        """Retain a generated internal-evaluation asset with its scoped origin."""
+        importer = getattr(prepared, "_importer", None)
+        if importer is None or importer.db is not self.db:
+            raise UseAdmissionError("evaluation_talking_output_importer_mismatch")
+        value = prepared._claim_retention(metadata)
+        self._pin_output(operation,job,context,value)
+        self.db.connection.execute("INSERT INTO assets(id,duration_ms,content_hash,payload) VALUES (?,?,?,?)",
+            (str(value.id),value.duration_ms,value.content_hash,value.model_dump_json()))
+        return prepared._place_retained(value)
+
     def _pin_quarantine(self, operation, scope, identity, content_hash):
         """Restriction-only tombstone: no Asset, inference or read permission.
 

@@ -130,7 +130,11 @@
         "embedding",
         "tts",
         "talking",
-        "render"
+        "render",
+        "stock_search",
+        "stock_import",
+        "web_search",
+        "web_fetch"
       ],
       "title": "Operation",
       "type": "string"

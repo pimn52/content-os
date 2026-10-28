@@ -311,7 +311,7 @@ class OwnedDualLatentSync:
                 raise ExecutionPreparationError("maintained_resource_changed")
         _safe_copy(work/"generated.mp4",Path(target))
 
-    def synthesize(self,request):
+    def synthesize(self,request,*,reference=None,execution_options=None):
         from .latentsync import LatentSyncProvider
         from .talking import TalkingReference
         owner=self
@@ -332,7 +332,8 @@ class OwnedDualLatentSync:
                 ffmpeg_command=Path(self.options["tools"])/"ffmpeg.exe",timeout_seconds=self.remaining(),
                 command_runner=lambda argv, **_kw: self.run(argv,self.private,self.remaining()))
             narration=narration.model_copy(update={"content_hash":_digest(Path(narration.source_file),4*1024**3)[1]})
-        adapter.synthesize(request.profile,narration,TalkingReference(request.reference_clip_id,Path(request.reference_path),request.reference_start_ms,request.reference_end_ms),self.private/"output.mp4")
+        reference = reference or TalkingReference(request.reference_clip_id,Path(request.reference_path),request.reference_start_ms,request.reference_end_ms)
+        return adapter.synthesize(request.profile,narration,reference,self.private/"output.mp4",execution_options)
 
 
 def _environment(options,private,*,engine=False):

@@ -35,7 +35,9 @@ def talking_case(candidate, monkeypatch):
     (root/"hf"/VAE_CACHE/"refs/main").write_text(VAE_REVISION)
     inventory = runtime.observe_talking_inventory(options["environment"],options["base"],max_bytes=options["max_bytes"])
     from app.runtime_inventory import RuntimeInventoryStore
-    monkeypatch.setattr(RuntimeInventoryStore,"read_v2",lambda _self,_descriptor:inventory)
+    original_read=RuntimeInventoryStore.read_v2
+    monkeypatch.setattr(RuntimeInventoryStore,"read_v2",lambda _self,descriptor,**kwargs:
+        inventory if descriptor.sha256==inventory.descriptor.sha256 else original_read(_self,descriptor,**kwargs))
     origin = {k:v for k,v in candidate["origin"].items() if k != "diagnostic_scope"}
     origin.update(origin_version=4,generation_scope="evaluation_talking_run_only",accepts_talking_runtime_trust=True,
         runtime_inventory_sha256=inventory.descriptor.sha256)

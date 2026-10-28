@@ -20,7 +20,6 @@ from app.domain.models import (
 from app.media import AudioImportError, AudioImporter
 from app.voice_takes import VerifiedVoiceTake, VoiceTakeComposer, VoiceTakeCompositionError
 from app.voice_seam import VoiceSeamCompactionError, compact_measured_seam_quiet, take_boundary_kinds
-from app.voice_qa import voice_copy_adjudication_is_valid
 
 
 class MasterNarrationCompositionError(ValueError):
@@ -93,10 +92,6 @@ class MasterNarrationComposer:
             "composition": {
                 "source_take_audio_ids": list(provisional.source_asset_ids),
                 "source_take_content_hashes": [take.audio.content_hash for take in takes],
-                "copy_adjudicated_source_take_audio_ids": [
-                    str(take.audio.id) for take in takes
-                    if voice_copy_adjudication_is_valid(take.audio, project_id=project_id)
-                ],
                 "expected_duration_ms": expected_duration_ms,
                 "timing_state": "provisional_pending_master_voice_qa",
             },
@@ -129,9 +124,8 @@ class MasterNarrationComposer:
         generation = None if audio is None else audio.metadata.get("voice_generation")
         if audio is None or not isinstance(generation, dict) or not (
             generation.get("qa_state") == "verified"
-            or voice_copy_adjudication_is_valid(audio, project_id=project_id)
         ):
-            raise MasterNarrationCompositionError("every MasterNarration take must have verified QA or a valid owner copy adjudication")
+            raise MasterNarrationCompositionError("every MasterNarration take must have verified QA")
         job_id = generation.get("job_id")
         try:
             job = self.jobs.get(UUID(job_id)) if isinstance(job_id, str) else None

@@ -13,8 +13,7 @@ from typing import BinaryIO, Iterator
 from uuid import uuid4
 
 from app.db import AssetRepository, Database
-from app.domain.models import Asset, Job, SourceKind
-from app.execution_scope import register_generated_import_scope
+from app.domain.models import Asset, SourceKind
 
 from .ffprobe import FFProbeAdapter, ProbeMetadata
 
@@ -82,23 +81,18 @@ class MediaImporter:
         self.originals.mkdir(parents=True, exist_ok=True)
         self.probe = probe or FFProbeAdapter()
 
-    def import_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET, generated_job: Job | None = None) -> Asset:
+    def import_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
         source_path = Path(source)
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
         with source_path.open("rb") as stream:
-            return self._import_stream(stream, source_path.name, authorization_reference, source_kind, generated_job)
+            return self._import_stream(stream, source_path.name, authorization_reference, source_kind)
 
     def import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
         return self._import_stream(stream, filename, authorization_reference, source_kind)
 
     def prepare_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind) -> PreparedMediaImport:
-        """Observe/copy media outside a writer lock; grant no scope or DB row.
-
-        The application must retain the result inside its own transaction and
-        atomically write its producer provenance and scope there. This is not a
-        replacement for the normal guarded import entry point.
-        """
+        """Copy and probe media without writing a database row."""
         if self.db.connection.in_transaction:
             raise MediaImportError("media_preparation_inside_transaction")
         source_path = Path(source)
@@ -122,18 +116,14 @@ class MediaImporter:
                 target.write(chunk)
         return digest.hexdigest()
 
-    def _import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, source_kind: SourceKind, generated_job: Job | None = None) -> Asset:
+    def _import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, source_kind: SourceKind) -> Asset:
         temp = self.originals / f".import-{secrets.token_hex(12)}.tmp"
         try:
             content_hash = self._copy_stream(stream, temp)
             repository = AssetRepository(self.db)
             existing = repository.get_by_content_hash(content_hash)
             if existing is not None:
-                if generated_job is None:
-                    return self._existing_or_error(existing)
-                with self._write_transaction():
-                    register_generated_import_scope(self.db, "asset", existing, generated_job)
-                    return self._existing_or_error(existing)
+                return self._existing_or_error(existing)
             # One content hash maps to one retained local original regardless
             # of the source filename or extension supplied by a concurrent
             # importer. ffprobe identifies the file by contents, not suffix.
@@ -145,10 +135,8 @@ class MediaImporter:
                 with self._write_transaction():
                     existing = repository.get_by_content_hash(content_hash)
                     if existing is not None:
-                        register_generated_import_scope(self.db, "asset", existing, generated_job)
                         return self._existing_or_error(existing)
                     repository.create(value)
-                    register_generated_import_scope(self.db, "asset", value, generated_job)
                     newly_created = self._place(temp, destination)
                     self._verify_content_hash(destination, content_hash)
                 return value
@@ -160,8 +148,6 @@ class MediaImporter:
                 except Exception:
                     raise conflict
                 if winner is not None:
-                    with self._write_transaction():
-                        register_generated_import_scope(self.db, "asset", winner, generated_job)
                     return self._existing_or_error(winner)
                 if newly_created:
                     self._cleanup_created(destination)
@@ -277,19 +263,6 @@ class PreparedMediaImport:
         """Internal ordinary row/file primitive; normal repository guards apply."""
         value = self._claim_retention(metadata)
         AssetRepository(self._importer.db).create(value)
-        return self._place_retained(value)
-
-    def _retain_evaluation_talking(self, service, operation, job, context, metadata: dict) -> Asset:
-        """Named role writer; never a callback/permission flag on generic import."""
-        from app.evaluation_talking import EvaluationTalkingService
-        if type(service) is not EvaluationTalkingService or service.db is not self._importer.db:
-            raise MediaImportError("media_retention_owned_service_required")
-        value = self._claim_retention(metadata)
-        service._pin_output(operation,job,context,value)
-        # Ordinary repository writes intentionally invoke the generic producer
-        # guard. This exact application writer has different authority roles.
-        self._importer.db.connection.execute("INSERT INTO assets(id,duration_ms,content_hash,payload) VALUES (?,?,?,?)",
-            (str(value.id),value.duration_ms,value.content_hash,value.model_dump_json()))
         return self._place_retained(value)
 
     def close(self) -> None:

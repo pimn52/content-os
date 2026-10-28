@@ -210,7 +210,7 @@ def execute_evaluation_talking(*, db, root, job, prepared, cost_estimator):
         guard()
         # Pin first, before our own new row changes the detached input facts.
         # All of these writes roll back with the terminal ledger update.
-        item._retain_evaluation_talking(service,operation,job,context,asset.metadata)
+        service.retain_output(item,operation,job,context,asset.metadata)
         service.records.save_result(operation.id,"generation",result.model_dump(mode="json"))
 
     def replay(value):

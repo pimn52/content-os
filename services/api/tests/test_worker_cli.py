@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 import sys
 from uuid import uuid4
@@ -7,7 +8,8 @@ from uuid import uuid4
 import pytest
 
 from app.db import AssetRepository, ClipRepository, Database, VoiceProfileRepository
-from app.domain.models import Asset, Clip, ConsentRecord, Job, JobType, RationalFps, VoiceProfile
+from app.domain.models import Asset, Clip, ConsentRecord, Job, JobStatus, JobType, RationalFps, VoiceProfile
+from app.jobs.runner import JobRunner
 from app.jobs.handlers import AssetAnalysisJobHandler
 from app.jobs.targets import AssetJobTargetStore
 from app.jobs.store import JobStore
@@ -30,6 +32,48 @@ def test_worker_defaults_and_type_selection(monkeypatch):
     assert config.db_path == Path("content-os-data/content-os.sqlite3")
     assert config.ffmpeg == resolve_local_executable("ffmpeg")
     assert config.ffprobe == resolve_local_executable("ffprobe")
+    assert config.job_id is None
+
+
+def test_worker_job_id_requires_once_and_a_uuid():
+    job_id = uuid4()
+    config = parse_config(["--once", "--job-type", "generate_talking", "--job-id", str(job_id)])
+    assert config.job_id == job_id
+    with pytest.raises(SystemExit):
+        parse_config(["--job-id", str(job_id)])
+    with pytest.raises(SystemExit):
+        parse_config(["--once", "--job-id", "invalid-job-id"])
+
+
+def test_once_job_id_runs_only_target_and_leaves_same_type_backlog_untouched(tmp_path, monkeypatch):
+    db_path = tmp_path / "targeted-worker.sqlite"
+    now = datetime.now(timezone.utc)
+    with Database(db_path) as db:
+        store = JobStore(db)
+        older = store.enqueue(Job(type=JobType.GENERATE_TALKING, idempotency_key="older-pending",
+            created_at=now - timedelta(minutes=1), updated_at=now - timedelta(minutes=1)))
+        target = store.enqueue(Job(type=JobType.GENERATE_TALKING, idempotency_key="target",
+            created_at=now, updated_at=now))
+    seen = []
+    def no_bulk_operation(*args, **kwargs):
+        pytest.fail("a targeted invocation must not recover or reconcile unrelated jobs")
+    def fake_runner(config, db):
+        runner = JobRunner(JobStore(db), {JobType.GENERATE_TALKING: lambda job: seen.append(job.id)},
+            worker_id=config.worker_id, lease_duration=timedelta(seconds=30), max_attempts=1)
+        monkeypatch.setattr(runner, "recover_expired", no_bulk_operation)
+        return runner
+    monkeypatch.setattr("app.worker_cli.build_runner", fake_runner)
+    monkeypatch.setattr("app.worker_cli.ProductionRunService", no_bulk_operation)
+    config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking",
+        "--job-id", str(target.id)])
+    assert run(config) == 0
+    assert run(config) == 0  # A completed target never falls through to the backlog.
+    assert seen == [target.id]
+    with Database(db_path) as db:
+        store = JobStore(db)
+        assert store.get(target.id).status is JobStatus.COMPLETED
+        assert store.get(older.id).status is JobStatus.PENDING
+        assert store.get(older.id).attempt == 0
 
 
 def test_talking_qa_worker_is_local_and_needs_no_generation_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,16 +142,34 @@ def test_transcribe_can_select_local_faster_whisper_without_api_key(tmp_path: Pa
         db.close()
 
 
+def test_audio_asset_transcription_worker_uses_local_asr(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CONTENT_OS_ASR_API_KEY", raising=False)
+    monkeypatch.setenv("CONTENT_OS_ASR_PROVIDER", "local")
+    db = Database(tmp_path / "audio-asset-asr.sqlite")
+    try:
+        config = parse_config(["--once", "--db", str(tmp_path / "audio-asset-asr.sqlite"),
+            "--job-type", "transcribe_audio_asset"])
+        runner = build_runner(config, db)
+        assert runner.handler_types == {JobType.TRANSCRIBE_AUDIO_ASSET}
+        assert runner._handlers[JobType.TRANSCRIBE_AUDIO_ASSET]._provider.__class__.__name__ == "FasterWhisperASRProvider"
+    finally:
+        db.close()
+
+
 def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CONTENT_OS_VISION_API_KEY", raising=False)
+    monkeypatch.delenv("CONTENT_OS_VISION_API_KEY_FILE", raising=False)
     monkeypatch.delenv("CONTENT_OS_EMBEDDING_API_KEY", raising=False)
     db = Database(tmp_path / "vision-worker.sqlite")
     try:
         config = parse_config(["--once", "--db", str(tmp_path / "vision-worker.sqlite"), "--job-type", "index_clips"])
-        with pytest.raises(VisionConfigurationError, match="supplied at runtime"):
+        with pytest.raises(VisionConfigurationError, match="credential file"):
             build_runner(config, db)
-        monkeypatch.setenv("CONTENT_OS_VISION_API_KEY", "runtime-only-test-key")
+        key_file = tmp_path / 'vision-key.txt'
+        key_file.write_text('runtime-only-test-key', encoding='utf-8')
+        monkeypatch.setenv("CONTENT_OS_VISION_API_KEY_FILE", str(key_file))
         visual_only = build_runner(config, db)
         assert visual_only._handlers[JobType.INDEX_CLIPS]._indexer is None
         monkeypatch.setenv("CONTENT_OS_EMBEDDING_API_KEY", "runtime-only-embedding-key")
@@ -115,6 +177,22 @@ def test_vision_requires_runtime_key_and_builds_only_index_handler(tmp_path: Pat
         assert runner.handler_types == {JobType.INDEX_CLIPS}
     finally:
         db.close()
+
+
+def test_video_vision_uses_only_selected_file_and_never_inherits_key_values(tmp_path, monkeypatch):
+    from app.worker_cli import _vision_provider_from_env
+    monkeypatch.delenv('CONTENT_OS_VISION_API_KEY_FILE',raising=False)
+    monkeypatch.setenv('CONTENT_OS_VISION_API_KEY','inherited-should-not-be-read')
+    monkeypatch.setenv('OPENAI_API_KEY','inherited-openai-key')
+    assert _vision_provider_from_env() is None
+    key=tmp_path/'moonshot-key.txt';key.write_text('\ufefffile-selected-key',encoding='utf-8')
+    monkeypatch.setenv('CONTENT_OS_VISION_API_KEY_FILE',str(key))
+    monkeypatch.setenv('CONTENT_OS_VISION_PROTOCOL','chat_completions')
+    monkeypatch.setenv('CONTENT_OS_VISION_VIDEO_INPUT','true')
+    provider=_vision_provider_from_env()
+    assert provider._api_key=='file-selected-key' and provider.supports_video_input
+    key.unlink()
+    with pytest.raises(VisionConfigurationError):_vision_provider_from_env()
 
 
 def test_talking_worker_refuses_unadmitted_provider(tmp_path: Path):
@@ -159,6 +237,20 @@ def test_talking_worker_builds_explicit_latentsync_provider(tmp_path: Path, monk
         db.close()
 
 
+def test_maintained_talking_worker_keeps_ordinary_handler_and_runtime_identity(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+    provider = SimpleNamespace(runtime_label="maintained-latentsync-install", machine_id="local-machine")
+    monkeypatch.setenv("CONTENT_OS_TALKING_PROVIDER", "maintained-latentsync")
+    monkeypatch.setattr("app.providers.maintained_talking.configured_maintained_talking_provider", lambda *_args: provider)
+    with Database(tmp_path / "talking.sqlite") as db:
+        config = parse_config(["--once", "--db", str(db.path), "--job-type", "generate_talking"])
+        handler = build_runner(config, db)._handlers[JobType.GENERATE_TALKING]
+        assert handler.__class__.__name__ == "TalkingGenerationJobHandler"
+        assert handler._provider is provider and handler._ledger is not None
+        assert handler._execution_runtime == provider.runtime_label
+        assert handler._execution_machine_id == provider.machine_id
+
+
 def test_voice_worker_builds_explicit_omnivoice_provider(tmp_path: Path, monkeypatch):
     runtime = tmp_path / "python.exe"
     runtime.write_bytes(b"runtime")
@@ -178,6 +270,77 @@ def test_voice_worker_builds_explicit_omnivoice_provider(tmp_path: Path, monkeyp
         assert runner._resource_keys_by_type == {JobType.GENERATE_VOICE: config.gpu_resource_key}
     finally:
         db.close()
+
+
+def test_maintained_voice_uses_normal_job_handler_without_operator_secret(tmp_path: Path, monkeypatch):
+    environment, base, model = (tmp_path / name for name in ("runtime", "base", "model"))
+    (environment / "Scripts").mkdir(parents=True)
+    (environment / "Scripts/python.exe").write_bytes(b"runtime")
+    base.mkdir(); model.mkdir()
+    settings = tmp_path / "voice.json"
+    settings.write_text(json.dumps({"config_version": 1, "runtime_options": {
+        "environment": str(environment), "base": str(base), "model_root": str(model),
+        "runtime_label": "maintained-installation", "machine_id": "local-machine", "parameters": {},
+        "origin_reference": {"reference": "historical-only.json", "sha256": "a" * 64},
+    }}), encoding="utf-8")
+    monkeypatch.setenv("CONTENT_OS_VOICE_PROVIDER", "omnivoice-maintained")
+    monkeypatch.setenv("CONTENT_OS_MAINTAINED_VOICE_CONFIG", str(settings))
+    monkeypatch.delenv("CONTENT_OS_MAINTAINED_VOICE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("CONTENT_OS_OMNIVOICE_NUM_STEP", "irrelevant-legacy-setting")
+    with Database(tmp_path / "voice.sqlite") as db:
+        config = parse_config(["--once", "--db", str(db.path), "--data-root", str(tmp_path), "--job-type", "generate_voice"])
+        runner = build_runner(config, db)
+        handler = runner._handlers[JobType.GENERATE_VOICE]
+        assert handler.__class__.__name__ == "VoiceGenerationJobHandler"
+        assert handler._ledger is not None
+        assert handler._provider.model == str(model)
+        assert handler._provider.repair_execution["runtime"] == "maintained-installation"
+        assert runner._resource_keys_by_type == {JobType.GENERATE_VOICE: config.gpu_resource_key}
+
+
+def test_maintained_voice_synthesis_preserves_selected_reference_and_new_copy(tmp_path: Path, monkeypatch):
+    from contextlib import contextmanager
+    from app.providers.maintained_voice_provider import synthesize_maintained_voice
+    from app.providers.omnivoice_entry_v2 import LocalCloneInputV2
+    from types import SimpleNamespace
+
+    source = tmp_path / "authorized.wav"
+    source.write_bytes(b"original source")
+    target = tmp_path / "generated.wav"
+    selection = SimpleNamespace(source_content_hash=hashlib.sha256(source.read_bytes()).hexdigest())
+    window = SimpleNamespace(source_file=str(source), transcript="本人参考。", start_ms=1000, end_ms=3000)
+    seen = {}
+
+    @contextmanager
+    def reference(**kwargs):
+        seen["reference"] = kwargs
+        assert kwargs["selection"] is selection and kwargs["window"] is window
+        inputs = kwargs["inputs"].model_copy(update={"reference_audio": str(tmp_path / "exact-window.wav"),
+            "reference_sha256": "b" * 64})
+        yield SimpleNamespace(inputs_snapshot=lambda: inputs)
+
+    @contextmanager
+    def child(**kwargs):
+        seen["child"] = kwargs
+        def execute():
+            target.write_bytes(b"new synthesis")
+            return target
+        yield SimpleNamespace(execute=execute)
+
+    monkeypatch.setattr("app.providers.maintained_voice_provider.prepare_voice_reference", reference)
+    monkeypatch.setattr("app.providers.maintained_voice_provider.prepare_maintained_voice_child", child)
+    options = {"environment": tmp_path / "runtime", "base": tmp_path / "base", "model_root": tmp_path / "model",
+        "parameters": {"num_step": 32}, "timeout_seconds": 900, "gpu_uuid": None}
+    result = synthesize_maintained_voice(options=options, data_root=tmp_path, ffmpeg=tmp_path / "ffmpeg.exe",
+        window=window, selection=selection, text="这是全新的文案。", target=target, language="Chinese")
+    request = seen["child"]["inputs"]
+    assert isinstance(request, LocalCloneInputV2)
+    assert request.text == "这是全新的文案。" and request.reference_text == "本人参考。"
+    assert request.reference_start_frame == 0 and request.reference_end_frame == 48000
+    assert request.reference_sha256 == "b" * 64
+    assert seen["child"]["parameters"] == options["parameters"]
+    assert result.read_bytes() == b"new synthesis"
+    assert source.read_bytes() == b"original source"
 
 
 def test_omnivoice_worker_resolves_legacy_bare_reference_media_from_local_originals(tmp_path: Path, monkeypatch):

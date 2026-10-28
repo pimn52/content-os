@@ -17,6 +17,7 @@ def talking_visual_blocker(
     master_audio_id: UUID | None = None,
     selected_duration_ms: int | None = None,
     master_interval: tuple[int, int] | None = None,
+    production_run_id: UUID | None = None,
 ) -> str | None:
     """Return a stable blocker; only an admitted, context-matching Run is eligible.
 
@@ -25,7 +26,7 @@ def talking_visual_blocker(
     """
     if asset.source_kind is not SourceKind.AI_VIDEO:
         return None
-    if clip.asset_id != asset.id or not asset.authorization_reference.strip():
+    if clip.asset_id != asset.id:
         return "generated_talking_asset_identity_mismatch"
     metadata = asset.metadata.get("talking_run")
     if not isinstance(metadata, dict):
@@ -34,6 +35,21 @@ def talking_visual_blocker(
             return "generated_talking_provenance_missing"
         if generation.get("qa_state") != "verified":
             return "generated_talking_qa_not_verified"
+        if production_run_id is not None:
+            from pathlib import Path
+            from app.production_runs import ProductionRunNotReady, ProductionRunService
+            root = getattr(assets.db, "data_root", Path(assets.db.path).parent)
+            try:
+                ProductionRunService(assets.db, root).require_draft_talking_visual(
+                    project_id, production_run_id, asset, clip, copy=copy,
+                    master_audio_id=master_audio_id, selected_duration_ms=selected_duration_ms,
+                    master_interval=master_interval,
+                )
+            except ProductionRunNotReady as exc:
+                return exc.reasons[0]
+            except ValueError:
+                return "draft_talking_context_invalid"
+            return None
         if generation.get("human_review_state") != "approved":
             return "generated_talking_human_review_not_approved"
         return "generated_talking_run_admission_required"
@@ -63,11 +79,23 @@ def talking_visual_blocker(
         return "talking_run_source_missing"
     if series.planned_origin is not None:
         from pathlib import Path
-        from app.talking.source_admission import TalkingSourceAdmissionRepository
         root = getattr(assets.db,"data_root",Path(assets.db.path).parent)
-        permission = TalkingSourceAdmissionRepository(assets.db,root).get(series.planned_origin.source_admission_id)
-        if permission is None or not permission.active:
-            return "talking_source_permission_revoked_or_missing"
+        origin = series.planned_origin
+        if origin.source_admission_id is not None:
+            from app.talking.source_admission import TalkingSourceAdmissionRepository
+            permission = TalkingSourceAdmissionRepository(assets.db,root).get(origin.source_admission_id)
+            if permission is None or not permission.active:
+                return "talking_source_permission_revoked_or_missing"
+        else:
+            from app.production_runs import ProductionRunNotReady, ProductionRunService
+            try:
+                ProductionRunService(assets.db, root).require_current_planned_run_origin(
+                    project_id, origin.run_id, origin.scene_plan_id, expected=origin, admitted_run_id=run.id,
+                )
+            except ProductionRunNotReady as exc:
+                return exc.reasons[0]
+            except (ValueError, OSError):
+                return "talking_run_source_context_invalid"
     review = TalkingSliceSeriesContinuityReviewRepository(assets.db).get_by_series_id(run.series_id)
     if (review is None or review.id != run.continuity_review_id or not review.approved
         or review.project_id != project_id or review.review_policy_version != run.review_policy_version
@@ -90,7 +118,6 @@ def talking_visual_blocker(
         return "talking_run_source_missing"
     if (
         source.source_kind is not SourceKind.AI_VIDEO
-        or source.authorization_reference != asset.authorization_reference
         or source.metadata.get("talking_run") != metadata
     ):
         return "talking_run_source_identity_mismatch"
@@ -117,7 +144,6 @@ def talking_visual_blocker(
             ("source_asset_id", str(source.id)),
             ("source_clip_id", str(source_clip.id)),
             ("source_content_hash", source.content_hash),
-            ("source_authorization_reference", source.authorization_reference),
         )):
             return "talking_run_derivation_mismatch"
         interval = derivation.get("source_interval")
@@ -149,7 +175,7 @@ def talking_visual_blocker(
         if first < start_ms or last > end_ms or last <= first:
             return "talking_run_interval_mismatch"
         start_ms, end_ms = first, last
-    if not _matches_interval_copy(copy, audio.transcript_segments, start_ms, end_ms):
+    if not _matches_interval_copy(copy, audio.transcript_segments, start_ms, end_ms, audio=audio):
         return "talking_run_copy_mismatch"
     if selected_duration_ms is not None and selected_duration_ms < max(
         segment.end_ms - start_ms for segment in audio.transcript_segments
@@ -172,7 +198,7 @@ def _run_metadata_matches(run: TalkingRun, metadata: dict[str, object]) -> bool:
     )
 
 
-def _matches_interval_copy(copy: str, segments: list[TranscriptSegment], start_ms: int, end_ms: int) -> bool:
+def _matches_interval_copy(copy: str, segments: list[TranscriptSegment], start_ms: int, end_ms: int, *, audio: AudioAsset | None = None) -> bool:
     from app.voice_qa import comparison_tokens
 
     target = "".join(comparison_tokens(copy))
@@ -181,7 +207,18 @@ def _matches_interval_copy(copy: str, segments: list[TranscriptSegment], start_m
         if segment.start_ms >= start_ms and segment.end_ms <= end_ms
     ]
     spoken = "".join(comparison_tokens(" ".join(segment.text for segment in covered)))
-    return bool(target and spoken and target == spoken)
+    if target and spoken and target == spoken:
+        return True
+    # 已核验旁白可沿用有界 ASR 同音替换的时间轴，不能把新文案塞进旧音频。
+    if not target or not covered or audio is None:
+        return False
+    from app.voice_qa import verified_generated_copy_tokens
+    expected = verified_generated_copy_tokens(audio)
+    if expected is None or segments != audio.transcript_segments:
+        return False
+    first = sum(len(comparison_tokens(segment.text)) for segment in segments if segment.end_ms <= start_ms)
+    size = sum(len(comparison_tokens(segment.text)) for segment in covered)
+    return tuple(comparison_tokens(copy)) == expected[first:first + size]
 
 
 

@@ -126,6 +126,28 @@ class TalkingRepairService:
         return [None if (policy := repo.get_by_project(scope)) is None else policy.model_dump(mode="json")
                 for scope in (None, project_id)]
 
+    def reconcile_automatic_qa_failure(self, project_id: UUID, run_id: UUID):
+        """独立QA已定位的画面缺陷只修一次；生成请求失败和未知缺陷不重试。"""
+        run=self.production.get(project_id,run_id)
+        if run is None or not run.automatic or any(value.startswith('automatic_stop:') for value in run.waiting_stop_reasons):return None
+        for binding in run.talking_source_bindings:
+            qa=JobRepository(self.db).get(binding.talking_qa_job_id) if binding.talking_qa_job_id else None
+            if qa is None or qa.status is not JobStatus.FAILED:continue
+            plan=self.plan(project_id,run_id,binding.scene_plan_id)
+            if (plan.action=='regenerate_scene' and plan.failure_kind=='technical'
+                and any(item.get('type')=='technical_qa_output' for item in plan.evidence)):
+                return self.execute(project_id,run_id,TalkingRepairRequest(scene_plan_id=binding.scene_plan_id,
+                    expected_fingerprint=plan.fingerprint,idempotency_key=f'automatic-talking-repair:{qa.id}',
+                    confirmed_action='regenerate_scene',reason='独立技术核验已定位人物画面缺陷，保留合格旁白与其他人物段，执行一次局部修正。'))
+            reasons=plan.stop_reasons or ('talking_qa_failure_requires_diagnosis',)
+            with self.db.transaction(immediate=True):
+                row=self.db.connection.execute('SELECT waiting_stop_reasons FROM production_runs WHERE id=?',(str(run_id),)).fetchone()
+                current=json.loads(row[0]) if row else []
+                self.db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',
+                    (json.dumps(list(dict.fromkeys([*current,*(f'automatic_stop:{reason}' for reason in reasons)]))),str(run_id)))
+            return None
+        return None
+
     def plan(self, project_id: UUID, run_id: UUID, scene_id: UUID) -> TalkingRepairPlan:
         run = self.production.get(project_id, run_id)
         if run is None:
@@ -167,7 +189,40 @@ class TalkingRepairService:
                 reasons.append("talking_invalid_request_requires_correction")
             else:
                 reasons.append("talking_failure_not_verified_transient")
-        elif job.status is JobStatus.COMPLETED and binding.talking_series_id is not None:
+        elif job.status is JobStatus.COMPLETED and binding.talking_qa_job_id is not None:
+            qa = JobRepository(self.db).get(binding.talking_qa_job_id)
+            if qa is not None and qa.status is JobStatus.FAILED:
+                kind = "technical"
+                try:
+                    output, _ = self.production.require_talking_qa_job(qa)
+                    report = output.metadata.get("talking_generation", {}).get("qa", {})
+                    evidence.extend([
+                        {"type": "technical_qa_job", "record": qa.model_dump(mode="json")},
+                        {"type": "technical_qa_output", "asset_id": str(output.id),
+                         "sha256": output.content_hash, "report": report},
+                    ])
+                    checks = report.get("checks") if isinstance(report, dict) else None
+                    output_failures = {"output_probe_failed", "output_not_playable_video_audio", "output_duration_drift"}
+                    known_checks = output_failures | {"output_playable_video_audio", "output_duration_matches_narration", "narration_copy_qa_verified"}
+                    if isinstance(checks, list) and "narration_copy_qa_not_verified" in checks:
+                        action = "replan"
+                        reasons.append("talking_qa_narration_requires_voice_repair")
+                    elif (qa.error_code == "talking_qa_failed" and binding.talking_series_id is None
+                        and output.metadata["talking_generation"].get("qa_state") == "failed"
+                        and isinstance(report, dict) and report.get("automated_verified") is False
+                        and report.get("job_id") == str(qa.id)
+                        and report.get("evidence_reference") == f"talking-qa-job:{qa.id}:output:{output.content_hash}"
+                        and isinstance(checks, list) and checks and all(isinstance(item, str) for item in checks)
+                        and set(checks) <= known_checks and set(checks) & output_failures
+                        and "narration_copy_qa_verified" in checks):
+                        action = "regenerate_scene"
+                    else:
+                        reasons.append("talking_qa_failure_requires_diagnosis")
+                except ProductionRunNotReady as exc:
+                    reasons.extend(exc.reasons)
+            elif binding.talking_series_id is None:
+                reasons.append("talking_repair_requires_persisted_failure_evidence")
+        if job.status is JobStatus.COMPLETED and binding.talking_series_id is not None:
             from app.talking.planned_admission import PlannedTalkingAdmissionService
             series = TalkingSliceSeriesRepository(self.db).get(binding.talking_series_id)
             if series is None or series.project_id != project_id:

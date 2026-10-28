@@ -127,7 +127,7 @@ def test_render_api_rejects_foreign_project_unauthorized_spec_and_unknown_files(
         })]})
         rejected = client.post(f"/projects/{project.id}/render", json={"video_spec": bad_visual.model_dump(mode="json")})
         assert rejected.status_code == 422
-        assert "authorized stored Clip" in rejected.json()["detail"]
+        assert rejected.json()["detail"] == "render_invalid"
         assert runner.calls == 0
 
         # UUID route parameters and server-owned output names leave no path

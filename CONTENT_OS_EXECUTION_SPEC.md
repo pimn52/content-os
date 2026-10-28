@@ -1,197 +1,46 @@
-# Content OS — Product & R1 Specification
+# Content OS 产品与 R1 验收
 
-Updated: 2026-10-03
+Content OS 帮创作者把知识、素材和个人表达稳定转成短视频。长期资产是创作者工作区，不是某一条样片。目标是以更少人工操作，持续得到可发布作品。
 
-This is the authoritative whole-product map and R1 acceptance contract. Module details live under docs/product/. Technical layering lives in docs/architecture/SYSTEM_ARCHITECTURE.md. Current execution state lives in STATUS.md.
+## 创作原则
 
-## 1. Product thesis
+- 场景规划、语音克隆和对口型共同设计作品；利用已授权声音与形象说新内容，不要求用户反复拍摄流畅口播。
+- 默认规划无需新增拍摄的可完成方案。补拍限于作品确需的独有现场、操作或结果，适配本次意愿与条件；可选补充不阻断制作。
+- 素材须支持表达；能够胜任时优先本人表达与素材，再按实际需要使用图解、外部资料或预算内生成，兼顾整片质量与辨识度。不能生成亲历或实测证据。
+- 在既定内容范围、节奏与预算内自主选题、制作并按发布设置交付；用户没点子或未参与可选优化时继续推进。缺少关键依据的选题可暂缓并换题，不让整条创作计划停等。
+- 对外发布遵循明确授权；研发人审保留确切版本与结论，不把逐段人工批准设为普通生产的固定前提。以上原则的实现状态见 STATUS。
+- 产品沿既定创作与发布设置自主推进。正常链路的唯一有效成片自动承接发布目标并计入素材占用；用户介入返工时保留同作品候选，到选版或多版导出时展示决策影响。
 
-Know what to create → Create it as you → Learn what works.
+## 一条产品路径
 
-Content OS is a Local-first / BYOK content operating system for creators, professionals and small teams that have useful knowledge but insufficient time or production capacity to repeatedly turn it into short-form content.
+创作者资料、素材与发布设置 → 一次主题输入 → 文案与场景规划 → 素材适配、能力许可与预算预检 → Voice、Talking 与媒体处理 → 实际时长驱动的 EditPlan/VideoSpec → 渲染与 QA → 按既定发布策略交付 → 发布回执与反馈。用户介入时从当前作品分出候选，选版后回到同一路径。
 
-The primary durable object is the creator/brand workspace, not an isolated video.
+视觉可行性应在昂贵生成前判断。生成后依据真实音视频时长修正时间线。短视频默认竖屏，优先适配选材和布局；横屏须明确选择，整片画幅一致，不主动将竖裁片混入横版，也不用大字卡掩盖素材缺口。开场须完整交代主体，人物参考短不能成为删减表达的理由。
 
-The core product objective is to maximize repeatable automatic creation, then extend toward authorized operations. Progress is measured by publishable outcomes with less manual planning, dispatch, repair and repeated review—not by the number of successful provider experiments.
+## R1 通过条件
 
-Within admitted capability, optimize output for the actual input rather than
-forcing a single source aspect or substituting text for usable footage. Support
-comfortable source proportions inside the final canvas and explain constrained
-quality, alternatives and unknowns so the user can choose an appropriate outcome.
-Suitable full-screen portrait footage remains the preferred result; square or
-wider viewports are disclosed compromises for limited input, not the universal
-output target.
-Accepting a useful limited result does not claim that it passed the R1
-publishability/normal-workflow gate; sufficient-input trials must still prove it.
+一位已授权创作者在普通 UI 中：
 
-## 2. Product system
+1. 保存可复用的个人/IP 资料与媒体库；
+2. 输入新主题，得到并可修改符合其表达的文案；
+3. 生成经独立 QA 的新旁白，以及至少一段说新内容的本人 Talking；
+4. 结合有权利证据的真实素材、字幕和必要图形，导出可播放、适合内容及发布目标的短视频；默认竖版，关键画面不适合时评估横版；
+5. 真人判断内容、声音、人物和成片可发布；
+6. 换第二主题重复，无需开发脚本手填分镜、裁切或子任务。
 
-    Workspace / Creator / Brand
-    ├─ IP / Persona / Strategy context
-    ├─ Knowledge and historical content
-    ├─ Voice identity and authorization
-    ├─ Visual identity and production assets
-    ├─ Platform/account evidence
-    └─ Performance / feedback evidence
+本轮链路验收从普通 UI 一次输入开始，产品自主完成规划到成片；中途由 Codex/人工纠偏不计通过。研发验收在确切成片交用户审核处结束，产品长期目标包含授权范围内自动发布。
 
-    New topic or sourced opportunity
-            ↓
-    IP-aware editable copy + narration performance intent
-            ↓
-    ScenePlan + preliminary EditPlan / editorial and visual intent
-            ↓
-    Asset suitability + Hybrid Asset Router
-            ↓
-    Execution feasibility + whole-production cost/budget preflight
-            ↓
-    Necessary Voice / Talking / transforms / capture only
-            ↓
-    MasterNarration + TalkingRun + Assets / measured timing
-            ↓
-    Timing-resolved EditPlan / visual preflight
-            ↓
-    VideoSpec
-            ↓
-    30–60s render
-            ↓
-    Review / publication / feedback
+以 30–60 秒短视频作为首轮验收场景；这不是所有未来视频的固定时长。导入成品旁白、旧口型、通用 TTS 或通用头像可以是明确的备选功能，不能替代以上新内容验证。
 
-Visual intent and feasibility precede expensive generation. After generation, measured audio/visual timing resolves the plan. This is one versioned planning lifecycle, not a second planner that first discovers the visual concept after production. Unsuitable material returns a reason and bounded alternative to planning before dispatch.
+记录两次试作的操作、返工、耗时、失败与费用；未知费用写未知。单次成功不能证明其他配置、主题或模型许可。
 
-## 3. R1 product gate
+## 不可省略的事实
 
-R1 is complete only when an authorized creator can, through the normal product flow:
+- 素材权利在入库登记，人物同意在 Profile 登记；Run 继承记录并核验哈希、适配、重复度和历史冲突。模型许可、能力与预算在派发前核验，不在运行后补索素材授权。
+- 能力与当前配置、模型文件、机器和用途绑定。未知能力不能自动分派。
+- 实际模型/渲染调用保留幂等、预算、用量及失败结算；相同已认可输入优先复用成果。
+- MasterNarration 是旁白时轴；TalkingRun 是人物画面的产品结果；EditPlan 表达剪辑意图；VideoSpec 锁定可执行时间线。
+- 自动技术 QA、真实运行与人工声音/人物/成片判断分开记录。看起来更差的作品不能用技术通过替代质量通过。
+- 发布继承创作者明确配置的授权；系统根据创作目标、选版、导出、排期、发布任务及回执识别发布走向，记录依据。导出、发布计划和发布成功分别留痕；反馈不倒写旧事实。
 
-1. retain a persistent creator/IP profile and reusable media library;
-2. enter a new topic and obtain editable IP-aware copy;
-3. create a new verified Master Narration in the creator's authorized voice;
-4. create at least one new creator-visible Talking segment/run speaking new words;
-5. combine it with authorized real media, optional capture, typography/static material and subtitles;
-6. export a playable 30–60 second vertical video;
-7. repeat the flow for another topic without re-recording the entire narration or manually cutting all media from scratch.
-
-Imported finished narration, source-led recuts, old mouth motion, generic TTS or generic avatars may remain explicit fallback paths but do not prove the R1 core gate.
-
-These are acceptance scenarios, not a rule that every future video must generate Talking or have one fixed length. Source eligibility and usable intervals come from evidence, not conversational duration examples.
-
-Both topic trials must use the normal UI/application workflow, without implementation scripts supplying scenes, cuts, crop coordinates or child-job dispatch. Record user-active time, manual corrections, review events, quality failures, retries, actual/unknown cost and elapsed time. Unknown measurements cannot be reported as zero. Accepted assets remain reusable unless their dependencies change.
-
-[D029](DECISIONS.md#d029--admit-execution-for-an-evidenced-purpose-and-preserve-that-scope-downstream) separates an internal R1 workflow-quality trial from commercial provider admission. A future explicitly admitted internal-evaluation lane must use the same normal workflow and quality gates, verify that the exact provider terms permit the intended activity, and retain output-use restrictions. Such a pass establishes R1 workflow quality only; commercial readiness remains separate. Fresh generation retains its capability-specific dispatch admission. Retained-only local internal composition now enters the ordinary production/Render Worker through an exact media-use review and a finite render allowance; it does not authorize fresh inference or commercial use. Neither an evaluation label nor this specification grants provider rights.
-
-## 4. Product modules
-
-### 4.1 Creator / IP / Intelligence
-
-Owns persistent creator context, sourced opportunities, historical account/content evidence and feedback.
-
-Spec: docs/product/CREATOR_INTELLIGENCE.md
-
-### 4.2 Media / Asset Intelligence
-
-Owns local media, continuous Clips, analysis evidence, candidate selection, capture gaps and asset usage.
-
-Spec: docs/product/MEDIA_ASSET_SYSTEM.md
-
-### 4.3 Voice / Talking
-
-Owns new creator speech, reviewable rhetorical delivery suggestions, editable narration performance intent, Master Narration admission, creator-visible generated Talking, continuous TalkingRun semantics and human likeness/publishability gates.
-
-Spec: docs/product/VOICE_TALKING.md
-
-### 4.4 Execution / Hybrid Compute
-
-Owns capability evidence, provider/runtime/machine resolution, parameter provenance, Advanced Settings, local resource guards and future explicit remote/BYOK routing.
-
-Spec: docs/product/EXECUTION_COMPUTE.md
-
-### 4.5 Timeline / Render / Learning
-
-Owns MasterNarration timeline use, VideoSpec, render, final review, publication records and feedback.
-
-Spec: docs/product/TIMELINE_RENDER_LEARNING.md
-
-## 5. Product invariants
-
-- Local-first Data + Hybrid Compute. Creator assets, identity/profile, project state, evidence and control remain local-first; heavy inference may use approved local or remote compute.
-- Provider-neutral product semantics. A model/vendor may be replaced without changing ScenePlan, Asset, MasterNarration, TalkingRun or VideoSpec meaning.
-- Narrative intent is not a hardware setting. Execution adapts to capability; editorial structure is not hard-coded to one provider's limits.
-- Real media first. Existing creator material is preferred when it clears the quality bar.
-- Continuous media is first class. Keyframes support understanding; they do not replace source clips.
-- No hidden downgrade or cloud fallback. Cost, privacy/data transfer and missing capability remain explicit.
-- Consent and rights are hard gates.
-- Unknown cost is not zero; unknown capability is not verified.
-- Evidence and human judgment are separate. Automated QA does not claim likeness or publishability.
-- Lowest cost means the lowest adequate total production effort: cash/compute, waiting, failed work and creator time remain separately visible. Cheap but unpublishable output is not success.
-
-## 6. First-class product outputs
-
-The normal product pipeline should converge on these objects:
-
-- IP Profile / creator context;
-- Project / Draft / ScenePlan and versioned EditPlan;
-- Asset / Clip / AudioAsset;
-- verified MasterNarration;
-- reviewed TalkingRun;
-- VideoSpec;
-- Render / Publication / Feedback.
-
-Provider child calls, short Talking slices, alignment runways and resource leases are execution details, not the user-facing product model.
-
-## 7. R1 quality gates
-
-### Voice
-
-Automated evidence must cover copy/timing/silence/playability/provenance. One
-asset-specific U-Voice record after automated QA must cover likeness,
-naturalness, emphasis, pace, pauses and rhetorical rhythm. Pending or rejected
-generated Voice cannot drive Talking or final assembly; this human judgment
-does not substitute for a provider capability/application receipt.
-For R1, emphasis and rhythm pass when the exact narration is sufficiently
-clear and publishable; perfect word focus or verified automatic whole-sentence
-intonation control is not a separate release prerequisite. Materially harmful
-delivery still fails the asset-level human gate.
-
-### Talking
-
-Automated evidence must cover playable/timing/raw-output integrity and narration provenance. Human review covers visible sync, identity, mouth artifacts, original performance retention, continuity and publishability.
-
-### Product
-
-The final U-Product review judges the normal 30–60s rendered result.
-
-A single successful experiment is not enough: R1 requires one full pass and then a second-topic repeatability pass.
-
-Policy v1 retains child-level subjective review. New normal Web Runs explicitly select v2, while existing/unspecified policy records retain v1. The v2 lane for planned single-child collections preserves technical QA and requires explicit six-dimension review of the exact Master-audio preview, with focused concern answers. Its core UI path has isolated fixture evidence; real planned-media judgments remain unverified. Master judgment and final review remain required. Calibration/provider-change experiments are separate from ordinary production; they must not make every new video repeat the original validation campaign.
-
-## 8. R1 architecture boundary
-
-Keep the current modular-monolith direction:
-
-- FastAPI local API;
-- SQLite persistent state;
-- durable Job/Worker execution;
-- provider-neutral adapters;
-- local FFmpeg/ffprobe media operations;
-- Remotion + FFmpeg rendering;
-- browser workspace;
-- provider budget/idempotency/accounting;
-- backup/recovery and private-network boundaries.
-
-Do not introduce Redis, Celery, Kubernetes, n8n or microservices merely because the media pipeline is complex.
-
-## 9. Current R1 status at a glance
-
-Creator/project state, local assets, routing, jobs, capability settings, Voice/Talking APIs and deterministic rendering are implemented foundations. Exact reviewed MasterNarration/TalkingRun assets are valuable runtime evidence; they do not establish a normal automatic creation flow.
-
-Current gaps span production-before-planning drift, generated-asset routing/admission consistency, manual UI orchestration, source suitability, review granularity and feedback consumption. EditPlan presentation contracts exist; automatic visual planning and reliable derived-media eligibility are not proven. Assisted renders have failed final visual review.
-
-STATUS.md owns the current maturity/evidence matrix and single active package. docs/implementation/ROADMAP.md defines the bounded recovery sequence. No R1 or autonomous-production completion is claimed.
-
-## 10. Deferred beyond the immediate R1 proof
-
-- broad autonomous Market Brain / competitor crawling;
-- automatic platform publishing;
-- automatic cross-provider remote selection before a remote provider is admitted;
-- large distributed scheduling infrastructure;
-- broad avatar-generation product modes;
-- claims of commercial readiness for benchmark providers with incompatible model-weight licenses.
+模块细节见 [产品索引](docs/product/README.md)，技术边界见 [架构](docs/architecture/SYSTEM_ARCHITECTURE.md)，当前完成度见 [STATUS](STATUS.md)。

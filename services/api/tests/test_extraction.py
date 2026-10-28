@@ -28,6 +28,59 @@ def _asset(path: Path, *, has_audio=True, duration_ms=1000):
     return Asset(source_file=str(path), content_hash="a" * 64, duration_ms=duration_ms, width=320, height=240, fps=RationalFps(numerator=25, denominator=1), has_audio=has_audio, authorization_reference="test", imported_at=datetime.now(timezone.utc))
 
 
+def test_real_video_analysis_proxy_normalizes_vfr_and_stream_offset_without_source_change(tmp_path):
+    ffmpeg=os.environ.get('CONTENT_OS_FFMPEG') or shutil.which('ffmpeg')
+    ffprobe=os.environ.get('CONTENT_OS_FFPROBE') or shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:pytest.skip('local ffmpeg/ffprobe unavailable')
+    source=tmp_path/'variable-clock.mp4'
+    subprocess.run([ffmpeg,'-y','-v','error','-itsoffset','0.108','-f','lavfi','-i',
+        'testsrc2=duration=3:size=320x180:rate=30','-f','lavfi','-i','sine=duration=3.4',
+        '-map','0:v','-map','1:a','-vf',"select='not(eq(mod(n,13),0))'",'-fps_mode:v','vfr',
+        '-c:v','libx264','-c:a','aac',str(source)],check=True,capture_output=True)
+    before=hashlib.sha256(source.read_bytes()).hexdigest()
+    probe=FFProbeAdapter(ffprobe)
+    raw=probe.probe(source)
+    assert float(raw.metadata['streams'][0]['start_time']) > 0
+    asset=Asset(source_file=str(source),content_hash=before,duration_ms=raw.duration_ms,width=raw.width,height=raw.height,
+        fps=RationalFps(numerator=30,denominator=1),authorization_reference='fixture',imported_at=datetime.now(timezone.utc))
+    extractor=MediaExtractor(tmp_path/'data',command=ffmpeg)
+    legacy=tmp_path/'data'/'assets'/'analysis-video'/before/'730-1759-30-1.mp4'
+    legacy.parent.mkdir(parents=True,exist_ok=True)
+    legacy.write_bytes(b'outdated video clock cache')
+    output=extractor.extract_video_interval(asset,730,1759)
+    assert output != legacy and legacy.read_bytes() == b'outdated video clock cache'
+    video=probe.probe(output)
+    assert abs(video.duration_ms-1029) <= 34 and video.fps.numerator/video.fps.denominator == 30
+    assert video.has_audio is False
+    assert abs(float(video.metadata['streams'][0]['start_time'])) < .001
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+    assert extractor.extract_video_interval(asset,730,1759) == output
+
+
+@pytest.mark.parametrize('size,expected', [('1080x1920',(540,960)),('1920x1080',(960,540)),('320x180',(320,180))])
+def test_real_analysis_proxy_bounds_both_axes_without_cropping_or_changing_time(tmp_path, size, expected):
+    ffmpeg=os.environ.get('CONTENT_OS_FFMPEG') or shutil.which('ffmpeg')
+    ffprobe=os.environ.get('CONTENT_OS_FFPROBE') or shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:pytest.skip('local ffmpeg/ffprobe unavailable')
+    source=tmp_path/'source.mp4'
+    subprocess.run([ffmpeg,'-y','-v','error','-f','lavfi','-i',f'testsrc2=duration=1:size={size}:rate=30',
+        '-c:v','libx264','-preset','ultrafast',str(source)],check=True,capture_output=True)
+    source_hash=hashlib.sha256(source.read_bytes()).hexdigest()
+    probe=FFProbeAdapter(ffprobe); raw=probe.probe(source)
+    asset=Asset(source_file=str(source),content_hash=source_hash,duration_ms=raw.duration_ms,width=raw.width,height=raw.height,
+        fps=raw.fps,authorization_reference='fixture',imported_at=datetime.now(timezone.utc))
+    extractor=MediaExtractor(tmp_path/'data',command=ffmpeg)
+    old=tmp_path/'data'/'assets'/'analysis-video'/source_hash/'0-1000-30-1-cfr.mp4'
+    old.parent.mkdir(parents=True,exist_ok=True);old.write_bytes(b'oversized legacy proxy')
+    output=extractor.extract_video_interval(asset,0,1000)
+    video=probe.probe(output)
+    assert (video.width,video.height)==expected
+    assert abs(video.width*raw.height-video.height*raw.width)<=2*raw.width
+    assert abs(video.duration_ms-1000)<=34 and video.fps==raw.fps and not video.has_audio
+    assert output!=old and old.read_bytes()==b'oversized legacy proxy'
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==source_hash
+
+
 def test_audio_argv_no_shell_and_idempotent(monkeypatch, tmp_path: Path):
     source = tmp_path / "源 file.mp4"
     source.write_bytes(b"source")
@@ -50,6 +103,32 @@ def test_audio_argv_no_shell_and_idempotent(monkeypatch, tmp_path: Path):
     assert "-ar" in argv and argv[argv.index("-ar") + 1] == "22050"
     assert "-ac" in argv and argv[argv.index("-ac") + 1] == "2"
     assert not list(first.path.parent.glob("*.tmp"))
+
+
+def test_bounded_source_audio_interval_is_validated_and_idempotent(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    asset = _asset(source, duration_ms=10_000)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        Path(argv[-1]).write_bytes(b"RIFF interval")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    extractor = MediaExtractor(tmp_path / "data", command=("ffmpeg-custom",), sample_rate=48_000, channels=2)
+    first = extractor.extract_audio_interval(asset, 2_500, 8_000)
+    second = extractor.extract_audio_interval(asset, 2_500, 8_000)
+    assert first.path == second.path and len(calls) == 1
+    assert calls[0][calls[0].index("-ss") + 1] == "2.500"
+    assert calls[0][calls[0].index("-t") + 1] == "5.500"
+    assert calls[0][calls[0].index("-ar") + 1] == "48000"
+    assert calls[0][calls[0].index("-ac") + 1] == "2"
+    with pytest.raises(ExtractionValidationError):
+        extractor.extract_audio_interval(asset, 8_001, 10_001)
+    with pytest.raises(ExtractionValidationError):
+        extractor.extract_audio_interval(asset, True, 2_000)
 
 
 def test_keyframe_midpoint_cross_asset_and_audio_validation(monkeypatch, tmp_path: Path):

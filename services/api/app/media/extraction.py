@@ -118,12 +118,42 @@ class MediaExtractor:
         finally:
             temp.unlink(missing_ok=True)
 
+    def extract_audio_interval(self, asset: Asset, start_ms: int, end_ms: int) -> AudioExtraction:
+        """Extract an exact bounded source-audio interval without changing the source."""
+        if not asset.has_audio:
+            raise AudioUnavailableError(f"asset {asset.id} has no audio stream")
+        if (isinstance(start_ms, bool) or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool) or not isinstance(end_ms, int)
+            or start_ms < 0 or end_ms <= start_ms or end_ms > asset.duration_ms):
+            raise ExtractionValidationError("source audio interval must fit the source asset")
+        source = self._source(asset)
+        output = self.data_root / "assets" / "audio" / (
+            f"{asset.content_hash}-{start_ms}-{end_ms}-{self.sample_rate}-{self.channels}.wav"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if self._usable(output):
+            return AudioExtraction(output)
+        temp = self._temp_path(output)
+        argv = [
+            *self.command, "-y", "-v", "error", "-ss", f"{start_ms / 1000:.3f}",
+            "-i", str(source), "-t", f"{(end_ms - start_ms) / 1000:.3f}",
+            "-vn", "-acodec", "pcm_s16le", "-ar", str(self.sample_rate),
+            "-ac", str(self.channels), str(temp),
+        ]
+        try:
+            self._run(argv)
+            self._publish(temp, output)
+            self._ensure_output(output)
+            return AudioExtraction(output)
+        finally:
+            temp.unlink(missing_ok=True)
+
     def extract_keyframe(self, asset: Asset, clip: Clip) -> KeyframeExtraction:
         if clip.asset_id != asset.id:
             raise ExtractionValidationError("clip asset_id does not match asset")
         if clip.asset_duration_ms != asset.duration_ms:
             raise ExtractionValidationError("clip asset_duration_ms does not match asset duration")
-        self._source(asset)
+        source = self._source(asset)
         timestamp = (Decimal(clip.start_ms) + Decimal(clip.end_ms)) / Decimal(2)
         if not Decimal(clip.start_ms) < timestamp < Decimal(clip.end_ms):
             raise ExtractionValidationError("clip has no representable interior timestamp")
@@ -134,7 +164,7 @@ class MediaExtractor:
             return KeyframeExtraction(output, timestamp)
         temp = self._temp_path(output)
         seek_seconds = format(timestamp / Decimal(1000), "f")
-        argv = [*self.command, "-y", "-v", "error", "-ss", seek_seconds, "-i", str(asset.source_file), "-frames:v", "1", "-q:v", str(self.image_quality)]
+        argv = [*self.command, "-y", "-v", "error", "-ss", seek_seconds, "-i", str(source), "-frames:v", "1", "-q:v", str(self.image_quality)]
         if self.image_width is not None and self.image_height is not None:
             argv.extend(["-vf", f"scale={self.image_width}:{self.image_height}"])
         argv.append(str(temp))
@@ -143,6 +173,30 @@ class MediaExtractor:
             self._publish(temp, output)
             self._ensure_output(output)
             return KeyframeExtraction(output, timestamp)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def extract_video_interval(self, asset: Asset, start_ms: int, end_ms: int) -> Path:
+        """只生成核验用静音代理，原片和最终成片保持独立。"""
+        if (type(start_ms) is not int or type(end_ms) is not int
+            or not 0 <= start_ms < end_ms <= asset.duration_ms or end_ms - start_ms > 24000):
+            raise ExtractionValidationError("video analysis interval must fit the source and be at most 24 seconds")
+        source = self._source(asset)
+        fps = f"{asset.fps.numerator}/{asset.fps.denominator}"
+        # 核验代理限制长边；只限宽会让竖屏仍高达 1700 像素，放大上传与推理负担。
+        output = self.data_root / "assets" / "analysis-video" / asset.content_hash / f"{start_ms}-{end_ms}-{asset.fps.numerator}-{asset.fps.denominator}-long960-cfr.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if self._usable(output):
+            return output
+        temp = self._temp_path(output)
+        try:
+            self._run([*self.command, "-y", "-v", "error", "-ss", f"{start_ms/1000:.3f}", "-i", str(source),
+                "-t", f"{(end_ms-start_ms)/1000:.3f}", "-map", "0:v:0", "-an",
+                "-vf", f"scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=fps={fps}:start_time=0", "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temp)])
+            self._publish(temp, output)
+            self._ensure_output(output)
+            return output
         finally:
             temp.unlink(missing_ok=True)
 
@@ -178,9 +232,12 @@ class MediaExtractor:
         if not MediaExtractor._usable(output):
             raise ExtractionOutputError(f"ffmpeg output is missing or empty: {output.name}")
 
-    @staticmethod
-    def _source(asset: Asset) -> Path:
-        source = Path(asset.source_file)
+    def _source(self, asset: Asset) -> Path:
+        from .local_paths import existing_local_media_file
+        try:
+            source = existing_local_media_file(asset.source_file, self.data_root)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ExtractionValidationError("asset source file is missing or outside its data root") from exc
         if not source.is_file():
             raise ExtractionValidationError(f"asset source file is missing: {source}")
         return source

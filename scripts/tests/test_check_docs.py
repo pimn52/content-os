@@ -29,7 +29,7 @@ def checker(tmp_path):
     (tmp_path / "START_HERE.md").write_text(
         "\n".join(sorted(module.REQUIRED_START_REFERENCES)), encoding="utf-8"
     )
-    (tmp_path / "STATUS.md").write_text("## Active work package\n", encoding="utf-8")
+    (tmp_path / "STATUS.md").write_text("## 当前任务\n", encoding="utf-8")
     return module
 
 
@@ -50,16 +50,3 @@ def test_entry_must_link_roadmap(checker, capsys):
     )
     assert checker.main() == 1
     assert "START_HERE.md must reference docs/implementation/ROADMAP.md" in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("model", ["Luna", "Terra", "Sol", "Astra", "gpt-6-astra"])
-def test_roadmap_uses_work_classes_not_duplicate_model_mapping(checker, capsys, model):
-    (checker.ROOT / "docs/implementation/ROADMAP.md").write_text(model, encoding="utf-8")
-    assert checker.main() == 1
-    assert "repeats implementation-model tier policy" in capsys.readouterr().out
-
-
-def test_agent_policy_and_active_assignment_may_name_models(checker):
-    (checker.ROOT / "AGENTS.md").write_text("gpt-6-luna / gpt-6-sol / gpt-6-astra", encoding="utf-8")
-    (checker.ROOT / "STATUS.md").write_text("## Active work package\ngpt-6-sol", encoding="utf-8")
-    assert checker.main() == 0

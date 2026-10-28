@@ -20,6 +20,19 @@ $RendererDir = Join-Path $RepoRoot "apps\renderer"
 $RendererCompositorDir = Join-Path $RendererDir "node_modules\@remotion\compositor-win32-x64-msvc"
 $WebDist = Join-Path $RepoRoot "apps\web\dist"
 
+# 本机已有 Moonshot 凭据用于看视频；写稿仍沿用单独的规划配置。
+if (-not $env:CONTENT_OS_VISION_API_KEY_FILE) {
+    $visionCredentialPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'moonshot key.txt'
+    if (Test-Path -LiteralPath $visionCredentialPath) {
+        $env:CONTENT_OS_VISION_API_KEY_FILE = $visionCredentialPath
+        $env:CONTENT_OS_VISION_BASE_URL = 'https://api.moonshot.cn/v1'
+        $env:CONTENT_OS_VISION_MODEL = 'kimi-k2.6'
+        $env:CONTENT_OS_VISION_PROTOCOL = 'chat_completions'
+        $env:CONTENT_OS_VISION_VIDEO_INPUT = 'true'
+        $env:CONTENT_OS_VISION_THINKING_TYPE = 'disabled'
+    }
+}
+
 function Resolve-ExecutablePath {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -174,19 +187,19 @@ try {
         if (-not (Test-Path -LiteralPath $Worker)) {
             throw "content-os-worker is not installed; run the documented editable install first"
         }
-        $workerArguments = @("--job-type", "analyze_asset", "--job-type", "render")
+        $workerArguments = @("--max-attempts", "1", "--production-only", "--job-type", "plan_content", "--job-type", "analyze_asset", "--job-type", "render")
         if ($env:CONTENT_OS_VOICE_PROVIDER) {
             $workerArguments += @("--job-type", "generate_voice")
         }
         if ($env:CONTENT_OS_VOICE_QA_ASR_MODEL) {
-            $workerArguments += @("--job-type", "verify_voice")
+            $workerArguments += @("--job-type", "verify_voice", "--job-type", "align_voice_boundaries")
         }
         if ($env:CONTENT_OS_TALKING_PROVIDER) {
-            $workerArguments += @("--job-type", "generate_talking")
+            $workerArguments += @("--job-type", "generate_talking", "--job-type", "verify_talking", "--job-type", "prepare_talking_run_preview")
         }
         $asrConfigured = Test-AsrConfigured
         if ($asrConfigured) {
-            $workerArguments += @("--job-type", "transcribe_audio")
+            $workerArguments += @("--job-type", "transcribe_audio", "--job-type", "transcribe_audio_asset")
         }
         $WorkerProcess = Start-Process -FilePath $Worker `
             -ArgumentList $workerArguments `

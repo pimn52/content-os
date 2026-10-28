@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from uuid import UUID, uuid4
+from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from app.db import AudioAssetRepository, JobRepository, ProjectDraftRepository, ProjectRepository
 from app.db.evaluation_master import EvaluationMasterRepository
@@ -20,6 +21,20 @@ DIMENSIONS = ("likeness", "naturalness", "emphasis", "pace", "pauses", "rhythm")
 DEFERRED = {"unknown_cost_requires_budget_authorization", "budget_call_limit", "budget_amount_limit",
     "provider_license_scope_unverified", "voice_capability_not_verified", "talking_capability_not_verified"}
 DOWNSTREAM = ("evaluation_talking_execution_not_integrated", "evaluation_render_execution_not_integrated")
+
+
+class EvaluationMasterRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    project_id: UUID
+    idempotency_key: str
+    preflight_fingerprint: str
+    render_job_id: None = None
+    created_at: AwareDatetime
+    status: str
+    talking_review_policy_version: int
+    waiting_stop_reasons: tuple[str, ...]
+    evaluation_master: dict
 
 
 def _same_composed_copy(saved, target):
@@ -286,7 +301,6 @@ class EvaluationMasterService:
         return self.get(project_id, run_id)
 
     def get(self, project_id, run_id):
-        from app.production_runs import ProductionRun
         row = self.db.connection.execute("SELECT * FROM production_runs WHERE id=? AND project_id=?", (str(run_id), str(project_id))).fetchone()
         if row is None:
             return None
@@ -329,7 +343,7 @@ class EvaluationMasterService:
                 duration_ms=c["audio"].duration_ms, copy=c["request"]["copy"])
         except (ValueError, KeyError, TypeError, OSError) as exc:
             info["reasons"] = [str(exc) if isinstance(exc, ValueError) else "evaluation_master_proof_invalid"]
-        return ProductionRun(id=run_id, project_id=project_id, idempotency_key=row["idempotency_key"],
+        return EvaluationMasterRun(id=run_id, project_id=project_id, idempotency_key=row["idempotency_key"],
             preflight_fingerprint=row["preflight_fingerprint"], render_job_id=None, created_at=row["created_at"],
             status="cancelled" if row["stage"] == "cancelled" else "evaluation_master_bound" if info["current_eligible"] else "evaluation_master_blocked",
             talking_review_policy_version=row["talking_review_policy_version"],

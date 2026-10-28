@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { canBindTalkingSource, canReuseTalkingSource, talkingRepairKey, talkingReviewPolicyVersion, talkingSeriesReviewKey, type ProductionRun } from "./production";
+import { canBindTalkingSource, talkingRepairKey, talkingReviewPolicyVersion, talkingSeriesReviewKey, type ProductionRun } from "./production";
 
 type Request = <T>(path: string, options?: RequestInit) => Promise<T>;
 type Profile = { id: string; name: string; provider: string; reference_clip_ids: string[]; consent: { confirmed: boolean; authorization_reference: string | null } };
 type Capability = { id: string; capability: string; provider: string; model: string; runtime: string; machine_id: string; readiness: string; quality_status: string; commercial_status: string; provenance_source: string; evidence_reference: string | null; license_evidence_reference: string | null };
 type Asset = { id: string; content_hash: string; width: number; height: number; authorization_reference: string; metadata: Record<string, unknown> };
 type Clip = { id: string; asset_id: string; start_ms: number; end_ms: number; orientation: string | null; talking_candidate: boolean; face_visibility: number | null; mouth_visibility: number | null; talking_reference_assessment: { burned_in_subtitles: boolean | null; evidence_reference: string } | null };
-type ReviewChoice = { assessment_id: string; assessment: { source_content_hash: string; start_ms: number; end_ms: number; presentation: string; coverage: string; face_head_clearance: string; motion_continuity: string; subtitle_clearance: string; effective_quality: string; reviewer_reference: string; evidence_reference: string; evidence_class: string } | null; decision: string | null; admission: { id: string; active: boolean } | null; state: string; evidence_sha256: string | null; reasons: string[] };
 type SourceContext = { scene_plan_id: string; scene_id: string; scene_voice_text: string; master_audio_id: string; master_content_hash: string; status: "ready" | "unresolved"; reason: string | null; speech_start_ms: number | null; speech_end_ms: number | null };
-type Binding = { scene_plan_id: string; talking_profile_id: string; reference_clip_id: string; reference_asset_id: string; reference_asset_hash: string; reference_start_ms: number; reference_end_ms: number; source_authorization_reference: string; reference_assessment_reference: string; performance_brief: Record<string, unknown>; capability_profile_id: string; capability_evidence_reference: string; license_evidence_reference: string; master_audio_id: string; master_start_ms: number; master_end_ms: number; authorization_reference: string; suitability: string; suitability_assessment_id: string | null; talking_job_id: string | null; talking_output_asset_id: string | null; talking_qa_job_id: string | null; talking_series_id: string | null; talking_preview_job_id: string | null; talking_run_id: string | null };
+type Binding = { scene_plan_id: string; talking_profile_id: string; reference_clip_id: string; reference_asset_id: string; reference_asset_hash: string; reference_start_ms: number; reference_end_ms: number; source_authorization_reference: string; reference_assessment_reference: string; performance_brief: Record<string, unknown>; capability_profile_id: string; capability_evidence_reference: string; license_evidence_reference: string; master_audio_id: string; master_start_ms: number; master_end_ms: number; authorization_reference: string; talking_job_id: string | null; talking_output_asset_id: string | null; talking_qa_job_id: string | null; talking_series_id: string | null; talking_preview_job_id: string | null; talking_run_id: string | null };
 type Qa = { scene_plan_id: string; generation_job_id: string; output_asset_id: string | null; qa_job_id: string | null; state: string };
 type Preview = { scene_plan_id: string; series_id: string; job_id: string; output_asset_id: string | null; state: string; child_review_state: string; continuity_review_state: string };
 type Dimension = "visible_sync" | "identity" | "artifacts" | "source_performance" | "continuity" | "publishability";
@@ -23,7 +22,6 @@ async function stableConcernKey(value: unknown) {
   return `web-v2-concern:${Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 type Scene = { scene_plan_id: string; scene_id: string };
-const labels: Record<string, string> = { current: "当前有效，可复用", missing_admission: "有审核记录但未授予复用", revoked: "复用已撤销", source_stale: "原素材已变化", evidence_unavailable: "证据不可用", evidence_changed: "证据内容已变化", corrupt_record: "记录损坏" };
 const statusText = (value: string) => value.replace(/_/g, " ");
 const lines = (value: string) => value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
 
@@ -31,8 +29,8 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
   projectId: string; run: ProductionRun; request: Request; confirmAction?: (message: string) => boolean; onRunChange: (run: ProductionRun) => void;
 }) {
   const [profiles, setProfiles] = useState<Profile[]>([]); const [caps, setCaps] = useState<Capability[]>([]); const [assets, setAssets] = useState<Asset[]>([]);
-  const [clips, setClips] = useState<Clip[]>([]); const [reviews, setReviews] = useState<Record<string, ReviewChoice[]>>({}); const [contexts, setContexts] = useState<Record<string, SourceContext>>({});
-  const [profileId, setProfileId] = useState(""); const [clipId, setClipId] = useState(""); const [capId, setCapId] = useState(""); const [authorization, setAuthorization] = useState(""); const [reviewKey, setReviewKey] = useState("");
+  const [clips, setClips] = useState<Clip[]>([]); const [contexts, setContexts] = useState<Record<string, SourceContext>>({});
+  const [profileId, setProfileId] = useState(""); const [clipId, setClipId] = useState(""); const [capId, setCapId] = useState("");
   const [operation, setOperation] = useState(""); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [seriesReview, setSeriesReview] = useState<Record<string, SeriesReview>>({});
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({}); const scopeRef = useRef(""); const epoch = useRef(0); const busy = useRef(false);
   const [repairPlans, setRepairPlans] = useState<Record<string, RepairPlan>>({}); const [repairReasons, setRepairReasons] = useState<Record<string, string>>({}); const [repairRecords, setRepairRecords] = useState<RepairRecord[]>([]);
@@ -42,7 +40,6 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
   ])}`; scopeRef.current = scope;
   const selectedProfile = profiles.find(item => item.id === profileId); const permittedClips = selectedProfile ? clips.filter(item => selectedProfile.reference_clip_ids.includes(item.id)) : [];
   const selectedClip = permittedClips.find(item => item.id === clipId); const selectedAsset = assets.find(item => item.id === selectedClip?.asset_id); const selectedCap = caps.find(item => item.id === capId);
-  const reviewChoices = clipId ? reviews[clipId] ?? [] : [];
   const repairScope = `${scope}:${JSON.stringify((run.talking_preview_dependencies ?? []).map(dependency => {
     const qa = (run.talking_qa_dependencies ?? []).find(item => item.scene_plan_id === dependency.scene_plan_id);
     const qaIdentity = qa ? `${qa.generation_job_id}:${qa.qa_job_id ?? "no-qa"}:${qa.state}:${qa.output_asset_id ?? "no-output"}` : "no-qa-dependency";
@@ -59,7 +56,7 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
     if (scopeRef.current === scope) { onRunChange(value); if (message) setNotice(message); }
   }
   useEffect(() => {
-    const token = ++epoch.current; setProfiles([]); setCaps([]); setAssets([]); setClips([]); setReviews({}); setContexts({}); setSeriesReview({}); setReviewKey(""); setMediaUrls({}); setError(""); setNotice("");
+    const token = ++epoch.current; setProfiles([]); setCaps([]); setAssets([]); setClips([]); setContexts({}); setSeriesReview({}); setMediaUrls({}); setProfileId(""); setClipId(""); setCapId(""); setError(""); setNotice("");
     Promise.all([request<Profile[]>("/talking-profiles"), request<Capability[]>("/execution-settings/capabilities"), request<Asset[]>("/assets")]).then(async ([p, c, a]) => {
       if (token !== epoch.current) return;
       setProfiles(p); setCaps(c.filter(x => x.capability === "talking")); setAssets(a);
@@ -67,21 +64,11 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
       const sets = await Promise.all(a.map(async asset => request<Clip[]>(`/assets/${asset.id}/clips`).catch(() => [])));
       if (token === epoch.current) setClips(sets.flat().filter(clip => ids.includes(clip.id)));
     }).catch(reason => { if (token === epoch.current) setError(reason instanceof Error ? reason.message : "Talking 资料加载失败"); });
-    return () => { ++epoch.current; setReviewKey(""); setMediaUrls(current => { Object.values(current).forEach(URL.revokeObjectURL); return {}; }); };
+    return () => { ++epoch.current; setMediaUrls(current => { Object.values(current).forEach(URL.revokeObjectURL); return {}; }); };
   }, [projectId, request, run.id]);
-  useEffect(() => { setReviewKey(""); setReviews({}); setContexts({}); setSeriesReview({}); setRepairPlans({}); setRepairReasons({}); setRepairRecords([]); busy.current = false; setOperation(""); }, [scope]);
+  useEffect(() => { setContexts({}); setSeriesReview({}); setRepairPlans({}); setRepairReasons({}); setRepairRecords([]); busy.current = false; setOperation(""); }, [scope]);
   useEffect(() => { setRepairPlans({}); setRepairReasons({}); }, [repairScope]);
   useEffect(() => { let active = true; request<RepairRecord[]>(`/projects/${projectId}/production-runs/${run.id}/talking-repairs`).then(items => { if (active && scopeRef.current === scope) setRepairRecords(items); }).catch(reason => { if (active && scopeRef.current === scope) setError(reason instanceof Error ? reason.message : "修复记录读取失败"); }); return () => { active = false; }; }, [projectId, run.id, request, scope]);
-  useEffect(() => {
-    const token = epoch.current;
-    const bindings = run.talking_source_bindings ?? [];
-    for (const binding of bindings) {
-      if (reviews[binding.reference_clip_id]) continue;
-      request<ReviewChoice[]>(`/clips/${binding.reference_clip_id}/talking-source-reviews`).then(value => {
-        if (token === epoch.current && scopeRef.current === scope) setReviews(previous => ({ ...previous, [binding.reference_clip_id]: value }));
-      }).catch(reason => { if (token === epoch.current && scopeRef.current === scope) setError(reason instanceof Error ? reason.message : "已绑定来源的审核状态读取失败"); });
-    }
-  }, [run.talking_source_bindings, reviews, request, scope]);
   useEffect(() => {
     const token = epoch.current;
     for (const dependency of run.talking_preview_dependencies ?? []) {
@@ -116,11 +103,7 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
       .then(values => { if (!cancelled) setAssets(previous => { const additions = values.filter((item): item is Asset => !!item && !previous.some(old => old.id === item.id)); return additions.length ? [...previous, ...additions] : previous; }); });
     return () => { cancelled = true; };
   }, [run.talking_qa_dependencies, run.talking_preview_dependencies, assets, request]);
-  async function loadClipEvidence(id: string) {
-    setClipId(id); setReviewKey(""); setError(""); setReviews(previous => ({ ...previous, [id]: [] }));
-    try { const value = await request<ReviewChoice[]>(`/clips/${id}/talking-source-reviews`); if (scopeRef.current === scope) setReviews(previous => ({ ...previous, [id]: value })); }
-    catch (reason) { if (scopeRef.current === scope) setError(reason instanceof Error ? reason.message : "来源审核读取失败"); }
-  }
+  function selectClip(id: string) { setClipId(id); setError(""); }
   async function loadContext(scene: Scene) {
     try { const value = await request<SourceContext>(`/projects/${projectId}/production-runs/${run.id}/talking-source-context?scene_plan_id=${encodeURIComponent(scene.scene_plan_id)}`); if (scopeRef.current === scope) setContexts(previous => ({ ...previous, [scene.scene_plan_id]: value })); }
     catch (reason) { if (scopeRef.current === scope) setError(reason instanceof Error ? reason.message : "旁白区间读取失败"); }
@@ -132,20 +115,9 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
     } catch (reason) { if (scopeRef.current === expected) setError(reason instanceof Error ? reason.message : "后台拒绝此操作；刷新状态后再决定下一步。"); } finally { unlock(); }
   }
   async function bind(scene: Scene) {
-    const context = contexts[scene.scene_plan_id]; if (!canBindTalkingSource(selectedProfile, clipId, selectedCap, authorization, context) || !selectedClip) return;
-    await act("talking-source-bind", { scene_plan_id: scene.scene_plan_id, talking_profile_id: profileId, reference_clip_id: clipId, capability_profile_id: capId, master_start_ms: context.speech_start_ms, master_end_ms: context.speech_end_ms, authorization_reference: authorization.trim(), brief: { require_no_burned_subtitles: true } }, "来源与精确旁白区间已绑定；是否适用仍由现有后台门禁判定。");
+    const context = contexts[scene.scene_plan_id]; if (!canBindTalkingSource(selectedProfile, clipId, selectedCap, context) || !selectedClip) return;
+    await act("talking-source-bind", { scene_plan_id: scene.scene_plan_id, talking_profile_id: profileId, reference_clip_id: clipId, capability_profile_id: capId, master_start_ms: context.speech_start_ms, master_end_ms: context.speech_end_ms, brief: { require_no_burned_subtitles: true } }, "素材使用沿用入库授权；来源与人物适配继续校验。");
   }
-  async function submitSourceReview(event: FormEvent<HTMLFormElement>, scene: Scene) {
-    event.preventDefault(); const form = event.currentTarget; const source = selectedClip; if (!source || !selectedAsset || !reviewKey.trim()) return;
-    if (!confirmAction(`确认你已完整检查原生素材 Clip ${source.id} 的全区间 ${source.start_ms}–${source.end_ms} ms？这将保存不可覆盖的来源审核记录。`)) return;
-    if (!lock()) return; const expected = scope; const data = new FormData(form); const outcome = (key: string) => String(data.get(key) ?? "unknown");
-    try {
-      const key = `web-talking-review:${projectId}:${run.id}:${scene.scene_plan_id}:${source.id}:${selectedAsset.content_hash}`;
-      await request(`/clips/${source.id}/talking-source-reviews`, { method: "POST", headers: { "X-Content-OS-Talking-Review-Key": reviewKey.trim() }, body: JSON.stringify({ idempotency_key: key, expected_source_content_hash: selectedAsset.content_hash, expected_start_ms: source.start_ms, expected_end_ms: source.end_ms, presentation: selectedAsset.width < selectedAsset.height ? "source_native_portrait" : "unspecified", coverage: "full_interval_continuous", face_head_clearance: outcome("face"), motion_continuity: outcome("motion"), subtitle_clearance: outcome("subtitles"), effective_quality: outcome("quality"), findings: lines(String(data.get("findings") ?? "")), confirmed_inspection: true, adopt_for_reuse: data.get("adopt") === "on" }) });
-      if (scopeRef.current === expected) { await loadClipEvidence(source.id); setNotice("来源判断已提交；只有明确完整且正向并选择复用的记录会生成复用凭据。"); }
-    } catch (reason) { if (scopeRef.current === expected) setError(reason instanceof Error ? reason.message : "来源审核提交失败"); } finally { setReviewKey(""); unlock(); }
-  }
-  async function applySource(scene: Scene, review: ReviewChoice) { if (!review.admission?.id) return; await act("talking-suitability-apply", { scene_plan_id: scene.scene_plan_id, assessment_id: review.assessment_id }, "来源审核已提交给 Run；不会自动派发。"); }
   async function loadSeries(scene: Scene, preview: Preview) {
     const qa = (run.talking_qa_dependencies ?? []).find(item => item.scene_plan_id === scene.scene_plan_id);
     const qaIdentity = qa ? `${qa.generation_job_id}:${qa.qa_job_id ?? "no-qa"}:${qa.state}:${qa.output_asset_id ?? "no-output"}` : "no-qa-dependency";
@@ -202,21 +174,34 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
     catch (reason) { if (scopeRef.current === expected) setError(reason instanceof Error ? reason.message : "局部问题回答失败"); } finally { unlock(); }
   }
   const scenes = run.talking_dependencies ?? [];
+  const pendingScenes = scenes.filter(scene => !(run.talking_source_bindings ?? []).some(binding => binding.scene_plan_id === scene.scene_plan_id && binding.talking_job_id)
+    && !(run.talking_qa_dependencies ?? []).some(qa => qa.scene_plan_id === scene.scene_plan_id && qa.generation_job_id));
+  const bindingGroups = new Set((run.talking_source_bindings ?? []).map(binding => [binding.talking_profile_id, binding.reference_clip_id, binding.capability_profile_id]
+    .every(value => typeof value === "string" && value.length > 0) ? JSON.stringify([binding.talking_profile_id, binding.reference_clip_id, binding.capability_profile_id]) : ""));
+  const hasSelection = Boolean(profileId || clipId || capId);
+  const canBatch = hasSelection ? Boolean(selectedProfile?.consent.confirmed && selectedClip && selectedCap?.capability === "talking")
+    : bindingGroups.size === 1 && !bindingGroups.has("");
   const sceneFor = (id: string): Scene => ({ scene_plan_id: id, scene_id: id });
   const sceneIndex = useMemo(() => new Map(scenes.map((item, index) => [item.scene_plan_id, index + 1])), [scenes]);
   return <section className="draft-editor" aria-label="此执行的人物画面 TalkingRun">
     <div className="row-between"><div><span className="kicker">TALKING / SOURCE → REVIEWED RUN</span><h3>此执行的人物画面</h3></div><span className="badge">{scenes.length} 个 Talking 场景</span></div>
-    <p className="muted">这里只使用 Talking Profile 已登记的参考 Clip。来源适用性、同意、能力、许可、成本及执行门禁均由后台复核；技术 QA 不替代本人相似度、自然度或可发布性判断。</p>
+    <p className="muted">一次选择本人形象与制作能力，系统按主旁白真实时间制作。失败保留，可逐段处理；最终质量在成片中审核。</p>
     {error && <p role="alert" className="error">{error}</p>}{notice && <p role="status" className="ok">{notice}</p>}
+    {pendingScenes.length > 0 && <div className="subform" aria-label="全部人物画面制作">
+      <label>Talking Profile<select value={profileId} disabled={!!operation} onChange={event => { setProfileId(event.target.value); setClipId(""); }}><option value="">请选择</option>{profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.provider} · 本人同意：{item.consent.confirmed ? "已记录" : "未确认"} · 已授权来源 {item.reference_clip_ids.length} 项</option>)}</select></label>
+      <label>Profile 授权来源 Clip<select value={clipId} disabled={!!operation || !selectedProfile} onChange={event => selectClip(event.target.value)}><option value="">请选择</option>{permittedClips.map(item => { const asset = assets.find(a => a.id === item.asset_id); return <option key={item.id} value={item.id}>Clip {item.id} · {asset ? `${asset.width}×${asset.height}` : "素材信息未知"} · {item.start_ms}–{item.end_ms} ms · 字幕 {item.talking_reference_assessment?.burned_in_subtitles == null ? "未知" : item.talking_reference_assessment.burned_in_subtitles ? "有" : "未观察到"}</option>; })}</select></label>
+          {selectedClip && selectedAsset && <p>素材 {selectedAsset.id} · {selectedAsset.width}×{selectedAsset.height} · hash {selectedAsset.content_hash} · 入库授权 {selectedAsset.authorization_reference} · 人脸可见 {selectedClip.face_visibility ?? "未知"} · 嘴部可见 {selectedClip.mouth_visibility ?? "未知"}</p>}
+      <label>Talking 能力档案<select value={capId} disabled={!!operation} onChange={event => setCapId(event.target.value)}><option value="">请选择</option>{caps.map(item => <option key={item.id} value={item.id}>{item.provider}/{item.model} · {item.runtime}/{item.machine_id} · readiness={item.readiness} · quality={item.quality_status} · license={item.commercial_status}</option>)}</select></label>
+          {selectedCap && <p className="muted">能力证据 {selectedCap.evidence_reference ?? "未知"} · 许可证据 {selectedCap.license_evidence_reference ?? "未知"} · 来源 {selectedCap.provenance_source}</p>}
+      {!hasSelection && canBatch && <p className="muted">沿用此执行已绑定的同一组人物形象与制作能力。</p>}
+      <button type="button" className="button primary" disabled={!!operation || !canBatch} onClick={() => void act("talking-batch-dispatch", hasSelection ? { talking_profile_id: profileId, reference_clip_id: clipId, capability_profile_id: capId, brief: { require_no_burned_subtitles: true } } : {}, "人物画面已提交；已有任务保留，完成技术 QA 后继续制作待审视频。")}>制作全部人物画面</button>
+      <small className="muted">待制作 {pendingScenes.length} 段。已有任务不会重复生成。</small>
+    </div>}
     {scenes.map((dependency, index) => {
       const scene = sceneFor(dependency.scene_plan_id); const binding = (run.talking_source_bindings ?? []).find(item => item.scene_plan_id === dependency.scene_plan_id) as Binding | undefined;
       const qa = (run.talking_qa_dependencies ?? []).find(item => item.scene_plan_id === dependency.scene_plan_id) as Qa | undefined;
       const preview = (run.talking_preview_dependencies ?? []).find(item => item.scene_plan_id === dependency.scene_plan_id) as Preview | undefined;
-      const context = contexts[dependency.scene_plan_id]; const review = binding ? reviews[binding.reference_clip_id] ?? [] : reviewChoices;
-      const knownReview = review.find(item => item.assessment_id === binding?.suitability_assessment_id)
-        ?? review.find(item => item.state === "current" && item.decision === "review_claimed_suitable" && item.admission?.active)
-        ?? review.find(item => item.assessment?.source_content_hash === binding?.reference_asset_hash);
-      const existing = knownReview ?? review.find(item => item.state === "current");
+      const context = contexts[dependency.scene_plan_id];
       const boundProfile = profiles.find(item => item.id === binding?.talking_profile_id);
       const boundCapability = caps.find(item => item.id === binding?.capability_profile_id);
       const child = qa?.output_asset_id ? assets.find(item => item.id === qa.output_asset_id) : undefined;
@@ -231,32 +216,14 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
       const canRequestRepairPlan = preview?.continuity_review_state === "rejected" || qa?.state === "generation_failed" || hasNegativeConcern;
       return <article className="scene" key={`${dependency.scene_plan_id}:${talkingReviewPolicyVersion(run)}:${qa?.generation_job_id ?? "no-job"}:${qa?.output_asset_id ?? "no-qa-asset"}:${preview?.series_id ?? "no-series"}:${previewAsset?.id ?? "no-preview"}:${previewAsset?.content_hash ?? "no-hash"}:${concernScope}`} aria-label={`Talking 场景 ${index + 1}`}>
         <h4>场景 {index + 1} · {dependency.scene_id}</h4>
+        <details><summary>逐段处理与来源</summary>
         <button type="button" className="button" disabled={!!operation} onClick={() => void loadContext(scene)}>读取此场景的主旁白区间</button>
         {context && <p>Master {context.master_audio_id} · SHA-256 {context.master_content_hash} · {context.status === "ready" ? `${context.speech_start_ms}–${context.speech_end_ms} ms` : `无法确定区间：${context.reason}`}<br />场景旁白：{context.scene_voice_text}</p>}
-        {!binding && <>
-          <label>Talking Profile<select value={profileId} disabled={!!operation} onChange={event => { setProfileId(event.target.value); setClipId(""); setReviewKey(""); }}><option value="">请选择</option>{profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.provider} · 本人同意：{item.consent.confirmed ? "已记录" : "未确认"} · 已授权来源 {item.reference_clip_ids.length} 项</option>)}</select></label>
-          <label>Profile 授权来源 Clip<select value={clipId} disabled={!!operation || !selectedProfile} onChange={event => void loadClipEvidence(event.target.value)}><option value="">请选择</option>{permittedClips.map(item => { const asset = assets.find(a => a.id === item.asset_id); return <option key={item.id} value={item.id}>Clip {item.id} · {asset ? `${asset.width}×${asset.height}` : "素材信息未知"} · {item.start_ms}–{item.end_ms} ms · 字幕 {item.talking_reference_assessment?.burned_in_subtitles == null ? "未知" : item.talking_reference_assessment.burned_in_subtitles ? "有" : "未观察到"}</option>; })}</select></label>
-          {selectedClip && selectedAsset && <p>素材 {selectedAsset.id} · {selectedAsset.width}×{selectedAsset.height} · hash {selectedAsset.content_hash} · 权利引用 {selectedAsset.authorization_reference} · 人脸可见 {selectedClip.face_visibility ?? "未知"} · 嘴部可见 {selectedClip.mouth_visibility ?? "未知"}。这些元数据不代表全区间质量审核。</p>}
-          <label>Talking 能力档案<select value={capId} disabled={!!operation} onChange={event => setCapId(event.target.value)}><option value="">请选择</option>{caps.map(item => <option key={item.id} value={item.id}>{item.provider}/{item.model} · {item.runtime}/{item.machine_id} · readiness={item.readiness} · quality={item.quality_status} · license={item.commercial_status}</option>)}</select></label>
-          {selectedCap && <p className="muted">能力证据 {selectedCap.evidence_reference ?? "未知"} · 许可证据 {selectedCap.license_evidence_reference ?? "未知"} · 来源 {selectedCap.provenance_source}</p>}
-          <label>此场景 Talking 授权引用<input value={authorization} disabled={!!operation} onChange={event => setAuthorization(event.target.value)} /></label>
-          <button className="button primary" disabled={!!operation || !canBindTalkingSource(selectedProfile, clipId, selectedCap, authorization, context) || !selectedClip} onClick={() => void bind(scene)}>绑定所选素材及服务端区间（后台复核）</button>
-        </>}
-        {binding && <div><p>已绑定 Profile {binding.talking_profile_id}（同意：{boundProfile?.consent.confirmed ? "已记录" : "未知/未确认"}）· Clip {binding.reference_clip_id} · 源 hash {binding.reference_asset_hash} · speech {binding.master_start_ms}–{binding.master_end_ms} ms · Source/rights {binding.source_authorization_reference} · capability {boundCapability ? `${boundCapability.provider}/${boundCapability.model} · quality=${boundCapability.quality_status} · license=${boundCapability.commercial_status}` : binding.capability_profile_id} · 许可引用 {binding.license_evidence_reference || "未知"} · {binding.suitability}</p>
-          {existing && <p>绑定来源审核：{labels[existing.state] ?? existing.state} · 类型 {existing.assessment?.evidence_class ?? "未知"} · decision {existing.decision ?? "未知"} · receipt {existing.admission?.id ?? "无"} · 源区间 {existing.assessment?.start_ms ?? "未知"}–{existing.assessment?.end_ms ?? "未知"} ms · hash {existing.assessment?.source_content_hash ?? "未知"} · 覆盖 {existing.assessment?.coverage ?? "未知"} · 结论 {existing.assessment?.face_head_clearance ?? "?"}/{existing.assessment?.motion_continuity ?? "?"}/{existing.assessment?.subtitle_clearance ?? "?"}/{existing.assessment?.effective_quality ?? "?"} · evidence {existing.evidence_sha256 ?? "不可用"} · {existing.reasons.join(" · ")}</p>}
-          {!binding.suitability_assessment_id && <>
-            <button type="button" className="button" disabled={!!operation} onClick={() => void loadClipEvidence(binding.reference_clip_id)}>读取既有完整区间来源判断</button>
-            {review.map(choice => <article key={choice.assessment_id} className="subform"><strong>{labels[choice.state] ?? statusText(choice.state)} · {choice.decision ?? "未知"}</strong><p>Assessment {choice.assessment_id} · {choice.assessment?.coverage ?? "覆盖未知"} · 头像/头部 {choice.assessment?.face_head_clearance ?? "未知"} · 连续性 {choice.assessment?.motion_continuity ?? "未知"} · 字幕 {choice.assessment?.subtitle_clearance ?? "未知"} · 成片质量 {choice.assessment?.effective_quality ?? "未知"}</p><p>审核 {choice.assessment?.reviewer_reference ?? "未知"} · evidence {choice.evidence_sha256 ?? "不可用"} · {choice.reasons.join(" · ")}</p>{canReuseTalkingSource(choice) && <button className="button" disabled={!!operation} onClick={() => void applySource(scene, choice)}>将既有有效判断应用于此场景</button>}</article>)}
-            {!knownReview && selectedClip?.id === binding.reference_clip_id && <form className="subform" onSubmit={event => void submitSourceReview(event, scene)}><h5>缺少可复用记录：执行一次全区间来源人审</h5><p>这是对原生素材全区间的主观核验，不是自动检测，也不批准横转竖或局部二次裁切。审查中不得把测试/fixture 证据作为真实判断。</p>
-              <label>本机配置的 reviewer key（只在内存使用）<input type="password" autoComplete="off" value={reviewKey} onChange={event => setReviewKey(event.target.value)} /></label>
-              {[ ["face", "头部/人脸全区间保持在画面内"], ["motion", "动作与连续性可接受"], ["subtitles", "字幕对该用途无冲突"], ["quality", "此来源用于此场景的整体质量"] ].map(([name, label]) => <label key={name}>{label}<select name={name} defaultValue="unknown" required><option value="unknown">未知</option><option value="pass">通过</option><option value="fail">不通过</option></select></label>)}
-              <label><input type="checkbox" name="adopt" />若完整正向，保存为以后可复用的审核依据</label><label>实际观察发现（每行一条）<textarea name="findings" required rows={3} /></label>
-              <button className="button" disabled={!!operation || !reviewKey.trim() || !selectedAsset}>提交全区间审核</button>
-            </form>}
-            {knownReview && !existing?.admission?.active && <p className="error">此 Clip 已有不可覆盖的记录，但当前无有效复用授权（{labels[knownReview.state] ?? knownReview.state} / {knownReview.decision ?? "判断未知"}）。不要重复审同一证据；需选另一授权素材或先解决记录失效原因。</p>}
-          </>}
-          {binding.suitability_assessment_id && <div><p>来源审核 {binding.suitability_assessment_id} 已绑定。</p><button className="button primary" disabled={!!operation || !existing?.admission?.id || existing.state !== "current"} onClick={() => existing?.admission?.id && void act("talking-dispatch", { scene_plan_id: scene.scene_plan_id, source_admission_id: existing.admission.id }, "已提交派发请求；请检查后台状态与预算/许可门禁。")}>按已审核来源派发 Talking（后台校验）</button>{!existing?.admission?.id && <p className="error">当前绑定尚无有效来源复用凭据，不能派发。</p>}</div>}
+        {!binding && <button className="button primary" disabled={!!operation || !canBindTalkingSource(selectedProfile, clipId, selectedCap, context) || !selectedClip} onClick={() => void bind(scene)}>绑定所选素材及服务端区间</button>}
+        {binding && <div><p>已绑定 Profile {binding.talking_profile_id}（同意：{boundProfile?.consent.confirmed ? "已记录" : "未知/未确认"}）· Clip {binding.reference_clip_id} · 源 hash {binding.reference_asset_hash} · speech {binding.master_start_ms}–{binding.master_end_ms} ms · 入库授权 {binding.source_authorization_reference} · capability {boundCapability ? `${boundCapability.provider}/${boundCapability.model} · quality=${boundCapability.quality_status} · license=${boundCapability.commercial_status}` : binding.capability_profile_id} · 许可证据 {binding.license_evidence_reference || "未知"}</p>
+          {!binding.talking_job_id && <button className="button primary" disabled={!!operation} onClick={() => void act("talking-dispatch", { scene_plan_id: scene.scene_plan_id }, "Talking 已提交；后台按既有入库授权、能力与预算执行，并保留产出 QA。")}>开始 Talking</button>}
         </div>}
+        </details>
         {qa && <div className="subform"><h5>Talking 子任务与技术 QA</h5><p>生成 Job {qa.generation_job_id} · QA Job {qa.qa_job_id ?? "尚无"} · 状态 {statusText(qa.state)} · 输出 {qa.output_asset_id ?? "尚无"}</p><p>QA 只证明自动技术检查，不证明人脸身份/自然度/唇形质量。</p>
           {(qa.state === "output_awaiting_qa" || qa.state === "qa_failed") && <button className="button" disabled={!!operation} onClick={() => void act("talking-qa-advance", { scene_plan_id: scene.scene_plan_id })}>推进独立 Talking 技术 QA（后台校验）</button>}
           {child && <><p>子片 Asset {child.id} · hash {child.content_hash}</p>{mediaUrls[child.id] ? <video controls preload="none" src={mediaUrls[child.id]} /> : <p className="muted">子片预览不可用或仍在加载。</p>}{run.talking_review_policy_version !== 2 && priorChildReview ? <p>已存在不可覆盖的 U-Talking：{priorChildReview.approved ? "通过" : "未通过"} · {priorChildReview.evidence_reference} · {priorChildReview.findings?.join("；")}</p> : run.talking_review_policy_version === 2 ? <p className={priorChildReview?.approved === false ? "error" : "muted"}>V2 子片状态：{priorChildReview?.approved === false ? "已有不可覆盖的历史驳回，仍阻断后续预览" : priorChildReview ? "存在历史正向子片判断；不作为 Run 审批依据" : "主观判断待完整 Run 预览；技术 QA 独立保留"}</p> : qa.state === "qa_verified_awaiting_u_talking" && <form className="subform" onSubmit={event => void submitChildReview(event, child.id)}><h5>针对精确子片提交 U-Talking 判断</h5><label>判断<select name="approved" defaultValue="" required><option value="" disabled>请选择</option><option value="yes">通过</option><option value="no">未通过</option></select></label><label>审核证据引用<input name="evidence" required /></label><label>具体发现（每行一条）<textarea name="findings" required rows={3} /></label><button className="button">保存不可覆盖的子片判断</button></form>}</>}
@@ -275,7 +242,7 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
         {!binding && <p className="muted">下一操作不会自动选择来源。当前执行状态：{run.status} · 场景序号 {sceneIndex.get(dependency.scene_plan_id)}</p>}
       </article>;
     })}
-    <small className="muted">切换项目、草稿、Master 或 Run 会清除本地审核密钥与异步显示。表单提交均为不可覆盖的人审，不会自动续跑、重试或渲染。</small>
+    <small className="muted">本次 Talking 技术 QA 通过后自动进入待审视频；最终质量由成片审核判断。失败保留记录，不自动重试。</small>
   </section>;
 }
 

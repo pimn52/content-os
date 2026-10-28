@@ -12,7 +12,7 @@ from typing import Callable, Collection, Mapping, Protocol
 from uuid import UUID
 
 from app.db.database import Database
-from app.domain.models import Job, JobType
+from app.domain.models import Job, JobType, JobStatus
 
 from .store import JobStore
 
@@ -166,6 +166,11 @@ class JobRunner:
         """The job types this runner can execute without ``NoHandler``."""
         return frozenset(self._handlers)
 
+    def reconcile_completed(self,job: Job) -> None:
+        """重启后补齐已完成任务的下游引用，不重新执行提供商。"""
+        if job.status is JobStatus.COMPLETED and self._on_completed is not None:
+            self._on_completed(job)
+
     def recover_expired(self) -> list[Job]:
         """Make expired leases visible before a polling worker starts."""
         return self._store.recover_expired(max_attempts=self._max_attempts)
@@ -193,63 +198,22 @@ class JobRunner:
         if handler is None:
             return self._record_failure(job, NoHandler(job.type))
         heartbeat = self._start_heartbeat(job)
+        handler_error: JobExecutionError | None = None
         try:
-            try:
-                from app.execution_scope import require_evaluation_lane_closed
-                from app.execution_admission import UseAdmissionError
-                try:
-                    from app.jobs.voice_draft_handler import MaintainedVoiceDraftHandler
-                    from app.jobs.voice_evaluation_qa_handler import MaintainedVoiceEvaluationQAHandler
-                    from app.jobs.evaluation_talking_handler import MaintainedEvaluationTalkingHandler
-                    from app.jobs.evaluation_talking_qa_handler import EvaluationTalkingQaHandler
-                    from app.jobs.evaluation_talking_preview_handler import EvaluationTalkingPreviewHandler
-                    owned_types = {
-                        MaintainedVoiceDraftHandler: "voice_draft_handler_unsupported",
-                        MaintainedVoiceEvaluationQAHandler: "voice_qa_handler_unsupported",
-                        MaintainedEvaluationTalkingHandler: "evaluation_talking_handler_unsupported",
-                        EvaluationTalkingQaHandler: "evaluation_talking_handler_unsupported",
-                        EvaluationTalkingPreviewHandler: "evaluation_talking_handler_unsupported",
-                    }
-                    from app.jobs.handlers import RenderVideoJobHandler
-                    from app.evaluation_composition import is_composition
-                    if type(handler) is RenderVideoJobHandler and is_composition(self._store.db,job_id=job.id):
-                        owned_types[RenderVideoJobHandler] = "composition_handler_unsupported"
-                    if type(handler) in owned_types:
-                        if handler.db is not self._store.db:
-                            raise UseAdmissionError(owned_types[type(handler)])
-                        if type(handler) in (MaintainedEvaluationTalkingHandler, EvaluationTalkingQaHandler, EvaluationTalkingPreviewHandler):
-                            from app.provider_execution import ProviderExecutionInProgress, ProviderExecutionRecordedFailure
-                            from app.evaluation_talking_access import public_reason
-                            try:
-                                handler.require_dispatch(job)
-                            except (ProviderExecutionInProgress, ProviderExecutionRecordedFailure):
-                                raise JobExecutionError("provider_call_reconciliation_required",
-                                    "已有 Talking 调用需要核对，不会重复生成", retryable=False) from None
-                            except Exception as exc:
-                                code = public_reason(exc)
-                                raise JobExecutionError(code, code, retryable=False) from None
-                        else:
-                            handler.require_dispatch(job)
-                    else:
-                        require_evaluation_lane_closed(self._store.db, job)
-                except UseAdmissionError as exc:
-                    raise JobExecutionError(str(exc), str(exc), retryable=False) from None
-                from .lease_fence import owned_job_lease
-                with owned_job_lease(self._store, job, self._worker_id, heartbeat,
-                        self._resource_keys_by_type.get(job.type)):
-                    handler(job)
-            except JobExecutionError as error:
-                handler_error: JobExecutionError | None = error
-            except Exception:
-                # Do not persist an arbitrary exception's text: provider clients
-                # and OS errors can include credentials, paths, or response data.
-                handler_error = JobExecutionError(
-                    "unexpected_handler_error",
-                    "job handler failed unexpectedly",
-                    retryable=True,
-                )
-            else:
-                handler_error = None
+            from .lease_fence import owned_job_lease
+            with owned_job_lease(self._store, job, self._worker_id, heartbeat,
+                    self._resource_keys_by_type.get(job.type)):
+                handler(job)
+        except JobExecutionError as error:
+            handler_error = error
+        except Exception:
+            # Do not persist an arbitrary exception's text: provider clients
+            # and OS errors can include credentials, paths, or response data.
+            handler_error = JobExecutionError(
+                "unexpected_handler_error",
+                "job handler failed unexpectedly",
+                retryable=True,
+            )
         finally:
             if heartbeat is not None:
                 heartbeat.stop()

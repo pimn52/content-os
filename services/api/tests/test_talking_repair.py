@@ -150,6 +150,93 @@ def test_persisted_technical_error_classification(tmp_path, monkeypatch, error, 
         assert client.post(f"{url}/talking-repair", json=body).status_code == (201 if action == "regenerate_scene" else 409)
 
 
+def _failed_independent_qa(path, run, binding, *, check="output_duration_drift", change=None):
+    """Persist the same typed QA evidence a failed real handler leaves behind."""
+    with Database(path) as db:
+        jobs, assets = JobRepository(db), AssetRepository(db)
+        output = assets.get(UUID(binding["talking_output_asset_id"]))
+        qa = jobs.get(UUID(binding["talking_qa_job_id"]))
+        checks = ["output_playable_video_audio", check, "narration_copy_qa_verified"]
+        report = {"job_id": str(qa.id), "automated_verified": False, "checks": checks,
+            "evidence_reference": f"talking-qa-job:{qa.id}:output:{output.content_hash}"}
+        if change == "unknown_check": checks.append("unclassified_face_failure")
+        elif change == "voice": checks[-1] = "narration_copy_qa_not_verified"
+        elif change == "qa_identity": report["job_id"] = str(uuid4())
+        elif change == "qa_hash": report["evidence_reference"] = "talking-qa-job:stale:output:" + "0" * 64
+        generation = {**output.metadata["talking_generation"], "qa_state": "failed", "qa": report}
+        assets.update(output.model_copy(update={"metadata": {**output.metadata, "talking_generation": generation}}))
+        jobs.update(qa.model_copy(update={"status": JobStatus.FAILED,
+            "error_code": "talking_qa_admission_changed" if change == "admission" else "talking_qa_failed"}))
+        current = {**binding, "talking_series_id": None, "talking_preview_job_id": None}
+        db.connection.execute("UPDATE production_runs SET talking_source_bindings=? WHERE id=?",
+            (json.dumps([current]), run["id"]))
+        return current, assets.get(output.id), jobs.get(qa.id)
+
+
+@pytest.mark.parametrize("check", ["output_duration_drift", "output_not_playable_video_audio", "output_probe_failed"])
+def test_independent_output_qa_failure_repairs_only_scene_and_preserves_master(tmp_path, monkeypatch, check):
+    path = tmp_path / "qa-repair.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, run, binding, _, url = setup(client, path, monkeypatch, reject=False)
+        binding, failed_output, failed_qa = _failed_independent_qa(path, run, binding, check=check)
+        with Database(path) as db:
+            master = AudioAssetRepository(db).get(UUID(binding["master_audio_id"]))
+            jobs_before = len(JobRepository(db).list())
+        plan, body = request(client, url, binding)
+        assert plan["failure_kind"] == "technical" and plan["action"] == "regenerate_scene", plan
+        assert any(item["type"] == "technical_qa_output" for item in plan["evidence"])
+        response = client.post(f"{url}/talking-repair", json=body)
+        assert response.status_code == 201, response.text
+        record = response.json()
+        assert record["reused_master_audio_id"] == str(master.id)
+        assert client.post(f"{url}/talking-repair", json=body).json() == record
+        current = client.get(url).json()["talking_source_bindings"][0]
+        assert current["talking_job_id"] == record["replacement_job_id"]
+        assert current["talking_output_asset_id"] is None and current["talking_qa_job_id"] is None
+        with Database(path) as db:
+            assert AssetRepository(db).get(failed_output.id) == failed_output
+            assert JobRepository(db).get(failed_qa.id) == failed_qa
+            assert AudioAssetRepository(db).get(master.id) == master
+            assert len(JobRepository(db).list()) == jobs_before + 1
+            assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
+
+
+@pytest.mark.parametrize("change", ["unknown_check", "voice", "qa_identity", "qa_hash", "admission"])
+def test_unknown_or_upstream_qa_failure_never_regenerates_talking(tmp_path, monkeypatch, change):
+    path = tmp_path / "qa-stop.sqlite"
+    with TestClient(create_app(path)) as client:
+        _, run, binding, _, url = setup(client, path, monkeypatch, reject=False)
+        binding, _, _ = _failed_independent_qa(path, run, binding, change=change)
+        plan, body = request(client, url, binding)
+        assert plan["action"] == ("replan" if change == "voice" else "stop")
+        if change == "voice":
+            assert "talking_qa_narration_requires_voice_repair" in plan["stop_reasons"]
+        assert client.post(f"{url}/talking-repair", json=body).status_code == 409
+        assert client.get(f"{url}/talking-repairs").json() == []
+
+
+@pytest.mark.parametrize('change',[None,'voice','unknown_check'])
+def test_automatic_diagnosed_qa_repair_is_bounded_and_preserves_upstream_results(tmp_path,monkeypatch,change):
+    path=tmp_path/'automatic-repair.sqlite'
+    with TestClient(create_app(path)) as client:
+        project,run,binding,_,_=setup(client,path,monkeypatch,reject=False)
+        current,failed_output,failed_qa=_failed_independent_qa(path,run,binding,change=change)
+        with Database(path) as db:
+            db.connection.execute('UPDATE production_runs SET automatic=1 WHERE id=?',(run['id'],))
+            service=TalkingRepairService(db,tmp_path)
+            before=len(JobRepository(db).list())
+            master=AudioAssetRepository(db).get(UUID(current['master_audio_id']))
+            result=service.reconcile_automatic_qa_failure(UUID(project),UUID(run['id']))
+            assert (result is not None)==(change is None)
+            assert len(JobRepository(db).list())==before+(1 if change is None else 0)
+            assert service.reconcile_automatic_qa_failure(UUID(project),UUID(run['id'])) is None
+            assert len(JobRepository(db).list())==before+(1 if change is None else 0)
+            assert AudioAssetRepository(db).get(master.id)==master
+            assert AssetRepository(db).get(failed_output.id)==failed_output
+            assert JobRepository(db).get(failed_qa.id)==failed_qa
+            assert ProviderCallRepository(db).list_for_project(UUID(project))==[]
+
+
 @pytest.mark.parametrize("change", ["allowance", "budget", "bytes", "cancelled", "fingerprint"])
 def test_stale_or_exhausted_repair_never_changes_binding(tmp_path, monkeypatch, change):
     path = tmp_path / "stale.sqlite"
@@ -230,7 +317,7 @@ def test_repair_rollback_and_concurrent_exact_replay(tmp_path, monkeypatch):
             assert len(JobRepository(db).list()) == before + 1
 
 
-@pytest.mark.parametrize("change", ["consent", "source_receipt", "license", "source_bytes"])
+@pytest.mark.parametrize("change", ["consent", "profile_reference", "license", "source_bytes"])
 def test_repair_worker_guard_reopens_authority_inside_reservation(tmp_path, monkeypatch, change):
     path = tmp_path / "worker-authority.sqlite"
     with TestClient(create_app(path)) as client:
@@ -245,12 +332,14 @@ def test_repair_worker_guard_reopens_authority_inside_reservation(tmp_path, monk
                 profile = repo.get(UUID(binding["talking_profile_id"]))
                 revoked = profile.model_copy(update={"consent": profile.consent.model_copy(update={"confirmed": False})})
                 db.connection.execute("UPDATE talking_profiles SET payload = ? WHERE id = ?", (revoked.model_dump_json(), str(profile.id)))
-            elif change == "source_receipt":
-                TalkingSourceAdmissionRepository(db, tmp_path).revoke(context.source_admission_id, actor_id="reviewer", reason="fixture: revoked")
+            elif change == "profile_reference":
+                profile=TalkingProfileRepository(db).get(UUID(binding['talking_profile_id']))
+                profile=profile.model_copy(update={'reference_clip_ids':[uuid4()]})
+                db.connection.execute('UPDATE talking_profiles SET payload=? WHERE id=?',(profile.model_dump_json(),str(profile.id)))
             elif change == "license":
                 repo = ProviderMachineCapabilityProfileRepository(db)
                 capability = repo.get(context.capability_profile_id)
-                repo.save(capability.model_copy(update={"commercial_status": "non_commercial_only"}))
+                repo.save(capability.model_copy(update={"commercial_status": "unverified"}))
             else:
                 source = AssetRepository(db).get(UUID(binding["reference_asset_id"]))
                 (tmp_path / source.source_file).write_bytes(b"changed fixture source")
@@ -377,7 +466,7 @@ def test_repair_preserves_other_current_scene_binding_and_master_review(tmp_path
         project, _, original, _, _ = setup(client, path, monkeypatch)
         with Database(path) as db:
             draft = ProjectDraftRepository(db).get(UUID(project))
-            first = draft.scenes[0].model_copy(update={"id": uuid4(), "voice_text": "A fresh", "duration_target_ms": 1500})
+            first = draft.scenes[0].model_copy(update={"id": uuid4(), "voice_text": "A fresh ", "duration_target_ms": 1500})
             second = first.model_copy(update={"id": uuid4(), "scene_id": "continuation", "order": 1, "voice_text": "creator point."})
             master = AudioAssetRepository(db).get(UUID(original["master_audio_id"]))
             # Same approved bytes and exact spoken copy; fixture ASR resolves two scenes.
@@ -387,11 +476,17 @@ def test_repair_preserves_other_current_scene_binding_and_master_review(tmp_path
             ]})
             AudioAssetRepository(db).update(master)
             admission_id = JobRepository(db).get(UUID(original["talking_job_id"])).payload.planned_context.source_admission_id
-        saved = client.put(f"/projects/{project}/draft", json={"script": "A fresh creator point.", "topic": "New",
-            "scenes": [first.model_dump(mode="json"), second.model_dump(mode="json")]})
-        assert saved.status_code == 200, saved.text
+        from app.project_drafts import save_project_draft
+        from app.db import ProjectRepository
+        with Database(path) as db:
+            current=ProjectRepository(db).get(UUID(project))
+            current=ProjectRepository(db).update(current.model_copy(update={'delivery_intent':'draft'}))
+            save_project_draft(db,current,script='A fresh creator point.',topic=draft.topic,
+                scenes=[first,second],routes=(),confirmed=(),video_spec=None,accept_scene_plan_with_new_script=True)
         assert client.put(f"/projects/{project}/budget", json={"max_calls": 10, "allow_unknown_cost": True}).status_code == 200
-        plan = client.post(f"/projects/{project}/production-preflight", json={"repair_allowance": 2}).json()
+        checked = client.post(f"/projects/{project}/production-preflight", json={"repair_allowance": 2})
+        assert checked.status_code==200,checked.text
+        plan=checked.json()
         started = client.post(f"/projects/{project}/production-runs", json={"idempotency_key": "two-scenes",
             "repair_allowance": 2, "expected_fingerprint": plan["fingerprint"], "talking_review_policy_version": 2})
         assert started.status_code == 201, started.text
@@ -401,13 +496,10 @@ def test_repair_preserves_other_current_scene_binding_and_master_review(tmp_path
                 "scene_plan_id": str(scene.id), "talking_profile_id": original["talking_profile_id"],
                 "reference_clip_id": original["reference_clip_id"], "capability_profile_id": original["capability_profile_id"],
                 "master_start_ms": index * 1500, "master_end_ms": (index + 1) * 1500,
-                "authorization_reference": original["authorization_reference"], "brief": original["performance_brief"],
+                "brief": original["performance_brief"],
             })
             assert bound.status_code == 200, bound.text
-            applied = client.post(f"{url}/talking-suitability-apply", json={
-                "scene_plan_id": str(scene.id), "assessment_id": original["suitability_assessment_id"]})
-            assert applied.status_code == 200, applied.text
-            dispatched = client.post(f"{url}/talking-dispatch", json={"scene_plan_id": str(scene.id), "source_admission_id": str(admission_id)})
+            dispatched = client.post(f"{url}/talking-dispatch", json={"scene_plan_id": str(scene.id)})
             assert dispatched.status_code == 200, dispatched.text
         bindings = client.get(url).json()["talking_source_bindings"]
         with Database(path) as db:

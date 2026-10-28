@@ -8,6 +8,7 @@ from .extraction import (
     MediaExtractor,
 )
 from .audio_importer import AudioImportError, AudioImporter
+from .source_audio import SourceAudioDerivationError, SourceAudioDerivationService, admitted_source_audio_binding
 from .ffprobe import AudioProbeMetadata, FFProbeAdapter, ProbeError, ProbeMetadata
 from .image_importer import ImageImportError, ImageImporter
 from .importer import MediaImportError, MediaImporter
@@ -39,6 +40,8 @@ __all__ = [
     "AudioAssetNotFound",
     "AudioImportError",
     "AudioImporter",
+    "SourceAudioDerivationError",
+    "SourceAudioDerivationService",
     "AudioProbeMetadata",
     "AudioTranscriptPersistence",
     "ClipTranscriptPersistence",
@@ -77,6 +80,7 @@ __all__ = [
     "VerticalSourceDerivationService",
     "map_transcript_to_clips",
     "map_visual_metadata",
+    "admitted_source_audio_binding",
     "parse_subtitle_file",
     "parse_subtitle_text",
 ]

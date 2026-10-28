@@ -113,6 +113,7 @@ class JobStore:
                     continue
                 claimed = current.model_copy(update={
                     "status": JobStatus.RUNNING,
+                    "started_at": timestamp,
                     "attempt": current.attempt + 1,
                     "updated_at": timestamp,
                     "error_code": None,

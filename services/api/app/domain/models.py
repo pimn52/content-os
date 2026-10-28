@@ -11,12 +11,14 @@ from pathlib import PureWindowsPath
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Discriminator, Field, JsonValue, Tag, field_validator, model_validator, model_serializer
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Discriminator, Field, JsonValue, StringConstraints, Tag, field_validator, model_validator, model_serializer
 from pydantic_core import PydanticCustomError
 from .execution_runtime import HostRuntimeObservation, HostRuntimeObservationV3Policy2, RuntimeInventoryDescriptor
 from .maintained_runtime import MaintainedRuntimeInventoryDescriptor, MaintainedEvidenceReference, MaintainedHostObservation
 
 SCHEMA_VERSION = "0.1"
+GRAPHIC_LABEL_MAX_CHARS = 24
+GRAPHIC_TOTAL_MAX_CHARS = 72
 
 NonNegativeMs = Annotated[int, Field(ge=0, strict=True, description="Milliseconds from the source start.")]
 PositiveFrames = Annotated[int, Field(gt=0, strict=True)]
@@ -52,6 +54,7 @@ class SourceKind(StrEnum):
     STOCK = "stock"
     AI_IMAGE = "ai_image"
     AI_VIDEO = "ai_video"
+    AI_BROLL = "ai_broll"
     TYPOGRAPHY = "typography"
     SCREENSHOT = "screenshot"
     CHART = "chart"
@@ -93,6 +96,7 @@ class JobType(StrEnum):
     IMPORT_ASSET = "import_asset"
     ANALYZE_ASSET = "analyze_asset"
     TRANSCRIBE_AUDIO = "transcribe_audio"
+    TRANSCRIBE_AUDIO_ASSET = "transcribe_audio_asset"
     INDEX_CLIPS = "index_clips"
     BUILD_IP_PROFILE = "build_ip_profile"
     BUILD_VOICE_PROFILE = "build_voice_profile"
@@ -510,10 +514,11 @@ class VoiceProfile(ContractModel):
 
 class TalkingProfile(ContractModel):
     id: UUID = Field(default_factory=uuid4)
+    ip_profile_id: UUID | None = None
     name: str = Field(min_length=1, max_length=200)
     provider: str = Field(min_length=1, max_length=100)
     provider_profile_id: str | None = Field(default=None, max_length=500)
-    reference_clip_ids: list[UUID] = Field(min_length=1, max_length=100)
+    reference_clip_ids: list[UUID] = Field(default_factory=list, max_length=100)
     consent: ConsentRecord
     created_at: AwareDatetime
 
@@ -583,6 +588,9 @@ class Project(ContractModel):
     ip_profile_id: UUID
     title: str = Field(min_length=1, max_length=500)
     topic: str = Field(min_length=1, max_length=5_000)
+    presentation_style: Literal["auto", "creator_led"] = "auto"
+    delivery_intent: Literal["publish", "draft"] = "publish"
+    format_policy: Literal["auto", "fixed"] = "auto"
     format: ProjectFormat = ProjectFormat.VERTICAL
     resolution_width: int = Field(default=1080, gt=0, le=16_384)
     resolution_height: int = Field(default=1920, gt=0, le=16_384)
@@ -609,21 +617,32 @@ class GraphicCardPlan(ContractModel):
     def bounded_realization(self) -> "GraphicCardPlan":
         if self.kind in {"unsupported", "none"}:
             if not (self.reason or "").strip() or self.treatment is not None or self.points:
-                raise ValueError("unsupported or omitted graphics require a reason and no executable card")
+                raise PydanticCustomError("graphic_omission", "unsupported or omitted graphics require a reason and no executable card")
         else:
             if (self.kind == "diagram") != bool(self.treatment and self.treatment.startswith("diagram_")):
-                raise ValueError("diagrams require an explicit diagram treatment")
+                raise PydanticCustomError("graphic_treatment", "diagrams require an explicit diagram treatment")
             if self.kind == "diagram" and (len(self.points) < 2 or self.treatment == "diagram_loss" and len(self.points) != 2):
-                raise ValueError("diagrams require two to four labels; information loss requires two")
-            if self.reason is not None or self.treatment is None or not self.points or any(
-                not point.strip() or len(point) > 24 or "\n" in point or "\r" in point for point in self.points
-            ) or sum(len(point) for point in self.points) > 72:
-                raise ValueError("text cards require bounded nonblank points and treatment")
+                raise PydanticCustomError("graphic_point_count", "diagrams require two to four labels; information loss requires two")
+            if self.reason is not None or self.treatment is None or not self.points:
+                raise PydanticCustomError("graphic_realization", "executable graphics require points, treatment and null reason")
+            if any(not point.strip() or "\n" in point or "\r" in point for point in self.points):
+                raise PydanticCustomError("graphic_label_content", "graphic labels must be nonblank single lines")
+            if any(len(point) > GRAPHIC_LABEL_MAX_CHARS for point in self.points):
+                raise PydanticCustomError("graphic_label_length", "graphic label exceeds the character limit")
+            if sum(len(point) for point in self.points) > GRAPHIC_TOTAL_MAX_CHARS:
+                raise PydanticCustomError("graphic_total_length", "graphic labels exceed the total character limit")
             if self.treatment == "headline" and len(self.points) != 1:
-                raise ValueError("headline requires one point")
+                raise PydanticCustomError("graphic_point_count", "headline requires one point")
             if self.treatment == "contrast" and len(self.points) != 2:
-                raise ValueError("contrast requires two points")
+                raise PydanticCustomError("graphic_point_count", "contrast requires two points")
         return self
+
+
+class MaterialRequest(ContractModel):
+    """尚未取得的画面需求，不能作为已有素材进入装配。"""
+    source_kind: Literal["stock", "ai_broll"]
+    query: str = Field(min_length=1, max_length=1000)
+    reason: str = Field(min_length=1, max_length=1000)
 
 
 class ScenePlan(ContractModel):
@@ -632,9 +651,12 @@ class ScenePlan(ContractModel):
     scene_id: str = Field(min_length=1, max_length=100)
     order: int = Field(ge=0, le=10_000)
     purpose: str = Field(min_length=1, max_length=100)
-    voice_text: str = Field(min_length=1, max_length=10_000)
+    voice_text: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=1, max_length=10_000)
     duration_target_ms: PositiveFrames
     visual_intent: VisualIntent
+    supporting_visual_intent: VisualIntent | None = Field(default=None,
+        description="可替代本人可见讲述的切题实拍意图；不可替代不可缺的本人表演或事实证据。")
+    preferred_clip_id: UUID | None = None
     graphic_plan: GraphicCardPlan | None = None
     preferred_sources: list[SourceKind] = Field(min_length=1, max_length=10)
     fallback_sources: list[SourceKind] = Field(default_factory=list, max_length=10)
@@ -642,6 +664,16 @@ class ScenePlan(ContractModel):
     evidence_refs: list[str] = Field(default_factory=list, max_length=100, description="Traceable IP/material evidence identifiers.")
     visual_requirement: Literal["unknown", "creator_speaking", "action_evidence", "explanatory"] = "unknown"
     visual_requirement_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    viewer_takeaway: str | None = Field(default=None, min_length=1, max_length=1000)
+    material_request: MaterialRequest | None = None
+    reuse_intent: Literal["auto", "reference"] = "auto"
+
+    @field_validator("voice_text")
+    @classmethod
+    def voice_text_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("spoken copy must not be blank")
+        return value
 
     @field_validator("visual_requirement_reason", mode="before")
     @classmethod
@@ -654,6 +686,18 @@ class ScenePlan(ContractModel):
     def visual_requirement_has_reason(self) -> "ScenePlan":
         if self.visual_requirement != "unknown" and not (self.visual_requirement_reason or "").strip():
             raise PydanticCustomError("visual_requirement_reason_required", "explicit visual requirement needs an editorial reason")
+        if self.supporting_visual_intent is not None:
+            footage = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_BROLL}
+            if (self.visual_requirement != "creator_speaking" or not footage.intersection(self.fallback_sources)
+                or not any((self.supporting_visual_intent.subject, self.supporting_visual_intent.action,
+                            self.supporting_visual_intent.description))):
+                raise PydanticCustomError("supporting_visual_intent_invalid", "supporting visual intent requires replaceable creator speech and permitted footage fallback")
+        if self.material_request is not None:
+            if (self.preferred_clip_id is not None
+                or self.material_request.source_kind not in {source.value for source in (*self.preferred_sources,*self.fallback_sources)}
+                or self.visual_requirement == "creator_speaking"
+                or self.material_request.source_kind == "ai_broll" and self.visual_requirement == "action_evidence"):
+                raise PydanticCustomError("material_request_invalid", "material request must describe a missing compatible visual, not existing footage or fabricated evidence")
         return self
 
 
@@ -1473,7 +1517,7 @@ class ProviderCallRecord(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=500)
-    operation: Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render"]
+    operation: Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render", "stock_search", "stock_import", "web_search", "web_fetch"]
     mode: Literal["assisted_test", "runtime"]
     provider: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=200)
@@ -1511,6 +1555,8 @@ class CandidateAsset(ContractModel):
     source_kind: SourceKind
     asset_id: UUID | None = None
     clip_id: UUID | None = None
+    playback_start_ms: NonNegativeMs | None = None
+    playback_end_ms: NonNegativeMs | None = None
     match_score: Score
     why: list[str] = Field(min_length=1, max_length=10)
     reuse_count: int = Field(default=0, ge=0)
@@ -1520,7 +1566,11 @@ class CandidateAsset(ContractModel):
 
     @model_validator(mode="after")
     def candidate_references_match_source(self) -> "CandidateAsset":
-        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO, SourceKind.SCREENSHOT, SourceKind.CHART}
+        if (self.playback_start_ms is None) != (self.playback_end_ms is None):
+            raise ValueError("candidate playback interval requires both boundaries")
+        if self.playback_start_ms is not None and (self.clip_id is None or self.playback_end_ms <= self.playback_start_ms):
+            raise ValueError("candidate playback interval requires a Clip and increasing boundaries")
+        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_VIDEO, SourceKind.AI_BROLL, SourceKind.SCREENSHOT, SourceKind.CHART}
         has_reference = self.asset_id is not None or self.clip_id is not None
         if self.source_kind == SourceKind.CAPTURE and not self.requires_capture:
             raise ValueError("capture candidates must require_capture")
@@ -1589,7 +1639,7 @@ class VideoVisual(ContractModel):
 
     @model_validator(mode="after")
     def visual_source_is_complete(self) -> "VideoVisual":
-        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO, SourceKind.SCREENSHOT, SourceKind.CHART}
+        existing_media = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_VIDEO, SourceKind.AI_BROLL, SourceKind.SCREENSHOT, SourceKind.CHART}
         if self.source_kind in existing_media and self.asset_id is None and self.clip_id is None:
             raise ValueError("existing-media visuals need an asset_id or clip_id")
         values = (self.clip_start_ms, self.clip_end_ms)
@@ -1611,7 +1661,7 @@ class VideoVisual(ContractModel):
         ):
             raise ValueError("bottom_crop_contain requires a positive bottom crop and reviewable evidence")
         if self.vertical_reframe_mode is VerticalReframeMode.BOTTOM_CROP_CONTAIN and self.source_kind not in {
-            SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO,
+            SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_VIDEO, SourceKind.AI_BROLL,
         }:
             raise ValueError("bottom_crop_contain requires local video media")
         return self
@@ -1720,10 +1770,10 @@ class EditPlanScene(ContractModel):
     def presentation_is_complete(self) -> "EditPlanScene":
         if bool(self.source_bottom_crop_ratio) != bool(self.source_subtitle_evidence_reference):
             raise ValueError("source subtitle clearance requires crop geometry and evidence together")
-        if self.source_bottom_crop_ratio and self.selected_source_kind not in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET}:
+        if self.source_bottom_crop_ratio and self.selected_source_kind not in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET,SourceKind.STOCK,SourceKind.AI_BROLL}:
             raise ValueError("source subtitle clearance is only available for original footage")
         source_requires_media = self.selected_source_kind in {
-            SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO,
+            SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_VIDEO, SourceKind.AI_BROLL,
         }
         if source_requires_media != (self.selected_asset_id is not None and self.selected_clip_id is not None):
             raise ValueError("continuous selected visuals require both asset and Clip identities")
@@ -1746,14 +1796,14 @@ class EditPlanScene(ContractModel):
             )
             footage_panel = (
                 self.visual_role is EditVisualRole.FOOTAGE
-                and self.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                and self.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK}
             )
             if (not (talking_panel or footage_panel)
                 or self.framing_policy is not TalkingFramingPolicy.FACE_SAFE_CONTAIN):
                 raise ValueError("portrait_panel requires complete-frame Talking or authorized footage without a crop")
         if self.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
             if (self.visual_role is not EditVisualRole.FOOTAGE
-                or self.selected_source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                or self.selected_source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK}
                 or self.framing_policy is not TalkingFramingPolicy.FACE_SAFE_CONTAIN
                 or self.subtitle_treatment is not SubtitleTreatment.TIMED_CAPTIONS):
                 raise ValueError("stacked_comparison requires authorized footage and timed narration captions")
@@ -2176,6 +2226,16 @@ class AssetUsageEvent(ContractModel):
     clip_id: UUID | None = None
     usage_kind: Literal["production"] = "production"
     used_at: AwareDatetime
+    source_start_ms: NonNegativeMs | None = None
+    source_end_ms: PositiveFrames | None = None
+
+    @model_validator(mode="after")
+    def exact_interval(self):
+        if (self.source_start_ms is None) != (self.source_end_ms is None):
+            raise ValueError("source usage interval must be complete")
+        if self.source_start_ms is not None and self.source_end_ms <= self.source_start_ms:
+            raise ValueError("source usage interval must be positive")
+        return self
 
 
 class PublicationRecord(ContractModel):
@@ -2309,11 +2369,11 @@ class VoiceBoundaryAlignmentJobPayload(ContractModel):
 
 
 class PlannedTalkingContext(ContractModel):
-    """Execution-only identity for one admitted ProductionRun Talking scene."""
+    """Execution identity for one planned Talking scene."""
 
     run_id: UUID
     scene_plan_id: UUID
-    source_admission_id: UUID
+    source_admission_id: UUID | None = None
     capability_profile_id: UUID
     expected_provider: str = Field(min_length=1, max_length=100)
     expected_model: str = Field(min_length=1, max_length=200)
@@ -2453,7 +2513,7 @@ class PlannedTalkingRunOrigin(ContractModel):
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_start_ms: int = Field(ge=0)
     source_end_ms: int = Field(ge=1)
-    source_admission_id: UUID
+    source_admission_id: UUID | None = None
     consent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     authorization_reference: str = Field(min_length=1)
     license_evidence_reference: str = Field(min_length=1)
@@ -2663,6 +2723,19 @@ class ClipIndexJobPayload(ContractModel):
         return sorted(values, key=str)
 
 
+class AudioAssetTranscriptionJobPayload(ContractModel):
+    audio_asset_id: UUID
+    source_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
+class ContentPlanJobPayload(ContractModel):
+    project_id: UUID
+    topic: str = Field(min_length=1,max_length=5000)
+    candidate_of_run_id: UUID | None = None
+    resume_from_job_id: UUID | None = None
+    resume_draft_version: int | None = Field(default=None, ge=1)
+
+
 class Job(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID | None = None
@@ -2672,13 +2745,17 @@ class Job(ContractModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     created_at: AwareDatetime
     updated_at: AwareDatetime
+    started_at: AwareDatetime | None = None
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=2_000)
-    payload: RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | TalkingQaJobPayload | TalkingRunPreviewJobPayload | ClipIndexJobPayload | None = None
+    payload: ContentPlanJobPayload | RenderVideoJobPayload | VoiceGenerationJobPayload | VoicePaceCandidateJobPayload | VoiceQaJobPayload | VoiceBoundaryAlignmentJobPayload | TalkingGenerationJobPayload | TalkingQaJobPayload | TalkingRunPreviewJobPayload | ClipIndexJobPayload | AudioAssetTranscriptionJobPayload | None = None
 
     @model_validator(mode="after")
     def validates_typed_payload(self) -> "Job":
-        if self.type is JobType.RENDER:
+        if self.type is JobType.PLAN_CONTENT:
+            if self.payload is not None and (not isinstance(self.payload,ContentPlanJobPayload) or self.project_id!=self.payload.project_id):
+                raise ValueError("content planning requires matching project payload")
+        elif self.type is JobType.RENDER:
             # Legacy generic Job construction remains valid so target stores
             # can reject RENDER as an unsupported asset job. The render API
             # always persists this typed payload, and the handler rejects a
@@ -2723,6 +2800,9 @@ class Job(ContractModel):
         elif self.type is JobType.INDEX_CLIPS:
             if self.payload is not None and not isinstance(self.payload, ClipIndexJobPayload):
                 raise ValueError("index_clips payload must be a ClipIndexJobPayload")
+        elif self.type is JobType.TRANSCRIBE_AUDIO_ASSET:
+            if not isinstance(self.payload, AudioAssetTranscriptionJobPayload):
+                raise ValueError("audio asset transcription requires a typed payload")
         elif self.payload is not None:
             raise ValueError("only declared typed jobs may contain a payload")
         return self

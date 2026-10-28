@@ -48,6 +48,7 @@ class MediaAnalysisResult:
     clips: tuple[Clip, ...]
     audio_path: Path | None
     keyframe_paths: tuple[Path, ...]
+    keyframe_timestamps_ms: tuple[float, ...] = ()
 
 
 class MediaAnalysisPipeline:
@@ -67,9 +68,11 @@ class MediaAnalysisPipeline:
         # cache files may safely be reused on retry by the extractor.
         normalized = self._normalize_clips(stored, self.segmenter.segment(stored))
         audio_path = self.extractor.extract_audio(stored).path if stored.has_audio else None
-        keyframe_paths = tuple(self.extractor.extract_keyframe(stored, clip).path for clip in normalized)
+        frames = tuple(self.extractor.extract_keyframe(stored, clip) for clip in normalized)
+        keyframe_paths = tuple(frame.path for frame in frames)
         self._replace_clip_set(stored, normalized)
-        return MediaAnalysisResult(stored, tuple(normalized), audio_path, keyframe_paths)
+        return MediaAnalysisResult(stored, tuple(normalized), audio_path, keyframe_paths,
+            tuple(float(frame.timestamp_ms) for frame in frames))
 
     def analyze(self, asset: Asset) -> MediaAnalysisResult:
         """Alias for service callers that prefer analysis terminology."""

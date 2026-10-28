@@ -43,8 +43,7 @@ def setup(client, path, *, code="voice_temporarily_unavailable"):
         ProviderMachineCapabilityProfileRepository(db).save(qa_cap)
     client.put(f"/projects/{project}/budget", json={"currency": "USD", "max_calls": 10, "allow_unknown_cost": True})
     root = f"/projects/{project}/production-runs/{run['id']}"
-    voice = client.post(root + "/voice-dispatch", json={"voice_profile_id": profile, "capability_profile_id": cap,
-        "authorization_reference": "fixture:explicit-dispatch"})
+    voice = client.post(root + "/voice-dispatch", json={"voice_profile_id": profile, "capability_profile_id": cap})
     assert voice.status_code == 200, voice.text
     job_id = voice.json()["voice_job_id"]
     with Database(path) as db:

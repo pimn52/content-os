@@ -1,86 +1,11 @@
-# Content OS — Product Module Map
+# 产品模块
 
-This directory contains the current product specifications by module. These files describe what the product is, what each module owns, the user-visible behavior, stable boundaries and current capability state.
+| 模块 | 负责 |
+|---|---|
+| [创作者与选题](CREATOR_INTELLIGENCE.md) | 身份、知识、选题、文案和反馈 |
+| [媒体资产](MEDIA_ASSET_SYSTEM.md) | 导入、来源、适配、检索和选择 |
+| [Voice 与 Talking](VOICE_TALKING.md) | 授权声音、统一旁白、人物画面和质量 |
+| [执行与成本](EXECUTION_COMPUTE.md) | 能力、供应商许可、预算、任务和失败 |
+| [时间线与渲染](TIMELINE_RENDER_LEARNING.md) | EditPlan、VideoSpec、成片与学习 |
 
-They are not implementation journals.
-
-## 1. Whole-product functional map
-
-| Module | Core capabilities | Specification |
-|---|---|---|
-| Creator / IP / Intelligence | IP Profile, revisions, sourced topics, historical account/content evidence, feedback loop | CREATOR_INTELLIGENCE.md |
-| Media / Asset Intelligence | import, continuous Clips, transcript/analysis evidence, Hybrid Asset Router, Shoot Tasks, usage evidence | MEDIA_ASSET_SYSTEM.md |
-| Voice / Talking | Voice Profile, Voice QA, MasterNarration creation, Talking Profile, short-slice execution, continuous TalkingRun, terminal closeout | VOICE_TALKING.md |
-| Execution / Hybrid Compute | capability profiles, provider/runtime/machine evidence, parameter resolution, Advanced Settings, local resource guards, future remote routing | EXECUTION_COMPUTE.md |
-| Timeline / Render / Learning | MasterNarration timeline use, EditPlan/visual direction, VideoSpec, subtitles, render, review, publication and feedback | TIMELINE_RENDER_LEARNING.md |
-
-## 2. Product flow
-
-    Creator context + topic + authorized media
-              ↓
-    Editable copy / ScenePlan / preliminary EditPlan
-              ↓
-    Suitability / asset routing / execution and cost preflight
-              ↓
-    Required production → MasterNarration / TalkingRun / Assets
-              ↓
-    Measured timing → resolved EditPlan → VideoSpec
-              ↓
-    Render / technical QA / bounded repair / human review
-              ↓
-    Explicit publication / feedback → next planning input
-
-This is the target flow. Module sections distinguish implemented contracts, runtime evidence and missing normal-flow automation. A presentation default is not automatic visual planning.
-
-## 3. How to read
-
-- Start with ../../CONTENT_OS_EXECUTION_SPEC.md for the whole-product R1 contract.
-- Read ../../STATUS.md only for current progress and the one active package.
-- Open the module spec relevant to the task.
-- Read ../architecture/SYSTEM_ARCHITECTURE.md when object/layer ownership matters.
-- Read ../../AGENTS.md only when implementing.
-- Read ../implementation/ROADMAP.md for the selected future package contract; STATUS alone owns live package state.
-
-## 4. What belongs in a module spec
-
-A product-module spec may contain:
-
-- product responsibility and user outcome;
-- feature/function taxonomy;
-- core product objects and stable terminology;
-- supported product flows;
-- quality/admission gates;
-- interfaces with adjacent modules;
-- current capability state and known product gaps.
-
-It must not contain:
-
-- work-package histories;
-- per-run filenames, timestamps or debug transcripts;
-- implementation-agent model tiers;
-- step-by-step implementation notes;
-- superseded plans.
-
-## 5. Completion and archive semantics
-
-**Completed is not archived.**
-
-When implementation completes:
-
-- if the product behavior changed, update the relevant module spec so the current product remains discoverable;
-- remove the closed task from STATUS;
-- keep detailed implementation history in Git and local evaluation evidence.
-
-docs/history/ is only for a whole document that has been superseded but still has historical reading value. It is not a completed-task warehouse.
-
-## 6. Change routing
-
-Use this rule when deciding where a change belongs:
-
-- product scope / R1 acceptance changed → CONTENT_OS_EXECUTION_SPEC.md;
-- module behavior / function changed → the relevant docs/product spec;
-- technical layer/object ownership changed → SYSTEM_ARCHITECTURE.md;
-- durable cross-package rationale changed → DECISIONS.md;
-- current task/progress changed → STATUS.md;
-- future package dependencies/acceptance changed → docs/implementation/ROADMAP.md;
-- implementation/model/process rule changed → AGENTS.md.
+从 [产品总规格](../../CONTENT_OS_EXECUTION_SPEC.md) 理解 R1，通过 [STATUS](../../STATUS.md) 看当前事实。模块文件只写应当如何工作及已经实现到哪一步；过程记录留在 Git。

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import re
-import math
 from collections.abc import Mapping, Sequence
 from uuid import UUID
+
+from app.media.visual_facts import _requested_source_interval, footage_geometry, full_interval_geometry, subtitle_keep_height
 
 from app.domain.models import (
     CandidateAsset,
@@ -26,42 +27,99 @@ class EditPlanPreflightError(ValueError):
     """A visual plan is unsafe or contradictory before renderer work begins."""
 
 
-def footage_geometry(asset, clip):
-    """Read existing source-analysis facts; stale or unrelated intervals are unknown."""
-    if asset is None or clip is None:
-        return {}
-    analysis=asset.metadata.get("visual_analysis",{})
-    facts=analysis.get(str(clip.id),{}) if isinstance(analysis,dict) else {}
-    if not isinstance(facts,dict):return {}
-    interval = facts.get("clip_interval",facts)
-    if (facts.get("source_content_hash") != asset.content_hash
-        or interval.get("start_ms",clip.start_ms+1)>clip.start_ms or interval.get("end_ms",0)<clip.end_ms):
-        return {}
-    return facts
+def source_frame_interval_ms(start_ms, duration_frames, fps, clip_end_ms=None):
+    """Return the frame-ceiled source window used by a scene, in integer ms."""
+    if (isinstance(start_ms, bool) or not isinstance(start_ms, int) or start_ms < 0
+        or isinstance(duration_frames, bool) or not isinstance(duration_frames, int) or duration_frames <= 0
+        or not hasattr(fps, "numerator") or not hasattr(fps, "denominator")
+        or fps.numerator <= 0 or fps.denominator <= 0):
+        raise ValueError("invalid_source_playback_interval")
+    denominator = 1_000 * fps.denominator
+    first_frame = (start_ms * fps.numerator + denominator - 1) // denominator
+    last_frame_exclusive = first_frame + duration_frames
+    interval_start_ms = (first_frame * denominator) // fps.numerator
+    end_numerator = last_frame_exclusive * denominator
+    interval_end_ms = (end_numerator + fps.numerator - 1) // fps.numerator
+    if clip_end_ms is not None:
+        interval_end_ms = min(interval_end_ms, clip_end_ms)
+    if interval_end_ms <= interval_start_ms:
+        raise ValueError("invalid_source_playback_interval")
+    return interval_start_ms, interval_end_ms
 
 
-def comparison_clearance(asset, clip):
-    facts=footage_geometry(asset,clip)
-    if facts.get("comparison_layout")!="side_by_side_equal_halves" or facts.get("subtitle_regions") is None:
-        raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
-    if (facts.get("coverage") != "full_interval_continuous"
-        or facts.get("covered_start_ms",clip.end_ms) > clip.start_ms
-        or facts.get("covered_end_ms",clip.start_ms) < clip.end_ms):
+def source_subtitle_updates(asset, clip, playback_interval_ms=None):
+    """规划与装配共用原字幕处理，返回实际呈现字段，不创建图文替代。"""
+    facts = full_interval_geometry(asset, clip, playback_interval_ms)
+    if not facts:
+        return {}
+    if facts.get("method") == "human_full_interval_review" and facts.get("source_subtitle_clearance_verified") is True:
+        ratio = 1 - facts["crop_window"]["height"] / asset.height
+    else:
+        regions = facts.get("subtitle_regions")
+        if regions is None:
+            return {}
+        from app.providers.vision import validate_visual_geometry
+        try:
+            validate_visual_geometry(facts.get("comparison_layout", "unknown"), regions)
+        except ValueError as exc:
+            raise EditPlanPreflightError("source_subtitle_geometry_invalid") from exc
+        if not regions:
+            return {"burned_in_subtitles": "absent", "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS}
+        if (facts.get("source_subtitle_clearance_verified") is not True
+            and (facts.get("coverage") == "video_interval_analysis" or facts.get("comparison_layout") != "side_by_side_equal_halves")):
+            raise EditPlanPreflightError("source_subtitle_clearance_required")
+        top = min(box[1] for box in regions)
+        if top < .75:
+            raise EditPlanPreflightError("source_subtitles_overlap_required_picture")
+        ratio = 1 - subtitle_keep_height(asset.height,regions,machine=facts.get("coverage")=="video_interval_analysis") / asset.height
+    return {
+        "source_bottom_crop_ratio": ratio,
+        "source_subtitle_evidence_reference": facts["evidence_reference"] if ratio else None,
+        "burned_in_subtitles": "present" if ratio else "absent",
+        "subtitle_treatment": SubtitleTreatment.TIMED_CAPTIONS,
+    }
+
+
+def source_subtitle_presentation(entry, asset, clip, playback_interval_ms=None):
+    """Handle existing subtitles before laying a new narration over footage."""
+    return entry.model_copy(update=source_subtitle_updates(asset,clip,playback_interval_ms))
+
+
+def comparison_clearance(asset, clip, playback_interval_ms=None):
+    requested = _requested_source_interval(clip, playback_interval_ms)
+    if requested is None:
         raise EditPlanPreflightError("comparison_full_interval_clearance_required")
+    requested_start_ms, requested_end_ms = requested
+    facts=footage_geometry(asset,clip,playback_interval_ms)
+    if facts.get("comparison_layout")!="side_by_side_equal_halves":
+        raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
+    if not full_interval_geometry(asset, clip, playback_interval_ms):
+        raise EditPlanPreflightError("comparison_full_interval_clearance_required")
+    if facts.get("coverage") == "video_interval_analysis" and facts.get("source_subtitle_clearance_verified") is not True:
+        raise EditPlanPreflightError("comparison_source_subtitle_clearance_required")
+    if facts.get("method") == "human_full_interval_review":
+        crop = facts["crop_window"]
+        return 1-crop["height"]/asset.height, facts["evidence_reference"]
+    if facts.get("subtitle_regions") is None:
+        raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
     regions=facts["subtitle_regions"]
     if not regions:
         return 0,None
     top=min(box[1] for box in regions)
     if top<.75:
         raise EditPlanPreflightError("comparison_subtitles_overlap_required_picture")
-    keep=max(1,math.floor(top*asset.height)-2)
+    keep=subtitle_keep_height(asset.height,regions,machine=facts.get("coverage")=="video_interval_analysis")
     return 1-keep/asset.height,facts["evidence_reference"]
 
 
-def presentation_for_style(entry, style, asset=None, scene_plan=None, clip=None):
+def presentation_for_style(entry, style, asset=None, scene_plan=None, clip=None, playback_interval_ms=None, *, portrait_output=True):
     """Select existing layouts without inventing a crop or editorial content."""
+    if entry.visual_role is EditVisualRole.FOOTAGE:
+        entry = source_subtitle_presentation(entry, asset, clip, playback_interval_ms)
+    if not portrait_output:
+        return entry.model_copy(update={"portrait_presentation": PortraitPresentation.FULL_CANVAS})
     comparison_style = style.name == "content-os-portrait-comparison"
-    facts = footage_geometry(asset,clip)
+    facts = footage_geometry(asset,clip,playback_interval_ms)
     comparison_intent = False
     if scene_plan is not None:
         intent_text = " ".join(str(value or "") for value in (
@@ -72,14 +130,14 @@ def presentation_for_style(entry, style, asset=None, scene_plan=None, clip=None)
         )).casefold()
         comparison_intent = any(token in intent_text for token in ("对比", "比較", "比较", "comparison", "contrast"))
     if (comparison_intent and entry.visual_role is EditVisualRole.FOOTAGE
-        and entry.selected_source_kind in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET}
+        and entry.selected_source_kind in {SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET,SourceKind.STOCK}
         and asset is not None and asset.width>asset.height
         and facts.get("comparison_layout","unknown")=="unknown"):
         raise EditPlanPreflightError("comparison_source_layout_or_subtitle_geometry_unknown")
     comparison_candidate = (
         (comparison_style or facts.get("comparison_layout")=="side_by_side_equal_halves")
         and comparison_intent
-        and entry.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+        and entry.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK}
         and entry.visual_role is EditVisualRole.FOOTAGE
     )
     if comparison_candidate and asset is not None and asset.width > asset.height and asset.width * 9 != asset.height * 16:
@@ -91,7 +149,7 @@ def presentation_for_style(entry, style, asset=None, scene_plan=None, clip=None)
         and entry.framing_policy is TalkingFramingPolicy.FACE_SAFE_CONTAIN
     )
     if comparison_source:
-        ratio,reference = comparison_clearance(asset,clip)
+        ratio,reference = comparison_clearance(asset,clip,playback_interval_ms)
         updates = {}
         if ratio:
             updates = dict(source_bottom_crop_ratio=ratio,
@@ -111,7 +169,7 @@ def presentation_for_style(entry, style, asset=None, scene_plan=None, clip=None)
     )
     subject_first_footage_panel = (
         style.name in {"content-os-subject-first", "content-os-portrait-comparison"}
-        and entry.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+        and entry.selected_source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK}
         and entry.visual_role is EditVisualRole.FOOTAGE
     )
     if (panel_style and (talking_panel or subject_first_footage_panel)

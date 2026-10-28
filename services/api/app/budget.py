@@ -12,7 +12,7 @@ from uuid import UUID
 from app.domain.models import BudgetPolicy, ProviderCallRecord, UsageCost
 
 
-ProviderOperation = Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render"]
+ProviderOperation = Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render", "stock_search", "stock_import", "web_search", "web_fetch"]
 ProviderMode = Literal["assisted_test", "runtime"]
 ProviderTerminalStatus = Literal["completed", "failed", "cancelled"]
 

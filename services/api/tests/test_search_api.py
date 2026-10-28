@@ -60,10 +60,24 @@ def test_search_api_requires_runtime_provider_and_rejects_secrets(tmp_path: Path
     _seed(path, tmp_path)
     monkeypatch.delenv("CONTENT_OS_EMBEDDING_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CONTENT_OS_RETRIEVAL_MODE", "embedding")
     with TestClient(create_app(path)) as client:
         assert client.post("/clips/search", json={"query": "test"}).status_code == 503
         rejected = client.post("/clips/search", json={"query": "test", "api_key": "must-not-persist"})
         assert rejected.status_code == 422
+
+
+def test_search_api_uses_local_lexical_when_no_embedding_is_configured(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "search-auto-lexical.sqlite"
+    _, computer, _ = _seed(path, tmp_path)
+    monkeypatch.delenv("CONTENT_OS_RETRIEVAL_MODE", raising=False)
+    monkeypatch.delenv("CONTENT_OS_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with TestClient(create_app(path)) as client:
+        response = client.post("/clips/search", json={"query": "电脑 软件", "top_k": 1})
+    assert response.status_code == 200
+    assert response.json()[0]["clip"]["id"] == str(computer.id)
+    assert response.json()[0]["score_basis"] == "lexical_overlap"
 
 
 def test_search_api_explicit_lexical_mode_reports_non_embedding_basis(tmp_path: Path, monkeypatch) -> None:

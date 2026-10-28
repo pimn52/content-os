@@ -102,7 +102,6 @@ test('retained rejection needs source confirmation, then a separately selected e
   assert.match(h.text(), /Original horizontal composition rejected/);
   assert.doesNotMatch(h.text(), /未来用法设置/);
   await h.change('保留的拒绝成片', 'evaluation-evidence/case/manifest.json');
-  await h.change('证据来源', 'assisted_test');
   await h.change('采纳 / 禁用理由', 'I confirmed this retained rejection and its future scope');
   s.setConfirm(false); await h.click('确认来源并加入待确认拒绝');
   assert.equal(s.calls.some(c => c.path.endsWith('source-use-constraints') && c.options?.method === 'POST'), false);
@@ -119,7 +118,7 @@ test('retained rejection needs source confirmation, then a separately selected e
 test('only checked reconstructable uses may be adopted; reload wins over stale write body', async () => {
   const s = setup(), h = s.harness; s.setRetained(retainedCase()); await h.flush();
   await h.change('保留的拒绝成片', 'evaluation-evidence/case/manifest.json');
-  await h.change('证据来源', 'assisted_test'); await h.change('采纳 / 禁用理由', 'explicit product adoption of this exact scope');
+  await h.change('采纳 / 禁用理由', 'explicit product adoption of this exact scope');
   await h.click('确认来源并加入待确认拒绝');
   assert.equal(h.find('button', '明确采纳所选未来避用范围').props.disabled, true);
   const boxes = h.nodes('input').filter(input => input.props.type === 'checkbox');
@@ -140,13 +139,13 @@ test('only checked reconstructable uses may be adopted; reload wins over stale w
 
 test('fixture and changed-evidence records stay visible but cannot be adopted', async () => {
   const fixture = setup(), h = fixture.harness;
-  fixture.setRetained(retainedCase()); await h.flush();
-  await h.change('保留的拒绝成片', 'evaluation-evidence/case/manifest.json');
-  await h.change('证据来源', 'fixture'); await h.change('采纳 / 禁用理由', 'test evidence only');
-  await h.click('确认来源并加入待确认拒绝');
+  fixture.setUseRules([{ id: 'legacy', version: 1, state: 'candidate', classification: 'configuration_use_limit',
+    evidence_class: 'fixture', reason: 'old record', current_stop_reasons: [], adopted_use_ids: [],
+    original_review: retainedCase()[0].original_review, uses: retainedCase()[0].uses }]);
+  await h.flush(); await h.change('采纳 / 禁用理由', 'keep prior evidence');
   assert.equal(h.find('button', '明确采纳所选未来避用范围').props.disabled, true);
   assert.equal(fixture.calls.some(c => c.path.includes('/source-use-constraints/constraint') && c.options?.method === 'PUT'), false);
-  assert.match(h.text(), /测试夹具（不可采纳为规则）/);
+  assert.match(h.text(), /历史记录不可采纳/);
 
   const held = setup(), heldHarness = held.harness;
   held.setUseRules([{ id: 'held', version: 2, state: 'candidate', classification: 'configuration_use_limit',
@@ -160,10 +159,9 @@ test('fixture and changed-evidence records stay visible but cannot be adopted', 
 test('fresh project load clears prior selected evidence and user scope', async () => {
   const s = setup(), h = s.harness; s.setRetained(retainedCase()); await h.flush();
   await h.change('保留的拒绝成片', 'evaluation-evidence/case/manifest.json');
-  await h.change('证据来源', 'assisted_test'); await h.change('采纳 / 禁用理由', 'prior creator choice');
+  await h.change('采纳 / 禁用理由', 'prior creator choice');
   h.setProps({ projectId: 'other-project' }); await h.flush();
   assert.equal(h.input('保留的拒绝成片').props.value, '');
-  assert.equal(h.input('证据来源').props.value, '');
   assert.equal(h.input('采纳 / 禁用理由').props.value, '');
   assert.doesNotMatch(h.text(), /creator-interview\.mp4/);
 });

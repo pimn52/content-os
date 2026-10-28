@@ -38,12 +38,9 @@ class TalkingCloseoutPlan:
 
 @dataclass(frozen=True)
 class TerminalTalkingDeliveryPlan:
-    """A lossless frame-aligned terminal cut at verified final speech.
+    """An opt-in terminal cut preserving all verified speech.
 
-    This is deliberately opt-in: ending a project at speech completion is
-    valid only when the narrative itself ends there.  A timestamp which is not
-    exactly representable at the project frame rate is rejected rather than
-    clipping a partial final phoneme or silently extending the audio.
+    Audio keeps the exact speech end; video includes its final partial frame.
     """
 
     speech_end_ms: int
@@ -91,13 +88,7 @@ def plan_terminal_talking_delivery(
     speech_end_ms = max(segment.end_ms for segment in narration.transcript_segments)
     if speech_end_ms > narration.duration_ms:
         raise TalkingCloseoutPlanningError("narration transcript extends beyond narration audio")
-    numerator = speech_end_ms * fps.numerator
-    denominator = 1_000 * fps.denominator
-    if numerator % denominator:
-        raise TalkingCloseoutPlanningError(
-            "terminal Talking delivery requires a final speech timestamp aligned to the project frame rate"
-        )
-    return TerminalTalkingDeliveryPlan(speech_end_ms=speech_end_ms, end_frame=numerator // denominator)
+    return TerminalTalkingDeliveryPlan(speech_end_ms=speech_end_ms, end_frame=_ceiling_frame(speech_end_ms, fps))
 
 
 def _require_verified_timing(narration: AudioAsset, fps: RationalFps) -> None:

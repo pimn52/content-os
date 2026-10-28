@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import math
 from pathlib import Path
 from typing import Protocol, Sequence
 from uuid import UUID
@@ -69,20 +71,33 @@ class MediaVisionPipeline:
         *,
         provider: VisionProvider | None = None,
         selected_clip_ids: Sequence[UUID] | None = None,
+        keyframe_timestamps_ms: Sequence[float] | None = None,
     ) -> VisionAnalysisResult:
         asset, input_clips, paths = self._inputs(asset_or_analysis, clips, keyframe_paths)
         stored_asset = self._stored_asset(asset)
         stored_clips = selected_visual_clips(self.clips.list_by_asset(stored_asset.id), selected_clip_ids)
         self._validate_clip_identity(stored_asset, stored_clips, input_clips)
         normalized_paths = self._validate_paths(paths, stored_clips)
+        if isinstance(asset_or_analysis, MediaAnalysisResult):
+            if keyframe_timestamps_ms is not None:
+                raise VisionKeyframeMismatch("separate timestamps cannot override media analysis")
+            keyframe_timestamps_ms = asset_or_analysis.keyframe_timestamps_ms or None
+        timestamps = list(keyframe_timestamps_ms) if keyframe_timestamps_ms is not None else [None] * len(stored_clips)
+        if len(timestamps) != len(stored_clips) or any(stamp is not None and
+            (isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp)
+             or not clip.start_ms <= stamp < clip.end_ms) for clip, stamp in zip(stored_clips, timestamps)):
+            raise VisionKeyframeMismatch("keyframe timestamps must match their Clip intervals")
+        frame_hashes = tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in normalized_paths)
 
         # Provider calls can be slow or remote. No SQLite write transaction is
         # open until every result is available and identity-bound below.
         active_provider = self.provider if provider is None else provider
         metadata = tuple(
-            _metadata_for(clip, path, active_provider.analyze(path))
-            for clip, path in zip(stored_clips, normalized_paths)
+            _metadata_for(clip, path, active_provider.analyze(path), stamp, stored_asset.content_hash)
+            for clip, path, stamp in zip(stored_clips, normalized_paths, timestamps)
         )
+        if frame_hashes != tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in normalized_paths):
+            raise VisionKeyframeMismatch("keyframe changed during visual analysis")
         updated = (self.persistence.apply(stored_asset.id, metadata, normalized_paths)
             if selected_clip_ids is None else self.persistence.apply(stored_asset.id, metadata, normalized_paths,
                 selected_clip_ids=selected_clip_ids))
@@ -149,7 +164,8 @@ class MediaVisionPipeline:
         return normalized
 
 
-def _metadata_for(clip: Clip, path: Path, analysis: ClipVisualAnalysis) -> VisualMetadata:
+def _metadata_for(clip: Clip, path: Path, analysis: ClipVisualAnalysis, timestamp_ms: float | None = None,
+    source_content_hash: str | None = None) -> VisualMetadata:
     if not isinstance(analysis, ClipVisualAnalysis):
         raise VisionPipelineError("vision provider returned an invalid analysis contract")
-    return VisualMetadata.for_clip(clip, path, analysis)
+    return VisualMetadata.for_clip(clip, path, analysis, timestamp_ms=timestamp_ms, source_content_hash=source_content_hash)

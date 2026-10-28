@@ -69,6 +69,33 @@
       "title": "Topic",
       "type": "string"
     },
+    "presentation_style": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "creator_led"
+      ],
+      "title": "Presentation Style",
+      "type": "string"
+    },
+    "delivery_intent": {
+      "default": "publish",
+      "enum": [
+        "publish",
+        "draft"
+      ],
+      "title": "Delivery Intent",
+      "type": "string"
+    },
+    "format_policy": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "fixed"
+      ],
+      "title": "Format Policy",
+      "type": "string"
+    },
     "format": {
       "$ref": "#/$defs/ProjectFormat",
       "default": "vertical"

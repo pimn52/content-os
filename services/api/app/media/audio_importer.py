@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from app.db import AudioAssetRepository, Database
 from app.domain.models import AudioAsset, Job, JobType, SourceKind
-from app.execution_scope import register_generated_import_scope
 
 from .ffprobe import AudioProbeMetadata, FFProbeAdapter, ProbeError
 from .importer import _place_exclusive
@@ -88,11 +87,7 @@ class AudioImporter:
             repository = AudioAssetRepository(self.db)
             existing = repository.get_by_content_hash(content_hash)
             if existing is not None:
-                if generated_job is None:
-                    return self._existing_or_error(existing)
-                with self._write_transaction():
-                    register_generated_import_scope(self.db, "audio", existing, generated_job)
-                    return self._existing_or_error(existing)
+                return self._existing_or_error(existing)
             try:
                 metadata = self.probe.probe_audio(temp)
             except ProbeError as exc:
@@ -112,18 +107,14 @@ class AudioImporter:
                 with self._write_transaction():
                     existing = repository.get_by_content_hash(content_hash)
                     if existing is not None:
-                        register_generated_import_scope(self.db, "audio", existing, generated_job)
                         return self._existing_or_error(existing)
                     repository.create(value)
-                    register_generated_import_scope(self.db, "audio", value, generated_job)
                     placed = self._place(temp, destination)
                     _verify_hash(destination, content_hash)
                 return value
             except sqlite3.IntegrityError:
                 winner = repository.get_by_content_hash(content_hash)
                 if winner is not None:
-                    with self._write_transaction():
-                        register_generated_import_scope(self.db, "audio", winner, generated_job)
                     return self._existing_or_error(winner)
                 if placed:
                     destination.unlink(missing_ok=True)

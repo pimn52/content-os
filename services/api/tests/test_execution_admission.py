@@ -81,14 +81,12 @@ def test_receipt_roundtrip_restart_reads_are_pure_and_dispatch_stays_closed(setu
         # Existing commercial lane does not use this new receipt.
         plan = other.post(f'/projects/{project}/production-preflight', json={}).json()
         assert 'provider_license_scope_unverified' in plan['stop_reasons']
-        waiting = other.post(f'/projects/{project}/production-runs', json={'idempotency_key':'still-closed','expected_fingerprint':plan['fingerprint']}).json()
-        with Database(path) as db:
-            voice_id = db.connection.execute('SELECT id FROM voice_profiles').fetchone()[0]
-        denied = other.post(f'/projects/{project}/production-runs/{waiting["id"]}/voice-dispatch', json={
-            'voice_profile_id':voice_id,'capability_profile_id':str(profile.id),'authorization_reference':'internal-evaluation'})
+        denied = other.post(f'/projects/{project}/production-runs', json={
+            'idempotency_key':'still-closed','expected_fingerprint':plan['fingerprint']})
         assert denied.status_code == 409
         with Database(path) as db:
             assert db.connection.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
+            assert db.connection.execute('SELECT COUNT(*) FROM production_runs').fetchone()[0] == 0
             assert ProviderCallRepository(db).list_for_project(project) == []
 
 

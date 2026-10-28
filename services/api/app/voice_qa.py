@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import lru_cache
 from datetime import datetime
 import hashlib
 import json
@@ -15,9 +16,10 @@ import wave
 from uuid import UUID
 
 from opencc import OpenCC
+from pypinyin import Style, __version__ as _PINYIN_VERSION, pinyin
 
 from app.domain.models import AudioAsset, TranscriptSegment, VoiceHumanReview
-from app.providers.asr import TranscriptionResult
+from app.providers.asr import ASRProviderResponseError, TranscriptionResult, TranscriptionSegment, TranscriptionWord
 from app.voice_recovery import recommend_voice_recovery
 
 
@@ -48,6 +50,7 @@ class VoiceQaReport:
     longest_silence_ms: int
     transcript_segment_count: int
     checks: tuple[str, ...]
+    phonetic_equivalences: tuple[tuple[int, str, str, str], ...] = ()
 
     def metadata(self, *, provider: str, model: str) -> dict[str, object]:
         return {
@@ -64,11 +67,110 @@ class VoiceQaReport:
             "longest_silence_ms": self.longest_silence_ms,
             "transcript_segment_count": self.transcript_segment_count,
             "checks": list(self.checks),
+            "comparison_policy": "zh_single_reading_tone3",
+            "comparison_engine": f"pypinyin:{_PINYIN_VERSION}",
+            "phonetic_equivalences": [
+                dict(index=index, target=target, observed=observed, syllable=syllable)
+                for index, target, observed, syllable in self.phonetic_equivalences
+            ],
+            "unresolved_substitution_token_count": self.substitution_token_count - len(self.phonetic_equivalences),
         }
 
 
 class VoiceQaError(ValueError):
     pass
+
+
+def generated_voice_qa_parts(audio: AudioAsset, data_root: Path | None):
+    """校验每段确实组成当前 Master；文案仅用于核对来源，不传给识别器。"""
+    generation = audio.metadata.get("voice_generation", {})
+    saved = generation.get("generation_segments")
+    if not saved:
+        return ()
+    try:
+        if data_root is None or not isinstance(saved, list) or not 1 < len(saved) <= 100:
+            raise ValueError()
+        root = data_root.resolve()
+        master = Path(audio.source_file)
+        master = (root / master).resolve() if not master.is_absolute() else master.resolve()
+        if not master.is_relative_to(root) or hashlib.sha256(master.read_bytes()).hexdigest() != audio.content_hash:
+            raise ValueError()
+        text = generation["target_text"]
+        spans = []; cursor = 0
+        for part in re.split(r"\n\s*\n", text):
+            start = text.index(part, cursor); cursor = start + len(part)
+            left = start + len(part) - len(part.lstrip()); right = start + len(part.rstrip())
+            if left < right:
+                spans.append((left, right))
+        if len(spans) != len(saved):
+            raise ValueError()
+        result = []; cursor = 0
+        with wave.open(str(master), "rb") as full:
+            rate, width, channels = full.getframerate(), full.getsampwidth(), full.getnchannels()
+            if rate != audio.sample_rate or channels != audio.channels:
+                raise ValueError()
+            for segment, (start, end) in zip(saved, spans):
+                source = (root / segment["source_file"]).resolve()
+                first, last = segment["start_sample"], segment["end_sample"]
+                if (not source.is_relative_to(root) or source == master
+                    or type(first) is not int or type(last) is not int or first != cursor or last <= first
+                    or segment["start_char"] != start or segment["end_char"] != end
+                    or hashlib.sha256(source.read_bytes()).hexdigest() != segment["sha256"]):
+                    raise ValueError()
+                with wave.open(str(source), "rb") as part:
+                    if (part.getframerate(), part.getsampwidth(), part.getnchannels(), part.getnframes()) != (rate, width, channels, last-first):
+                        raise ValueError()
+                    if part.readframes(last-first) != full.readframes(last-first):
+                        raise ValueError()
+                result.append((source, first * 1000 // rate, last * 1000 // rate))
+                cursor = last
+            if cursor != full.getnframes():
+                raise ValueError()
+        return tuple(result)
+    except (OSError, ValueError, TypeError, KeyError, wave.Error):
+        raise VoiceQaError("voice_qa_segment_provenance_invalid") from None
+
+
+def transcribe_voice_parts(asr, parts, *, language, part_results=None):
+    """一次 QA 顺序识别各实际生成段；每段仅识别一次，复用模型，不提供目标文案。"""
+    segments = []; words = []; texts = []; complete_words = True
+    for source, offset, end in parts:
+        result = asr.transcribe(source, language=language)
+        duration = end - offset
+        if (not result.segments or any(segment.end_ms > duration for segment in result.segments)
+            or any(word.end_ms > duration for word in result.words)):
+            raise ASRProviderResponseError("Voice part transcription exceeds its source interval")
+        if part_results is not None:
+            part_results.append(result)
+        texts.append(result.text)
+        segments.extend(TranscriptionSegment(offset+s.start_ms, offset+s.end_ms, s.text) for s in result.segments)
+        words.extend(TranscriptionWord(offset+w.start_ms, offset+w.end_ms, w.text) for w in result.words)
+        complete_words = complete_words and bool(result.words)
+    return TranscriptionResult(" ".join(texts), tuple(segments), language, tuple(words) if complete_words else ())
+
+
+def generation_part_qa(audio, parts, transcriptions, *, provider, model,
+                       max_silence_ms=2_000, max_leading_silence_ms=500):
+    """保存各实际生成段的独立核验，不能由整稿失败猜测哪一段有问题。"""
+    generation = audio.metadata["voice_generation"]
+    saved = generation["generation_segments"]
+    if len(parts) != len(saved) or len(parts) != len(transcriptions):
+        raise VoiceQaError("voice_qa_segment_evidence_incomplete")
+    evidence = []
+    for index, ((source, start, end), segment, transcription) in enumerate(zip(parts, saved, transcriptions)):
+        text = generation["target_text"][segment["start_char"]:segment["end_char"]]
+        part = audio.model_copy(update={"source_file": str(source), "content_hash": segment["sha256"],
+            "duration_ms": end-start, "metadata": {"voice_generation": {"target_text": text}}})
+        report = verify_generated_voice(part, text, transcription,
+            max_silence_ms=max_silence_ms, max_leading_silence_ms=max_leading_silence_ms)
+        reviewed = apply_voice_qa(part, report, transcription, provider=provider, model=model)
+        evidence.append({"index": index, "source_sha256": segment["sha256"],
+            "start_char": segment["start_char"], "end_char": segment["end_char"],
+            "max_silence_ms": max_silence_ms, "max_leading_silence_ms": max_leading_silence_ms,
+            "transcript_text": transcription.text,
+            "transcript_segments": [item.model_dump(mode="json") for item in reviewed.transcript_segments],
+            "report": reviewed.metadata["voice_generation"]["qa"]})
+    return evidence
 
 
 def apply_voice_copy_adjudication(
@@ -254,6 +356,8 @@ def verify_generated_voice(
     target = comparison_tokens(target_text)
     observed = comparison_tokens(transcription.text)
     missing, duplicate, substitutions = _alignment_counts(target, observed)
+    equivalents = _phonetic_equivalences(target, observed)
+    unresolved = substitutions - len(equivalents)
     coverage = 0.0 if not target else max(0.0, min(1.0, (len(target) - missing) / len(target)))
     segments = _segments(transcription.segments, audio.duration_ms)
     leading_silence, leading_silence_source = _leading_silence(audio, segments)
@@ -267,14 +371,16 @@ def verify_generated_voice(
         checks.append("copy_missing_tokens")
     if duplicate:
         checks.append("copy_duplicate_tokens")
-    if substitutions and substitutions / len(target) > float(max_substitution_ratio):
+    if unresolved and unresolved / len(target) > float(max_substitution_ratio):
         checks.append("copy_substitution_tokens")
-    elif substitutions:
+    elif unresolved:
         # ASR can substitute a homophone or split/merge a product name even
         # when the generated speech contains the full requested copy. Keep
         # this uncertainty explicit and bounded; never turn arbitrary ASR
         # disagreement into a pass.
         checks.append("copy_substitutions_within_tolerance")
+    if equivalents:
+        checks.append("copy_phonetic_equivalence")
     if leading_silence > max_leading_silence_ms:
         checks.append("leading_silence_or_unrecognized_audio")
     if longest_silence > max_silence_ms:
@@ -302,7 +408,71 @@ def verify_generated_voice(
         longest_silence_ms=longest_silence,
         transcript_segment_count=len(segments),
         checks=tuple(checks),
+        phonetic_equivalences=equivalents,
     )
+
+
+def _timed_qa_clauses(target_text, segments, words, duration_ms):
+    """Refine admitted ASR segments only at punctuation backed by real word edges."""
+    from app.narration_performance import derive_narration_boundary_map, NarrationBoundaryKind
+
+    original = list(segments)
+    observed = tuple(token for segment in original for token in comparison_tokens(segment.text))
+    target = comparison_tokens(target_text)
+    if not words or not target or len(target) != len(observed):
+        return original
+    bounds, count, segment_index = [], 0, 0
+    for segment in original:
+        count += len(comparison_tokens(segment.text))
+        bounds.append(count)
+    stream, edges = [], {}
+    previous_end = 0
+    for word in words:
+        tokens = comparison_tokens(word.text)
+        if (not tokens or word.start_ms < previous_end or word.end_ms <= word.start_ms
+            or word.end_ms > duration_ms):
+            return original
+        while segment_index < len(bounds) and len(stream) >= bounds[segment_index]:
+            segment_index += 1
+        if (segment_index >= len(original) or len(stream) + len(tokens) > bounds[segment_index]
+            or word.start_ms < original[segment_index].start_ms
+            or word.end_ms > original[segment_index].end_ms):
+            return original
+        stream.extend(tokens)
+        edges[len(stream)] = word.end_ms
+        previous_end = word.end_ms
+    if tuple(stream) != observed:
+        return original
+    cuts = {len(comparison_tokens(target_text[:item.char_index]))
+        for item in derive_narration_boundary_map(target_text).boundaries
+        if item.kind in {NarrationBoundaryKind.TERMINAL, NarrationBoundaryKind.CONTINUING}}
+    result, offset = [], 0
+    for segment in original:
+        count = len(comparison_tokens(segment.text))
+        end_offset = offset + count
+        # Never infer a word boundary inside a provider word or across a source segment.
+        positions = sorted(p for p in cuts if offset < p < end_offset and p in edges
+            and segment.start_ms < edges[p] < segment.end_ms)
+        pieces, left, start_ms = [], 0, segment.start_ms
+        for position in positions:
+            wanted = position - offset
+            lower, upper = left, len(segment.text)
+            while lower < upper:
+                middle = (lower + upper + 1) // 2
+                if len(comparison_tokens(segment.text[:middle])) <= wanted:
+                    lower = middle
+                else:
+                    upper = middle - 1
+            if (lower <= left or lower >= len(segment.text)
+                or comparison_tokens(segment.text[:lower]) != observed[offset:position]
+                or edges[position] <= start_ms):
+                return original
+            pieces.append(TranscriptSegment(start_ms=start_ms, end_ms=edges[position], text=segment.text[left:lower]))
+            left, start_ms = lower, edges[position]
+        pieces.append(TranscriptSegment(start_ms=start_ms, end_ms=segment.end_ms, text=segment.text[left:]))
+        result.extend(pieces)
+        offset = end_offset
+    return result
 
 
 def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: TranscriptionResult, *, provider: str, model: str) -> AudioAsset:
@@ -316,8 +486,32 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
     if not isinstance(generation, dict):
         raise VoiceQaError("voice QA only applies to a generated voice asset")
     metadata = dict(audio.metadata)
+    for key in ('voice_word_timing', 'voice_clause_timing', 'voice_boundary_alignment'):
+        metadata.pop(key, None)
     updated_generation = dict(generation)
     updated_generation["qa"] = report.metadata(provider=provider.strip(), model=model.strip())
+    updated_generation["qa"]["source_sha256"] = audio.content_hash
+    updated_generation["qa"]["target_text_sha256"] = _sha256_text(generation.get("target_text", ""))
+    # Bind exactly the transcript persisted below, including its real timings.
+    persisted_transcription = audio.model_copy(update={"transcript_source": f"{provider.strip()}:{model.strip()}", "transcript_segments": [
+        TranscriptSegment(start_ms=item.start_ms, end_ms=item.end_ms, text=item.text)
+        for item in transcription.segments
+        if item.end_ms <= audio.duration_ms and item.end_ms > item.start_ms and item.text.strip()
+    ]})
+    updated_generation["qa"]["observed_text"] = transcription.text
+    updated_generation["qa"]["observed_segments"] = [segment.model_dump(mode="json")
+        for segment in persisted_transcription.transcript_segments]
+    if report.verified and transcription.words:
+        refined = _timed_qa_clauses(generation.get("target_text", ""),
+            persisted_transcription.transcript_segments, transcription.words, audio.duration_ms)
+        if len(refined) > len(persisted_transcription.transcript_segments):
+            metadata["voice_clause_timing"] = {
+                "version": "1.0", "source_sha256": audio.content_hash,
+                "method": "qa_admitted_copy_punctuation_at_ordered_asr_word_edges",
+                "limitation": "ASR word timestamps are estimates; this is not a naturalness or human quality verdict.",
+            }
+            persisted_transcription = persisted_transcription.model_copy(update={"transcript_segments": refined})
+    updated_generation["qa"]["transcript_sha256"] = _transcript_sha256(persisted_transcription)
     updated_generation["qa_state"] = "verified" if report.verified else "failed"
     if transcription.words:
         # Kept separately from the QA verdict: ASR word timing is alignment
@@ -340,15 +534,7 @@ def apply_voice_qa(audio: AudioAsset, report: VoiceQaReport, transcription: Tran
     # to offer while retaining the original QA evidence.
     updated_generation["recovery"] = recommend_voice_recovery(report).metadata()
     metadata["voice_generation"] = updated_generation
-    return audio.model_copy(update={
-        "metadata": metadata,
-        "transcript_segments": [
-            TranscriptSegment(start_ms=item.start_ms, end_ms=item.end_ms, text=item.text)
-            for item in transcription.segments
-            if item.end_ms <= audio.duration_ms and item.end_ms > item.start_ms and item.text.strip()
-        ],
-        "transcript_source": f"{provider.strip()}:{model.strip()}",
-    })
+    return persisted_transcription.model_copy(update={"metadata": metadata})
 
 
 def voice_human_review_status(audio: AudioAsset) -> str:
@@ -416,6 +602,72 @@ def comparison_tokens(value: str) -> tuple[str, ...]:
     # it is not a general semantic or homophone relaxation.
     normalized = re.sub(r"(?<=[a-z0-9])[._-](?=[0-9])", "", normalized, flags=re.IGNORECASE)
     return tuple(item.casefold() for item in _TOKEN.findall(normalized))
+
+
+@lru_cache(maxsize=4096)
+def _single_reading(token: str) -> str | None:
+    """Only a single dictionary reading with its tone can resolve a glyph swap."""
+    if not re.fullmatch(r"[\u4e00-\u9fff]", token):
+        return None
+    readings = pinyin(token, style=Style.TONE3, heteronym=True,
+        neutral_tone_with_five=True, strict=True)
+    values = set(readings[0]) if len(readings) == 1 else set()
+    if len(values) != 1:
+        return None
+    value = next(iter(values))
+    return value if re.fullmatch(r"[a-zv]+[1-5]", value) else None
+
+
+def _phonetic_equivalences(target: Sequence[str], observed: Sequence[str]) -> tuple[tuple[int, str, str, str], ...]:
+    """Resolve same-position, single-reading Mandarin homophones; never realign."""
+    missing, extra, substitutions = _alignment_counts(target, observed)
+    if (len(target) != len(observed) or missing or extra
+        or substitutions != sum(left != right for left, right in zip(target, observed))):
+        return ()
+    result = []
+    for index, (left, right) in enumerate(zip(target, observed)):
+        if left != right:
+            syllable = _single_reading(left)
+            if syllable is not None and syllable == _single_reading(right):
+                result.append((index, left, right, syllable))
+    return tuple(result)
+
+
+def verified_generated_copy_tokens(audio: AudioAsset) -> tuple[str, ...] | None:
+    """Share admitted copy positions with timing, captions and Talking consumers."""
+    generation = audio.metadata.get("voice_generation")
+    if not isinstance(generation, dict) or generation.get("qa_state") != "verified":
+        return None
+    qa, text = generation.get("qa"), generation.get("target_text")
+    if not isinstance(qa, dict) or not isinstance(text, str) or not audio.transcript_source:
+        return None
+    target = comparison_tokens(text)
+    observed = tuple(token for segment in audio.transcript_segments for token in comparison_tokens(segment.text))
+    missing, extra, substitutions = _alignment_counts(target, observed)
+    if (not target or len(target) != len(observed) or missing or extra
+        or substitutions != sum(left != right for left, right in zip(target, observed))
+        or qa.get("missing_token_count") != 0 or qa.get("duplicate_token_count") != 0
+        or qa.get("substitution_token_count") != substitutions):
+        return None
+    unresolved = substitutions
+    bound_fields = {"comparison_policy", "comparison_engine", "phonetic_equivalences",
+        "unresolved_substitution_token_count", "source_sha256", "target_text_sha256", "transcript_sha256"}
+    if bound_fields.intersection(qa) and qa.get("comparison_policy") != "zh_single_reading_tone3":
+        return None
+    if qa.get("comparison_policy") == "zh_single_reading_tone3":
+        equivalents = [dict(index=index, target=left, observed=right, syllable=syllable)
+            for index, left, right, syllable in _phonetic_equivalences(target, observed)]
+        unresolved -= len(equivalents)
+        if (qa.get("qa_state") != "verified" or qa.get("source_sha256") != audio.content_hash
+            or qa.get("target_text_sha256") != _sha256_text(text)
+            or qa.get("transcript_sha256") != _transcript_sha256(audio)
+            or qa.get("comparison_engine") != f"pypinyin:{_PINYIN_VERSION}"
+            or qa.get("phonetic_equivalences") != equivalents
+            or qa.get("unresolved_substitution_token_count") != unresolved):
+            return None
+    # Older verified assets retain their literal QA tolerance; no retroactive
+    # homophone approval or rewriting of the stored transcription.
+    return target if unresolved / len(target) <= 0.05 else None
 
 
 def _alignment_counts(target: Sequence[str], observed: Sequence[str]) -> tuple[int, int, int]:

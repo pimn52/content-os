@@ -132,59 +132,28 @@ class RemotionRenderer:
         self.timeout_seconds = float(timeout_seconds)
         self.runner = runner or SubprocessRenderCommandRunner()
 
-    def render(self, spec: VideoSpec, output_path: str | Path) -> Path:
-        return self._render(spec, output_path)
+    def render(self, spec: VideoSpec, output_path: str | Path, *, production_run_id: UUID | None = None) -> Path:
+        return self._render(spec, output_path, production_run_id=production_run_id)
 
-    def render_composition(self, job_id: UUID, output_path: str | Path) -> Path:
-        """Named owned entry: reconstruct permission from persisted authority."""
-        from app.evaluation_composition import EvaluationCompositionService
-        from app.db import JobRepository, ProviderCallRepository
-        from app.domain.models import JobStatus
-        service = EvaluationCompositionService(self.assets.db,self.data_root)
-        job = JobRepository(self.assets.db).get(job_id)
-        context = service.require_current_job(job)
-        binding,owner,_ = service.require_job_identity(job)
-        call = ProviderCallRepository(self.assets.db).get_by_idempotency_key(service.provider_call_key(job))
-        if job.status != JobStatus.RUNNING or job.attempt != 1 or call is None or call.status != "running":
-            raise UnauthorizedVisualError("composition_owned_once_call_required")
-        expected = service.output_path(owner).with_name("staged.mp4")
-        if not expected.resolve().is_relative_to(self.data_root) or Path(output_path).resolve() != expected.resolve():
-            raise UnauthorizedVisualError("composition_private_output_required")
-        with self.assets.db.transaction(immediate=True):
-            service._fence(context["token"])
-            launch_id = (job.id if binding.get("recovery",{}).get("replacement_job_id") == str(job.id)
-                else UUID(owner["run_id"]))
-            if service.records.get("launch",launch_id) is not None:
-                raise UnauthorizedVisualError("composition_render_already_launched")
-            service.records.save("launch",launch_id,dict(project_id=str(job.project_id),
-                job_id=str(job.id),call_id=str(call.id),job_sha256=owner["job_sha256"]))
-        return self._render(context["spec"],expected,composition_job_id=job_id,
-            frame_range=context.get("preview_frame_range"))
-
-    def _render(self, spec: VideoSpec, output_path: str | Path, *, composition_job_id: UUID | None = None,
-                frame_range: tuple[int,int] | None = None) -> Path:
+    def _render(self, spec: VideoSpec, output_path: str | Path, *, production_run_id: UUID | None = None) -> Path:
         stage = "input_validation"
         staging: Path | None = None
         props_path: Path | None = None
         try:
             if not isinstance(spec, VideoSpec):
                 raise RenderInputError("renderer requires a VideoSpec contract")
-            if spec.format != ProjectFormat.VERTICAL or spec.width * 16 != spec.height * 9:
-                raise RenderInputError("minimal renderer accepts only 9:16 vertical VideoSpecs")
+            if not (spec.format is ProjectFormat.VERTICAL and spec.width * 16 == spec.height * 9
+                    or spec.format is ProjectFormat.HORIZONTAL and spec.width * 9 == spec.height * 16):
+                raise RenderInputError("renderer accepts 9:16 vertical or 16:9 horizontal VideoSpecs")
             output = _output_path(output_path)
             _renderer_project(self.renderer_dir)
-            master_narration = self._validate_master_narration(spec, spec.fps, composition_job_id=composition_job_id)
-            if frame_range is not None:
-                total = max(s.start_frame+s.duration_frames for s in spec.scenes)
-                if (composition_job_id is None or master_narration is None
-                    or not 0 <= frame_range[0] < frame_range[1] <= total):
-                    raise RenderInputError("preview requires an owned narration timeline interval")
+            master_narration = self._validate_master_narration(spec, spec.fps)
             prepared = {
                 scene.scene_id: self._validate_scene(
                     scene, spec.fps, project_id=spec.project_id,
                     master_audio_id=None if spec.master_narration is None else spec.master_narration.audio_asset_id,
                     validate_scene_narration=master_narration is None,
-                    composition_job_id=composition_job_id,
+                    production_run_id=production_run_id,
                 )
                 for scene in spec.scenes
             }
@@ -212,8 +181,6 @@ class RemotionRenderer:
             ]
             if master_narration is not None:
                 argv.append("--muted")
-            if frame_range is not None:
-                argv.append(f"--frames={frame_range[0]}-{frame_range[1]-1}")
             completed = self.runner.run(argv, cwd=self.renderer_dir, timeout_seconds=self.timeout_seconds)
             if completed.returncode != 0:
                 raise RenderProcessError(completed.returncode, stderr=completed.stderr)
@@ -226,10 +193,6 @@ class RemotionRenderer:
                 # delay; container-duration tolerance cannot detect that error.
                 master = spec.master_narration
                 audio_start, audio_end = master.start_ms/1000, master.end_ms/1000
-                if frame_range is not None:
-                    frame_seconds = spec.fps.denominator/spec.fps.numerator
-                    audio_start += frame_range[0]*frame_seconds
-                    audio_end = min(audio_end,master.start_ms/1000+frame_range[1]*frame_seconds)
                 argv = [resolve_local_executable("ffmpeg"), "-nostdin", "-v", "error",
                     "-i", str(visual_output), "-i", str(master_narration),
                     "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
@@ -241,6 +204,16 @@ class RemotionRenderer:
             stage = "output_validation"
             if not output.is_file() or output.stat().st_size == 0:
                 raise RenderProcessError(-1)
+            from app.external_media import attribution_text
+            source_assets = []
+            for scene in spec.scenes:
+                clip = self.clips.get(scene.visual.clip_id) if scene.visual.clip_id else None
+                asset_id = scene.visual.asset_id or (clip.asset_id if clip else None)
+                asset = self.assets.get(asset_id) if asset_id else None
+                if asset is not None:
+                    source_assets.append(asset)
+            credits = attribution_text(source_assets)
+            output.with_suffix(".credits.txt").write_text(credits or "本片未使用外部资料库素材。\n", encoding="utf-8")
             return output
         except Exception as exc:
             exc.render_stage = stage
@@ -261,7 +234,7 @@ class RemotionRenderer:
         project_id: UUID,
         master_audio_id: UUID | None,
         validate_scene_narration: bool = True,
-        composition_job_id: UUID | None = None,
+        production_run_id: UUID | None = None,
     ) -> _PreparedVisual:
         visual = scene.visual
         if scene.transition != "cut":
@@ -274,13 +247,13 @@ class RemotionRenderer:
                 }
             )
             footage_panel = (
-                visual.source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+                visual.source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK}
                 and visual.vertical_reframe_mode is VerticalReframeMode.CONTAIN
             )
             if not (talking_panel or footage_panel):
                 raise RenderInputError("portrait_panel requires complete-frame Talking or authorized footage")
         if scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
-            if (visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET}
+            if (visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK}
                 or scene.visual_role is not EditVisualRole.FOOTAGE
                 or visual.vertical_reframe_mode not in {VerticalReframeMode.CONTAIN,VerticalReframeMode.BOTTOM_CROP_CONTAIN}
                 or scene.subtitle_treatment is not SubtitleTreatment.TIMED_CAPTIONS):
@@ -308,9 +281,8 @@ class RemotionRenderer:
             image = self.images.get(visual.asset_id)
             if image is None or image.source_kind != visual.source_kind or image.authorization_reference != visual.authorization_reference:
                 raise UnauthorizedVisualError("VideoSpec static visual does not match the authorized stored image")
-            self._require_commercial_content(image)
             return _PreparedVisual(source=_local_existing_image(image, self.data_root), trim_before=0, trim_after=0, kind="image", narration_source=narration_source, narration_start_frame=narration_start_frame)
-        if visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO}:
+        if visual.source_kind not in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_VIDEO, SourceKind.AI_BROLL}:
             raise UnauthorizedVisualError("renderer accepts only authorized user or historical local media")
         if visual.asset_id is None or visual.clip_id is None or visual.clip_start_ms is None or visual.clip_end_ms is None:
             raise RenderInputError("renderer requires a complete local Clip visual reference")
@@ -318,19 +290,6 @@ class RemotionRenderer:
         clip = self.clips.get(visual.clip_id)
         if asset is None or clip is None:
             raise LocalResourceError("referenced local media is unavailable")
-        if scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
-            from app.assembly.edit_plan import comparison_clearance
-            try:
-                ratio,reference=comparison_clearance(asset,clip)
-            except ValueError as exc:
-                raise RenderInputError(str(exc)) from None
-            if (abs(ratio-visual.source_bottom_crop_ratio)>1e-9
-                or reference!=visual.vertical_reframe_evidence_reference):
-                raise RenderInputError("comparison subtitle geometry changed; replan required")
-        if (scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON
-            and asset.width * 9 != asset.height * 16):
-            raise RenderInputError("stacked_comparison requires a 16:9 source")
-        self._require_commercial_content(asset, composition_job_id=composition_job_id)
         if (
             clip.asset_id != asset.id
             or asset.source_kind != visual.source_kind
@@ -343,14 +302,43 @@ class RemotionRenderer:
             or clip.end_ms > asset.duration_ms
         ):
             raise UnauthorizedVisualError("VideoSpec visual does not match the authorized stored Clip")
-        if asset.source_kind is SourceKind.AI_VIDEO and composition_job_id is None:
+        if scene.portrait_presentation is PortraitPresentation.STACKED_COMPARISON:
+            if asset.width * 9 != asset.height * 16:
+                raise RenderInputError("stacked_comparison requires a 16:9 source")
+            from app.assembly.edit_plan import comparison_clearance, source_frame_interval_ms
+            playback_interval_ms = source_frame_interval_ms(
+                visual.clip_start_ms, scene.duration_frames, composition_fps, visual.clip_end_ms,
+            )
+            try:
+                ratio,reference=comparison_clearance(asset,clip,playback_interval_ms)
+            except ValueError as exc:
+                raise RenderInputError(str(exc)) from None
+            if (abs(ratio-visual.source_bottom_crop_ratio)>1e-9
+                or reference!=visual.vertical_reframe_evidence_reference):
+                raise RenderInputError("comparison subtitle geometry changed; replan required")
+        if asset.source_kind is SourceKind.AI_VIDEO:
+            master_interval = None
+            selected_duration_ms = math.ceil(scene.duration_frames * 1000 * composition_fps.denominator / composition_fps.numerator)
+            if master_audio_id is not None and scene.narration_start_ms is not None:
+                master_interval = (scene.narration_start_ms, scene.narration_end_ms)
+                selected_duration_ms = master_interval[1] - master_interval[0]
+                frame_units = selected_duration_ms * composition_fps.numerator
+                denominator = 1000 * composition_fps.denominator
+                if scene.duration_frames not in {frame_units // denominator, (frame_units + denominator - 1) // denominator}:
+                    raise RenderInputError("Talking timeline frames do not cover its narration interval")
             blocker = talking_visual_blocker(
                 asset, clip, self.assets, project_id=project_id, copy=scene.caption or "",
                 master_audio_id=master_audio_id or scene.narration_asset_id,
-                selected_duration_ms=math.ceil(scene.duration_frames * 1000 * composition_fps.denominator / composition_fps.numerator),
+                production_run_id=production_run_id,
+                selected_duration_ms=selected_duration_ms, master_interval=master_interval,
             )
             if blocker is not None:
                 raise UnauthorizedVisualError(f"generated Talking visual: {blocker}")
+        if asset.source_kind is SourceKind.AI_BROLL:
+            from app.media.visual_facts import generated_footage_admitted, full_interval_geometry
+            if (not generated_footage_admitted(asset)
+                or not full_interval_geometry(asset,clip,(visual.clip_start_ms,visual.clip_end_ms))):
+                raise UnauthorizedVisualError("generated illustration model admission or source QA changed")
         source = _local_existing_file(asset, self.data_root)
         # Remotion trimBefore/trimAfter are measured in composition frames,
         # not the source file's native frame rate. Both endpoints use the
@@ -380,16 +368,6 @@ class RemotionRenderer:
             style_tokens=scene.style_tokens.model_dump(),
         )
 
-    def _require_commercial_content(self, asset, *, composition_job_id: UUID | None = None) -> None:
-        if composition_job_id is not None:
-            from app.evaluation_composition import EvaluationCompositionService
-            EvaluationCompositionService(self.assets.db,self.data_root).require_media_identity(composition_job_id,asset)
-            return
-        from app.execution_scope import commercial_content_blocker
-        blocker = commercial_content_blocker(self.assets.db, asset.content_hash)
-        if blocker is not None:
-            raise UnauthorizedVisualError(blocker)
-
     def _validate_narration(self, scene: VideoScene, composition_fps: RationalFps) -> tuple[Path | None, int]:
         if scene.narration_asset_id is None:
             return None, 0
@@ -398,7 +376,6 @@ class RemotionRenderer:
         audio = self.audios.get(scene.narration_asset_id)
         if audio is None:
             raise LocalResourceError("referenced narration audio is unavailable")
-        self._require_commercial_content(audio)
         start_ms = scene.narration_start_ms or 0
         end_ms = scene.narration_end_ms or audio.duration_ms
         if end_ms > audio.duration_ms:
@@ -408,7 +385,7 @@ class RemotionRenderer:
             raise RenderInputError("narration interval is shorter than the scene")
         return _local_existing_audio(audio, self.data_root), _ceil_frames(start_ms, composition_fps)
 
-    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps, *, composition_job_id: UUID | None = None) -> Path | None:
+    def _validate_master_narration(self, spec: VideoSpec, composition_fps: RationalFps) -> Path | None:
         master = spec.master_narration
         if master is None:
             return None
@@ -417,7 +394,6 @@ class RemotionRenderer:
         audio = self.audios.get(master.audio_asset_id)
         if audio is None:
             raise LocalResourceError("referenced master narration audio is unavailable")
-        self._require_commercial_content(audio, composition_job_id=composition_job_id)
         if master.end_ms > audio.duration_ms:
             raise RenderInputError("master narration interval exceeds audio duration")
         return _local_existing_audio(audio, self.data_root)

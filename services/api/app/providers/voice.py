@@ -100,6 +100,7 @@ class VoiceSynthesisResult:
     audio_path: Path
     provider_version: str | None = None
     performance_intent_applied: bool = False
+    generation_segments: tuple[dict[str, object], ...] = ()
 
 
 class VoiceProvider(Protocol):
@@ -253,7 +254,7 @@ class OmniVoiceProvider:
             raise VoiceConnectionError("local OmniVoice inference could not access its runtime") from exc
         except Exception:
             raise VoiceProviderResponseError("local OmniVoice inference failed") from None
-        path = Path(produced) if isinstance(produced, (str, Path)) else target
+        path = produced.audio_path if isinstance(produced,VoiceSynthesisResult) else Path(produced) if isinstance(produced, (str, Path)) else target
         if not path.is_file() or path.stat().st_size == 0:
             raise VoiceProviderResponseError("voice provider did not produce a playable local audio file")
-        return VoiceSynthesisResult(path)
+        return produced if isinstance(produced,VoiceSynthesisResult) else VoiceSynthesisResult(path)

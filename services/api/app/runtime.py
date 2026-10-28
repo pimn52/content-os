@@ -7,9 +7,12 @@ import shutil
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Mapping
 
 from app.domain.models import CostCategory, UsageCost
+from app.providers.scene_planner import ScenePlannerConfigurationError
+from app.providers.vision import VisionConfigurationError
 
 from app.providers.latentsync import (
     LATENTSYNC_MODEL,
@@ -19,6 +22,34 @@ from app.providers.latentsync import (
 )
 
 CapabilityStatus = str
+
+
+def scene_planner_api_key(values: Mapping[str, str]) -> str | None:
+    """An explicitly selected credential file takes precedence over inherited keys."""
+    key_file = values.get("CONTENT_OS_LLM_API_KEY_FILE", "").strip()
+    if not key_file:
+        return values.get("CONTENT_OS_LLM_API_KEY") or values.get("OPENAI_API_KEY")
+    return _runtime_key_file(key_file, ScenePlannerConfigurationError, "scene planner")
+
+
+def vision_api_key(values: Mapping[str, str]) -> str | None:
+    """视觉能力只读取指定凭据文件，不继承环境中的 key 值。"""
+    from app.providers.vision import VisionConfigurationError
+    key_file = values.get("CONTENT_OS_VISION_API_KEY_FILE", "").strip()
+    return _runtime_key_file(key_file, VisionConfigurationError, "vision") if key_file else None
+
+
+def _runtime_key_file(key_file, error_type, capability):
+    try:
+        path = Path(key_file)
+        if path.stat().st_size > 8192:
+            raise ValueError
+        key = path.read_text(encoding="utf-8-sig").strip()
+        if not key or len(key.split()) != 1:
+            raise ValueError
+        return key
+    except (OSError, UnicodeError, ValueError):
+        raise error_type(f"{capability} credential file is missing, unreadable or invalid") from None
 
 @dataclass(frozen=True)
 class RuntimeCapability:
@@ -112,9 +143,11 @@ def inspect_runtime_capabilities(
         model_names=("CONTENT_OS_EMBEDDING_MODEL",),
         default_model="text-embedding-3-small",
     )
-    retrieval_mode = values.get("CONTENT_OS_RETRIEVAL_MODE", "embedding").strip().lower()
+    configured_retrieval = values.get("CONTENT_OS_RETRIEVAL_MODE")
+    retrieval_mode = (configured_retrieval.strip().lower() if configured_retrieval is not None else
+                      "embedding" if embedding.status == "ready" else "lexical")
     if retrieval_mode == "lexical":
-        retrieval = RuntimeCapability("retrieval", "ready", "local", None, "explicit local lexical retrieval is available; it does not create or write vectors")
+        retrieval = RuntimeCapability("retrieval", "ready", "local", None, "local lexical retrieval is available; it does not create or write vectors")
     elif retrieval_mode == "embedding":
         retrieval = RuntimeCapability("retrieval", embedding.status, embedding.provider, embedding.model, f"embedding retrieval: {embedding.detail}")
     else:
@@ -139,7 +172,21 @@ def inspect_runtime_capabilities(
         asr = RuntimeCapability("asr", "unavailable", asr_provider, selected_model("CONTENT_OS_ASR_MODEL", "CONTENT_OS_ASR_LOCAL_MODEL"), "CONTENT_OS_ASR_PROVIDER must be local or openai-compatible")
 
     selected_talking = values.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
-    if selected_talking == LATENTSYNC_PROVIDER:
+    if selected_talking == "maintained-latentsync":
+        from app.providers.maintained_talking import configured_maintained_talking_provider
+        from app.providers.talking import TalkingConfigurationError
+        data_root = Path(values.get("CONTENT_OS_DATA_ROOT") or Path(values.get("CONTENT_OS_DB_PATH", "content-os-data/content-os.sqlite3")).parent)
+        try:
+            provider = configured_maintained_talking_provider(SimpleNamespace(data_root=data_root), values)
+        except TalkingConfigurationError:
+            talking = RuntimeCapability("talking", "unavailable", LATENTSYNC_PROVIDER, LATENTSYNC_MODEL,
+                "本地对口型配置不完整；未调用模型")
+        else:
+            talking = RuntimeCapability("talking", "ready", provider.provider_name, provider.model,
+                "本地对口型运行配置已检查；输出仍需自动 QA 和成片复核",
+                provider.runtime_metadata.estimated_cost,
+                ("non_commercial_only", "output_quality_pending", "no inference probe request sent"))
+    elif selected_talking == LATENTSYNC_PROVIDER:
         talking_model = selected_model("CONTENT_OS_TALKING_MODEL") or LATENTSYNC_MODEL
         estimated_cost = UsageCost(
             category=CostCategory.TALKING,
@@ -201,7 +248,22 @@ def inspect_runtime_capabilities(
         )
 
     selected_voice = values.get("CONTENT_OS_VOICE_PROVIDER", "").strip().lower()
-    if selected_voice == "omnivoice":
+    if selected_voice == "omnivoice-maintained":
+        from app.providers.maintained_voice_provider import read_maintained_voice_options
+        from app.providers.voice import VoiceConfigurationError
+        data_root = Path(values.get("CONTENT_OS_DATA_ROOT") or Path(values.get("CONTENT_OS_DB_PATH", "content-os-data/content-os.sqlite3")).parent)
+        try:
+            options = read_maintained_voice_options(values.get("CONTENT_OS_MAINTAINED_VOICE_CONFIG", ""), data_root)
+        except VoiceConfigurationError:
+            voice = RuntimeCapability("tts", "unavailable", "omnivoice", None,
+                "本地克隆运行配置不完整；未调用模型")
+        else:
+            voice = RuntimeCapability("tts", "ready", "omnivoice", str(options["model_root"]),
+                "本地克隆运行配置已检查；输出仍需自动 QA 和成片复核",
+                UsageCost(category=CostCategory.VOICE, amount=Decimal("0"), currency="USD",
+                    provider="omnivoice", note="local inference; no external provider charge"),
+                ("non_commercial_only", "output_quality_pending", "no inference probe request sent"))
+    elif selected_voice == "omnivoice":
         voice_model = selected_model("CONTENT_OS_OMNIVOICE_MODEL") or "official-pretrained"
         voice_python = values.get("CONTENT_OS_OMNIVOICE_PYTHON", "").strip()
         voice_checkpoint = values.get("CONTENT_OS_OMNIVOICE_MODEL", "").strip()
@@ -274,24 +336,42 @@ def inspect_runtime_capabilities(
             ("independent ASR evidence is required before Talking", "no inference probe request sent"),
         )
 
+    credential_file = values.get("CONTENT_OS_LLM_API_KEY_FILE", "").strip()
+    anthropic_scene_planner = not credential_file and configured("ANTHROPIC_API_KEY") and not configured(
+        "CONTENT_OS_LLM_API_KEY", "OPENAI_API_KEY"
+    )
+    if credential_file:
+        try:
+            scene_planner_api_key(values)
+            scene_planning = RuntimeCapability("scene_planning", "ready", "openai-compatible",
+                selected_model("CONTENT_OS_LLM_MODEL") or "gpt-4.1-mini",
+                "runtime credential file is configured; no probe request was sent")
+        except ScenePlannerConfigurationError:
+            scene_planning = RuntimeCapability("scene_planning", "provider_not_configured", "openai-compatible",
+                selected_model("CONTENT_OS_LLM_MODEL") or "gpt-4.1-mini",
+                "scene planner credential file is missing, unreadable or invalid")
+    else:
+        scene_planning = provider_capability(
+            "scene_planning", names=("CONTENT_OS_LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+            provider="anthropic" if anthropic_scene_planner else "openai-compatible",
+            model_names=("ANTHROPIC_MODEL", "CONTENT_OS_LLM_MODEL") if anthropic_scene_planner else ("CONTENT_OS_LLM_MODEL",),
+            default_model="claude-sonnet-4-6" if anthropic_scene_planner else "gpt-4.1-mini",
+        )
+    vision_model = selected_model("CONTENT_OS_VISION_MODEL") or "gpt-4.1-mini"
+    try:
+        vision_key = vision_api_key(values)
+        vision = RuntimeCapability("vision", "ready" if vision_key else "provider_not_configured",
+            "openai-compatible", vision_model,
+            "credential file is configured; no visual quality probe was sent" if vision_key else "vision credential file is not configured")
+    except VisionConfigurationError:
+        vision = RuntimeCapability("vision", "unavailable", "openai-compatible", vision_model,
+            "vision credential file is missing, unreadable or invalid")
     return (
         local_media,
         renderer,
-        provider_capability(
-            "scene_planning",
-            names=("CONTENT_OS_LLM_API_KEY", "OPENAI_API_KEY"),
-            provider="openai-compatible",
-            model_names=("CONTENT_OS_LLM_MODEL",),
-            default_model="gpt-4o-mini",
-        ),
+        scene_planning,
         asr,
-        provider_capability(
-            "vision",
-            names=("CONTENT_OS_VISION_API_KEY", "OPENAI_API_KEY"),
-            provider="openai-compatible",
-            model_names=("CONTENT_OS_VISION_MODEL",),
-            default_model="gpt-4o-mini",
-        ),
+        vision,
         embedding,
         retrieval,
         voice,

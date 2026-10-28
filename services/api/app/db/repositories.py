@@ -232,26 +232,15 @@ class ImageAssetRepository(_Repository[ImageAsset]):
         return None if row is None else _model(row, self.model)
 
 
-def _persist_scoped_media(db: Database, kind: str, value, write):
-    # The generation provenance and use restriction must commit together.
-    # Imports without a known producer retain their legacy payload/behavior;
-    # the content-origin index still protects same-byte reimports downstream.
-    from contextlib import nullcontext
-    from app.execution_scope import inherit_generated_media_scope
-    with (nullcontext() if db.connection.in_transaction else db.transaction(immediate=True)):
-        write()
-        inherit_generated_media_scope(db, kind, value)
-    return value
-
-
 class AudioAssetRepository(_Repository[AudioAsset]):
     table, model = "audio_assets", AudioAsset
 
     def create(self, value: AudioAsset) -> AudioAsset:
-        return _persist_scoped_media(self.db, "audio", value, lambda: self.db.connection.execute(
+        self.db.connection.execute(
             "INSERT INTO audio_assets(id, content_hash, payload) VALUES (?, ?, ?)",
             (str(value.id), value.content_hash, _payload(value)),
-        ))
+        )
+        return value
 
     def update(self, value: AudioAsset) -> AudioAsset:
         existing = self.db.connection.execute("SELECT content_hash FROM audio_assets WHERE id = ?", (str(value.id),)).fetchone()
@@ -259,14 +248,13 @@ class AudioAssetRepository(_Repository[AudioAsset]):
             raise KeyError(value.id)
         if existing["content_hash"] != value.content_hash:
             raise ValueError("audio asset content_hash is immutable")
-        def write():
-            cursor = self.db.connection.execute(
-                "UPDATE audio_assets SET content_hash = ?, payload = ? WHERE id = ?",
-                (value.content_hash, _payload(value), str(value.id)),
-            )
-            if cursor.rowcount != 1:
-                raise KeyError(value.id)
-        return _persist_scoped_media(self.db, "audio", value, write)
+        cursor = self.db.connection.execute(
+            "UPDATE audio_assets SET content_hash = ?, payload = ? WHERE id = ?",
+            (value.content_hash, _payload(value), str(value.id)),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
 
     def get_by_content_hash(self, content_hash: str) -> AudioAsset | None:
         row = self.db.connection.execute(
@@ -470,6 +458,14 @@ class TalkingProfileRepository(_Repository[TalkingProfile]):
         )
         return value
 
+    def update(self, value: TalkingProfile) -> TalkingProfile:
+        cursor = self.db.connection.execute(
+            "UPDATE talking_profiles SET payload = ? WHERE id = ?", (_payload(value), str(value.id))
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
+
 class BudgetPolicyRepository(_Repository[BudgetPolicy]):
     table, model = "budget_policies", BudgetPolicy
 
@@ -580,9 +576,10 @@ class AssetRepository(_Repository[Asset]):
         self.db.connection.execute("PRAGMA busy_timeout = 5000")
 
     def create(self, value: Asset) -> Asset:
-        return _persist_scoped_media(self.db, "asset", value, lambda: self.db.connection.execute(
+        self.db.connection.execute(
             "INSERT INTO assets(id, duration_ms, content_hash, payload) VALUES (?, ?, ?, ?)",
-            (str(value.id), value.duration_ms, value.content_hash, _payload(value))))
+            (str(value.id), value.duration_ms, value.content_hash, _payload(value)))
+        return value
 
     def update(self, value: Asset) -> Asset:
         existing = self.db.connection.execute("SELECT content_hash FROM assets WHERE id = ?", (str(value.id),)).fetchone()
@@ -593,11 +590,13 @@ class AssetRepository(_Repository[Asset]):
         clips = self.db.connection.execute("SELECT asset_duration_ms, end_ms FROM clips WHERE asset_id = ?", (str(value.id),)).fetchall()
         if any(int(row["asset_duration_ms"]) != value.duration_ms or int(row["end_ms"]) > value.duration_ms for row in clips):
             raise ValueError("asset duration update would invalidate existing clips")
-        def write():
-            cursor = self.db.connection.execute("UPDATE assets SET duration_ms = ?, content_hash = ?, payload = ? WHERE id = ?", (value.duration_ms, value.content_hash, _payload(value), str(value.id)))
-            if cursor.rowcount != 1:
-                raise KeyError(value.id)
-        return _persist_scoped_media(self.db, "asset", value, write)
+        cursor = self.db.connection.execute(
+            "UPDATE assets SET duration_ms = ?, content_hash = ?, payload = ? WHERE id = ?",
+            (value.duration_ms, value.content_hash, _payload(value), str(value.id)),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
+        return value
 
     def get_by_content_hash(self, content_hash: str) -> Asset | None:
         row = self.db.connection.execute("SELECT * FROM assets WHERE content_hash = ?", (content_hash,)).fetchone()

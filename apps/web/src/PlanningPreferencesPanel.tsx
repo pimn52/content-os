@@ -14,7 +14,6 @@ export function PlanningPreferencesPanel({ projectId, request }: Props) {
   const [retainedChoices, setRetainedChoices] = useState<RetainedChoice[]>([]);
   const [useConstraints, setUseConstraints] = useState<UseConstraint[]>([]);
   const [selectedManifest, setSelectedManifest] = useState("");
-  const [evidenceClass, setEvidenceClass] = useState<"" | "assisted_test" | "fixture">("");
   const [selectedUseIds, setSelectedUseIds] = useState<Record<string, string[]>>({});
   const [useHistories, setUseHistories] = useState<Record<string, UseConstraint[]>>({});
   const [selectionScope, setSelectionScope] = useState<{ profile_version: number; rule: string } | null>(null);
@@ -39,7 +38,7 @@ export function PlanningPreferencesPanel({ projectId, request }: Props) {
   useEffect(() => {
     const token = ++epoch.current;
     lock.current = false;
-    setBusy(false); setObservations([]); setPreferences([]); setSelectionScope(null); setRetainedChoices([]); setUseConstraints([]); setSelectedManifest(""); setEvidenceClass(""); setSelectedUseIds({}); setUseHistories({}); setReason(""); setError(""); setClassification("creator_preference");
+    setBusy(false); setObservations([]); setPreferences([]); setSelectionScope(null); setRetainedChoices([]); setUseConstraints([]); setSelectedManifest(""); setSelectedUseIds({}); setUseHistories({}); setReason(""); setError(""); setClassification("creator_preference");
     void load(token).catch(e => { if (epoch.current === token) setError(errorText(e)); });
     return () => { ++epoch.current; };
   }, [projectId, request]);
@@ -57,9 +56,9 @@ export function PlanningPreferencesPanel({ projectId, request }: Props) {
   const confirmationFor = (operation: string) => `确认${operation}？这会新增一条创作者范围的未来用法设置；原成片拒绝及其判断范围保持原样，不表示源素材已通过审核。`;
   async function intakeSelected() {
     const choice = retainedChoices.find(item => item.manifest_path === selectedManifest);
-    if (!choice || !evidenceClass) return;
+    if (!choice) return;
     await act(`${root}/source-use-constraints`, { manifest_path: choice.manifest_path,
-      expected_manifest_sha256: choice.expected_manifest_sha256, evidence_class: evidenceClass,
+      expected_manifest_sha256: choice.expected_manifest_sha256, evidence_class: "assisted_test",
       confirmed_source: true, reason, idempotency_key: `retained-intake:${crypto.randomUUID()}` },
       confirmationFor("确认此保留文件来自本创作者项目，并加入待确认拒绝证据"), "POST");
   }
@@ -91,10 +90,7 @@ export function PlanningPreferencesPanel({ projectId, request }: Props) {
       <label>保留的拒绝成片<select value={selectedManifest} onChange={event => setSelectedManifest(event.target.value)}>
         <option value="">请选择本项目中的保留文件</option>{retainedChoices.map(choice => <option key={choice.manifest_path} value={choice.manifest_path}>{choice.manifest_path} · {choice.original_review.scope}</option>)}
       </select></label>
-      <label>证据来源<select value={evidenceClass} onChange={event => setEvidenceClass(event.target.value as typeof evidenceClass)}>
-        <option value="">请选择</option><option value="assisted_test">已有成片的人审证据</option><option value="fixture">仅测试夹具</option>
-      </select></label>
-      <button className="button" disabled={busy || !selectedManifest || !evidenceClass || !reason.trim()} onClick={() => void intakeSelected()}>确认来源并加入待确认拒绝</button>
+      <button className="button" disabled={busy || !selectedManifest || !reason.trim()} onClick={() => void intakeSelected()}>确认来源并加入待确认拒绝</button>
       {retainedChoices.map(choice => <div className="asset-row" key={choice.manifest_path}>
         <strong>原审核结论：拒绝 · {choice.original_review.scope}</strong>
         <p>{choice.original_review.findings.map((finding, index) => <span key={index}>{finding}{index + 1 < choice.original_review.findings.length ? "；" : ""}</span>)}</p>
@@ -108,7 +104,7 @@ export function PlanningPreferencesPanel({ projectId, request }: Props) {
         return <div className="panel" key={rule.id}>
           <strong>未来用法设置 · v{rule.version} · {rule.state === "candidate" ? "待明确范围" : rule.state === "enabled" ? "已采纳" : "已禁用"}</strong>
           <p>原审核：拒绝 · {rule.original_review.scope} · {rule.original_review.evidence_reference}</p>
-          <p className="muted">范围来源：从完整成片方案提取，仅表示用户可选择的未来避用建议；不是分场景审核。证据类别：{rule.evidence_class === "fixture" ? "测试夹具（不可采纳为规则）" : "既有辅助人审"}。理由：{rule.reason}</p>
+          <p className="muted">范围来源：从完整成片方案提取，仅表示用户可选择的未来避用建议；不是分场景审核。证据类别：{rule.evidence_class === "fixture" ? "历史记录不可采纳" : "已有成片审核"}。理由：{rule.reason}</p>
           {stops.length > 0 && <p className="error">当前不可采纳：{stops.join(" · ")}</p>}
           {!usable.length && <p className="error">没有可准确还原的呈现范围；此证据只能保留，不能用于自动避用。</p>}
           {rule.uses.map(use => <label className="asset-row" key={use.use_id}>

@@ -1,85 +1,24 @@
-# Content OS — Start Here
+# Content OS 从这里开始
 
-This is the single navigation entry for humans and implementation agents.
+目标：让创作者在普通界面中，从新主题完成可发布短视频，并在第二主题重复。当前恢复顺序见 [STATUS.md](STATUS.md)。
 
-## 1. Understand the whole product first
+## 产品路径
 
-Read in this order:
+创作者资料与同意、授权素材入库及发布设置 → 一次主题输入 → 文案与镜头意图 → 核心素材可行性及预算 → 克隆旁白与核验 → 按真实时长调度 A/B-roll → 对口型与核验 → 装配、渲染及整片审核 → 交付、发布与反馈。用户介入时保留同作品候选，在选版或多版导出处说明影响。
 
-1. [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) — whole-product map, R1 scope and acceptance gate.
-2. [docs/product/README.md](docs/product/README.md) — product module index; open only the module relevant to the task.
-3. [docs/architecture/SYSTEM_ARCHITECTURE.md](docs/architecture/SYSTEM_ARCHITECTURE.md) — stable technical layers and first-class object boundaries.
-4. [STATUS.md](STATUS.md) — current facts, the one active work package, blockers and short queue.
-5. [AGENTS.md](AGENTS.md) — implementation rules, model-cost policy and work-package lifecycle.
-6. [DECISIONS.md](DECISIONS.md) — durable choices only, when rationale is needed.
-7. [README.md](README.md) — developer setup and repository quick start.
+本轮验收要求普通 UI 一次输入后产品自主成片，交用户判断确切版本；当前实现与缺口见 STATUS。
 
-For an implementation package, then open only its section in [docs/implementation/ROADMAP.md](docs/implementation/ROADMAP.md). That document owns future package contracts, not live status or product truth.
+## 按需阅读
 
-Do not start from old reviews, experiment logs or historical plans.
+| 要解决的问题 | 文档 |
+|---|---|
+| 产品范围与 R1 验收 | [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) |
+| 模块行为 | [docs/product/README.md](docs/product/README.md) |
+| 技术边界 | [docs/architecture/SYSTEM_ARCHITECTURE.md](docs/architecture/SYSTEM_ARCHITECTURE.md) |
+| 当前任务和阻塞 | [STATUS.md](STATUS.md) |
+| 实施约定 | [AGENTS.md](AGENTS.md) |
+| 持久决策 | [DECISIONS.md](DECISIONS.md) |
+| 开发运行 | [README.md](README.md) |
+| 后续依赖顺序 | [docs/implementation/ROADMAP.md](docs/implementation/ROADMAP.md) |
 
-When STATUS names a concrete evidence question, retrieve only the named Git
-revision or retained evaluation record needed to answer it. Do not promote an
-old fixture, rejected artifact or unrelated runtime result into current truth.
-
-## 2. Product map
-
-    Creator / IP + topic + authorized media
-                ↓
-    Copy / ScenePlan + preliminary EditPlan
-                ↓
-    Asset suitability + routing + execution/cost preflight
-                ↓
-    Required Voice / Talking / media transforms only
-                ↓
-    Actual timing + admitted assets → resolved EditPlan / VideoSpec
-                ↓
-    Render / technical QA / bounded repair / human review
-                ↓
-    Explicit publication / feedback → next planning input
-
-This is the target dependency order, not a claim that the entire flow is implemented. Initial visual feasibility precedes generation; post-generation planning refines measured timing, not the first visual decision.
-
-Detailed current behavior belongs in the product module specs, not in this navigation file.
-
-## 3. Current product modules
-
-- [Creator, IP and Intelligence](docs/product/CREATOR_INTELLIGENCE.md)
-- [Media, Asset Intelligence and Hybrid Routing](docs/product/MEDIA_ASSET_SYSTEM.md)
-- [Creator Voice and Talking](docs/product/VOICE_TALKING.md)
-- [Execution Planner and Hybrid Compute](docs/product/EXECUTION_COMPUTE.md)
-- [Timeline, Render, Review and Learning](docs/product/TIMELINE_RENDER_LEARNING.md)
-
-## 4. Documentation ownership
-
-| Document | Owns | Must not become |
-|---|---|---|
-| Execution Spec | product whole, R1 contract, module map | implementation diary |
-| Product module specs | current product functions and boundaries | experiment log |
-| System Architecture | stable technical layers/objects | current task list |
-| STATUS | current truth + one active package + short queue | history archive |
-| Implementation roadmap | future bounded package contracts / dependencies / tests | second STATUS or product PRD |
-| DECISIONS | durable decisions and rationale | duplicate product spec |
-| AGENTS | implementation/process/model policy | product PRD |
-| README | setup/contributor entry | governance source |
-
-**Completed is not archived.** When a completed implementation changes the product, update the relevant current product/module spec. The step-by-step implementation history remains in Git/evaluation evidence.
-
-docs/history/ is reserved only for a whole superseded document that still has historical reading value.
-
-## 5. Task handoff
-
-For implementation work:
-
-1. read this file;
-2. read the whole-product spec;
-3. read STATUS;
-4. read only the relevant product module and architecture section;
-5. read AGENTS for execution rules;
-6. inspect the relevant code/tests.
-
-Do not load every old work package into context.
-
-Before handoff, run:
-
-    python scripts/check_docs.py
+只打开当前任务相关的代码、模块和证据。旧实验过程以 Git 与本地证据为准。

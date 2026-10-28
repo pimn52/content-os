@@ -1,5 +1,113 @@
 {
   "$defs": {
+    "GraphicCardPlan": {
+      "additionalProperties": false,
+      "description": "Explicit executable text card, or a named unsupported visual need.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "text_card",
+            "diagram",
+            "unsupported",
+            "none"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "treatment": {
+          "anyOf": [
+            {
+              "enum": [
+                "headline",
+                "key_point",
+                "contrast",
+                "diagram_flow",
+                "diagram_loss",
+                "diagram_factors"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Treatment"
+        },
+        "points": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Points",
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "GraphicCardPlan",
+      "type": "object"
+    },
+    "MaterialRequest": {
+      "additionalProperties": false,
+      "description": "\u5c1a\u672a\u53d6\u5f97\u7684\u753b\u9762\u9700\u6c42\uff0c\u4e0d\u80fd\u4f5c\u4e3a\u5df2\u6709\u7d20\u6750\u8fdb\u5165\u88c5\u914d\u3002",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_kind": {
+          "enum": [
+            "stock",
+            "ai_broll"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_kind",
+        "query",
+        "reason"
+      ],
+      "title": "MaterialRequest",
+      "type": "object"
+    },
     "SourceKind": {
       "enum": [
         "user_asset",
@@ -8,6 +116,7 @@
         "stock",
         "ai_image",
         "ai_video",
+        "ai_broll",
         "typography",
         "screenshot",
         "chart",
@@ -132,6 +241,42 @@
     "visual_intent": {
       "$ref": "#/$defs/VisualIntent"
     },
+    "supporting_visual_intent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VisualIntent"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "\u53ef\u66ff\u4ee3\u672c\u4eba\u53ef\u89c1\u8bb2\u8ff0\u7684\u5207\u9898\u5b9e\u62cd\u610f\u56fe\uff1b\u4e0d\u53ef\u66ff\u4ee3\u4e0d\u53ef\u7f3a\u7684\u672c\u4eba\u8868\u6f14\u6216\u4e8b\u5b9e\u8bc1\u636e\u3002"
+    },
+    "preferred_clip_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Preferred Clip Id"
+    },
+    "graphic_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GraphicCardPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "preferred_sources": {
       "items": {
         "$ref": "#/$defs/SourceKind"
@@ -165,6 +310,65 @@
       "maxItems": 100,
       "title": "Evidence Refs",
       "type": "array"
+    },
+    "visual_requirement": {
+      "default": "unknown",
+      "enum": [
+        "unknown",
+        "creator_speaking",
+        "action_evidence",
+        "explanatory"
+      ],
+      "title": "Visual Requirement",
+      "type": "string"
+    },
+    "visual_requirement_reason": {
+      "anyOf": [
+        {
+          "maxLength": 1000,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Visual Requirement Reason"
+    },
+    "viewer_takeaway": {
+      "anyOf": [
+        {
+          "maxLength": 1000,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Viewer Takeaway"
+    },
+    "material_request": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MaterialRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "reuse_intent": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "reference"
+      ],
+      "title": "Reuse Intent",
+      "type": "string"
     }
   },
   "required": [

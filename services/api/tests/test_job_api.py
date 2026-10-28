@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -5,9 +7,18 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository, Database
-from app.domain.models import Asset, RationalFps
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
+from app.domain.models import Asset, AudioAsset, Clip, IPProfile, Project, RationalFps, TranscriptSegment
 from app.main import create_app
+
+
+def test_render_output_root_defaults_under_configured_data_root(tmp_path: Path, monkeypatch):
+    media_root = tmp_path / "media"
+    monkeypatch.setenv("CONTENT_OS_DATA_ROOT", str(media_root))
+
+    app = create_app(data_path=tmp_path / "database.sqlite")
+
+    assert app.state.render_output_root == (media_root / "renders").resolve()
 
 
 def test_index_clip_scope_is_asset_bound_and_part_of_idempotency(tmp_path):
@@ -120,3 +131,92 @@ def test_concurrent_api_enqueue_requests_are_serialized(tmp_path: Path):
         assert reopened.connection.execute("SELECT COUNT(*) FROM asset_job_targets").fetchone()[0] == 8
     finally:
         reopened.close()
+
+
+def test_audio_asset_transcription_api_requires_project_bound_audio_and_is_idempotent(tmp_path: Path):
+    from types import SimpleNamespace
+    import pytest
+    from fastapi import HTTPException
+    from app.main import AudioAssetTranscriptionEnqueueRequest
+
+    path = tmp_path / "audio-transcription.sqlite"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source video")
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"source audio")
+    now = datetime.now(timezone.utc)
+    with Database(path) as db:
+        profile = IPProfileRepository(db).create(IPProfile(creator_name="Creator"))
+        project = ProjectRepository(db).create(Project(
+            ip_profile_id=profile.id, title="P6", topic="bitrate",
+            fps=RationalFps(numerator=30, denominator=1), created_at=now,
+        ))
+        other_project = ProjectRepository(db).create(Project(
+            ip_profile_id=profile.id, title="Other", topic="other",
+            fps=RationalFps(numerator=30, denominator=1), created_at=now,
+        ))
+        source = AssetRepository(db).create(Asset(
+            source_file=str(video_path), content_hash=hashlib.sha256(video_path.read_bytes()).hexdigest(),
+            duration_ms=5_000, width=1280, height=720, fps=RationalFps(numerator=30, denominator=1),
+            has_audio=True, authorization_reference="owner-approved", imported_at=now,
+        ))
+        clip = ClipRepository(db).create(Clip(
+            asset_id=source.id, start_ms=0, end_ms=5_000, asset_duration_ms=5_000,
+            transcript="one two", transcript_source="source-asr",
+            transcript_segments=[TranscriptSegment(start_ms=1_000, end_ms=2_000, text="one"),
+                                 TranscriptSegment(start_ms=2_000, end_ms=3_000, text="two")],
+        ))
+        segments = [TranscriptSegment(start_ms=0, end_ms=1_000, text="one"),
+                    TranscriptSegment(start_ms=1_000, end_ms=2_000, text="two")]
+
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+        transcript_source = "source-clip:source-asr"
+        binding = {
+            "project_id": str(project.id), "source_asset_id": str(source.id),
+            "source_asset_sha256": source.content_hash, "source_clip_id": str(clip.id),
+            "source_start_ms": 1_000, "source_end_ms": 3_000,
+            "authorization_reference": source.authorization_reference,
+            "transcript_source": transcript_source,
+            "source_transcript_source": transcript_source,
+            "transcript_sha256": digest([item.model_dump(mode="json") for item in segments]),
+            "source_transcript_sha256": digest([item.model_dump(mode="json") for item in segments]),
+        }
+        binding["binding_sha256"] = digest(binding)
+        audio = AudioAssetRepository(db).create(AudioAsset(
+            source_file=str(audio_path), content_hash=hashlib.sha256(audio_path.read_bytes()).hexdigest(),
+            duration_ms=2_000, sample_rate=48_000, channels=2,
+            authorization_reference=source.authorization_reference, imported_at=now,
+            transcript_source=transcript_source, transcript_segments=segments,
+            metadata={"source_audio": {"schema_version": 1, "bindings": [binding]}},
+        ))
+
+    app = create_app(path)
+    with Database(path, startup_mode="existing") as db:
+        app.state.database = db
+        app.state.data_root = tmp_path
+        route = next(route for route in app.routes
+            if getattr(route, "path", None) == "/audio-assets/{audio_id}/jobs/transcribe")
+
+        def invoke(project_id, key):
+            request = SimpleNamespace(app=app)
+            coroutine = route.endpoint(audio.id, AudioAssetTranscriptionEnqueueRequest(
+                project_id=project_id, idempotency_key=key,
+            ), request)
+            try:
+                coroutine.send(None)
+            except StopIteration as completed:
+                return completed.value
+            raise AssertionError("route unexpectedly suspended")
+
+        first = invoke(project.id, "asr-once")
+        assert first["type"] == "transcribe_audio_asset"
+        assert first["target_asset_id"] is None
+        repeated = invoke(project.id, "asr-once")
+        assert repeated["id"] == first["id"]
+        with pytest.raises(HTTPException) as error:
+            invoke(other_project.id, "wrong-project")
+        assert error.value.status_code == 409
+        assert db.connection.execute("SELECT COUNT(*) FROM audio_asset_job_targets").fetchone()[0] == 1

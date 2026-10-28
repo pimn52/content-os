@@ -1,9 +1,8 @@
 """Server-enforced draft revisioning and downstream invalidation.
 
 The browser may clear stale UI state optimistically, but it is not the source
-of truth.  This module makes a changed script, scene copy, topic, or IP
-revision invalidate derived routes, selections, and render specifications even
-when an old client retries a previously assembled payload.
+of truth. This module keeps a user-edited scene plan only when it fully matches
+the changed script, and invalidates routes, selections, and render specs.
 """
 from __future__ import annotations
 
@@ -11,10 +10,11 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
+from uuid import uuid5
 
 from app.db import IPProfileRepository, ProjectDraftRepository
 from app.db.database import Database
-from app.domain.models import CandidateAsset, DraftRoute, NarrationPerformancePlan, Project, ProjectDraft, ScenePlan, VideoSpec
+from app.domain.models import CandidateAsset, DraftRoute, NarrationPerformancePlan, Project, ProjectDraft, ScenePlan, SourceKind, TalkingPerformanceBrief, VideoSpec
 from app.narration_performance import validate_narration_performance_plan
 
 
@@ -56,6 +56,13 @@ def save_project_draft(
     refs = list(dict.fromkeys(str(value) for value in evidence_refs if str(value)))
     repository = ProjectDraftRepository(db)
     previous = repository.get(project.id)
+    # 未选材草稿使用已有 Master 的真实短句；Run 已锁定的输入不自动重构。
+    current_run = previous is not None and db.connection.execute(
+        "SELECT 1 FROM production_runs WHERE project_id = ? AND draft_version = ? AND script_revision = ? LIMIT 1",
+        (str(project.id), previous.version, previous.script_revision),
+    ).fetchone() is not None
+    if not stored_routes and not stored_confirmed and video_spec is None and not current_run:
+        stored_scenes = _split_talking_master_clauses(db, project, script, stored_scenes)
     profile_version = _ip_profile_version(db, project)
     script_changed = previous is None or previous.script != script
     topic_changed = previous is None or previous.topic != topic
@@ -88,10 +95,14 @@ def save_project_draft(
         reasons.append("ip_profile_changed")
 
     if upstream_changed and previous is not None:
-        # A user edit to the prose or topic cannot retain an old plan. A
-        # freshly returned server-side ScenePlan is the one narrow exception;
-        # it is still paired with empty downstream artifacts.
-        if (script_changed or topic_changed or ip_profile_changed) and not accept_scene_plan_with_new_script:
+        # A changed script may keep the scenes submitted with it only when
+        # their ordered spoken copy exactly covers that script. Topic and IP
+        # changes still need a fresh plan because their evidence changed.
+        aligned_manual_copy = (
+            script_changed and not topic_changed and not ip_profile_changed
+            and _scene_copy_matches_script(script, stored_scenes)
+        )
+        if (topic_changed or ip_profile_changed or (script_changed and not aligned_manual_copy)) and not accept_scene_plan_with_new_script:
             stored_scenes = []
         stored_routes = []
         stored_confirmed = []
@@ -154,6 +165,112 @@ def draft_input_fingerprint(*, script: str | None, topic: str | None, scenes: Se
 
 def _scene_copy_fingerprint(scenes: Sequence[ScenePlan]) -> str:
     return draft_input_fingerprint(script=None, topic=None, scenes=scenes)
+
+
+def _scene_copy_matches_script(script: str | None, scenes: Sequence[ScenePlan]) -> bool:
+    if not script or not scenes:
+        return False
+    from app.voice_qa import comparison_tokens
+
+    planned = tuple(token for scene in scenes for token in comparison_tokens(scene.voice_text))
+    target = comparison_tokens(script)
+    return bool(target) and planned == target
+
+
+def _split_talking_master_clauses(db: Database, project: Project, script: str | None,
+                                 scenes: list[ScenePlan], *, master=None, max_segment_ms=None) -> list[ScenePlan]:
+    """Split editable Talking copy at admitted Master clauses, never at guessed times."""
+    speaking_sources = {SourceKind.AI_VIDEO, SourceKind.TALKING_PROFILE}
+    if not _scene_copy_matches_script(script, scenes) or not any(
+        scene.visual_requirement == "creator_speaking"
+        and speaking_sources.intersection((*scene.preferred_sources, *scene.fallback_sources)) for scene in scenes
+    ):
+        return scenes
+    from app.production_preflight import _approved_master
+    from app.voice_qa import comparison_tokens, verified_generated_copy_tokens
+
+    master = master or _approved_master(db, project.id, script)
+    if master is None or not master.transcript_source or not master.transcript_segments:
+        return scenes
+    target = comparison_tokens(script)
+    segments = master.transcript_segments
+    observed = tuple(token for segment in segments for token in comparison_tokens(segment.text))
+    if target != observed and verified_generated_copy_tokens(master) != target:
+        return scenes
+    edges = {0: (0, 0)}
+    offset = previous_end = 0
+    for index, segment in enumerate(segments):
+        tokens = comparison_tokens(segment.text)
+        if (not tokens or segment.start_ms < previous_end or segment.end_ms <= segment.start_ms
+            or segment.end_ms > master.duration_ms):
+            return scenes
+        offset += len(tokens)
+        edges[offset] = (index + 1, segment.end_ms)
+        previous_end = segment.end_ms
+
+    result = []
+    offset = 0
+    clause_limit = max_segment_ms if type(max_segment_ms) is int and max_segment_ms>0 else TalkingPerformanceBrief().minimum_reference_duration_ms
+    for scene in scenes:
+        end_offset = offset + len(comparison_tokens(scene.voice_text))
+        eligible = (scene.visual_requirement == "creator_speaking"
+            and speaking_sources.intersection((*scene.preferred_sources, *scene.fallback_sources))
+            and offset in edges and end_offset in edges)
+        parts = []
+        if eligible:
+            first, start_ms = edges[offset]
+            last, _ = edges[end_offset]
+            if last - first > 1:
+                groups, count, group_start = [], 0, start_ms
+                for index in range(first, last):
+                    segment = segments[index]
+                    end_ms = master.duration_ms if end_offset == len(target) and index == last - 1 else segment.end_ms
+                    if index > first and end_ms - group_start > clause_limit:
+                        previous_ms = segments[index - 1].end_ms
+                        if previous_ms > group_start:
+                            groups.append((count, previous_ms))
+                            group_start = previous_ms
+                    count += len(comparison_tokens(segment.text))
+                groups.append((count, end_ms))
+                texts = _copy_at_token_boundaries(scene.voice_text, [count for count, _ in groups[:-1]]) if len(groups) > 1 else None
+                if texts is not None:
+                    for text, (_, end_ms) in zip(texts, groups):
+                        # 沿用 Master 的连续时轴，尾段包含真实音频尾部；不缩短来迎合参考片。
+                        identity = uuid5(scene.id, f"master-clause:{master.id}:{start_ms}:{end_ms}")
+                        parts.append(scene.model_copy(update={
+                            "id": identity, "scene_id": f"{scene.scene_id[:70]}--speech-{identity.hex[:12]}",
+                            "voice_text": text, "duration_target_ms": end_ms - start_ms,
+                        }))
+                        start_ms = end_ms
+        result.extend(parts or [scene])
+        offset = end_offset
+    if len(result) > 1_000 or len(result) == len(scenes):
+        return scenes
+    return [scene.model_copy(update={"order": index}) for index, scene in enumerate(result)]
+
+
+def _copy_at_token_boundaries(text: str, counts: Sequence[int]) -> list[str] | None:
+    """Map ASR positions back to exact editable text, retaining punctuation and whitespace."""
+    from app.voice_qa import comparison_tokens
+
+    tokens = comparison_tokens(text)
+    cuts = [0]
+    for count in counts:
+        lower, upper = cuts[-1], len(text)
+        # 最右侧同 token 数位置保留分句后的标点，不把英语单词切半。
+        while lower < upper:
+            middle = (lower + upper + 1) // 2
+            if len(comparison_tokens(text[:middle])) <= count:
+                lower = middle
+            else:
+                upper = middle - 1
+        if (lower <= cuts[-1] or lower >= len(text)
+            or comparison_tokens(text[:lower]) != tokens[:count]
+            or comparison_tokens(text[lower:]) != tokens[count:]):
+            return None
+        cuts.append(lower)
+    cuts.append(len(text))
+    return [text[left:right] for left, right in zip(cuts, cuts[1:])]
 
 
 def _ip_profile_version(db: Database, project: Project) -> int | None:

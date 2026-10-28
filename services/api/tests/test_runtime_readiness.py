@@ -8,6 +8,19 @@ from app.main import create_app
 from app.runtime import inspect_runtime_capabilities, resolve_local_executable
 
 
+def test_scene_planner_key_file_readiness_matches_selected_file(tmp_path):
+    key_file = tmp_path / "provider-key.txt"
+    key_file.write_text("file-only-secret\n", encoding="utf-8")
+    env = {"CONTENT_OS_LLM_API_KEY_FILE": str(key_file), "CONTENT_OS_LLM_MODEL": "deepseek-flash",
+           "ANTHROPIC_API_KEY": "inherited-anthropic-secret"}
+    scene = next(c for c in inspect_runtime_capabilities(env) if c.key == "scene_planning")
+    assert scene.status == "ready" and scene.provider == "openai-compatible" and scene.model == "deepseek-flash"
+    assert "secret" not in str(scene)
+    key_file.unlink()
+    missing = next(c for c in inspect_runtime_capabilities(env) if c.key == "scene_planning")
+    assert missing.status == "provider_not_configured" and missing.provider == "openai-compatible"
+
+
 def test_capability_inspection_distinguishes_configuration_and_development() -> None:
     env = {
         "CONTENT_OS_LLM_API_KEY": "secret-that-must-not-be-returned",
@@ -23,10 +36,23 @@ def test_capability_inspection_distinguishes_configuration_and_development() -> 
     assert "secret" not in " ".join(value.detail for value in capabilities)
 
 
+def test_anthropic_scene_planner_configuration_is_reported_without_secret(monkeypatch) -> None:
+    capabilities = inspect_runtime_capabilities(
+        {"ANTHROPIC_API_KEY": "runtime-secret", "ANTHROPIC_MODEL": "claude-sonnet-4-6"},
+        executable_lookup=lambda command: f"C:/{command}.exe",
+    )
+    scene_planning = next(value for value in capabilities if value.key == "scene_planning")
+    assert scene_planning.status == "ready"
+    assert scene_planning.provider == "anthropic"
+    assert scene_planning.model == "claude-sonnet-4-6"
+    assert "runtime-secret" not in str(scene_planning)
+
+
 def test_runtime_readiness_endpoint_is_side_effect_free_and_secret_free(tmp_path, monkeypatch) -> None:
     for name in (
         "OPENAI_API_KEY",
         "CONTENT_OS_LLM_API_KEY",
+        "ANTHROPIC_API_KEY",
         "CONTENT_OS_ASR_API_KEY",
         "CONTENT_OS_VISION_API_KEY",
         "CONTENT_OS_EMBEDDING_API_KEY",
@@ -56,6 +82,14 @@ def test_lexical_retrieval_readiness_is_explicit_without_claiming_embedding(tmp_
     assert by_key["retrieval"].provider == "local"
     assert by_key["embedding"].status == "provider_not_configured"
     assert "embedding" not in by_key["retrieval"].detail.lower()
+
+
+def test_retrieval_defaults_to_local_when_embedding_is_unconfigured() -> None:
+    capabilities = inspect_runtime_capabilities({}, executable_lookup=lambda command: None)
+    by_key = {value.key: value for value in capabilities}
+    assert by_key["embedding"].status == "provider_not_configured"
+    assert by_key["retrieval"].status == "ready"
+    assert by_key["retrieval"].provider == "local"
 
 
 def test_local_executable_resolution_prefers_explicit_override_and_bundled_tools(monkeypatch) -> None:

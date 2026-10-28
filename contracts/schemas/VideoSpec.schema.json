@@ -20,6 +20,271 @@
       "title": "CostCategory",
       "type": "string"
     },
+    "EditPlan": {
+      "additionalProperties": false,
+      "description": "Visual-direction bridge from ScenePlan/routed assets to VideoSpec.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "project_id": {
+          "format": "uuid",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "scenes": {
+          "items": {
+            "$ref": "#/$defs/EditPlanScene"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Scenes",
+          "type": "array"
+        },
+        "style_tokens": {
+          "$ref": "#/$defs/VisualStyleTokens"
+        }
+      },
+      "required": [
+        "project_id",
+        "scenes"
+      ],
+      "title": "EditPlan",
+      "type": "object"
+    },
+    "EditPlanFallback": {
+      "additionalProperties": false,
+      "description": "An explicit local graphic fallback if the selected visual cannot be used.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_kind": {
+          "const": "typography",
+          "default": "typography",
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "graphic_treatment": {
+          "$ref": "#/$defs/GraphicTreatment"
+        },
+        "text": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "graphic_treatment",
+        "text"
+      ],
+      "title": "EditPlanFallback",
+      "type": "object"
+    },
+    "EditPlanScene": {
+      "additionalProperties": false,
+      "description": "One provider-neutral presentation decision for one routed ScenePlan.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scene_plan_id": {
+          "format": "uuid",
+          "title": "Scene Plan Id",
+          "type": "string"
+        },
+        "scene_id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "visual_role": {
+          "$ref": "#/$defs/EditVisualRole"
+        },
+        "selected_source_kind": {
+          "$ref": "#/$defs/SourceKind"
+        },
+        "selected_asset_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Asset Id"
+        },
+        "selected_clip_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Clip Id"
+        },
+        "framing_policy": {
+          "$ref": "#/$defs/TalkingFramingPolicy",
+          "default": "face_safe_contain"
+        },
+        "portrait_presentation": {
+          "$ref": "#/$defs/PortraitPresentation",
+          "default": "full_canvas"
+        },
+        "crop_safety_evidence_reference": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crop Safety Evidence Reference"
+        },
+        "crop_safety_start_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crop Safety Start Ms"
+        },
+        "crop_safety_end_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crop Safety End Ms"
+        },
+        "subtitle_treatment": {
+          "$ref": "#/$defs/SubtitleTreatment",
+          "default": "timed_captions"
+        },
+        "burned_in_subtitles": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "present",
+            "absent"
+          ],
+          "title": "Burned In Subtitles",
+          "type": "string"
+        },
+        "source_bottom_crop_ratio": {
+          "default": 0,
+          "maximum": 0.4,
+          "minimum": 0,
+          "title": "Source Bottom Crop Ratio",
+          "type": "number"
+        },
+        "source_subtitle_evidence_reference": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Subtitle Evidence Reference"
+        },
+        "graphic_treatment": {
+          "$ref": "#/$defs/GraphicTreatment",
+          "default": "none"
+        },
+        "graphic_text": {
+          "anyOf": [
+            {
+              "maxLength": 10000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Graphic Text"
+        },
+        "transition_intent": {
+          "const": "cut",
+          "default": "cut",
+          "title": "Transition Intent",
+          "type": "string"
+        },
+        "fallback": {
+          "$ref": "#/$defs/EditPlanFallback"
+        }
+      },
+      "required": [
+        "scene_plan_id",
+        "scene_id",
+        "visual_role",
+        "selected_source_kind",
+        "fallback"
+      ],
+      "title": "EditPlanScene",
+      "type": "object"
+    },
+    "EditVisualRole": {
+      "description": "Editorial presentation role, independent of the renderer or provider.",
+      "enum": [
+        "talking",
+        "footage",
+        "graphic"
+      ],
+      "title": "EditVisualRole",
+      "type": "string"
+    },
+    "GraphicTreatment": {
+      "enum": [
+        "none",
+        "headline",
+        "key_point",
+        "contrast",
+        "diagram_flow",
+        "diagram_loss",
+        "diagram_factors"
+      ],
+      "title": "GraphicTreatment",
+      "type": "string"
+    },
     "MasterNarration": {
       "additionalProperties": false,
       "description": "One authorized, timestamped narration track driving a whole VideoSpec.\n\nThe audio remains a single continuous local asset.  Video scenes reference\nintervals on this track for provenance and caption timing; they do not\neach replay the recording from its beginning.",
@@ -73,6 +338,16 @@
       "title": "MasterNarration",
       "type": "object"
     },
+    "PortraitPresentation": {
+      "description": "Where an authorized source sits inside the vertical output canvas.",
+      "enum": [
+        "full_canvas",
+        "portrait_panel",
+        "stacked_comparison"
+      ],
+      "title": "PortraitPresentation",
+      "type": "string"
+    },
     "ProjectFormat": {
       "enum": [
         "vertical",
@@ -119,12 +394,30 @@
         "stock",
         "ai_image",
         "ai_video",
+        "ai_broll",
         "typography",
         "screenshot",
         "chart",
         "talking_profile"
       ],
       "title": "SourceKind",
+      "type": "string"
+    },
+    "SubtitleTreatment": {
+      "enum": [
+        "timed_captions",
+        "none"
+      ],
+      "title": "SubtitleTreatment",
+      "type": "string"
+    },
+    "TalkingFramingPolicy": {
+      "description": "Bounded R1 framing choices for creator Talking footage.",
+      "enum": [
+        "face_safe_contain",
+        "verified_static_crop"
+      ],
+      "title": "TalkingFramingPolicy",
       "type": "string"
     },
     "TranscriptSegment": {
@@ -237,6 +530,16 @@
       ],
       "title": "UsageCost",
       "type": "object"
+    },
+    "VerticalReframeMode": {
+      "description": "An explicit, reviewable treatment of non-vertical source media.",
+      "enum": [
+        "contain",
+        "center_crop",
+        "bottom_crop_contain"
+      ],
+      "title": "VerticalReframeMode",
+      "type": "string"
     },
     "VideoCaption": {
       "additionalProperties": false,
@@ -369,6 +672,42 @@
           "maxLength": 100,
           "title": "Transition",
           "type": "string"
+        },
+        "visual_role": {
+          "$ref": "#/$defs/EditVisualRole",
+          "default": "footage"
+        },
+        "framing_policy": {
+          "$ref": "#/$defs/TalkingFramingPolicy",
+          "default": "face_safe_contain"
+        },
+        "portrait_presentation": {
+          "$ref": "#/$defs/PortraitPresentation",
+          "default": "full_canvas"
+        },
+        "subtitle_treatment": {
+          "$ref": "#/$defs/SubtitleTreatment",
+          "default": "timed_captions"
+        },
+        "graphic_treatment": {
+          "$ref": "#/$defs/GraphicTreatment",
+          "default": "none"
+        },
+        "graphic_text": {
+          "anyOf": [
+            {
+              "maxLength": 10000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Graphic Text"
+        },
+        "style_tokens": {
+          "$ref": "#/$defs/VisualStyleTokens"
         }
       },
       "required": [
@@ -465,6 +804,30 @@
           ],
           "default": null,
           "title": "Source Duration Ms"
+        },
+        "vertical_reframe_mode": {
+          "$ref": "#/$defs/VerticalReframeMode",
+          "default": "contain"
+        },
+        "vertical_reframe_evidence_reference": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vertical Reframe Evidence Reference"
+        },
+        "source_bottom_crop_ratio": {
+          "default": 0,
+          "maximum": 0.4,
+          "minimum": 0,
+          "title": "Source Bottom Crop Ratio",
+          "type": "number"
         }
       },
       "required": [
@@ -472,6 +835,52 @@
         "authorization_reference"
       ],
       "title": "VideoVisual",
+      "type": "object"
+    },
+    "VisualStyleTokens": {
+      "additionalProperties": false,
+      "description": "Reusable visual tokens consumed by the renderer, never provider settings.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "name": {
+          "default": "content-os-dark",
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "background_color": {
+          "default": "#172033",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Background Color",
+          "type": "string"
+        },
+        "foreground_color": {
+          "default": "#f8fbff",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Foreground Color",
+          "type": "string"
+        },
+        "accent_color": {
+          "default": "#65d3b4",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Accent Color",
+          "type": "string"
+        },
+        "font_family": {
+          "default": "Inter, ui-sans-serif, system-ui",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Font Family",
+          "type": "string"
+        }
+      },
+      "title": "VisualStyleTokens",
       "type": "object"
     }
   },
@@ -543,6 +952,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/UsageCost"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "edit_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EditPlan"
         },
         {
           "type": "null"

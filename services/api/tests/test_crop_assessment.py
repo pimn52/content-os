@@ -112,7 +112,7 @@ def test_preflight_and_router_exclude_only_the_proposed_bad_crop(tmp_path: Path,
             voice_text="A fresh creator point.", duration_target_ms=3_000,
             visual_intent=VisualIntent(subject="creator", action="showing a workflow"),
             preferred_sources=[SourceKind.USER_ASSET], fallback_sources=[SourceKind.TYPOGRAPHY],
-            visual_requirement="explanatory", visual_requirement_reason="This fixture explicitly permits a concept card after crop rejection.",
+            visual_requirement="explanatory", visual_requirement_reason="需要展示实际画面中的操作过程。",
         )
         saved = client.put(f"/projects/{project_id}/draft", json={
             "script": scene.voice_text, "topic": "New", "scenes": [scene.model_dump(mode="json")],
@@ -141,7 +141,8 @@ def test_preflight_and_router_exclude_only_the_proposed_bad_crop(tmp_path: Path,
             "crop_proposals": [proposal.model_dump(mode="json")],
         }).json()
         assert latest["evidence_level"] == "metadata_and_persisted_negative_assessment"
-        assert latest["scenes"][0]["selected_candidate"]["source_kind"] == "typography"
+        assert latest["scenes"][0]["selected_candidate"] is None
+        assert "visual_route_unresolved:hook" in latest["stop_reasons"]
         assert any("face-boundary failure" in reason for reason in latest["scenes"][0]["reasons"])
         route = client.post(f"/projects/{project_id}/asset-routes", json={
             "scenes": [scene.model_dump(mode="json")],

@@ -96,6 +96,8 @@ def test_repeat_processing_is_stable_and_duplicate_free(tmp_path: Path) -> None:
         assert [clip.id for clip in first.clips] == [clip.id for clip in second.clips]
         assert first.audio_path == second.audio_path
         assert first.keyframe_paths == second.keyframe_paths
+        assert first.keyframe_timestamps_ms == second.keyframe_timestamps_ms
+        assert first.keyframe_timestamps_ms == tuple((clip.start_ms + clip.end_ms) / 2 for clip in first.clips)
         assert ClipRepository(db).list_by_asset(asset.id) == list(first.clips)
         assert len(first.keyframe_paths) == len(set(first.keyframe_paths)) == 2
     finally:

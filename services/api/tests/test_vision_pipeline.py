@@ -94,6 +94,64 @@ def test_pipeline_provider_order_and_persistence(tmp_path: Path):
         db.close()
 
 
+def test_analysis_frame_time_and_hash_survive_provider_and_persistence(tmp_path):
+    import hashlib
+    db, asset, clips, paths = _fixture(tmp_path)
+    try:
+        analysis = MediaAnalysisResult(asset, tuple(clips), None, paths, (500.5, 1500))
+        stored = MediaVisionPipeline(db, _Provider()).process(analysis).asset
+        facts = stored.metadata['visual_analysis'][str(clips[0].id)]
+        assert facts['observations'][0]['timestamp_ms'] == 500.5
+        assert facts['observations'][0]['frame_sha256'] == hashlib.sha256(paths[0].read_bytes()).hexdigest()
+        assert facts['coverage'] == 'sampled_keyframe'
+        assert 'covered_start_ms' not in facts
+        from app.media.vision import planning_visual_evidence
+        hint = planning_visual_evidence(db, stored, clips[0])
+        assert hint['source_hash_bound'] and hint['observations'][0]['timestamp_ms'] == 500.5
+        assert hint['coverage'] != 'full_interval_continuous'
+    finally:
+        db.close()
+
+
+def test_bad_timestamp_or_frame_changed_during_analysis_never_updates_clips(tmp_path):
+    db, asset, clips, paths = _fixture(tmp_path)
+    try:
+        provider = _Provider()
+        with pytest.raises(VisionKeyframeMismatch, match='timestamps'):
+            MediaVisionPipeline(db, provider).process(asset, clips, paths, keyframe_timestamps_ms=(1500, 500))
+        assert provider.paths == []
+        class Mutating(_Provider):
+            def analyze(self, path):
+                result = super().analyze(path)
+                path.write_bytes(b'changed-frame')
+                return result
+        with pytest.raises(VisionKeyframeMismatch, match='changed'):
+            MediaVisionPipeline(db, Mutating()).process(asset, clips, paths)
+        assert ClipRepository(db).list_by_asset(asset.id) == clips
+        assert AssetRepository(db).get(asset.id).metadata == {}
+    finally:
+        db.close()
+
+
+def test_source_change_while_provider_runs_cannot_receive_old_observations(tmp_path):
+    from app.media.vision import VisualMetadataMismatch
+    db, asset, clips, paths = _fixture(tmp_path)
+    try:
+        class ChangingSource(_Provider):
+            def analyze(self, path):
+                # Simulate an out-of-band database replacement; normal repository updates forbid changing this hash.
+                replacement = asset.model_copy(update={'content_hash':'b'*64})
+                db.connection.execute('UPDATE assets SET content_hash=?,payload=? WHERE id=?',
+                    (replacement.content_hash, replacement.model_dump_json(), str(asset.id)))
+                return super().analyze(path)
+        with pytest.raises(VisualMetadataMismatch, match='source identity changed'):
+            MediaVisionPipeline(db, ChangingSource()).process(asset, clips, paths)
+        assert ClipRepository(db).list_by_asset(asset.id) == clips
+        assert AssetRepository(db).get(asset.id).metadata == {}
+    finally:
+        db.close()
+
+
 def test_explicit_clip_refresh_preserves_unselected_clip_and_geometry(tmp_path):
     db, asset, clips, paths = _fixture(tmp_path)
     try:

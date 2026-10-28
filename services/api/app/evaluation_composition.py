@@ -15,7 +15,6 @@ from app.execution_admission import ProviderUseAdmissionService, UseAdmissionErr
 from app.execution_scope import ExecutionScopeService, _make_scope, read_subject_scope, job_use_identity
 from app.media.audio_access import file_digest
 
-
 def is_composition(db, *, run_id=None, job_id=None, render_id=None):
     if CompositionRepository(db).owner(run_id=run_id,job_id=job_id,render_id=render_id):
         return True
@@ -36,34 +35,12 @@ class EvaluationCompositionService:
         self.masters = EvaluationMasterRepository(db)
         self.admissions = ProviderUseAdmissionService(db,self.root)
 
-    def _token(self):
-        # The local monolith's DB fence ignores only lease renewal timestamps.
-        # A global SQLite data_version fence would reject our own heartbeat
-        # during retained file observation. Job identity/status/attempt/owner,
-        # resource ownership and every authority row remain covered.
-        facts=[]
-        tables=[r[0] for r in self.db.connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
-        for table in tables:
-            quoted='"'+table.replace('"','""')+'"'
-            rows=[]
-            for row in self.db.connection.execute(f"SELECT * FROM {quoted} ORDER BY rowid"):
-                item=dict(row)
-                if table == "jobs":
-                    payload=json.loads(item["payload"])
-                    if item["status"] == "running" and payload.get("status") == "running":
-                        item.pop("updated_at",None);item.pop("lease_expires_at",None)
-                        payload.pop("updated_at",None)
-                    item["payload"]=payload
-                elif table == "local_resource_leases":
-                    item.pop("lease_expires_at",None)
-                rows.append(item)
-            facts.append([table,rows])
-        return digest(facts)
-
-    def _fence(self, token):
-        if token != self._token():
+    def _fence(self, project_id, context):
+        current = self._context(project_id, context["selection"])
+        if (current["request_sha256"] != context["request_sha256"]
+            or current["proof"] != context["proof"]):
             raise UseAdmissionError("composition_authority_changed_reload")
+        return current
 
     def _file(self, reference, sha, maximum=1_000_000):
         raw = self.admissions._file(reference,maximum=maximum)
@@ -101,12 +78,20 @@ class EvaluationCompositionService:
         return binding,audio,draft,project
 
     def _context(self, project_id, selection):
+        if self.db.connection.in_transaction:
+            return self._build_context(project_id,selection)
+        # A read transaction gives the multi-query Composition a single
+        # SQLite snapshot. Dispatch later rechecks this exact revision under
+        # its existing immediate transaction.
+        with self.db.transaction():
+            return self._build_context(project_id,selection)
+
+    def _build_context(self, project_id, selection):
         from app.production_runs import _unique_scene_speech_span
         from app.assembly.evaluation_composition import assemble_retained_composition
         from app.db import AssetRepository, ClipRepository, VoiceProfileRepository, TalkingProfileRepository
         from app.media.local_paths import existing_local_media_file
         from app.source_use_constraints import SourceUseConstraintService, presentation
-        token = self._token()
         binding,audio,draft,project = self._parent(project_id,selection)
         ordered = sorted(draft.scenes,key=lambda s:s.order)
         if not ordered or set(selection.talking_runs) - {s.id for s in ordered}:
@@ -176,6 +161,11 @@ class EvaluationCompositionService:
                         or asset.metadata.get("project_id") not in (None,str(project_id))
                         or asset.metadata.get("ip_profile_id") not in (None,str(project.ip_profile_id))):
                         raise UseAdmissionError("composition_source_not_authorized")
+                    if candidate.playback_start_ms is not None:
+                        if (candidate.playback_start_ms < clip.start_ms or candidate.playback_end_ms > clip.end_ms):
+                            raise UseAdmissionError("composition_source_interval_changed")
+                        clip = clip.model_copy(update={"start_ms": candidate.playback_start_ms,
+                                                       "end_ms": candidate.playback_end_ms})
                     if clip.end_ms-clip.start_ms < interval[1]-interval[0]:
                         missing.append(str(scene.id));continue  # Never fill required evidence with a card.
                     if file_digest(existing_local_media_file(asset.source_file,self.root)) != asset.content_hash:
@@ -250,9 +240,8 @@ class EvaluationCompositionService:
             source_use_constraints=constraints.context(project_id),tail=dict(kind=selection.tail,start_ms=intervals[-1][2],end_ms=audio.duration_ms),
             video_spec=None if spec is None else spec.model_dump(mode="json"))
         request = dict(policy=POLICY,project_id=str(project_id),selection=selection.model_dump(mode="json"),proof=proof)
-        self._fence(token)
         return dict(selection=selection,proof=proof,request_sha256=digest(request),scope=scope,spec=spec,
-            inputs=inputs,audio=audio,draft=draft,missing=missing,token=token)
+            inputs=inputs,audio=audio,draft=draft,missing=missing)
 
     def retained_selection(self, project_id, style):
         from app.production_preflight import _approved_master
@@ -287,22 +276,142 @@ class EvaluationCompositionService:
                 return self._receipt(UUID(raw["id"]),context,project_id)
         raise UseAdmissionError("composition_use_admission_required")
 
-    def retained_batch(self, project_id, selection):
+    def _retained_batch_row(self, project_id, selection, revision_sha256):
         row = self.db.connection.execute(
-            "SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_audio_id=?",
+            "SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_audio_id=? AND revision_sha256=?",
+            (str(project_id),str(selection.master_audio_id),revision_sha256)).fetchone()
+        if row is not None:
+            return row
+        # A legacy NULL-revision batch can only serve its original retained run.
+        legacy = self.db.connection.execute(
+            "SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_audio_id=? AND revision_sha256 IS NULL",
             (str(project_id),str(selection.master_audio_id))).fetchone()
+        if legacy is None:
+            return None
+        for slot in self.db.connection.execute(
+            "SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=?",(legacy[0],)):
+            owner = self.records.owner(run_id=slot[0])
+            if owner is not None and owner["request_sha256"] == revision_sha256:
+                return legacy
+        return None
+
+    def retained_batch(self, project_id, selection, revision_sha256):
+        row = self._retained_batch_row(project_id,selection,revision_sha256)
         if row is None:
-            raise UseAdmissionError("composition_batch_missing")
+            raise UseAdmissionError("composition_batch_revision_authorization_required")
         return self._batch(UUID(row[0]))
 
-    def start_retained(self, project_id, *, style, fingerprint, idempotency_key):
+    def start_retained(self, project_id, *, style, fingerprint=None, idempotency_key, operator_key):
+        actor = self._operator(operator_key)
         selection = self.retained_selection(project_id,style)
         c = self._context(project_id,selection)
-        if fingerprint != c["request_sha256"]:
+        if fingerprint is not None and fingerprint != c["request_sha256"]:
             raise UseAdmissionError("composition_preflight_changed")
-        use = self.current_use(project_id,c)
-        batch = self.retained_batch(project_id,selection)
-        return self._create(project_id,c,use,batch,idempotency_key)
+        self.require_retained_source_authority(project_id,c)
+        row = self._retained_batch_row(project_id,selection,c["request_sha256"])
+        occupied = row is not None and self.db.connection.execute(
+            "SELECT 1 FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",(row[0],)).fetchone() is not None
+        if not occupied:
+            from app.production_preflight import dominant_landscape_fallback_in_spec
+            blockers = dominant_landscape_fallback_in_spec(c["spec"],AssetRepository(self.db))
+            if blockers:
+                raise UseAdmissionError(blockers[0])
+            self._check_render_budget(project_id,c)
+        batch = self._authenticated_render_batch(project_id,c,actor)
+        # The batch is created from this authenticated Render request. Refresh
+        # the transaction fence to include that one local write.
+        return self._create(project_id,c,None,batch,idempotency_key,actor_id=actor)
+
+    def require_retained_source_authority(self, project_id, context):
+        """Check current source grants and license terms without a composition review file."""
+        scope = context["scope"]
+        if scope.project_id != project_id or scope.purpose != "internal_evaluation":
+            raise UseAdmissionError("composition_origin_scope_invalid")
+        for binding in scope.bindings:
+            admission = self.admissions.get(project_id,binding.admission_id)
+            if admission is None:
+                raise UseAdmissionError("provider_use_admission_missing")
+            if admission.revoked_at is not None:
+                raise UseAdmissionError("provider_use_admission_revoked")
+            report = admission.review
+            if (admission.project_id != project_id or admission.review_sha256 != binding.review_sha256
+                or report.project_id != project_id or report.purpose != "internal_evaluation"
+                or report.capability_profile_id != binding.capability_profile_id
+                or report.configuration_sha256 != binding.configuration_sha256
+                or report.identity != binding.identity or report.permits_intended_activity is not True
+                or "review" not in report.permitted_operations):
+                raise UseAdmissionError("provider_use_binding_changed")
+            raw = self.admissions._file(admission.review_reference,maximum=100_000)
+            if (hashlib.sha256(raw).hexdigest() != admission.review_sha256
+                or json.loads(raw) != report.model_dump(mode="json")):
+                raise UseAdmissionError("provider_use_review_hash_changed")
+            terms = self.admissions._file(report.license_terms_reference)
+            if not terms or hashlib.sha256(terms).hexdigest() != report.license_terms_sha256:
+                raise UseAdmissionError("provider_use_terms_hash_changed")
+
+    def retained_source_evidence(self, project_id, context, *, expected=None):
+        """Validate historical composition-use evidence for jobs created under that contract."""
+        required = {str(item.admission_id) for item in context["scope"].bindings}
+        if not required:
+            return None
+        for raw in self.records.list("admission",project_id):
+            try:
+                value = CompositionAdmission.model_validate_json(json.dumps(raw["value"]))
+                if expected is not None and (str(value.id),value.review_sha256) != tuple(expected):
+                    continue
+                if (str(value.id) != raw["id"] or raw.get("project_id") != str(project_id)
+                    or value.project_id != project_id or value.revoked_at is not None
+                    or not value.actor_id.strip()):
+                    continue
+                report = CompositionUseReview.model_validate_json(self._file(
+                    value.review_reference,value.review_sha256))
+                if (report != value.review or report.project_id != project_id
+                    or report.proof.get("scope") != context["proof"]["scope"]):
+                    continue
+                evidence = {str(item.admission_id):item for item in report.license_evidence}
+                if set(evidence) != required:
+                    continue
+                for item in evidence.values():
+                    self._file(item.terms_reference,item.terms_sha256)
+                for binding in context["scope"].bindings:
+                    origin = self.admissions.get(project_id,binding.admission_id)
+                    if (origin is None or origin.revoked_at is not None
+                        or origin.review_sha256 != binding.review_sha256):
+                        raise UseAdmissionError("composition_origin_permission_revoked")
+                return dict(admission_id=str(value.id),review_sha256=value.review_sha256)
+            except (KeyError,TypeError,ValueError,OSError):
+                continue
+        raise UseAdmissionError("composition_source_license_evidence_required")
+
+    def _authenticated_render_batch(self, project_id, context, actor_id):
+        selection = context["selection"]
+        revision = context["request_sha256"]
+        row = self._retained_batch_row(project_id,selection,revision)
+        if row is not None:
+            value = self._batch(UUID(row[0]))
+            if value.get("mode") == "authenticated_render" and value.get("actor_id") != actor_id:
+                raise UseAdmissionError("composition_authenticated_render_owner_changed")
+            return value
+        with self.db.transaction(immediate=True):
+            current = self._fence(project_id,context)
+            self.require_retained_source_authority(project_id,current)
+            row = self._retained_batch_row(project_id,selection,revision)
+            if row is not None:
+                value = self._batch(UUID(row[0]))
+                if value.get("mode") == "authenticated_render" and value.get("actor_id") != actor_id:
+                    raise UseAdmissionError("composition_authenticated_render_owner_changed")
+                return value
+            identity = uuid4()
+            authorization_sha256 = digest(dict(kind="authenticated_retained_render",
+                project_id=str(project_id),actor_id=actor_id,revision_sha256=revision))
+            self.db.connection.execute("""INSERT INTO evaluation_composition_batches
+                (id,project_id,master_audio_id,revision_sha256,authorization_sha256)
+                VALUES (?,?,?,?,?)""",(str(identity),str(project_id),str(selection.master_audio_id),
+                revision,authorization_sha256))
+            return self.records.save("batch",identity,dict(project_id=str(project_id),
+                mode="authenticated_render",master_audio_id=str(selection.master_audio_id),
+                revision_sha256=revision,request_sha256=revision,selection=selection.model_dump(mode="json"),actor_id=actor_id,
+                authorization_sha256=authorization_sha256))
 
     def preflight(self, project_id, selection):
         result = dict(policy=POLICY,purpose="internal_evaluation",eligible=False,reasons=[],missing_scenes=[],dispatch_authorized=False)
@@ -320,19 +429,19 @@ class EvaluationCompositionService:
     def _check_render_budget(self, project_id, c, *, idempotency_key=None):
         from app.budget import ProviderCallLedger
         from app.db import ProviderCallRepository
-        row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND (master_run_id=? OR master_audio_id=?)",
-            (str(project_id),str(c["selection"].parent_id),str(c["selection"].parent_id))).fetchone()
+        row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_audio_id=? AND revision_sha256=?",
+            (str(project_id),str(c["selection"].master_audio_id),c["request_sha256"])).fetchone()
         key = idempotency_key or (None if row is None else f"composition:{row[0]}:render")
         if key and ProviderCallRepository(self.db).get_by_idempotency_key(key) is not None:
             return  # A spent slot may only recover, never reserve again.
         ProviderCallLedger(self.db).check_reservation(project_id=project_id,estimated_cost=c["spec"].estimated_cost)
 
-    def render_dispatch_blocker(self, project_id, selection):
+    def render_dispatch_blocker(self, project_id, selection, revision_sha256):
         """Keep a consumed one-shot out of ordinary preflight dispatch."""
-        row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND (master_run_id=? OR master_audio_id=?)",
-            (str(project_id),str(selection.parent_id),str(selection.parent_id))).fetchone()
+        row = self._retained_batch_row(project_id,selection,revision_sha256)
         if row is None:
             return None
+        self._batch(UUID(row[0]))
         slot = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='render'",
             (row[0],)).fetchone()
         if slot is None:
@@ -422,7 +531,12 @@ class EvaluationCompositionService:
                 or self.output_path(owner).with_name("staged.mp4").exists()):
                 raise UseAdmissionError("composition_render_reconciliation_required")
             with self.db.transaction(immediate=True):
-                self._fence(c["token"])
+                current_job = JobRepository(self.db).get(job.id)
+                if current_job != job:
+                    raise UseAdmissionError("composition_render_reconciliation_required")
+                c = self.require_current_job(current_job)
+                if self._failed_call(project_id,owner,current_job,identity) != old_call:
+                    raise UseAdmissionError("composition_render_reconciliation_required")
                 if self._recovery_attempt_exists(project_id,owner["batch_id"]):
                     raise UseAdmissionError("composition_render_recovery_allowance_spent")
                 self._check_render_budget(project_id,c,idempotency_key=replacement_key)
@@ -447,40 +561,89 @@ class EvaluationCompositionService:
             return
         self.require_result(job)
         with self.db.transaction(immediate=True):
-            self._fence(c["token"])
             current = JobRepository(self.db).get(job.id)
             if current != job or current.status not in (JobStatus.FAILED,JobStatus.COMPLETED):
                 raise UseAdmissionError("composition_terminal_reconciliation_required")
+            c = self.require_current_job(current)
             JobRepository(self.db).update(job.model_copy(update=dict(status=JobStatus.COMPLETED,
                 error_code=None,error_message=None,updated_at=datetime.now(timezone.utc))))
 
-    def adopt_batch(self, project_id, payload, key):
+    @staticmethod
+    def _operator(key):
         actor = configured_admission_actor(key)
         if actor is None:
             raise UseAdmissionError("execution_admission_operator_required")
+        return actor
+
+    def adopt_batch(self, project_id, payload, operator_key):
+        actor = self._operator(operator_key)
         review = CompositionBatchReview.model_validate_json(self._file(payload.review_reference,payload.review_sha256))
         if review.project_id != project_id:
             raise UseAdmissionError("composition_batch_project_changed")
         self._file(review.authorization_reference,review.authorization_sha256)
-        token = self._token()
-        _,_,draft,_ = self._parent(project_id,CompositionSelection(master_run_id=review.master_run_id,master_audio_id=review.master_audio_id))
-        if not set(review.scene_ids).issubset(s.id for s in draft.scenes):
-            raise UseAdmissionError("composition_batch_scene_changed")
-        with self.db.transaction(immediate=True):
-            self._fence(token)
-            row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND (master_run_id=? OR master_audio_id=?)",
-                (str(project_id),str(review.parent_id),str(review.parent_id))).fetchone()
-            if row:
-                value = self._batch(UUID(row[0]))
+        if review.master_audio_id is not None:
+            if review.revision_sha256 is None:
+                existing = self.db.connection.execute(
+                    "SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_audio_id=? AND revision_sha256 IS NULL",
+                    (str(project_id),str(review.master_audio_id))).fetchone()
+                if existing is None:
+                    raise UseAdmissionError("composition_revision_fingerprint_required")
+                value = self._batch(UUID(existing[0]))
+                if "review" not in value:
+                    raise UseAdmissionError("composition_batch_already_bound")
                 if value["review"] != review.model_dump(mode="json"):
                     raise UseAdmissionError("composition_batch_already_bound")
                 return value
-            if any((v["review"].get("master_run_id") or v["review"].get("master_audio_id")) == str(review.parent_id) for v in self.records.list("batch",project_id)):
+            if review.selection is None:
+                raise UseAdmissionError("composition_revision_selection_required")
+            c = self._context(project_id,review.selection)
+            if c["request_sha256"] != review.revision_sha256:
+                raise UseAdmissionError("composition_batch_revision_changed")
+            draft = c["draft"]
+            revision_sha256 = c["request_sha256"]
+        else:
+            if review.revision_sha256 is not None:
+                raise UseAdmissionError("composition_revision_parent_unsupported")
+            legacy_selection = CompositionSelection(master_run_id=review.master_run_id,master_audio_id=review.master_audio_id)
+            _,audio,draft,project = self._parent(project_id,legacy_selection)
+            legacy_revision = digest(dict(audio=audio.model_dump(mode="json"),draft=draft.model_dump(mode="json"),
+                project=project.model_dump(mode="json")))
+            revision_sha256 = None
+        if not set(review.scene_ids).issubset(s.id for s in draft.scenes):
+            raise UseAdmissionError("composition_batch_scene_changed")
+        with self.db.transaction(immediate=True):
+            if revision_sha256 is not None:
+                c = self._fence(project_id,c)
+                if c["request_sha256"] != review.revision_sha256:
+                    raise UseAdmissionError("composition_batch_revision_changed")
+                draft = c["draft"]
+            else:
+                _,audio,draft,project = self._parent(project_id,legacy_selection)
+                current_revision = digest(dict(audio=audio.model_dump(mode="json"),draft=draft.model_dump(mode="json"),
+                    project=project.model_dump(mode="json")))
+                if current_revision != legacy_revision:
+                    raise UseAdmissionError("composition_authority_changed_reload")
+            if revision_sha256 is None:
+                row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_run_id=?",
+                    (str(project_id),str(review.master_run_id))).fetchone()
+            else:
+                row = self.db.connection.execute("SELECT id FROM evaluation_composition_batches WHERE project_id=? AND master_audio_id=? AND revision_sha256=?",
+                    (str(project_id),str(review.master_audio_id),revision_sha256)).fetchone()
+            if row:
+                value = self._batch(UUID(row[0]))
+                if "review" not in value:
+                    raise UseAdmissionError("composition_batch_already_bound")
+                if CompositionBatchReview.model_validate(value["review"]) != review:
+                    raise UseAdmissionError("composition_batch_already_bound")
+                return value
+            if any((v["review"].get("master_run_id") or v["review"].get("master_audio_id")) == str(review.parent_id)
+                   and v["review"].get("revision_sha256") == revision_sha256
+                   for v in self.records.list("batch",project_id)):
                 raise UseAdmissionError("composition_batch_index_missing")
             identity = uuid4()
-            self.db.connection.execute("INSERT INTO evaluation_composition_batches(id,project_id,master_run_id,authorization_sha256,master_audio_id) VALUES (?,?,?,?,?)",
+            self.db.connection.execute("INSERT INTO evaluation_composition_batches(id,project_id,master_run_id,authorization_sha256,master_audio_id,revision_sha256) VALUES (?,?,?,?,?,?)",
                 (str(identity),str(project_id),None if review.master_run_id is None else str(review.master_run_id),
-                 review.authorization_sha256,None if review.master_audio_id is None else str(review.master_audio_id)))
+                 review.authorization_sha256,None if review.master_audio_id is None else str(review.master_audio_id),revision_sha256))
             return self.records.save("batch",identity,dict(project_id=str(project_id),review=review.model_dump(mode="json"),
                 review_reference=payload.review_reference,review_sha256=payload.review_sha256,actor_id=actor))
 
@@ -488,15 +651,32 @@ class EvaluationCompositionService:
         value = self.records.get("batch",identity)
         if value is None:
             raise UseAdmissionError("composition_batch_missing")
+        if value.get("mode") == "authenticated_render":
+            actor = value.get("actor_id")
+            if not isinstance(actor, str) or not actor.strip():
+                raise UseAdmissionError("composition_authenticated_render_owner_changed")
+            revision = value.get("revision_sha256")
+            expected = digest(dict(kind="authenticated_retained_render",project_id=value.get("project_id"),
+                actor_id=actor,revision_sha256=revision))
+            row = self.db.connection.execute("SELECT * FROM evaluation_composition_batches WHERE id=?",
+                (str(identity),)).fetchone()
+            if (row is None or row["project_id"] != value.get("project_id")
+                or row["master_run_id"] is not None or row["master_audio_id"] != value.get("master_audio_id")
+                or row["revision_sha256"] != revision or row["authorization_sha256"] != expected
+                or value.get("authorization_sha256") != expected
+                or value.get("selection",{}).get("master_audio_id") != value.get("master_audio_id")
+                or value.get("request_sha256",revision) != revision):
+                raise UseAdmissionError("composition_batch_changed")
+            return value
         review = CompositionBatchReview.model_validate_json(json.dumps(value["review"]))
         raw = self._file(value["review_reference"],value["review_sha256"])
         if CompositionBatchReview.model_validate_json(raw) != review:
             raise UseAdmissionError("composition_batch_changed")
         self._file(review.authorization_reference,review.authorization_sha256)
         row = self.db.connection.execute("SELECT * FROM evaluation_composition_batches WHERE id=?",(str(identity),)).fetchone()
-        if row is None or (row["project_id"],row["master_run_id"],row["master_audio_id"],row["authorization_sha256"]) != (
+        if row is None or (row["project_id"],row["master_run_id"],row["master_audio_id"],row["authorization_sha256"],row["revision_sha256"]) != (
             str(review.project_id),None if review.master_run_id is None else str(review.master_run_id),
-            None if review.master_audio_id is None else str(review.master_audio_id),review.authorization_sha256):
+            None if review.master_audio_id is None else str(review.master_audio_id),review.authorization_sha256,review.revision_sha256):
             raise UseAdmissionError("composition_batch_changed")
         return value
 
@@ -522,15 +702,13 @@ class EvaluationCompositionService:
             if origin is None or origin.revoked_at or origin.review_sha256 != item.review_sha256:
                 raise UseAdmissionError("composition_origin_permission_revoked")
 
-    def adopt(self, project_id, payload, key):
-        actor = configured_admission_actor(key)
-        if actor is None:
-            raise UseAdmissionError("execution_admission_operator_required")
+    def adopt(self, project_id, payload, operator_key):
+        actor = self._operator(operator_key)
         report = self._use_report(payload.review_reference,payload.review_sha256)
         c = self._context(project_id,report.selection)
-        self._match(project_id,report,c)
         with self.db.transaction(immediate=True):
-            self._fence(c["token"])
+            c = self._fence(project_id,c)
+            self._match(project_id,report,c)
             old = next((v for v in self.records.list("admission",project_id) if v["value"]["idempotency_key"] == payload.idempotency_key),None)
             if old:
                 value = self._receipt(UUID(old["id"]),c,project_id)
@@ -569,9 +747,9 @@ class EvaluationCompositionService:
         if review.correction_of is not None:
             old_owner = self.records.owner(run_id=review.correction_of)
             old_binding = self.records.get("binding",review.correction_of)
-            batch = self.retained_batch(project_id,review.selection)
-            old_slot = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='preview'",
-                (batch['id'],)).fetchone()
+            old_slot = None if old_owner is None else self.db.connection.execute(
+                "SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot='preview'",
+                (old_owner['batch_id'],)).fetchone()
             if (old_owner is None or old_owner['project_id'] != str(project_id) or old_slot is None
                 or old_slot[0] != str(review.correction_of) or old_binding is None or not old_binding.get('preview')):
                 raise UseAdmissionError("composition_preview_correction_original_invalid")
@@ -586,25 +764,23 @@ class EvaluationCompositionService:
                 raise UseAdmissionError("composition_preview_correction_new_authorization_required")
         return review
 
-    def start_preview(self, project_id, payload, key):
+    def start_preview(self, project_id, payload, operator_key):
         from app.domain.evaluation_composition import CompositionPreviewReview
-        actor = configured_admission_actor(key)
-        if actor is None:
-            raise UseAdmissionError("execution_admission_operator_required")
+        actor = self._operator(operator_key)
         report = CompositionPreviewReview.model_validate_json(self._file(payload.review_reference,payload.review_sha256))
         c = self._context(project_id,report.selection)
         self._preview_report(project_id,payload.review_reference,payload.review_sha256,c)
         use = self.current_use(project_id,c)
-        batch = self.retained_batch(project_id,report.selection)
+        batch = self.retained_batch(project_id,report.selection,c["request_sha256"])
         preview = dict(review_reference=payload.review_reference,review_sha256=payload.review_sha256,actor_id=actor)
         if report.correction_of is not None:
             preview['slot'] = 'preview_correction'
         return self._create(project_id,c,use,batch,payload.idempotency_key,preview=preview)
 
-    def revoke(self, project_id, identity, reason, key):
-        actor = configured_admission_actor(key)
-        if actor is None or not reason.strip():
-            raise UseAdmissionError("execution_admission_operator_required")
+    def revoke(self, project_id, identity, reason, operator_key):
+        actor = self._operator(operator_key)
+        if not reason.strip():
+            raise UseAdmissionError("composition_revocation_reason_required")
         with self.db.transaction(immediate=True):
             raw = self.records.get("admission",identity)
             if raw is None or raw["project_id"] != str(project_id):
@@ -615,7 +791,14 @@ class EvaluationCompositionService:
                 self.records.save("admission",identity,dict(raw,value=value.model_dump(mode="json")),update=True)
             return value
 
-    def _create(self, project_id, c, receipt, batch, idempotency_key, *, preview=None):
+    def _create(self, project_id, c, receipt, batch, idempotency_key, *, preview=None,
+                actor_id=None):
+        if receipt is None:
+            if not isinstance(actor_id, str) or not actor_id.strip():
+                raise UseAdmissionError("composition_authenticated_render_owner_changed")
+            if (batch.get("mode") == "authenticated_render" and batch.get("actor_id") != actor_id
+                or batch.get("mode") != "authenticated_render" and "review" not in batch):
+                raise UseAdmissionError("composition_authenticated_render_owner_changed")
         slot = preview.get('slot','preview') if preview is not None else "render"
         call_key = f"composition:{batch['id']}:{slot}" + (":"+preview["review_sha256"] if preview is not None else "")
         previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",(batch["id"],slot)).fetchone()
@@ -627,7 +810,11 @@ class EvaluationCompositionService:
                 raise UseAdmissionError("composition_render_allowance_spent")
             return UUID(previous[0])
         with self.db.transaction(immediate=True):
-            self._fence(c["token"])
+            c = self._fence(project_id,c)
+            if receipt is None:
+                self.require_retained_source_authority(project_id,c)
+            else:
+                receipt = self._receipt(receipt.id,c,project_id)
             previous = self.db.connection.execute("SELECT operation_id FROM evaluation_composition_slots WHERE batch_id=? AND slot=?",(batch["id"],slot)).fetchone()
             if previous:
                 raise UseAdmissionError("composition_concurrent_submission_reload")
@@ -648,8 +835,12 @@ class EvaluationCompositionService:
             self.db.connection.execute("INSERT INTO evaluation_composition_owners VALUES (?,?,?,?,?,?,?,?)",
                 (str(run_id),str(project_id),str(job_id),str(render_id),batch["id"],c["request_sha256"],job_use_identity(job),c["scope"].fingerprint))
             binding = dict(project_id=str(project_id),selection=c["selection"].model_dump(mode="json"),
-                admission_id=str(receipt.id),admission_sha256=digest(receipt.model_dump(mode="json")),batch_id=batch["id"],
-                request_sha256=c["request_sha256"],proof=c["proof"])
+                batch_id=batch["id"],request_sha256=c["request_sha256"],proof=c["proof"])
+            if receipt is None:
+                binding.update(actor_id=actor_id)
+            else:
+                binding.update(admission_id=str(receipt.id),
+                    admission_sha256=digest(receipt.model_dump(mode="json")))
             if preview is not None:
                 binding["preview"] = preview
             self.records.save("binding",run_id,binding)
@@ -717,11 +908,32 @@ class EvaluationCompositionService:
     def require_current_job(self, job):
         binding,owner,scope = self.require_job_identity(job)
         c = self._context(job.project_id,CompositionSelection.model_validate(binding["selection"]))
-        receipt = self._receipt(UUID(binding["admission_id"]),c,job.project_id)
         batch = self._batch(UUID(owner["batch_id"]))
+        if "admission_id" in binding:
+            receipt = self._receipt(UUID(binding["admission_id"]),c,job.project_id)
+            authority_current = (digest(receipt.model_dump(mode="json")) == binding["admission_sha256"]
+                and "review" in batch
+                and (batch["review"].get("master_run_id") or batch["review"].get("master_audio_id")) == str(c["selection"].parent_id))
+        else:
+            actor = binding.get("actor_id")
+            if not isinstance(actor, str) or not actor.strip():
+                raise UseAdmissionError("composition_authenticated_render_owner_changed")
+            if batch.get("mode") == "authenticated_render":
+                self.require_retained_source_authority(job.project_id,c)
+                authority_current = (batch.get("actor_id") == actor
+                    and batch.get("revision_sha256") == c["request_sha256"]
+                    and batch.get("selection") == c["selection"].model_dump(mode="json"))
+            else:
+                expected_source = binding.get("source_use_evidence")
+                source_evidence = self.retained_source_evidence(job.project_id,c,
+                    expected=None if expected_source is None else (
+                        expected_source.get("admission_id"),expected_source.get("review_sha256")))
+                review = batch.get("review",{})
+                authority_current = (review.get("revision_sha256") == c["request_sha256"]
+                    and review.get("selection") == c["selection"].model_dump(mode="json")
+                    and source_evidence == expected_source)
         if (c["request_sha256"] != owner["request_sha256"] or c["proof"] != binding["proof"]
-            or scope != c["scope"] or digest(receipt.model_dump(mode="json")) != binding["admission_sha256"]
-            or (batch["review"].get("master_run_id") or batch["review"].get("master_audio_id")) != str(c["selection"].parent_id)):
+            or scope != c["scope"] or not authority_current):
             raise UseAdmissionError("composition_current_proof_changed")
         from app.source_use_constraints import SourceUseConstraintService
         SourceUseConstraintService(self.db,self.root).require_render_snapshot(job)
@@ -731,6 +943,11 @@ class EvaluationCompositionService:
             c["preview_frame_range"] = (report.start_frame,report.end_frame)
             c["execution_sha256"] = digest(dict(request=c["request_sha256"],preview=preview["review_sha256"]))
         return c
+
+    def require_current_execution(self, job):
+        from app.jobs.lease_fence import require_owned_lease
+        require_owned_lease(self.db,job)
+        return self.require_current_job(JobRepository(self.db).get(job.id))
 
     def provider_call_key(self, job):
         """Return the persisted once-only call identity after validating its Job."""

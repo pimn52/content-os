@@ -19,7 +19,7 @@ from app.budget import (
     ProviderOperation,
     provider_call_input_digest,
 )
-from app.costs import ProviderCostEstimator
+from app.costs import ProviderCostEstimator, ProviderUsage
 from app.domain.models import CostCategory, ProviderCallRecord
 
 
@@ -100,6 +100,7 @@ class ProviderExecutionService:
         before_action: Callable[[], None] | None = None,
         before_replay: Callable[[], None] | None = None,
         persist_result: Callable[[ResultT], None] | None = None,
+        usage_callback: Callable[[Exception | None], ProviderUsage] | None = None,
     ) -> ResultT:
         """Execute once, then persist a replayable result beside the ledger row.
 
@@ -152,9 +153,11 @@ class ProviderExecutionService:
                 before_action()
             result = action()
         except Exception as exc:
-            self._finish_failure(project_id, reservation.record, error_code(exc))
+            self._finish_failure(project_id, reservation.record, error_code(exc),
+                self._usage_values(usage_callback, exc))
             raise
 
+        usage = self._usage_values(usage_callback)
         try:
             encoded = encode_result(result)
             # Reject opaque/non-JSON values before marking a provider call
@@ -162,16 +165,16 @@ class ProviderExecutionService:
             json.dumps(encoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             payload: dict[str, object] = {"result": encoded}
         except Exception:
-            self._finish_failure(project_id, reservation.record, "provider_result_not_replayable")
+            self._finish_failure(project_id, reservation.record, "provider_result_not_replayable", usage)
             raise
         try:
             self._ledger.finish(
                 project_id=project_id,
                 call_id=reservation.record.id,
                 status="completed",
-                usage_observable=False,
                 result_payload=payload,
                 persist_result=None if persist_result is None else lambda: persist_result(result),
+                **usage,
             )
         except ProviderCallError as exc:
             raise ProviderExecutionAccountingFailure("provider call result could not be reconciled") from exc
@@ -190,14 +193,27 @@ class ProviderExecutionService:
             raise ProviderExecutionInProgress("provider execution is already running or needs recovery")
         raise ProviderExecutionRecordedFailure("provider execution already ended without a replayable result")
 
-    def _finish_failure(self, project_id: UUID, record: ProviderCallRecord, error_code: str | None) -> None:
+    @staticmethod
+    def _usage_values(callback, error=None):
+        if callback is not None:
+            try:
+                value = callback(error)
+                if isinstance(value, ProviderUsage):
+                    return value.ledger_values()
+            except Exception:
+                # 记账解析失败不能重发模型，也不能将缺失费用视为零；原保守预留继续计入预算。
+                pass
+        return {"usage_observable": False}
+
+    def _finish_failure(self, project_id: UUID, record: ProviderCallRecord, error_code: str | None,
+                        usage: dict | None = None) -> None:
         try:
             self._ledger.finish(
                 project_id=project_id,
                 call_id=record.id,
                 status="failed",
-                usage_observable=False,
                 error_code=error_code or "provider_execution_failed",
+                **(usage or {"usage_observable": False}),
             )
         except ProviderCallError as exc:
             raise ProviderExecutionAccountingFailure("provider call failure could not be reconciled") from exc

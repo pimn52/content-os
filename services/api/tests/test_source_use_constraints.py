@@ -105,7 +105,8 @@ def test_normal_intake_adopt_choice_disable_history_restart(tmp_path):
         assert adopted["state"] == "enabled", adopted
         after = preview(client, project)
         decision = after["scenes"][0]
-        assert decision["selected_candidate"]["source_kind"] == SourceKind.TYPOGRAPHY.value
+        assert decision["selected_candidate"] is None
+        assert f"source_use_replan_required:{scene.scene_id}" in after["stop_reasons"]
         assert decision["excluded_uses"][0]["state"] == "excluded"
         assert decision["excluded_uses"][0]["candidate"]["clip_id"] == str(clip.id)
         assert after["evidence_level"] == "metadata_and_adopted_use_constraint"
@@ -373,7 +374,7 @@ def test_creator_scope_concurrency_and_idempotency_conflict(tmp_path):
         assert state(client, str(other.id), record).status_code == 404
 
 
-def test_render_snapshot_fences_adoption_disable_and_late_changes(tmp_path):
+def test_render_snapshot_fences_next_dispatch_without_rejecting_completed_output(tmp_path):
     from app.db import JobRepository
     from app.domain.models import Job,JobType,RenderVideoJobPayload,RationalFps
     from app.jobs.handlers import RenderVideoJobHandler
@@ -411,8 +412,9 @@ def test_render_snapshot_fences_adoption_disable_and_late_changes(tmp_path):
             renderer = Renderer()
             running = job.model_copy(update={"status": JobStatus.RUNNING})
             handler = RenderVideoJobHandler(ProjectRepository(db), renderer, tmp_path / "renders")
-            with pytest.raises(JobExecutionError, match="policy or evidence changed"):
-                handler(running)  # late mutation while rendering
+            # A disabled policy added during rendering does not invalidate any
+            # actual source use or justify discarding the completed work.
+            handler(running)
             assert renderer.calls == 1
             with pytest.raises(JobExecutionError, match="policy or evidence changed"):
                 handler(running)  # before rendering

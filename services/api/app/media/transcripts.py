@@ -1,6 +1,8 @@
 """Provider-neutral timestamped transcript mapping for persisted Clips."""
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Mapping, Protocol, Sequence, TypeVar
 from uuid import UUID
 
@@ -125,9 +127,35 @@ class AudioTranscriptPersistence:
             "transcript_segments": persisted,
             "transcript_source": source_reference.strip(),
         })
+        metadata = dict(audio.metadata)
+        source_audio = metadata.get("source_audio")
+        if isinstance(source_audio, dict) and isinstance(source_audio.get("bindings"), list):
+            transcript_digest = _transcript_digest(persisted)
+            bindings = []
+            for raw in source_audio["bindings"]:
+                if not isinstance(raw, dict):
+                    continue
+                binding = dict(raw)
+                binding.setdefault("source_transcript_source", binding.get("transcript_source"))
+                binding.setdefault("source_transcript_sha256", binding.get("transcript_sha256"))
+                binding["transcript_source"] = source_reference.strip()
+                binding["transcript_sha256"] = transcript_digest
+                binding["binding_sha256"] = _object_digest({k: v for k, v in binding.items() if k != "binding_sha256"})
+                bindings.append(binding)
+            metadata["source_audio"] = {**source_audio, "bindings": bindings}
+            updated = updated.model_copy(update={"metadata": metadata})
         with self.db.transaction():
             self.repository.update(updated)
         return updated
+
+
+def _transcript_digest(segments: Sequence[PersistedTranscriptSegment]) -> str:
+    return _object_digest([segment.model_dump(mode="json") for segment in segments])
+
+
+def _object_digest(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _coerce_segment(segment: SegmentLike) -> TranscriptSegment:

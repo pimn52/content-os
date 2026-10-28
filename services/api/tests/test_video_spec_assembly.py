@@ -142,6 +142,27 @@ def test_milliseconds_to_frames_is_exact_and_source_boundary_is_enforced(tmp_pat
         db.close()
 
 
+def test_assembler_uses_reviewed_candidate_playback_interval(tmp_path: Path) -> None:
+    db, assembler, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        scene = scenes[0]
+        selected = _candidate(scene, assets[0], clips[0]).model_copy(update={
+            "playback_start_ms": 200, "playback_end_ms": 1_400,
+        })
+        spec = assembler.assemble(project, [scene], {scene.id: selected})
+        assert (spec.scenes[0].visual.clip_start_ms, spec.scenes[0].visual.clip_end_ms) == (200, 1_400)
+        outside = selected.model_copy(update={"playback_end_ms": 1_600})
+        with pytest.raises(InvalidCandidateSelection, match="playback interval"):
+            assembler.assemble(project, [scene], {scene.id: outside})
+        # Matching dialogue elsewhere must not replace an already selected picture.
+        ClipRepository(db).update(clips[0].model_copy(update={'transcript_segments':[
+            TranscriptSegment(start_ms=0, end_ms=150, text=scene.voice_text)]}))
+        unchanged = assembler.assemble(project, [scene], {scene.id:selected})
+        assert (unchanged.scenes[0].visual.clip_start_ms, unchanged.scenes[0].visual.clip_end_ms) == (200, 1400)
+    finally:
+        db.close()
+
+
 def test_assembler_rejects_capture_nonrecommended_and_identity_mismatch(tmp_path: Path) -> None:
     db, assembler, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
     try:
@@ -437,9 +458,9 @@ def test_legacy_single_scene_narration_uses_measured_audio_duration(tmp_path: Pa
 
 
 @pytest.mark.parametrize("fps", [RationalFps(numerator=30, denominator=1), RationalFps(numerator=30_000, denominator=1_001)])
-@pytest.mark.parametrize("no_graphics", [False, True])
-def test_master_narration_uses_one_aligned_audio_for_multiple_scenes_and_fills_short_visual(
-    tmp_path: Path, fps: RationalFps, no_graphics: bool
+@pytest.mark.parametrize("graphics", ["undeclared", "none", "declared"])
+def test_master_narration_short_visual_requires_independently_declared_graphics(
+    tmp_path: Path, fps: RationalFps, graphics: str
 ) -> None:
     db, _, project, scenes, assets, clips = _setup(tmp_path, fps)
     audio_source = tmp_path / "full-narration.wav"
@@ -458,18 +479,24 @@ def test_master_narration_uses_one_aligned_audio_for_multiple_scenes_and_fills_s
         assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
         first = scenes[0].model_copy(update={"voice_text": "First new line."})
         second = scenes[1].model_copy(update={"voice_text": "Second new line."})
-        if no_graphics:
-            from app.domain.models import GraphicCardPlan
-            second = second.model_copy(update={"graphic_plan": GraphicCardPlan(kind="none", reason="Keep actual footage")})
-            with pytest.raises(InsufficientSourceDuration, match="no_graphics_requires_full_media_coverage"):
+        from app.domain.models import GraphicCardPlan
+        if graphics != "declared":
+            second = second.model_copy(update={"graphic_plan": GraphicCardPlan(kind="none", reason="Keep actual footage") if graphics=="none" else None})
+            with pytest.raises(InsufficientSourceDuration, match="source_shortage_requires_media_replan_not_graphic_fill"):
                 assembler.assemble(project, [first, second],
                     {first.id: _candidate(first, assets[0], clips[0]), second.id: _candidate(second, assets[1], clips[1])},
                     master_narration_asset_id=audio.id, narration_required=True)
             return
+        second=second.model_copy(update={"graphic_plan":GraphicCardPlan(kind="diagram",treatment="diagram_flow",points=["Input","Output"]),
+            "fallback_sources":[SourceKind.TYPOGRAPHY]})
+        second_candidate = _candidate(second, assets[1], clips[1]).model_copy(update={
+            "playback_start_ms": 750,
+            "playback_end_ms": 1_500,
+        })
         spec = assembler.assemble(
             project,
             [first, second],
-            {first.id: _candidate(first, assets[0], clips[0]), second.id: _candidate(second, assets[1], clips[1])},
+            {first.id: _candidate(first, assets[0], clips[0]), second.id: second_candidate},
             master_narration_asset_id=audio.id,
             narration_required=True,
         )
@@ -483,6 +510,8 @@ def test_master_narration_uses_one_aligned_audio_for_multiple_scenes_and_fills_s
         assert intervals[-1][1] == audio.duration_ms
         assert all(end > start for start, end in intervals)
         assert spec.scenes[1].visual.source_kind is SourceKind.USER_ASSET
+        assert spec.scenes[1].visual.clip_start_ms == 750
+        assert spec.scenes[1].visual.clip_end_ms == 1_500
         assert spec.scenes[2].visual.source_kind is SourceKind.TYPOGRAPHY
         tail = spec.scenes[2]
         expected_tail_caption_end = min(3_200, tail.narration_end_ms) - max(800, tail.narration_start_ms)
@@ -557,8 +586,9 @@ def test_master_talking_default_preserves_the_selected_face_visual_through_audio
         db.close()
 
 
-def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_speech(tmp_path: Path, admit_talking_run) -> None:
-    db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=25, denominator=1))
+@pytest.mark.parametrize("fps,frames", [(25, 123), (30, 148)])
+def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_speech(tmp_path: Path, admit_talking_run, fps, frames) -> None:
+    db, _, project, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=fps, denominator=1))
     source = tmp_path / "talking-terminal.mp4"
     source.write_bytes(b"talking")
     audio_source = tmp_path / "terminal-master.wav"
@@ -594,7 +624,7 @@ def test_terminal_talking_delivery_ends_face_video_and_master_audio_at_final_spe
         assert spec.master_narration is not None
         assert spec.master_narration.end_ms == 4_920
         assert [item.visual.source_kind for item in spec.scenes] == [SourceKind.AI_VIDEO]
-        assert [(item.start_frame, item.duration_frames) for item in spec.scenes] == [(0, 123)]
+        assert [(item.start_frame, item.duration_frames) for item in spec.scenes] == [(0, frames)]
         assert [(item.narration_start_ms, item.narration_end_ms) for item in spec.scenes] == [(0, 4_920)]
     finally:
         db.close()
@@ -640,6 +670,93 @@ def test_master_narration_matches_traditional_asr_text_without_rewriting_evidenc
         db.close()
 
 
+def test_master_narration_uses_verified_asr_substitution_at_real_segment_boundaries(tmp_path: Path) -> None:
+    from app.assembly.video_spec import _master_narration_intervals
+    from app.providers.asr import TranscriptionResult, TranscriptionSegment
+    from app.voice_qa import apply_voice_qa, verify_generated_voice
+
+    db, _, _, scenes, _, _ = _setup(tmp_path, RationalFps(numerator=30, denominator=1))
+    try:
+        first = scenes[0].model_copy(update={"voice_text": "源画质已经丢失的细节"})
+        second = scenes[1].model_copy(update={"voice_text": "码率不足会丢失细节"})
+        audio = AudioAsset(
+            source_kind=SourceKind.USER_ASSET, source_file=str(tmp_path / "approved.wav"),
+            content_hash="a" * 64, duration_ms=2_100, sample_rate=24_000, channels=1,
+            authorization_reference="creator-voice", imported_at=NOW,
+            transcript_segments=[
+                TranscriptSegment(start_ms=0, end_ms=900, text="原话质已经丢失的细节"),
+                TranscriptSegment(start_ms=900, end_ms=2_000, text="码率不足会丢失细节"),
+            ], transcript_source="independent-asr:local",
+            metadata={"voice_generation": {
+                "qa_state": "verified", "target_text": "源画质已经丢失的细节，码率不足会丢失细节",
+                "qa": {"missing_token_count": 0, "duplicate_token_count": 0, "substitution_token_count": 2},
+            }},
+        )
+        Path(audio.source_file).write_bytes(b"offline fixture")
+        transcription = TranscriptionResult(" ".join(item.text for item in audio.transcript_segments),
+            tuple(TranscriptionSegment(item.start_ms, item.end_ms, item.text) for item in audio.transcript_segments))
+        report = verify_generated_voice(audio, audio.metadata["voice_generation"]["target_text"], transcription)
+        assert report.verified
+        audio = apply_voice_qa(audio, report, transcription, provider="fixture", model="fixture")
+        assert [(start, end) for _, start, end in _master_narration_intervals(audio, [first, second])] == [
+            (0, 900), (900, 2_100),
+        ]
+        imported = audio.model_copy(update={"metadata": {}})
+        with pytest.raises(NarrationTimelineError):
+            _master_narration_intervals(imported, [first, second])
+        wrong_qa = audio.model_copy(update={"metadata": {"voice_generation": {
+            **audio.metadata["voice_generation"],
+            "qa": {"missing_token_count": 0, "duplicate_token_count": 0, "substitution_token_count": 1},
+        }}})
+        with pytest.raises(NarrationTimelineError):
+            _master_narration_intervals(wrong_qa, [first, second])
+    finally:
+        db.close()
+
+
+def test_master_narration_uses_spoken_boundaries_instead_of_generated_silence_tail(tmp_path):
+    from app.assembly.video_spec import _master_narration_intervals
+    db,_,_,scenes,_,_=_setup(tmp_path,RationalFps(numerator=30,denominator=1))
+    try:
+        first=scenes[0].model_copy(update={"voice_text":"清晰吗"})
+        second=scenes[1].model_copy(update={"voice_text":"先看对比"})
+        generation={"qa_state":"verified","target_text":"清晰吗\n\n先看对比",
+            "qa":{"transcription_scope":"generation_parts","source_part_count":2},
+            "generation_segments":[dict(start_char=0,end_char=3,start_sample=0,end_sample=24_000),
+                dict(start_char=5,end_char=9,start_sample=24_000,end_sample=48_000)]}
+        audio=AudioAsset(source_file=str(tmp_path/'voice.wav'),content_hash='a'*64,duration_ms=2000,
+            sample_rate=24_000,channels=1,authorization_reference='fixture',imported_at=NOW,
+            transcript_segments=[TranscriptSegment(start_ms=0,end_ms=1100,text='清晰嘛'),
+                TranscriptSegment(start_ms=1100,end_ms=1950,text='先看对比')],metadata={'voice_generation':generation})
+        audio=audio.model_copy(update={"transcript_segments":[TranscriptSegment(start_ms=0,end_ms=900,text='清晰吗'),
+            TranscriptSegment(start_ms=1100,end_ms=1950,text='先看对比')]})
+        assert [(a,b) for _,a,b in _master_narration_intervals(audio,[first,second])]==[(0,900),(900,2000)]
+    finally:db.close()
+
+
+def test_verified_generated_captions_use_original_copy_with_actual_asr_timing(tmp_path):
+    from app.assembly.video_spec import _audio_captions_for_interval
+    from app.providers.asr import TranscriptionResult, TranscriptionSegment
+    from app.voice_qa import apply_voice_qa, verify_generated_voice
+    source_segments=[TranscriptSegment(start_ms=100,end_ms=900,text="话质好"),
+        TranscriptSegment(start_ms=1100,end_ms=1900,text="决定效果")]
+    audio=AudioAsset(source_file=str(tmp_path/'voice.wav'),content_hash='a'*64,duration_ms=2000,sample_rate=24000,channels=1,
+        authorization_reference='fixture',imported_at=NOW,transcript_segments=source_segments,
+        metadata={'voice_generation':{'qa_state':'pending','target_text':'画质好，决定效果。',
+            'qa':{'missing_token_count':0,'duplicate_token_count':0,'substitution_token_count':1}}})
+    Path(audio.source_file).write_bytes(b"offline fixture")
+    transcription = TranscriptionResult("话质好，决定效果。",
+        tuple(TranscriptionSegment(item.start_ms, item.end_ms, item.text) for item in source_segments))
+    report = verify_generated_voice(audio, audio.metadata['voice_generation']['target_text'], transcription)
+    assert report.verified
+    audio = apply_voice_qa(audio, report, transcription, provider="fixture", model="fixture")
+    captions=_audio_captions_for_interval(audio,0,2000)
+    assert [(s.start_ms,s.end_ms,s.text) for s in captions]==[(100,900,'画质好，'),(1100,1900,'决定效果。')]
+    assert audio.transcript_segments[0].text=='话质好'
+    audio.metadata['voice_generation']['qa_state']='failed'
+    assert _audio_captions_for_interval(audio,0,2000)[0].text=='话质好'
+
+
 @pytest.mark.parametrize("fps", [RationalFps(numerator=30, denominator=1), RationalFps(numerator=30_000, denominator=1_001)])
 def test_new_script_narration_never_extends_past_original_clip_boundary(tmp_path: Path, fps: RationalFps) -> None:
     db, _, project, scenes, assets, clips = _setup(tmp_path, fps)
@@ -675,7 +792,8 @@ def test_new_script_narration_never_extends_past_original_clip_boundary(tmp_path
         db.close()
 
 
-def test_new_script_narration_rejects_nonzero_ntsc_clip_that_lacks_a_complete_frame(tmp_path: Path) -> None:
+@pytest.mark.parametrize("start,end,eligible", [(500, 2000, True), (501, 2001, False)])
+def test_new_script_narration_counts_only_samples_inside_nonzero_ntsc_clip(tmp_path: Path, start, end, eligible) -> None:
     db, _, project, scenes, assets, clips = _setup(tmp_path, RationalFps(numerator=30_000, denominator=1_001))
     source = tmp_path / "frame-boundary.wav"
     source.write_bytes(b"voice")
@@ -692,14 +810,19 @@ def test_new_script_narration_rejects_nonzero_ntsc_clip_that_lacks_a_complete_fr
     AudioAssetRepository(db).create(audio)
     try:
         assembler = VideoSpecAssembler(AssetRepository(db), ClipRepository(db), audios=AudioAssetRepository(db))
-        with pytest.raises(InsufficientSourceDuration, match="frame rate"):
-            assembler.assemble(
-                project,
-                [scenes[0]],
-                {scenes[0].id: _candidate(scenes[0], assets[1], clips[1])},
-                narration_asset_ids={scenes[0].id: audio.id},
-                narration_required=True,
-            )
+        clip = clips[1].model_copy(update={"start_ms": start, "end_ms": end})
+        ClipRepository(db).update(clip)
+        def assemble():
+            return assembler.assemble(project, [scenes[0]],
+                {scenes[0].id: _candidate(scenes[0], assets[1], clip)},
+                narration_asset_ids={scenes[0].id: audio.id}, narration_required=True)
+        if eligible:
+            spec = assemble()
+            assert spec.scenes[0].duration_frames == 45
+            assert 59 * 1001 / 30 < end  # Last displayed source frame starts within the Clip.
+        else:
+            with pytest.raises(InsufficientSourceDuration, match="frame rate"):
+                assemble()
     finally:
         db.close()
 

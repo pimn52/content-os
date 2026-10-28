@@ -4,8 +4,8 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
-from app.domain.models import Asset, Clip, IPProfile, Project, ProjectFormat, RationalFps, ScenePlan, SourceKind, VisualIntent
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository
+from app.domain.models import Asset, AudioAsset, Clip, IPProfile, Project, ProjectFormat, RationalFps, ScenePlan, SourceKind, VisualIntent
 from app.main import create_app
 from app.providers.embedding import EmbeddingBatch, EmbeddingHTTPResponse, OpenAICompatibleEmbeddingProvider
 from app.search import ClipSearchService
@@ -60,6 +60,38 @@ def test_asset_route_api_returns_real_continuous_clip(tmp_path: Path) -> None:
         assert candidate["clip_id"] == str(clip.id)
         assert candidate["recommended"] is True
         assert candidate["estimated_cost"]["amount"] == "0"
+
+
+def test_asset_route_api_uses_local_retrieval_without_embedding_key(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "route-auto-lexical.sqlite"
+    project, clip, scene = _seed(path, tmp_path)
+    monkeypatch.delenv("CONTENT_OS_RETRIEVAL_MODE", raising=False)
+    monkeypatch.delenv("CONTENT_OS_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with TestClient(create_app(path)) as client:
+        response = client.post(f"/projects/{project.id}/asset-routes", json={"scenes": [scene.model_dump(mode="json")]})
+    assert response.status_code == 200
+    assert any(item["clip_id"] == str(clip.id) for item in response.json()[0]["candidates"])
+
+
+def test_asset_route_rejects_master_audio_without_persisted_timing(tmp_path: Path) -> None:
+    path = tmp_path / "route-master-timing.sqlite"
+    project, _, scene = _seed(path, tmp_path)
+    db = Database(path)
+    audio = AudioAsset(
+        source_file=str(tmp_path / "untimed.wav"), content_hash="a" * 64, duration_ms=2_000,
+        sample_rate=48_000, channels=1, authorization_reference="creator-voice",
+        imported_at=datetime.now(timezone.utc),
+    )
+    AudioAssetRepository(db).create(audio)
+    db.close()
+    with TestClient(create_app(path)) as client:
+        response = client.post(
+            f"/projects/{project.id}/asset-routes",
+            json={"scenes": [scene.model_dump(mode="json")], "master_narration_asset_id": str(audio.id)},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "master_narration_timing_required"
 
 
 def test_asset_route_api_discovers_admitted_talking_run_without_search_index(tmp_path: Path, monkeypatch, admit_talking_run) -> None:
@@ -156,7 +188,7 @@ def test_asset_route_api_explicit_lexical_mode_keeps_basis_traceable(tmp_path: P
     db = Database(path)
     asset = AssetRepository(db).get(clip.asset_id)
     assert asset is not None
-    AssetRepository(db).update(asset.model_copy(update={"metadata": {"r1_usage": "production"}}))
+    AssetRepository(db).update(asset.model_copy(update={"metadata": {"r1_usage": "reference"}}))
     db.close()
     monkeypatch.setenv("CONTENT_OS_RETRIEVAL_MODE", "lexical")
 

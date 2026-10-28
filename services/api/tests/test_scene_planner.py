@@ -20,9 +20,57 @@ from app.providers.scene_planner import (
     ScenePlannerHTTPError,
     ScenePlannerInputError,
     ScenePlannerProviderResponseError,
+    ScenePlannerHTTPResponse,
     ScenePlannerRateLimitError,
     ScenePlannerTimeout,
 )
+
+
+def test_short_motion_reference_does_not_limit_complete_narration_or_trigger_retry():
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    requests=[]
+    class Transport:
+        def post(self,url,headers,body,timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps(_chat_response([_scene("opening",0)])).encode(),{})
+    motion={"source_duration_ms":3200,"planned_visible_ms_max":2400,"approx_chinese_characters_max":7}
+    OpenAICompatibleScenePlanner("fixture",protocol="chat_completions",transport=Transport()).plan(
+        _project(),context={"continuous_production":{"talking_motion_budget":motion}})
+    assert len(requests)==1
+    prompt=requests[0]["messages"][0]["content"]
+    assert "不限制文案字数" in prompt
+    assert "真实时长调度多条人物参考" in prompt
+    assert "合计不得超过 planned_visible_ms_max" not in prompt
+
+
+@pytest.mark.parametrize("violation",[None,"long_text","long_duration","second_speaking","missing_slot"])
+def test_motion_capacity_is_a_scheduling_constraint_and_never_rejects_complete_copy(violation):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    requests=[]
+    creator={**_scene("creator",0,preferred=["ai_video"]),"fallback_sources":[],"voice_text":"先看这组对比",
+        "duration_target_ms":2000,"visual_requirement":"creator_speaking","visual_requirement_reason":"本人引出对比","graphic_plan":None}
+    support={**_scene("evidence",1,preferred=["user_asset"]),"fallback_sources":[],"voice_text":"相同原片在不同编码和码率下，细节的保留程度不同。",
+        "visual_requirement":"action_evidence","visual_requirement_reason":"展示真实对比","graphic_plan":None}
+    if violation=="long_text":creator["voice_text"]="视频码率越高画面就一定越清晰吗"
+    if violation=="long_duration":creator["duration_target_ms"]=2500
+    if violation=="second_speaking":
+        support["visual_requirement"]="creator_speaking"
+        support["preferred_sources"]=["ai_video"]
+    document={"creator_scene":creator,"scenes":[support]}
+    if violation=="missing_slot":document={"scenes":[creator,support]}
+    class Transport:
+        def post(self,url,headers,body,timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps({"choices":[{"message":{"content":json.dumps(document)}}]}).encode(),{})
+    planner=OpenAICompatibleScenePlanner("fixture",protocol="chat_completions",chat_output_mode="json_schema",transport=Transport())
+    project=_project().model_copy(update={"presentation_style":"creator_led"})
+    context={"continuous_production":{"talking_motion_budget":{"source_duration_ms":3200,"planned_visible_ms_max":2400,"approx_chinese_characters_max":7}}}
+    result=planner.plan(project,context=context)
+    assert [scene.voice_text for scene in result.scenes]==[creator["voice_text"],support["voice_text"]]
+    assert len(requests)==1
+    schema=requests[0]["response_format"]["json_schema"]["schema"]
+    assert 'creator_scene' not in schema['properties']
+    assert schema['properties']['scenes']['items']['properties']['voice_text']['maxLength']>7
 
 
 def _project() -> Project:
@@ -30,6 +78,122 @@ def _project() -> Project:
         ip_profile_id=uuid4(), title="Creator's practical coding advice", topic="When Vibe Coding is the wrong choice",
         fps=RationalFps(numerator=30, denominator=1), created_at=datetime.now(timezone.utc),
     )
+
+
+def test_short_reference_supporting_scene_selects_a_supplied_clip_instead_of_invented_media():
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    clip_id=str(uuid4());requests=[]
+    creator={**_scene("creator",0,preferred=["ai_video"]),"fallback_sources":[],"voice_text":"看这组对比",
+        "duration_target_ms":1800,"visual_requirement":"creator_speaking","visual_requirement_reason":"本人引出","graphic_plan":None}
+    support={**_scene("evidence",1,preferred=["user_asset"]),"fallback_sources":[],"voice_text":"比较同一原片编码后的差异。",
+        "visual_requirement":"action_evidence","visual_requirement_reason":"使用已提供的对比原片","graphic_plan":None,"preferred_clip_id":clip_id}
+    class Transport:
+        def post(self,url,headers,body,timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps({"choices":[{"message":{"content":json.dumps({"creator_scene":creator,"scenes":[support]})}}]}).encode(),{})
+    context={"continuous_production":{"talking_motion_budget":{"planned_visible_ms_max":2400,"approx_chinese_characters_max":7}},
+        "materials":[{"clip_id":clip_id,"source_kind":"user_asset","summary":"同原片高低码率对比"}]}
+    result=OpenAICompatibleScenePlanner("fixture",protocol="chat_completions",chat_output_mode="json_schema",transport=Transport()).plan(
+        _project().model_copy(update={"presentation_style":"creator_led"}),context=context)
+    assert str(result.scenes[1].preferred_clip_id)==clip_id
+    schema=requests[0]["response_format"]["json_schema"]["schema"]["properties"]["scenes"]["items"]
+    graphics=schema['properties']['graphic_plan']['anyOf']
+    assert not any(v.get('properties',{}).get('kind',{}).get('enum')==['text_card'] for v in graphics)
+    assert result.scenes[1].graphic_plan is None
+    assert 'creator_scene' not in requests[0]['response_format']['json_schema']['schema']['properties']
+
+
+@pytest.mark.parametrize('coverage,chosen,duration,accepted',[
+    ('video_interval_analysis',0,3297,True),('video_interval_analysis',0,3700,False),
+    ('video_interval_analysis',1,3700,True),('sampled_keyframes',0,3700,True),
+])
+def test_observed_source_limits_each_clip_and_preserves_full_narration(coverage,chosen,duration,accepted):
+    clips=[str(uuid4()),str(uuid4())];requests=[]
+    creator={**_scene('creator',0,preferred=['ai_video']),'fallback_sources':[],'voice_text':'看这组对比',
+        'duration_target_ms':1800,'visual_requirement':'creator_speaking','visual_requirement_reason':'本人引出','graphic_plan':None}
+    narration='所以别盲目拉高码率，先看内容本身。'
+    support={**_scene('closing',1,preferred=['user_asset']),'fallback_sources':[],'voice_text':narration,
+        'duration_target_ms':duration,'visual_requirement':'unknown','visual_requirement_reason':'已有画面承载观看建议',
+        'graphic_plan':None,'preferred_clip_id':clips[chosen]}
+    class Transport:
+        def post(self,url,headers,body,timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps({'choices':[{'message':{'content':json.dumps({'creator_scene':creator,'scenes':[support]})}}]}).encode(),{})
+    context={'continuous_production':{'talking_motion_budget':{'planned_visible_ms_max':2400,'approx_chinese_characters_max':7}},
+        'materials':[{'clip_id':identity,'source_kind':'user_asset','visual_evidence':{'source_hash_bound':True,
+            'coverage':coverage,'usable_interval':{'start_ms':10000,'end_ms':10000+span,'duration_ms':span}}}
+            for identity,span in zip(clips,[3297,6000])]}
+    planner=OpenAICompatibleScenePlanner('fixture',protocol='chat_completions',chat_output_mode='json_schema',transport=Transport())
+    project=_project().model_copy(update={'presentation_style':'creator_led'})
+    if accepted:
+        result=planner.plan(project,context=context)
+        assert result.scenes[1].voice_text==narration and str(result.scenes[1].preferred_clip_id)==clips[chosen]
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as error:planner.plan(project,context=context)
+        assert error.value.domain_field=='duration_target_ms'
+    assert len(requests)==1
+    assert 'creator_scene' not in requests[0]['response_format']['json_schema']['schema']['properties']
+
+
+@pytest.mark.parametrize('kind,accepted',[('ai_video',True),('user_asset',False)])
+def test_empty_prepared_footage_can_use_speaking_capacity_without_inventing_a_clip(kind,accepted):
+    requests=[]
+    scene={**_scene('advice',0,preferred=[kind]),'fallback_sources':[],'voice_text':'先确定需求，再用代码验证想法。',
+        'duration_target_ms':6000,'visual_requirement':'creator_speaking' if kind=='ai_video' else 'unknown',
+        'visual_requirement_reason':'本人讲解已有经验','graphic_plan':None,'preferred_clip_id':None}
+    class Transport:
+        def post(self,url,headers,body,timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps(_chat_response([scene])).encode(),{})
+    context={'materials':[],'continuous_production':{'talking_motion_budget':{'planned_visible_ms_max':24000,
+        'approx_chinese_characters_max':72}}}
+    planner=OpenAICompatibleScenePlanner('fixture',protocol='chat_completions',transport=Transport())
+    project=_project().model_copy(update={'presentation_style':'creator_led'})
+    if accepted:
+        result=planner.plan(project,context=context)
+        assert result.scenes[0].voice_text==scene['voice_text'] and result.scenes[0].visual_requirement=='creator_speaking'
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as error:planner.plan(project,context=context)
+        assert error.value.domain_field=='preferred_clip_id'
+    assert len(requests)==1
+
+
+def test_short_creator_reference_preserves_complete_opening_before_later_visible_speech():
+    requests=[]
+    opening={**_scene('opening',0,preferred=['user_asset']),'voice_text':'视频码率越高，画面就越清晰吗？',
+        'fallback_sources':[],'graphic_plan':None,'visual_requirement':'unknown','visual_requirement_reason':None}
+    creator={**_scene('creator',1,preferred=['ai_video']),'voice_text':'并不一定','duration_target_ms':1800,
+        'fallback_sources':[],'graphic_plan':None,'visual_requirement':'creator_speaking','visual_requirement_reason':'本人作出简短判断'}
+    class Transport:
+        def post(self,url,headers,body,timeout):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps({'choices':[{'message':{'content':json.dumps(
+                {'creator_scene':creator,'scenes':[opening]})}}]}).encode(),{})
+    result=OpenAICompatibleScenePlanner('fixture',protocol='chat_completions',transport=Transport()).plan(
+        _project().model_copy(update={'presentation_style':'creator_led'}),topic='视频码率为什么不是越高越清晰？',
+        context={'continuous_production':{'talking_motion_budget':{'planned_visible_ms_max':2400,'approx_chinese_characters_max':7}}})
+    assert [s.voice_text for s in result.scenes]==[opening['voice_text'],creator['voice_text']]
+    prompt=requests[0]['messages'][0]['content']
+    assert '开场必须独立交代主体' in prompt and '不限制文案字数' in prompt
+
+
+@pytest.mark.parametrize('copy,supplied,accepted',[
+    ('越高越清晰吗',False,False),('越高就越清晰吗',False,False),
+    ('码率越高越清晰吗？',False,True),('先说视频码率。',False,True),
+    ('越高越清晰吗',True,True)])
+def test_generated_opening_cannot_start_with_a_subjectless_comparison(copy,supplied,accepted):
+    calls=[]
+    class Transport:
+        def post(self,*args):
+            calls.append(1)
+            return ScenePlannerHTTPResponse(200,json.dumps(_chat_response([{**_scene('opening',0),'voice_text':copy}])).encode(),{})
+    planner=OpenAICompatibleScenePlanner('fixture',protocol='chat_completions',transport=Transport())
+    if accepted:
+        assert planner.plan(_project(),topic='视频码率',script=copy if supplied else None).scenes[0].voice_text==copy
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as error:planner.plan(_project(),topic='视频码率')
+        assert error.value.domain_rule=='opening_context' and error.value.domain_field=='voice_text'
+    assert calls==[1]
 
 
 def _scene(scene_id: str, order: int, *, preferred: list[str] | None = None, fallback: list[str] | None = None) -> dict[str, object]:
@@ -54,6 +218,284 @@ def _response(scenes: list[dict[str, object]]) -> dict[str, object]:
 
 def _chat_response(scenes: list[dict[str, object]]) -> dict[str, object]:
     return {"choices": [{"message": {"content": json.dumps({"scenes": scenes})}}]}
+
+
+@pytest.mark.parametrize('acquisition', ['bounded_search_import_then_interval_qa', 'manual_search_import'])
+def test_automatic_planner_requests_only_available_generation_and_reports_stock_connection(acquisition):
+    requests=[]
+    scene={**_scene('opening',0,preferred=['stock'],fallback=['stock']), 'graphic_plan':None,
+        'visual_requirement':'unknown','visual_requirement_reason':None,
+        'material_request':{'source_kind':'stock','query':'camera settings','reason':'展示设置'}}
+    class Transport:
+        def post(self,url,headers,body,timeout):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps(_chat_response([scene])).encode(),{})
+    context={'continuous_production':{'target':'短视频'},'material_supply':{
+        'ai_broll_generation':'not_configured','external_acquisition':acquisition}}
+    result=OpenAICompatibleScenePlanner('fixture',protocol='chat_completions',chat_output_mode='json_schema',
+        transport=Transport()).plan(_project(),context=context)
+    assert result.scenes[0].material_request.source_kind=='stock'
+    body=requests[0]; prompt=body['messages'][0]['content']
+    schema=body['response_format']['json_schema']['schema']['properties']['scenes']['items']['properties']
+    assert schema['material_request']['anyOf'][1]['properties']['source_kind']['enum']==['stock']
+    assert 'ai_broll' in schema['preferred_sources']['items']['enum']
+    assert '未配置 AI 补充画面生成' in prompt
+    assert ('已配置外部素材获取' in prompt)==(acquisition=='bounded_search_import_then_interval_qa')
+    assert ('当前未配置自动外部素材获取' in prompt)==(acquisition=='manual_search_import')
+
+
+@pytest.mark.parametrize('request_kind,clip_kind,accepted', [('ai_broll',None,False),('stock',None,True),(None,'ai_broll',True)])
+def test_automatic_material_contract_rejects_only_new_unavailable_generation(request_kind,clip_kind,accepted):
+    clip_id=str(uuid4()) if clip_kind else None
+    scene={**_scene('opening',0,preferred=[clip_kind or request_kind],fallback=['stock']), 'graphic_plan':None,
+        'visual_requirement':'unknown','visual_requirement_reason':None,
+        'preferred_clip_id':clip_id,'material_request':({'source_kind':request_kind,'query':'camera settings',
+        'reason':'展示设置'} if request_kind else None)}
+    class Transport:
+        def post(self,*args):
+            return ScenePlannerHTTPResponse(200,json.dumps(_chat_response([scene])).encode(),{})
+    planner=OpenAICompatibleScenePlanner('fixture',protocol='chat_completions',transport=Transport())
+    context={'continuous_production':{'target':'短视频'},'material_supply':{'ai_broll_generation':'not_configured'}}
+    if clip_id:
+        context['materials']=[{'clip_id':clip_id,'source_kind':'ai_broll','summary':'已入库的 AI 画面'}]
+    if accepted:
+        result=planner.plan(_project(),context=context)
+        assert str(result.scenes[0].preferred_clip_id)==clip_id if clip_id else result.scenes[0].material_request.source_kind=='stock'
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as error:
+            planner.plan(_project(),context=context)
+        assert error.value.domain_field=='material_request'
+        assert 'no AI B-roll generation provider configured' in str(error.value)
+        assert error.value.response_document is not None
+    # 手工规划仍可将生成需求保留为待解决的缺口。
+    if request_kind=='ai_broll':
+        assert planner.plan(_project()).scenes[0].material_request.source_kind=='ai_broll'
+
+
+@pytest.mark.parametrize("treatment,points", [
+    ("diagram_flow", ["原始画面", "编码", "输出画面"]),
+    ("diagram_loss", ["已有细节", "丢失细节"]),
+    ("diagram_factors", ["编码方式", "分辨率", "画面内容"]),
+])
+def test_normal_planner_schema_and_output_can_reach_supported_information_diagrams(treatment, points):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    from app.assembly.edit_plan import resolve_edit_plan
+    from app.domain.models import CandidateAsset, CostCategory, SourceKind, UsageCost
+    requests=[]
+    scene={**_scene("explain",0,preferred=["typography"]), "fallback_sources":[],
+        "visual_requirement":"explanatory", "visual_requirement_reason":"解释信息之间的关系",
+        "graphic_plan":{"kind":"diagram","treatment":treatment,"points":points,"reason":None}}
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200,json.dumps(_chat_response([scene])).encode(),{})
+    project=_project()
+    result=OpenAICompatibleScenePlanner("fixture-key",protocol="chat_completions",chat_output_mode="json_schema",transport=Transport()).plan(project)
+    variants=requests[0]["response_format"]["json_schema"]["schema"]["properties"]["scenes"]["items"]["properties"]["graphic_plan"]["anyOf"]
+    schema=next(v for v in variants if treatment in v.get("properties",{}).get("treatment",{}).get("enum",[]))
+    assert "diagram" in schema["properties"]["kind"]["enum"]
+    assert treatment in schema["properties"]["treatment"]["enum"]
+    assert schema["properties"]["reason"]=={"type":"null"}
+    assert schema["properties"]["points"]["minItems"]==2
+    assert schema["properties"]["points"]["maxItems"]==(2 if treatment=="diagram_loss" else 4)
+    planned=result.scenes[0]
+    assert planned.graphic_plan.kind == "diagram"
+    candidate=CandidateAsset(scene_plan_id=planned.id,source_kind=SourceKind.TYPOGRAPHY,
+        match_score=1,why=["diagram"],recommended=True,estimated_cost=UsageCost(category=CostCategory.TYPOGRAPHY))
+    edit=resolve_edit_plan(project,[planned],{planned.id:candidate},clip_intervals={},supplied=None)
+    assert edit.scenes[0].graphic_treatment.value == treatment
+    assert edit.scenes[0].graphic_text == "\n".join(points)
+
+
+@pytest.mark.parametrize("points,rule", [
+    (["长" * 24, "长" * 24, "长" * 23, "短"], None),
+    (["长" * 25, "短"], "graphic_label_length"),
+    (["长" * 24] * 4, "graphic_total_length"),
+    (["只有一个节点"], "graphic_point_count"),
+])
+def test_graphic_label_contract_preserves_uneven_valid_labels_and_reports_exact_failure(points, rule):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    requests = []
+    value = {**_scene("graphic", 0, preferred=["typography"]), "fallback_sources": [],
+        "visual_requirement": "explanatory", "visual_requirement_reason": "表达节点之间的关系",
+        "graphic_plan": {"kind": "diagram", "treatment": "diagram_flow", "points": points, "reason": None}}
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([value])).encode(), {})
+    planner = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", chat_output_mode="json_schema", transport=Transport())
+    if rule is None:
+        assert planner.plan(_project()).scenes[0].graphic_plan.points == points
+        variants = requests[0]["response_format"]["json_schema"]["schema"]["properties"]["scenes"]["items"]["properties"]["graphic_plan"]
+        branch = next(branch for branch in variants["anyOf"] if "diagram_flow" in branch.get("properties", {}).get("treatment", {}).get("enum", []))
+        assert all(len(point) <= branch["properties"]["points"]["items"]["maxLength"] for point in points)
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as raised:
+            planner.plan(_project())
+        assert raised.value.domain_field == "graphic_plan" and raised.value.domain_rule == rule
+        assert raised.value.graphic_diagnostic["point_total_chars"] == sum(map(len, points))
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_supplied_copy_must_survive_scene_planning_without_retry(changed):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    calls = []
+    scene = {**_scene("speech", 0), "voice_text": "Rewritten speech." if changed else "Exact supplied speech."}
+
+    class Transport:
+        def post(self, *args):
+            calls.append(args)
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([scene])).encode(), {})
+
+    planner = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport())
+    if changed:
+        with pytest.raises(ScenePlannerProviderResponseError) as failure:
+            planner.plan(_project(), script="Exact supplied speech.")
+        assert failure.value.domain_rule == "script_copy_mismatch"
+    else:
+        assert planner.plan(_project(), script="Exact supplied speech.").scenes[0].voice_text == "Exact supplied speech."
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("variant,accepted,retained", [
+    ("missing_source", True, False),
+    ("permitted_stock", True, True),
+    ("non_creator", False, False),
+    ("invalid_alternative", False, False),
+    ("empty_alternative", False, False),
+    ("invalid_fallback", False, False),
+    ("unsupported_fallback", False, False),
+])
+def test_incomplete_creator_cutaway_does_not_invent_permission(variant, accepted, retained):
+    alternative = {"subject": "手机画面", "action": "展示清晰度", "framing": "特写", "description": "切题实拍"}
+    scene = {**_scene("creator", 0, preferred=["talking_profile", "ai_video"]),
+        "fallback_sources": [], "visual_requirement": "creator_speaking",
+        "visual_requirement_reason": "本人必须面对镜头说明观点",
+        "supporting_visual_intent": alternative, "graphic_plan": None}
+    if variant == "permitted_stock":
+        scene["fallback_sources"] = ["stock"]
+    elif variant == "non_creator":
+        scene["visual_requirement"] = "action_evidence"
+    elif variant == "invalid_alternative":
+        scene["supporting_visual_intent"] = {**alternative, "subject": 17}
+    elif variant == "empty_alternative":
+        scene["supporting_visual_intent"] = dict.fromkeys(alternative)
+    elif variant == "invalid_fallback":
+        scene["fallback_sources"] = ["unknown_source"]
+    elif variant == "unsupported_fallback":
+        scene["fallback_sources"] = ["talking_profile"]
+
+    class Transport:
+        def post(self, *args):
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([scene])).encode(), {})
+
+    planner = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport())
+    if not accepted:
+        with pytest.raises(ScenePlannerProviderResponseError):
+            planner.plan(_project())
+        return
+    result = planner.plan(_project()).scenes[0]
+    assert result.voice_text == scene["voice_text"]
+    assert result.visual_requirement == "creator_speaking"
+    assert result.visual_requirement_reason == scene["visual_requirement_reason"]
+    assert [source.value for source in result.preferred_sources] == scene["preferred_sources"]
+    assert [source.value for source in result.fallback_sources] == scene["fallback_sources"]
+    assert (result.supporting_visual_intent is not None) is retained
+
+
+@pytest.mark.parametrize("primary_graphic", [False, True])
+def test_missing_graphic_discards_only_optional_fallback(primary_graphic):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    scene = {**_scene("visual", 0, preferred=["typography"] if primary_graphic else ["user_asset"]),
+        "graphic_plan": None, "visual_requirement": "unknown", "visual_requirement_reason": None}
+
+    class Transport:
+        def post(self, *args):
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([scene])).encode(), {})
+
+    planner = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport())
+    if primary_graphic:
+        with pytest.raises(ScenePlannerProviderResponseError) as failure:
+            planner.plan(_project())
+        assert failure.value.domain_rule == "graphic_plan_required"
+    else:
+        result = planner.plan(_project()).scenes[0]
+        assert [kind.value for kind in result.preferred_sources] == ["user_asset"]
+        assert "typography" not in [kind.value for kind in result.fallback_sources]
+        assert result.graphic_plan is None
+
+
+@pytest.mark.parametrize("style,accepted", [("auto", True), ("creator_led", False)])
+def test_saved_creator_led_requirement_rejects_card_only_plan_without_another_paid_request(style, accepted):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    requests = []
+    graphic = {**_scene("graphic", 0, preferred=["typography"]), "fallback_sources": [],
+        "visual_requirement": "explanatory", "visual_requirement_reason": "解释概念",
+        "graphic_plan": {"kind": "text_card", "treatment": "headline", "points": ["码率是数据量"], "reason": None}}
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([graphic])).encode(), {})
+    planner = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport())
+    current = _project().model_copy(update={"presentation_style": style})
+    if accepted:
+        assert planner.plan(current).scenes[0].preferred_sources[0] == "typography"
+    else:
+        with pytest.raises(ScenePlannerProviderResponseError) as raised:
+            planner.plan(current)
+        assert raised.value.domain_rule == "presentation_requirement"
+    assert len(requests) == 1
+    prompt = requests[0]["messages"][0]["content"]
+    sent=json.loads(prompt.split('Project request:\n',1)[1].splitlines()[0])
+    assert sent['production_controls']['presentation_style']==style
+
+
+def test_creator_led_missing_media_preserves_new_talking_and_real_evidence_plan():
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    scenes = [
+        {**_scene("speaker", 0, preferred=["user_asset", "ai_video"]), "fallback_sources": ["capture"],
+         "duration_target_ms": 7500, "visual_requirement": "creator_speaking",
+         "visual_requirement_reason": "用户选择本人讲解，需要授权人物说出本段新文案", "graphic_plan": None},
+        {**_scene("evidence", 1), "fallback_sources": ["capture"], "duration_target_ms": 2500,
+         "visual_requirement": "action_evidence", "visual_requirement_reason": "展示同一动作的真实差异", "graphic_plan": None},
+    ]
+    class Transport:
+        def post(self, *args):
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response(scenes)).encode(), {})
+    current = _project().model_copy(update={"presentation_style": "creator_led"})
+    result = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport()).plan(
+        current, context={"materials": [], "material_gap": "no relevant local media"})
+    assert [scene.visual_requirement for scene in result.scenes] == ["creator_speaking", "action_evidence"]
+    assert "ai_video" in result.scenes[0].preferred_sources
+    assert result.scenes[1].fallback_sources == ["capture"]
+
+
+@pytest.mark.parametrize("supporting_graphic", [False, True])
+def test_creator_led_new_talking_does_not_require_capture_or_action_evidence(supporting_graphic):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    calls = []
+    speaker = {**_scene("speaker", 0, preferred=["ai_video"]), "fallback_sources": [],
+        "duration_target_ms": 2500, "visual_requirement": "creator_speaking",
+        "visual_requirement_reason": "本人通过已授权 Talking 讲解新文案", "graphic_plan": None}
+    scenes = [speaker]
+    if supporting_graphic:
+        scenes.append({**_scene("concept", 1, preferred=["typography"]), "fallback_sources": [],
+            "duration_target_ms": 7500, "visual_requirement": "explanatory",
+            "visual_requirement_reason": "用静态对照说明概念，不声称实测结果",
+            "graphic_plan": {"kind": "text_card", "treatment": "contrast", "points": ["数据预算", "实际画质"], "reason": None}})
+
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            calls.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response(scenes)).encode(), {})
+
+    current = _project().model_copy(update={"presentation_style": "creator_led"})
+    result = OpenAICompatibleScenePlanner("fixture-key", protocol="chat_completions", transport=Transport()).plan(
+        current, context={"materials": []})
+    assert [s.visual_requirement for s in result.scenes] == (["creator_speaking", "explanatory"] if supporting_graphic else ["creator_speaking"])
+    assert all("capture" not in (*s.preferred_sources, *s.fallback_sources) for s in result.scenes)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("purpose,duration,error_field", [
@@ -148,10 +590,11 @@ def _fake_server(
 
 def test_scene_planner_posts_strict_schema_and_binds_project() -> None:
     project = _project()
-    response = _response([_scene("scene_01", 0), _scene("scene_02", 1)])
+    first = {**_scene("scene_01", 0), "voice_text": "Open with the misconception."}
+    response = _response([first, _scene("scene_02", 1)])
     with _fake_server(200, response) as (base_url, requests):
         result = OpenAICompatibleScenePlanner("  runtime-secret  ", base_url=base_url).plan(
-            project, script="Open with the misconception.", topic="When to avoid Vibe Coding",
+            project, script=first["voice_text"] + " " + _scene("scene_02", 1)["voice_text"], topic="When to avoid Vibe Coding",
             context={"ip_profile_version": 2, "evidence_refs": ["ip_profile:example:v2"], "ip_profile": {"audience": "builders"}},
         )
 
@@ -171,10 +614,12 @@ def test_scene_planner_posts_strict_schema_and_binds_project() -> None:
     assert schema["schema"]["additionalProperties"] is False
     assert schema["schema"]["properties"]["scenes"]["items"]["additionalProperties"] is False
     prompt = request["input"][0]["content"][0]["text"]
-    assert "Prefer user_asset and historical_asset first" in prompt
+    assert "Prefer suitable creator footage" in prompt
+    assert "Ownership does not make unrelated footage suitable" in prompt
     assert "Open with the misconception." in prompt
     assert "When to avoid Vibe Coding" in prompt
-    assert request["input"][0]["content"][0]["text"].find('"ip_profile_version": 2') >= 0
+    sent=json.loads(prompt.split('Project request:\n',1)[1].splitlines()[0])
+    assert sent['background_evidence']['ip_profile_version']==2
 
 
 def test_scene_planner_supports_explicit_chat_completions_protocol() -> None:
@@ -202,6 +647,30 @@ def test_scene_planner_supports_explicit_chat_completions_protocol() -> None:
     assert "response_format" not in request
 
 
+def test_scene_planner_supports_anthropic_messages_structured_output() -> None:
+    with _fake_server(200, {
+        "content": [{"type": "text", "text": json.dumps({"scenes": [_scene("anthropic", 0)]})}],
+        "stop_reason": "end_turn",
+    }) as (base_url, requests):
+        result = OpenAICompatibleScenePlanner(
+            "runtime-secret", base_url=base_url, model="claude-sonnet-4-6", protocol="anthropic_messages",
+        ).plan(_project())
+
+    assert result.scenes[0].scene_id == "anthropic"
+    path, headers, body = requests[0]
+    request = json.loads(body)
+    assert path == "/v1/messages"
+    headers = {key.lower(): value for key, value in headers.items()}
+    assert headers["x-api-key"] == "runtime-secret"
+    assert headers["anthropic-version"] == "2023-06-01"
+    assert request["max_tokens"] == 4096
+    assert request["output_config"]["format"]["type"] == "json_schema"
+    schema = request["output_config"]["format"]["schema"]
+    assert "minimum" not in json.dumps(schema)
+    assert "maxLength" not in json.dumps(schema)
+    assert "maxItems" not in json.dumps(schema)
+
+
 def test_chat_schema_opt_in_uses_the_same_contract_and_ignores_reasoning():
     from app.providers.scene_planner import _PLAN_SCHEMA
     payload = _chat_response([_scene("schema", 0)])
@@ -214,7 +683,38 @@ def test_chat_schema_opt_in_uses_the_same_contract_and_ignores_reasoning():
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("mode,protocol", [("auto", "chat_completions"), ("", "chat_completions"), (None, "chat_completions"), ("json_schema", "responses")])
+@pytest.mark.parametrize("base_url,model,mode,expected", [
+    ("https://api.moonshot.cn/v1", "kimi-k2.6", None, "json_schema"),
+    ("https://api.moonshot.ai/v1/", "kimi-k2.6", None, "json_schema"),
+    ("https://api.moonshot.cn/v1", "kimi-k2.6", "prompt", "prompt"),
+    ("https://api.moonshot.cn/v1", "kimi-k2.6", "json_schema", "json_schema"),
+    ("https://api.moonshot.cn/v1", "kimi-k3", None, "prompt"),
+    ("https://api.deepseek.com/v1", "kimi-k2.6", None, "prompt"),
+    ("https://proxy.example/v1", "kimi-k2.6", None, "prompt"),
+])
+def test_chat_output_default_uses_only_known_official_model_support(base_url, model, mode, expected):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+    requests = []
+    class Transport:
+        def post(self, url, headers, body, timeout):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([_scene("default", 0)])).encode(), {})
+    planner = OpenAICompatibleScenePlanner(
+        "fixture-key", base_url=base_url, model=model, protocol="chat_completions",
+        chat_output_mode=mode, transport=Transport(),
+    )
+    planner.plan(_project())
+    assert planner.chat_output_mode == expected
+    assert ("response_format" in requests[0]) == (expected == "json_schema")
+    assert len(requests) == 1
+
+
+def test_official_k26_responses_protocol_keeps_existing_default():
+    planner = OpenAICompatibleScenePlanner("fixture-key", base_url="https://api.moonshot.cn/v1", model="kimi-k2.6")
+    assert planner.chat_output_mode == "prompt"
+
+
+@pytest.mark.parametrize("mode,protocol", [("auto", "chat_completions"), ("", "chat_completions"), ("json_schema", "responses")])
 def test_chat_output_mode_is_explicitly_validated(mode, protocol):
     with pytest.raises(ScenePlannerConfigurationError):
         OpenAICompatibleScenePlanner("key", protocol=protocol, chat_output_mode=mode)
@@ -268,8 +768,6 @@ def test_safe_validation_codes_without_provider_values(failure, code, caplog):
     ("reason", "visual_requirement_reason_required", "visual_requirement_reason"),
     ("order", "scene_order", "unknown"),
     ("duplicate", "scene_id_duplicate", "unknown"),
-    ("priority", "real_asset_priority", "unknown"),
-    ("fallback", "real_asset_fallback_only", "unknown"),
     ("empty", "empty_plan", "unknown"),
 ])
 def test_domain_diagnostics_are_specific_fixed_and_private(failure, rule, field, caplog):
@@ -299,6 +797,40 @@ def test_domain_diagnostic_rejects_untrusted_identifiers():
     assert error.domain_rule == error.domain_field == "unknown"
 
 
+@pytest.mark.parametrize("case,path,error_type", [
+    ("nested", "visual_intent.action", "string_type"),
+    ("motion_fallback", "supporting_visual_intent", "supporting_visual_intent_invalid"),
+])
+def test_validation_diagnostic_identifies_safe_field_and_type_without_values(case, path, error_type, caplog):
+    import traceback
+    secret = "private-response-value-should-never-appear"
+    scene = _scene("safe", 0)
+    if case == "nested":
+        scene["visual_intent"]["action"] = [secret]
+    else:
+        scene.update(visual_requirement="creator_speaking", visual_requirement_reason=secret,
+                     supporting_visual_intent={"subject": secret, "action": None, "framing": None, "description": None},
+                     fallback_sources=["talking_profile"])
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([scene])).encode(), {})
+    with pytest.raises(ScenePlannerProviderResponseError) as raised:
+        OpenAICompatibleScenePlanner(secret, protocol="chat_completions", transport=Transport()).plan(_project())
+    assert raised.value.validation_path == path
+    assert raised.value.validation_type == error_type
+    assert f"validation_path={path} validation_type={error_type}" in caplog.text
+    assert secret not in caplog.text + "".join(traceback.format_exception(raised.value))
+
+
+def test_validation_path_never_renders_provider_controlled_keys():
+    from app.providers.scene_planner import _safe_validation_diagnostic
+    secret = "private_extra_key"
+    assert _safe_validation_diagnostic({"loc": ("visual_intent", secret), "type": "extra_forbidden"}) == (
+        "field_value", "visual_intent", "visual_intent", "extra_forbidden")
+    assert _safe_validation_diagnostic({"loc": (secret,), "type": secret}) == (
+        "field_value", "unknown", "unknown", "unknown")
+
+
 @pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
 @pytest.mark.parametrize("graphic,accepted", [
     ({"kind": "text_card", "treatment": "key_point", "points": ["结论", "条件", "证据", "限制"], "reason": None}, True),
@@ -309,6 +841,8 @@ def test_domain_diagnostic_rejects_untrusted_identifiers():
 def test_explicit_graphic_provider_shape_preserves_realization_or_rejects_invalid(protocol, graphic, accepted):
     value = {**_scene("graphic", 0), "visual_requirement": "explanatory",
              "visual_requirement_reason": "A concept explanation", "graphic_plan": graphic}
+    if graphic is None:
+        value["preferred_sources"] = ["typography"]
     response = _response([value]) if protocol == "responses" else _chat_response([value])
     with _fake_server(200, response) as (url, requests):
         planner = OpenAICompatibleScenePlanner("key", base_url=url, protocol=protocol)
@@ -322,19 +856,32 @@ def test_explicit_graphic_provider_shape_preserves_realization_or_rejects_invali
 
 
 @pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
-def test_prompt_states_local_cross_field_source_rules(protocol):
+def test_prompt_unifies_generation_and_editorial_source_preferences(protocol):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
     response = _response([_scene("valid", 0)]) if protocol == "responses" else _chat_response([_scene("valid", 0)])
-    with _fake_server(200, response) as (url, requests):
-        result = OpenAICompatibleScenePlanner("key", base_url=url, protocol=protocol).plan(_project())
-    body = json.loads(requests[0][2])
+    requests = []
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            requests.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200, json.dumps(response).encode(), {})
+
+    result = OpenAICompatibleScenePlanner("key", protocol=protocol, transport=Transport()).plan(_project())
+    body = requests[0]
     text = body["messages"][0]["content"] if protocol == "chat_completions" else body["input"][0]["content"][0]["text"]
-    assert "every user_asset/historical_asset in preferred_sources must precede every" in text
-    assert "real sources cannot be fallback-only" in text
+    assert "Prefer suitable creator footage" in text
+    assert "External footage or graphics may lead" in text
+    assert "creator sources may be fallback-only" in text
+    assert "Plan cloned narration, new Talking and supporting visuals together" in text
+    assert "Default to a complete plan needing no new capture" in text
+    assert "Do not turn generated illustrations into evidence of real events" in text
+    assert "must precede every" not in text and "real sources cannot be fallback-only" not in text
+    assert "25 percent" not in text
     assert "creative preference from an irreplaceable visual requirement" in text
     assert "not proof that the creator must visibly speak" in text
     assert "not merely because the topic mentions an action" in text
     assert "Read production_feasibility before choosing sources" in text
     assert "Unknown price is not zero" in text
+    assert len(requests) == 1
     assert result.scenes[0].visual_requirement == "unknown"  # unchanged legacy behavior
 
 
@@ -366,30 +913,16 @@ def test_retained_audience_control_leak_across_protocols(protocol, topic, accept
     assert LEAKED_VOICE not in caplog.text and "private-key" not in caplog.text
 
 
-@pytest.mark.parametrize("requirement,preferred,accepted", [
-    ("explanatory", ["typography"], True),
-    ("explanatory", ["typography", "screenshot"], True),
-    ("unknown", ["typography"], False),
-    ("creator_speaking", ["typography"], False),
-    ("action_evidence", ["typography"], False),
-    ("explanatory", ["screenshot", "typography"], False),
-    ("explanatory", ["typography", "ai_video"], False),
-    ("explanatory", ["typography", "talking_profile"], False),
-    ("explanatory", ["typography", "user_asset"], False),
+@pytest.mark.parametrize("preferred,fallback", [
+    (["stock", "user_asset"], ["capture"]),
+    (["stock"], ["user_asset", "historical_asset"]),
+    (["typography", "user_asset"], ["historical_asset"]),
 ])
-def test_explanatory_typography_first_exception_is_narrow(requirement, preferred, accepted):
-    scene = {**_scene("explain", 0, preferred=preferred, fallback=["user_asset", "historical_asset"]),
-        "visual_requirement": requirement, "visual_requirement_reason": "A concept card preserves the explanation without person/action evidence."}
+def test_source_order_follows_editorial_intent_not_ownership(preferred, fallback):
+    scene = _scene("explain", 0, preferred=preferred, fallback=fallback)
     with _fake_server(200, _chat_response([scene])) as (url, requests):
-        planner = OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions")
-        if accepted:
-            result = planner.plan(_project())
-            assert [s.value for s in result.scenes[0].preferred_sources] == preferred
-            assert [s.value for s in result.scenes[0].fallback_sources] == ["user_asset", "historical_asset"]
-        else:
-            with pytest.raises(ScenePlannerProviderResponseError) as raised:
-                planner.plan(_project())
-            assert raised.value.domain_rule == ("real_asset_priority" if "user_asset" in preferred else "real_asset_fallback_only")
+        result = OpenAICompatibleScenePlanner("key", base_url=url, protocol="chat_completions").plan(_project())
+        assert [v.value for v in result.scenes[0].preferred_sources] == preferred
     assert len(requests) == 1
 
 
@@ -401,7 +934,8 @@ def test_scene_planner_rejects_unknown_protocol(protocol: object) -> None:
 
 @pytest.mark.parametrize("protocol,field", [("responses", "max_output_tokens"), ("chat_completions", "max_completion_tokens")])
 def test_explicit_output_limit_and_effort(protocol, field, caplog):
-    payload = _response([_scene("bounded", 0)]) if protocol == "responses" else _chat_response([_scene("bounded", 0)])
+    scene = {**_scene("bounded", 0), "voice_text": "private-script"}
+    payload = _response([scene]) if protocol == "responses" else _chat_response([scene])
     with _fake_server(200, payload) as (url, requests):
         with caplog.at_level("INFO", logger="app.providers.scene_planner"):
             OpenAICompatibleScenePlanner("private-key", base_url=url, protocol=protocol,
@@ -426,14 +960,42 @@ def test_official_deepseek_chat_controls_and_parsing(base_url):
 
     result = OpenAICompatibleScenePlanner("runtime-key", base_url=base_url, model="deepseek-flash",
         protocol="chat_completions", reasoning_effort="none", max_output_tokens=4096,
-        timeout_seconds=90, transport=Transport()).plan(_project())
+        timeout_seconds=90, chat_output_mode="json_object", transport=Transport()).plan(_project())
     assert len(calls) == 1 and calls[0][0] == base_url.rstrip("/") + "/chat/completions"
     body = calls[0][1]
     assert body["max_tokens"] == 4096 and body["reasoning_effort"] == "none"
     assert "max_completion_tokens" not in body and "max_output_tokens" not in body
     assert body["model"] == "deepseek-flash" and calls[0][2] == 90
+    assert body["response_format"]=={"type":"json_object"}
     assert "Required output JSON Schema" in body["messages"][0]["content"]
     assert result.scenes[0].scene_id == "planned"
+
+
+@pytest.mark.parametrize("base_url", ["https://api.moonshot.cn/v1", "https://api.moonshot.ai/v1"])
+def test_moonshot_k26_structured_plan_disables_default_thinking(base_url):
+    from app.providers.scene_planner import ScenePlannerHTTPResponse
+
+    calls = []
+    class Transport:
+        def post(self, url, headers, body, timeout_seconds):
+            calls.append(json.loads(body))
+            return ScenePlannerHTTPResponse(200, json.dumps(_chat_response([_scene("planned", 0)])).encode(), {})
+
+    planner = OpenAICompatibleScenePlanner("runtime-key", base_url=base_url, model="kimi-k2.6",
+        protocol="chat_completions", max_output_tokens=6144, transport=Transport())
+    assert planner.plan(_project()).scenes[0].scene_id == "planned"
+    assert calls[0]["thinking"] == {"type": "disabled"}
+    assert calls[0]["max_tokens"] == 6144
+    assert "max_completion_tokens" not in calls[0]
+    assert len(calls) == 1
+
+
+def test_moonshot_k26_thinking_control_is_provider_scoped():
+    with pytest.raises(ScenePlannerConfigurationError, match="thinking type"):
+        OpenAICompatibleScenePlanner("key", model="gpt-4.1-mini", thinking_type="disabled")
+    with pytest.raises(ScenePlannerConfigurationError, match="thinking type"):
+        OpenAICompatibleScenePlanner("key", base_url="https://api.moonshot.cn/v1", model="kimi-k2.6",
+            protocol="chat_completions", thinking_type="invalid")
 
 
 @pytest.mark.parametrize("base_url,protocol", [
@@ -552,7 +1114,7 @@ def test_scene_planner_does_not_follow_redirect_with_byok() -> None:
     assert target_requests == []
 
 
-def test_scene_planner_rejects_bad_provider_order_and_real_asset_priority() -> None:
+def test_scene_planner_rejects_bad_provider_order_and_extra_fields() -> None:
     unordered = _response([_scene("later", 1), _scene("first", 0)])
     with _fake_server(200, unordered) as (base_url, _):
         with pytest.raises(ScenePlannerProviderResponseError, match="invalid scene plan"):
@@ -564,10 +1126,6 @@ def test_scene_planner_rejects_bad_provider_order_and_real_asset_priority() -> N
         with pytest.raises(ScenePlannerProviderResponseError, match="invalid scene plan"):
             OpenAICompatibleScenePlanner("key", base_url=base_url).plan(_project())
 
-    real_as_fallback_only = _response([_scene("bad", 0, preferred=["typography"], fallback=["user_asset"])])
-    with _fake_server(200, real_as_fallback_only) as (base_url, _):
-        with pytest.raises(ScenePlannerProviderResponseError, match="invalid scene plan"):
-            OpenAICompatibleScenePlanner("key", base_url=base_url).plan(_project())
 
 
 def test_scene_planner_input_configuration_and_transport_errors_are_safe() -> None:

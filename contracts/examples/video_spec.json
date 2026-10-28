@@ -23,14 +23,31 @@
         "clip_id": "33333333-3333-3333-3333-333333333333",
         "clip_start_ms": 13200,
         "clip_end_ms": 16200,
-        "source_duration_ms": 60000
+        "source_duration_ms": 60000,
+        "vertical_reframe_mode": "contain",
+        "vertical_reframe_evidence_reference": null,
+        "source_bottom_crop_ratio": 0.0
       },
       "narration_asset_id": null,
       "narration_start_ms": null,
       "narration_end_ms": null,
       "caption": "A continuous user clip",
       "captions": [],
-      "transition": "cut"
+      "transition": "cut",
+      "visual_role": "footage",
+      "framing_policy": "face_safe_contain",
+      "portrait_presentation": "full_canvas",
+      "subtitle_treatment": "timed_captions",
+      "graphic_treatment": "none",
+      "graphic_text": null,
+      "style_tokens": {
+        "schema_version": "0.1",
+        "name": "content-os-dark",
+        "background_color": "#172033",
+        "foreground_color": "#f8fbff",
+        "accent_color": "#65d3b4",
+        "font_family": "Inter, ui-sans-serif, system-ui"
+      }
     }
   ],
   "master_narration": null,
@@ -42,5 +59,6 @@
     "currency": "USD",
     "provider": null,
     "note": null
-  }
+  },
+  "edit_plan": null
 }

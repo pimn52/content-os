@@ -112,6 +112,16 @@ export function createRecoveryFixture(storage: Storage, kind: "voice" | "present
       return { id: jobId, type: "render", status: replacement ? state.records[0]?.status ?? "pending" : "completed",
         render_id: replacement ? recoveryIds.newRender : recoveryIds.oldRender, error_code: null } as T;
     }
+    if (path === `/projects/${projectId}/planning-observations` && !write) return clone(state.observations) as T;
+    if(path.startsWith(`/projects/${projectId}/renders/`)&&path.endsWith("/choice-impact")) return {delivery_intent:"publish",retained_source_ms:1000,discard_render_ids:[] } as T;
+    if(path.startsWith(`/projects/${projectId}/renders/`)&&path.endsWith("/choice")) {
+      if(options?.method==="PUT"){(state as any).renderChoice=body.disposition;count(state,"choose_render");save(state);}
+      return {disposition:(state as any).renderChoice??"candidate"} as T;
+    }
+    if (path === `/projects/${projectId}/feedback` && write) {
+      Object.assign(state.run, {review_state:body.accepted ? "approved" : "rejected", review_notes:body.rejection_reason});
+      count(state,"record_video_review");save(state);return body as T;
+    }
     if (path === base + "/presentation-observations" && write) {
       if (state.denied) throw new Error("presentation_authorization_changed");
       const expectedHash = state.run.render_job_id === recoveryIds.oldJob ? renderHashes.before : renderHashes.after;

@@ -51,6 +51,9 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
   const [observation, setObservation] = useState<Observation | null>(null); const [plan, setPlan] = useState<PresentationPlan | null>(null);
   const [records, setRecords] = useState<RepairRecord[]>([]); const [finding, setFinding] = useState<Finding>("duplicate_text");
   const [sceneId, setSceneId] = useState(""); const [reason, setReason] = useState(""); const [evidence, setEvidence] = useState("");
+  const [reviewReason, setReviewReason] = useState("");
+  const [choice,setChoice]=useState("candidate");
+  const [choiceImpact,setChoiceImpact]=useState<{delivery_intent:string;retained_source_ms:number;discard_render_ids:string[]}|null>(null);
   const [repairReason, setRepairReason] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
   const epoch = useRef(0); const locked = useRef(false);
   const identity = recoveryIdentity(projectId, run.id, run.render_job_id, null, JSON.stringify([
@@ -69,7 +72,7 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
     const token = ++epoch.current; const expected = identity;
     const active = () => token === epoch.current && identityRef.current === expected;
     locked.current = false; setBusy(false); setError(""); setNotice(""); setJob(null); setDraft(null); setRenderUrl(""); setRenderHash("");
-    setObservation(null); setPlan(null); setRecords([]);
+    setObservation(null); setPlan(null); setRecords([]);setChoice("candidate");setChoiceImpact(null);
     setSceneId(""); setFinding("duplicate_text"); setReason(""); setEvidence(""); setRepairReason("");
     const urls: string[] = [];
     const headers = new Headers(); const bearer = window.sessionStorage.getItem("content-os-access-token");
@@ -78,7 +81,8 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
       request<Draft>(`/projects/${projectId}/draft`),
       request<RepairRecord[]>(base + "/presentation-repairs"),
       run.render_job_id ? request<RenderJob>(`/jobs/${run.render_job_id}`) : Promise.resolve(null),
-    ]).then(async ([currentDraft, history, currentJob]) => {
+      request<Observation[]>(`/projects/${projectId}/planning-observations`),
+    ]).then(async ([currentDraft, history, currentJob, observations]) => {
       if (!active()) return;
       setDraft(currentDraft); setRecords(history);
       if (currentJob) setJob(currentJob);
@@ -91,13 +95,16 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
       const url = URL.createObjectURL(blob); urls.push(url);
       if (!active()) { URL.revokeObjectURL(url); return; }
       setRenderUrl(url); setRenderHash(hash);
-      const key = observationStorageKey(projectId, run.id, currentJob.id, hash);
-      try {
-        const saved = JSON.parse(localStorage.getItem(key) ?? "null") as Observation | null;
-        if (saved?.request?.render_sha256 === hash && saved.render_job_id === currentJob.id) {
-          setObservation(saved); setSceneId(saved.request.scene_id); setFinding(saved.request.finding); setReason(saved.request.reason); setEvidence(saved.request.evidence_reference);
-        }
-      } catch { /* A malformed local observation is discarded; the server remains authoritative. */ }
+      const currentChoice=await request<{disposition:string}>(`/projects/${projectId}/renders/${currentJob.render_id}/choice`);
+      if(!active())return;
+      setChoice(currentChoice.disposition);
+      const impact=await request<{delivery_intent:string;retained_source_ms:number;discard_render_ids:string[]}>(`/projects/${projectId}/renders/${currentJob.render_id}/choice-impact`);
+      if(!active())return;
+      setChoiceImpact(impact);
+      const saved = observations.filter(item => item.render_job_id === currentJob.id && item.request.render_sha256 === hash).slice(-1)[0];
+      if (saved) {
+        setObservation(saved); setSceneId(saved.request.scene_id); setFinding(saved.request.finding); setReason(saved.request.reason); setEvidence(saved.request.evidence_reference);
+      }
     }).catch(cause => { if (active()) setError(errorText(cause)); });
     return () => { ++epoch.current; for (const url of urls) URL.revokeObjectURL(url); };
   }, [projectId, run.id, run.render_job_id, run.status, request, identity]);
@@ -113,7 +120,6 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
         { job_id: job.id, scene_id: sceneId, finding, reason: reason.trim(), evidence_reference: evidence.trim() }),
         render_sha256: renderHash, scene_id: sceneId, finding, reason: reason.trim(), evidence_reference: evidence.trim() };
       if (!active()) return;
-      if (!confirmAction(`记录在 Render Job ${job.id} / SHA-256 ${renderHash} / 场景 ${sceneId} 的人工观察？这是观察记录，不等同于技术 QA 或完整成片审核。`)) return;
       const saved = await request<Observation>(base + "/presentation-observations", { method: "POST", body: JSON.stringify(value) });
       if (!active() || saved.request.render_sha256 !== renderHash || saved.render_job_id !== job.id) return;
       setObservation(saved);
@@ -159,12 +165,47 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
   }
 
   function clearObservationDraft() { setObservation(null); setPlan(null); setRepairReason(""); }
+  async function choose(disposition:"selected"|"discarded") {
+    if(!canInspect||!job?.render_id||locked.current)return;
+    const token=epoch.current;locked.current=true;setBusy(true);setError("");
+    try {
+      const value=await request<{disposition:string}>(`/projects/${projectId}/renders/${job.render_id}/choice`,{method:"PUT",body:JSON.stringify({disposition})});
+      if(token===epoch.current){setChoice(value.disposition);setNotice(disposition==="selected"?"已选用此版本；同作品弃用候选解除占用，文件和发布史保留。":"已不予使用；解除未发布占用，保留已发布历史。");}
+    }catch(cause){if(token===epoch.current)setError(errorText(cause));}
+    finally{if(token===epoch.current){locked.current=false;setBusy(false);}}
+  }
+  async function reviewVideo(accepted: boolean) {
+    if (!canInspect || !job?.render_id || locked.current || (!accepted && !reviewReason.trim())) return;
+    const token = epoch.current;
+    locked.current = true; setBusy(true); setError("");
+    try {
+      await request(`/projects/${projectId}/feedback`, { method:"POST", body:JSON.stringify({
+        output_version:`render:${job.render_id}`, accepted, changed_fields:[],
+        rejection_reason:accepted ? null : reviewReason.trim(), notes:reviewReason.trim() || null,
+      }) });
+      const current = await request<ProductionRun>(base);
+      if (token === epoch.current) onRunChange(current);
+    } catch (cause) { if (token === epoch.current) setError(errorText(cause)); }
+    finally { if (token === epoch.current) { locked.current=false; setBusy(false); } }
+  }
   return <section className="draft-editor" aria-label="此执行的成片呈现修复">
     <div className="row-between"><div><span className="kicker">PRESENTATION / RENDER REVISION</span><h3>成片呈现与新版本</h3></div><span className="badge">{run.status}</span></div>
     {error && <p role="alert" className="error">{error}</p>}{notice && <p role="status" className="ok">{notice}</p>}
     <p className="muted">仅检查完整 Render 文件中的具体场景。记录为人工观察，按当前方案修复后会建立新的 Render；原主旁白、Talking 来源、原版本及审批记录分别保留。</p>
     {job && <p>当前 Render Job {job.id} · {job.status} · {job.error_code ?? "无技术错误码"} · {renderHash ? `SHA-256 ${renderHash}` : "媒体 hash 未读取"}</p>}
-    {renderUrl && <video className="render-preview" controls preload="metadata" src={renderUrl} />}
+    {canInspect && <section aria-label="完整成片审核" className="subform">
+      <p>{choice==="selected"?"当前选用版":choice==="discarded"?"不予使用，未发布占用已释放":run.delivery_intent==="draft"?"仅试做与比较：保留使用记录，不挤占正式作品":"作品候选：已保留占用，同作品版本可继续比较"}</p>
+      {choiceImpact&&<p>选用此版将{choiceImpact.delivery_intent==="draft"?"保留试做用料记录":"锁定本版用料"}（{(choiceImpact.retained_source_ms/1000).toFixed(1)} 秒），弃用同作品其他 {choiceImpact.discard_render_ids?.length??0} 个候选并解除其未发布占用。已发布历史保留；同时导出多版时仍需检查实际复用冲突。</p>}
+      <button type="button" disabled={busy||choice==="selected"||run.review_state==="rejected"} onClick={()=>void choose("selected")}>选用此版</button>
+      <button type="button" disabled={busy||choice==="discarded"} onClick={()=>void choose("discarded")}>不予使用</button>
+      <p>成片版本：render:{job?.render_id}。{run.review_state === "approved" ? "用户已接受" : run.review_state === "rejected" ? "用户已拒绝，需要修改" : "待用户判断画面、声音与内容质量"}</p>
+      {(!run.review_state || run.review_state === "pending") && <>
+        <label>成片反馈<input value={reviewReason} onChange={event => setReviewReason(event.target.value)} maxLength={2000} disabled={busy} /></label>
+        <button type="button" disabled={busy || !reviewReason.trim()} onClick={() => void reviewVideo(false)}>需修改</button>
+        <button type="button" disabled={busy} onClick={() => void reviewVideo(true)}>接受此版成片</button>
+      </>}
+    </section>}
+    {renderUrl && <><video className="render-preview" controls preload="metadata" src={renderUrl} /><a href={`/projects/${projectId}/renders/${job?.render_id}/credits`} target="_blank" rel="noreferrer">下载素材来源与署名</a></>}
     {canInspect && <form className="subform" onSubmit={event => void recordObservation(event)}>
       <h4>登记此 Render 的一项场景观察</h4>
       <label>场景<select value={sceneId} disabled={busy} onChange={event => { clearObservationDraft(); setSceneId(event.target.value); }} required><option value="">请选择</option>{sceneChoices.map(item => <option value={item.id} key={item.id}>{item.label}</option>)}</select></label>

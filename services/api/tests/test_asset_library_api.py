@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import struct
 from uuid import uuid4
@@ -16,7 +17,7 @@ def _seed(tmp_path: Path):
     source = tmp_path / "素材 with spaces.mp4"
     source.write_bytes(b"video bytes")
     db = Database(db_path)
-    asset = Asset(source_file=str(source), content_hash="f" * 64, duration_ms=2_000, width=640, height=360,
+    asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(), duration_ms=2_000, width=640, height=360,
                   fps=RationalFps(numerator=30, denominator=1), authorization_reference="rights",
                   imported_at=datetime.now(timezone.utc))
     clip = Clip(asset_id=asset.id, start_ms=200, end_ms=1_200, asset_duration_ms=2_000,
@@ -71,15 +72,23 @@ def test_asset_library_not_found_and_interval_validation(tmp_path: Path):
         assert client.get(f"/clips/{clip.id}/media").status_code == 404
 
 
-def test_asset_usage_and_identity_are_saved_separately_from_source_kind(tmp_path: Path):
+def test_asset_identity_is_saved_separately_from_source_kind(tmp_path: Path):
     db_path, _, asset, _ = _seed(tmp_path)
     with TestClient(create_app(data_path=db_path)) as client:
-        response = client.patch(f"/assets/{asset.id}/usage", json={"usage": "production", "identity": "none"})
+        response = client.patch(f"/assets/{asset.id}/identity", json={"identity": "none"})
         assert response.status_code == 200
         body = response.json()
         assert body["source_kind"] == "user_asset"
-        assert body["metadata"]["r1_usage"] == "production"
         assert body["metadata"]["r1_identity"] == "none"
+
+
+def test_reusable_meme_role_is_saved_through_the_asset_library(tmp_path):
+    db_path,_,asset,_=_seed(tmp_path)
+    with TestClient(create_app(db_path)) as client:
+        value=client.patch(f"/assets/{asset.id}/identity",json={"identity":"other","reuse_role":"meme"})
+        assert value.status_code==200,value.text
+        assert client.get(f"/assets/{asset.id}").json()["metadata"]["reuse_role"]=="meme"
+        assert client.patch(f"/assets/{asset.id}/identity",json={"identity":"other","reuse_role":"anything"}).status_code==422
 
 
 def test_asset_readiness_reflects_retryable_job_state(tmp_path: Path):
@@ -123,6 +132,11 @@ def test_analysis_result_bundle_persists_provenance_and_replays_clip_semantics(t
         assert client.get(f"/analysis-results/{body['id']}").json()["input_hash"] == "a" * 64
         assert client.get(f"/clips/{clip_id}").json()["transcript"] == "A sourced analysis result"
         assert client.get(f"/assets/{asset.id}").json()["metadata"]["r1_analysis"]["bundle_id"] == body["id"]
+        facts = client.get(f"/assets/{asset.id}").json()["metadata"]["visual_analysis"][clip_id]
+        assert facts['source_content_hash'] == asset.content_hash
+        assert facts['coverage'] == 'sampled_keyframes'
+        assert facts['observations'][0]['timestamp_ms'] == 500
+        assert 'covered_start_ms' not in facts
         repeated_payload = {**bundle, "id": str(uuid4()), "results": [{**bundle["results"][0], "clip_id": clip_id}]}
         repeated = client.post("/analysis-results", json=repeated_payload)
         assert repeated.status_code == 201

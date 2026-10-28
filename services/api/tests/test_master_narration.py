@@ -117,7 +117,7 @@ def test_composition_persists_pending_master_with_ordered_source_provenance(tmp_
         failed_generation["qa_state"] = "failed"
         failed_audio = takes[0].model_copy(update={"metadata": {"voice_generation": failed_generation}})
         AudioAssetRepository(db).update(failed_audio)
-        with pytest.raises(MasterNarrationCompositionError, match="verified QA or a valid owner copy adjudication"):
+        with pytest.raises(MasterNarrationCompositionError, match="verified QA"):
             MasterNarrationComposer(audios=AudioAssetRepository(db), jobs=JobRepository(db), importer=Importer(), composer=Composer(), output_root=tmp_path).compose(project.id, [failed_audio.id])
     finally:
         db.close()

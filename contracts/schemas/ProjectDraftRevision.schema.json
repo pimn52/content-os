@@ -1,4 +1,215 @@
 {
+  "$defs": {
+    "NarrationEmphasis": {
+      "description": "Relative prominence for a spoken range of copy.",
+      "enum": [
+        "light",
+        "clear",
+        "strong"
+      ],
+      "title": "NarrationEmphasis",
+      "type": "string"
+    },
+    "NarrationPace": {
+      "description": "Editorial pace direction, deliberately not a provider speed value.",
+      "enum": [
+        "measured",
+        "conversational",
+        "driven"
+      ],
+      "title": "NarrationPace",
+      "type": "string"
+    },
+    "NarrationPause": {
+      "description": "Semantic pause length, never a provider-specific millisecond control.",
+      "enum": [
+        "brief",
+        "beat",
+        "long"
+      ],
+      "title": "NarrationPause",
+      "type": "string"
+    },
+    "NarrationPerformanceCue": {
+      "additionalProperties": false,
+      "description": "One semantic delivery instruction anchored to character positions.\n\nCharacter positions are Python/Unicode character offsets in the exact\ncurrent copy. They avoid forcing English-word tokenization onto Chinese\nscripts while keeping a deterministic, auditable anchor for every cue.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/NarrationPerformanceCueKind"
+        },
+        "start_char": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Start Char",
+          "type": "integer"
+        },
+        "end_char": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "End Char",
+          "type": "integer"
+        },
+        "emphasis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NarrationEmphasis"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NarrationPace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NarrationPause"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rhythm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NarrationRhythm"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "kind",
+        "start_char",
+        "end_char"
+      ],
+      "title": "NarrationPerformanceCue",
+      "type": "object"
+    },
+    "NarrationPerformanceCueKind": {
+      "enum": [
+        "emphasis",
+        "pace",
+        "pause",
+        "rhythm"
+      ],
+      "title": "NarrationPerformanceCueKind",
+      "type": "string"
+    },
+    "NarrationPerformancePlan": {
+      "additionalProperties": false,
+      "description": "Editable, provider-neutral delivery direction for exact narration copy.\n\nThis is narrative intent, not SSML or an execution configuration. A Voice\nadapter may later report that it applied an immutable copy of this plan,\nbut the plan alone never claims an acoustic result.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "copy_fingerprint": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Copy Fingerprint",
+          "type": "string"
+        },
+        "delivery_goal": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Delivery Goal",
+          "type": "string"
+        },
+        "overall_pace": {
+          "$ref": "#/$defs/NarrationPace",
+          "default": "conversational"
+        },
+        "cues": {
+          "items": {
+            "$ref": "#/$defs/NarrationPerformanceCue"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Cues",
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/NarrationPerformancePlanSource",
+          "default": "user"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "copy_fingerprint",
+        "delivery_goal",
+        "cues"
+      ],
+      "title": "NarrationPerformancePlan",
+      "type": "object"
+    },
+    "NarrationPerformancePlanSource": {
+      "description": "Who supplied the editable delivery direction.",
+      "enum": [
+        "user",
+        "assisted",
+        "imported"
+      ],
+      "title": "NarrationPerformancePlanSource",
+      "type": "string"
+    },
+    "NarrationRhythm": {
+      "description": "The rhetorical job a range plays in the delivery.",
+      "enum": [
+        "setup",
+        "build",
+        "turn",
+        "land"
+      ],
+      "title": "NarrationRhythm",
+      "type": "string"
+    }
+  },
   "additionalProperties": false,
   "description": "Immutable, inspectable record of one persisted script/draft version.",
   "properties": {
@@ -35,6 +246,17 @@
       ],
       "default": null,
       "title": "Script"
+    },
+    "narration_performance_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NarrationPerformancePlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "topic": {
       "anyOf": [

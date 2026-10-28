@@ -61,10 +61,6 @@ REQUIRED_START_REFERENCES = {
 
 STALE_REFERENCE_NAMES = FORBIDDEN_ROOT_DOCS | {"CONTENT_OS_REVIEW_2026-09-10.md"}
 
-# Implementation-model policy belongs only in AGENTS and the one active STATUS
-# package. Product/architecture specs must not repeat it.
-IMPLEMENTATION_TIER_TERMS = re.compile(r"\b(?:Luna|Terra|Sol|Astra)\b", re.IGNORECASE)
-
 MAX_LINES = {
     "STATUS.md": 220,
     "docs/implementation/ROADMAP.md": 180,
@@ -125,7 +121,7 @@ def main() -> int:
         status = status_path.read_text(encoding="utf-8")
         if re.search(r"^## (?:Completed|Blocked) (?:work )?package", status, flags=re.MULTILINE):
             errors.append("STATUS.md must not retain completed/blocked package history")
-        if status.count("## Active work package") != 1:
+        if len(re.findall(r"^## 当前任务(?:\s|$)", status, flags=re.MULTILINE)) != 1:
             errors.append("STATUS.md must contain exactly one active work package")
         if re.search(r"^## (?:Recent work package|Active experiment package)", status, flags=re.MULTILINE):
             errors.append("STATUS.md must not hold multiple recent experimental package narratives")
@@ -141,25 +137,6 @@ def main() -> int:
         path = ROOT / name
         if path.is_file() and len(path.read_text(encoding="utf-8").splitlines()) > limit:
             errors.append(f"{name} exceeds overview limit of {limit} lines")
-
-    # Implementation-agent tier language must not spread through product specs.
-    tier_free_docs = (
-        PRODUCT_DOCS
-        | ARCHITECTURE_DOCS
-        | IMPLEMENTATION_DOCS
-        | {
-            "CONTENT_OS_EXECUTION_SPEC.md",
-            "DECISIONS.md",
-            "README.md",
-            "START_HERE.md",
-        }
-    )
-    for name in tier_free_docs:
-        path = ROOT / name
-        if path.is_file() and IMPLEMENTATION_TIER_TERMS.search(path.read_text(encoding="utf-8")):
-            errors.append(
-                f"{name} repeats implementation-model tier policy; keep model mappings in AGENTS.md (and active STATUS assignment) only"
-            )
 
     # Product specs describe current capability, not task lifecycle.
     for name in PRODUCT_DOCS:

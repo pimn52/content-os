@@ -31,7 +31,7 @@ test('Voice UI replaces failed take, keeps pending/completed history and exposes
   const f = setup('voice'); const h = mount('voice', f); await h.flush();
   await h.click('检查 Voice 修复方案');
   assert.match(h.text(), /whole|完整|整段/); assert.match(h.text(), /剩余额度 1/);
-  await h.change('本次整段修复理由', 'fixture technical recovery'); await h.submit('按此方案创建整段');
+  await h.change('修复理由', 'fixture technical recovery'); await h.submit('按方案修复声音');
   assert.match(h.text(), /Voice 修复历史/); assert.match(h.text(), new RegExp(recoveryIds.newJob));
   assert.equal(h.nodes('form').length, 0); assert.equal(f.fixture.load().run.voice_audio_id, null);
   f.fixture.complete(); h.setProps({ run: f.fixture.load().run }); await h.flush();
@@ -47,6 +47,18 @@ test('Voice UI replaces failed take, keeps pending/completed history and exposes
   h.unmount(); const next = mount('voice', setup('voice', f.storageMap)); await next.flush();
   assert.match(next.text(), /已存在不可覆盖/); assert.match(next.text(), /Voice 修复历史/);
   assert.ok(review); next.unmount();
+});
+test('Voice segment repair describes the retained good audio and still submits the current plan', async () => {
+  const f = setup('voice'); const h = mount('voice', f); const confirmations = [];
+  h.setProps({ request: async (path, options) => {
+    const value = await f.fixture.request(path, options);
+    return path.endsWith('/voice-repair-plan') ? { ...value, execution_granularity: 'segment' } : value;
+  }, confirmAction: message => { confirmations.push(message); return true; } });
+  await h.flush(); await h.click('检查 Voice 修复方案');
+  await h.change('修复理由', '已定位第二段缺词'); await h.submit('按方案修复声音');
+  assert.match(confirmations[0], /只重做已定位的缺陷段，保留其它合格声音/);
+  assert.equal(f.fixture.load().records.length, 1);
+  assert.match(h.text(), /Voice 修复历史/); h.unmount();
 });
 test('presentation UI binds the exact playable fixture hash, displays the semantic candidate and preserves unreviewed successor on reload', async () => {
   for (const kind of ['before', 'after']) assert.equal(createHash('sha256').update(media[kind]).digest('hex'), renderHashes[kind]);
@@ -73,6 +85,30 @@ test('unknown/source findings expose replan links and no apply control; authoriz
   assert.ok(h.nodes('a').some(node => node.props.href === '#production-preflight')); h.unmount();
   const v = setup('voice'); v.fixture.setDenied(true); const vh = mount('voice', v); await vh.flush(); await vh.click('检查 Voice 修复方案');
   assert.match(vh.text(), /voice_repair_consent_changed/); assert.equal(vh.nodes('form').length, 0); vh.unmount();
+});
+test('server observations survive loss of the local observation cache', async () => {
+  const f=setup('presentation'); const h=mount('presentation',f); await h.flush(); await observe(h,'source_change'); h.unmount();
+  for (const key of [...f.storageMap.keys()]) if (key.startsWith('content-os-presentation-observation:')) f.storageMap.delete(key);
+  const restored=mount('presentation',setup('presentation',f.storageMap));await restored.flush();
+  assert.equal(restored.input('观察理由').props.value,'fixture observed duplicate');
+  assert.equal(restored.input('所见问题').props.value,'source_change');restored.unmount();
+});
+test('final video rejection persists against the exact render without another approval or model call', async () => {
+  const f=setup('presentation');const h=mount('presentation',f);await h.flush();
+  h.setProps({confirmAction:()=>false});await h.flush();await h.change('成片反馈','人物动作重复');await h.click('需修改');
+  assert.equal(f.fixture.load().run.review_state,'rejected');assert.equal(f.fixture.load().used,0);
+  assert.match(h.text(),/用户已拒绝/);h.unmount();
+});
+
+test('ordinary finished video can be selected or discarded without rendering again',async()=>{
+  const f=setup('presentation');const h=mount('presentation',f);await h.flush();
+  assert.match(h.text(),/已保留占用，同作品版本可继续比较/);
+  assert.match(h.text(),/选用此版将锁定本版用料/);
+  await h.click('选用此版');assert.match(h.text(),/当前选用版/);
+  await h.click('不予使用');assert.match(h.text(),/未发布占用已释放/);
+  assert.equal(f.fixture.load().used,0);
+  h.unmount();const restored=mount('presentation',setup('presentation',f.storageMap));await restored.flush();
+  assert.match(restored.text(),/未发布占用已释放/);restored.unmount();
 });
 test('Run/input switch cancels pending Voice plan and unlocks controls even after returning to the original identity', async () => {
   const f = setup('voice'); let resolve;
@@ -105,29 +141,29 @@ test('late authorization/stale input denial clears the executable plan without c
   for (const kind of ['voice', 'presentation']) {
     for (const cause of ['authorization', 'version']) {
       const f = setup(kind); const h = mount(kind, f); await h.flush();
-      if (kind === 'voice') { await h.click('检查 Voice 修复方案'); await h.change('本次整段修复理由', 'fixture'); }
+      if (kind === 'voice') { await h.click('检查 Voice 修复方案'); await h.change('修复理由', 'fixture'); }
       else { await observe(h); await h.click('读取修复候选'); await h.change('本次修复理由', 'fixture'); }
       if (cause === 'authorization') f.fixture.setDenied(true); else f.fixture.changeInput();
-      await h.submit(kind === 'voice' ? '按此方案创建整段' : '按此方案建立新 Render');
+      await h.submit(kind === 'voice' ? '按方案修复声音' : '按此方案建立新 Render');
       assert.equal(f.fixture.load().records.length, 0); assert.match(h.text(), cause === 'authorization' ? /changed/ : /stale/);
-      assert.ok(!h.nodes('button').some(node => String(node.props.children).includes(kind === 'voice' ? '按此方案创建整段' : '按此方案建立新 Render')));
+      assert.ok(!h.nodes('button').some(node => String(node.props.children).includes(kind === 'voice' ? '按方案修复声音' : '按此方案建立新 Render')));
       h.unmount();
     }
   }
 });
-test('editing an observation invalidates its old candidate; confirmation refusal performs no write', async () => {
+test('editing an observation invalidates its old candidate; saving feedback needs no extra approval', async () => {
   const f = setup('presentation'); const h = mount('presentation', f); await h.flush(); await observe(h); await h.click('读取修复候选');
   await h.change('所见问题', 'face_out_of_frame');
   assert.ok(!h.nodes('button').some(node => String(node.props.children).includes('按此方案建立新 Render')));
   h.setProps({ confirmAction: () => false }); await h.flush(); await h.submit('登记此 Render');
-  assert.equal(f.fixture.load().observations.length, 1); assert.equal(f.fixture.load().records.length, 0); h.unmount();
+  assert.equal(f.fixture.load().observations.length, 2); assert.equal(f.fixture.load().records.length, 0); h.unmount();
 });
 test('replaying the exact Voice/presentation repair keeps successor progress and never restores old bindings', async () => {
   for (const kind of ['voice', 'presentation']) {
     const f = setup(kind); const h = mount(kind, f); let body;
     const request = (path, options) => { if (path.endsWith(`/${kind}-repair`) && options?.method === 'POST') body = JSON.parse(options.body); return f.fixture.request(path, options); };
     h.setProps({ request }); await h.flush();
-    if (kind === 'voice') { await h.click('检查 Voice 修复方案'); await h.change('本次整段修复理由', 'fixture'); await h.submit('按此方案创建整段'); }
+    if (kind === 'voice') { await h.click('检查 Voice 修复方案'); await h.change('修复理由', 'fixture'); await h.submit('按方案修复声音'); }
     else { await observe(h); await h.click('读取修复候选'); await h.change('本次修复理由', 'fixture'); await h.submit('按此方案建立新 Render'); }
     f.fixture.complete(); const before = f.fixture.load();
     await f.fixture.request(f.fixture.base + `/${kind}-repair`, { method: 'POST', body: JSON.stringify(body) });

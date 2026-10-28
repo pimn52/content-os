@@ -72,6 +72,19 @@
       "title": "Id",
       "type": "string"
     },
+    "ip_profile_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ip Profile Id"
+    },
     "name": {
       "maxLength": 200,
       "minLength": 1,
@@ -103,7 +116,6 @@
         "type": "string"
       },
       "maxItems": 100,
-      "minItems": 1,
       "title": "Reference Clip Ids",
       "type": "array"
     },
@@ -119,7 +131,6 @@
   "required": [
     "name",
     "provider",
-    "reference_clip_ids",
     "consent",
     "created_at"
   ],

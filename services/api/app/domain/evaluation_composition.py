@@ -37,6 +37,10 @@ class CompositionBatchReview(BaseModel):
     project_id: UUID
     master_run_id: UUID | None = None
     master_audio_id: UUID | None = None
+    # Audio-based render grants are bound to one immutable composition revision.
+    # Omitted only by retained historical batches and Talking-owned batches.
+    revision_sha256: Sha256 | None = None
+    selection: CompositionSelection | None = None
     authorization_reference: str = Field(min_length=1, max_length=1000)
     authorization_sha256: Sha256
     scene_ids: tuple[UUID, ...] = Field(max_length=4)
@@ -54,6 +58,13 @@ class CompositionBatchReview(BaseModel):
     def unique_scenes(self):
         if (self.master_run_id is None) == (self.master_audio_id is None):
             raise ValueError("composition_one_master_required")
+        if self.revision_sha256 is not None:
+            if self.master_audio_id is None or self.selection is None:
+                raise ValueError("composition_revision_selection_required")
+            if self.selection.master_audio_id != self.master_audio_id or self.selection.master_run_id is not None:
+                raise ValueError("composition_revision_master_mismatch")
+        elif self.selection is not None:
+            raise ValueError("composition_revision_fingerprint_required")
         if len(set(self.scene_ids)) != len(self.scene_ids) or any(not x.strip() for x in self.findings):
             raise ValueError("composition_batch_invalid")
         return self

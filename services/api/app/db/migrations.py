@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 54
+CURRENT_SCHEMA_VERSION = 60
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -708,6 +708,70 @@ _MIGRATIONS += ((54, (
 )),)
 
 
+# An AudioAsset may have multiple immutable, separately authorized edit revisions.
+# Each revision keeps its own one-render slots; historical rows stay revision-null.
+_MIGRATIONS += ((55, (
+    """CREATE TABLE evaluation_composition_batches_next (
+        id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id),
+        master_run_id TEXT REFERENCES production_runs(id), authorization_sha256 TEXT NOT NULL UNIQUE,
+        master_audio_id TEXT REFERENCES audio_assets(id), revision_sha256 TEXT,
+        CHECK((master_run_id IS NULL) != (master_audio_id IS NULL)),
+        CHECK(revision_sha256 IS NULL OR length(revision_sha256)=64),
+        UNIQUE(project_id,master_run_id)
+    )""",
+    """INSERT INTO evaluation_composition_batches_next
+        (id,project_id,master_run_id,authorization_sha256,master_audio_id,revision_sha256)
+        SELECT id,project_id,master_run_id,authorization_sha256,master_audio_id,NULL
+        FROM evaluation_composition_batches""",
+    "DROP TABLE evaluation_composition_batches",
+    "ALTER TABLE evaluation_composition_batches_next RENAME TO evaluation_composition_batches",
+    """CREATE UNIQUE INDEX evaluation_composition_batch_revision_uq
+        ON evaluation_composition_batches(project_id,master_audio_id,revision_sha256)
+        WHERE master_audio_id IS NOT NULL AND revision_sha256 IS NOT NULL""",
+)),)
+
+
+_MIGRATIONS += ((56, (
+    """CREATE TABLE audio_asset_job_targets (
+        job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        audio_asset_id TEXT NOT NULL REFERENCES audio_assets(id)
+    )""",
+    "CREATE INDEX audio_asset_job_targets_audio_idx ON audio_asset_job_targets(audio_asset_id)",
+)),)
+
+
+_MIGRATIONS += ((57, (
+    "ALTER TABLE production_runs ADD COLUMN visual_source_uses TEXT NOT NULL DEFAULT '[]'",
+)),)
+
+_MIGRATIONS += ((58, (
+    "ALTER TABLE production_runs ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE production_runs ADD COLUMN start_job_id TEXT REFERENCES jobs(id)",
+    "CREATE UNIQUE INDEX production_runs_start_job_idx ON production_runs(start_job_id)",
+    """CREATE TABLE render_choices (
+        project_id TEXT NOT NULL REFERENCES projects(id), render_id TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK(disposition IN ('selected','discarded')), updated_at TEXT NOT NULL,
+        PRIMARY KEY(project_id,render_id))""",
+    "CREATE UNIQUE INDEX render_choices_selected_idx ON render_choices(project_id) WHERE disposition='selected'",
+)),)
+
+_MIGRATIONS += ((59, (
+    "ALTER TABLE production_runs ADD COLUMN work_id TEXT REFERENCES production_runs(id)",
+    "ALTER TABLE production_runs ADD COLUMN delivery_intent TEXT NOT NULL DEFAULT 'publish' CHECK(delivery_intent IN ('publish','draft'))",
+    "UPDATE production_runs SET work_id=id WHERE work_id IS NULL",
+    "DROP INDEX render_choices_selected_idx",
+)),)
+
+_MIGRATIONS += ((60, (
+    """CREATE TABLE external_search_replays (
+        idempotency_key TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        input_digest TEXT NOT NULL CHECK(length(input_digest)=64),
+        call_id TEXT NOT NULL REFERENCES provider_call_records(id),
+        created_at TEXT NOT NULL, cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0,1))
+    )""",
+)),)
+
 MIGRATION_VERSIONS = tuple(version for version, _ in _MIGRATIONS)
 
 
@@ -719,7 +783,7 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     for version, sql in _MIGRATIONS:
         if connection.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone() is None:
             foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
-            if version == 54:
+            if version in {54, 55}:
                 # SQLite's documented table-rebuild sequence: preserve referring
                 # rows, validate the complete graph before committing, restore FK.
                 connection.execute("PRAGMA foreign_keys=OFF")
@@ -727,7 +791,7 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
             try:
                 for statement in sql:
                     connection.execute(statement)
-                if version == 54 and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                if version in {54, 55} and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise sqlite3.IntegrityError("retained composition migration has invalid foreign keys")
                 connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
             except BaseException:
@@ -736,6 +800,6 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
             else:
                 connection.commit()
             finally:
-                if version == 54:
+                if version in {54, 55}:
                     connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
     return CURRENT_SCHEMA_VERSION

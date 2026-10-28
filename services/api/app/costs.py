@@ -2,14 +2,64 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from datetime import date
+from decimal import Decimal, ROUND_CEILING
 from typing import Literal, Mapping, Protocol, Sequence
 from uuid import UUID
 
 from app.domain.models import CandidateAsset, CostEstimate, CostLineItem, CostCategory, UsageCost
 
 
-CostOperation = Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render"]
+CostOperation = Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render", "stock_search", "stock_import", "web_search", "web_fetch"]
+
+
+@dataclass(frozen=True)
+class ProviderUsage:
+    """已观察用量；按公开价格推导的金额不等于服务商账单实扣。"""
+
+    actual_cost: UsageCost | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_tokens: int | None = None
+    usage_observable: bool = False
+    price_date: date | None = None
+
+    def ledger_values(self):
+        for count in (self.input_tokens, self.output_tokens, self.cache_tokens):
+            if count is not None and (type(count) is not int or count < 0):
+                raise ValueError("observed token counts must be non-negative integers")
+        if self.cache_tokens is not None and self.input_tokens is not None and self.cache_tokens > self.input_tokens:
+            raise ValueError("cached input cannot exceed total input")
+        return dict(actual_cost=self.actual_cost, input_tokens=self.input_tokens, output_tokens=self.output_tokens,
+            cache_tokens=self.cache_tokens, usage_observable=self.usage_observable, price_date=self.price_date)
+
+
+@dataclass(frozen=True)
+class TokenPrice:
+    """提供商适配器提供价格与依据；Core 只按各类 Token 计费。"""
+
+    input_per_million: Decimal
+    output_per_million: Decimal
+    cached_input_per_million: Decimal
+    currency: str
+    verified_on: date
+    reference: str
+
+    def cost(self, *, input_tokens: int, output_tokens: int, cache_tokens: int,
+             provider: str, category: CostCategory, note: str) -> UsageCost:
+        if (any(type(v) is not int or v < 0 for v in (input_tokens, output_tokens, cache_tokens))
+                or cache_tokens > input_tokens):
+            raise ValueError("invalid token counts")
+        rates = (self.input_per_million, self.output_per_million, self.cached_input_per_million)
+        if any(not rate.is_finite() or rate < 0 for rate in rates):
+            raise ValueError("invalid token price")
+        amount = ((input_tokens - cache_tokens) * self.input_per_million
+            + cache_tokens * self.cached_input_per_million + output_tokens * self.output_per_million) / Decimal("1000000")
+        rounded = amount.quantize(Decimal("0.0001"), rounding=ROUND_CEILING)
+        return UsageCost(category=category, provider=provider, amount=rounded, currency=self.currency,
+            note=f"{note}；Token计价{amount}，按账目精度向上保留；每百万输入{self.input_per_million}/缓存"
+                f"{self.cached_input_per_million}/输出{self.output_per_million} {self.currency}；"
+                f"价格核对 {self.verified_on.isoformat()}，{self.reference}")
 
 
 class ProviderCostEstimator(Protocol):

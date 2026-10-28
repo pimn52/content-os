@@ -229,10 +229,11 @@ def test_full_local_e2e_import_analyze_plan_match_voice_gate_talking_and_render(
         spec_response = client.post(f"/projects/{project.id}/video-spec", json={
             "scenes": scenes,
             "selections": selections,
+            "explicit_scene_ids": [scene["id"] for scene in scenes],
             "narration_asset_ids": narration_ids,
             "narration_required": True,
         })
-        assert spec_response.status_code == 200
+        assert spec_response.status_code == 200, spec_response.text
         spec = spec_response.json()
         assert [scene["narration_asset_id"] for scene in spec["scenes"]] == [audio["id"] for audio in imported_audio]
         assert all(scene["visual"]["clip_end_ms"] - scene["visual"]["clip_start_ms"] == audio["duration_ms"] for scene, audio in zip(spec["scenes"], imported_audio, strict=True))
@@ -255,4 +256,4 @@ def test_full_local_e2e_import_analyze_plan_match_voice_gate_talking_and_render(
         assert readiness.status_code == 200
         capabilities = {item["key"]: item for item in readiness.json()["capabilities"]}
         assert capabilities["tts"]["status"] == "not_developed"
-        assert capabilities["talking"]["status"] == "not_developed"
+        assert capabilities["talking"]["status"] == "provider_not_configured"

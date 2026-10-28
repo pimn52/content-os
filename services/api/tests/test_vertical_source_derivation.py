@@ -117,6 +117,37 @@ def _portrait_request(asset: Asset, clip: Clip, height: int = 1440) -> VerifiedV
         "crop_window": crop, "evidence": base.evidence.model_copy(update={"crop_window": crop})})
 
 
+@pytest.mark.parametrize("failure", [None, "output_bytes", "source_bytes", "missing_review", "negative_face", "subtitles"])
+def test_talking_binding_reopens_exact_review_without_reclassifying_source(tmp_path: Path, failure: str | None) -> None:
+    from app.domain.models import TalkingPerformanceBrief, TalkingReferenceAssessment
+    from app.production_runs import _select_bound_talking_reference
+
+    with Database(tmp_path / "talking-source.sqlite") as db:
+        asset, clip = _source(db, tmp_path)
+        runner = _WritingRunner()
+        result = _service(db, tmp_path, runner).derive(_request(asset, clip))
+        reference = result.clip.model_copy(update={"talking_reference_assessment": TalkingReferenceAssessment(
+            burned_in_subtitles=failure == "subtitles", evidence_reference="review://source/10s-25s/v1",
+        ), "face_visibility": 0.2 if failure == "negative_face" else None})
+        with db.transaction():
+            ClipRepository(db).update(reference)
+        derived = result.asset
+        if failure == "output_bytes":
+            Path(derived.source_file).write_bytes(b"changed output")
+        elif failure == "source_bytes":
+            Path(asset.source_file).write_bytes(b"changed source")
+        elif failure == "missing_review":
+            provenance = dict(derived.metadata["source_derivation"])
+            provenance.pop("evidence")
+            derived = derived.model_copy(update={"metadata": {"source_derivation": provenance}})
+        fit = _select_bound_talking_reference(db, tmp_path, derived, reference, TalkingPerformanceBrief())
+        assert (fit.selected_clip_id == reference.id) is (failure is None)
+        persisted = ClipRepository(db).get(reference.id)
+        assert persisted.talking_candidate is False
+        assert persisted.mouth_visibility is None
+        assert runner.calls == 1
+
+
 def test_shorter_portrait_viewport_retains_provenance_replay_and_guards(tmp_path: Path) -> None:
     with Database(tmp_path / "portrait.sqlite") as db:
         asset, clip = _source(db, tmp_path)

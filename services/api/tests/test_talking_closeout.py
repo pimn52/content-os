@@ -57,11 +57,11 @@ def test_terminal_delivery_ends_exactly_on_final_verified_speech_frame() -> None
     assert (plan.speech_end_ms, plan.end_frame) == (4_920, 123)
 
 
-def test_terminal_delivery_refuses_to_cut_a_partial_final_frame() -> None:
+def test_terminal_delivery_preserves_speech_with_a_partial_final_frame() -> None:
     audio = _audio(duration_ms=1_000, segments=[TranscriptSegment(start_ms=0, end_ms=813, text="last phrase")])
 
-    with pytest.raises(TalkingCloseoutPlanningError, match="aligned"):
-        plan_terminal_talking_delivery(audio, RationalFps(numerator=25, denominator=1))
+    plan = plan_terminal_talking_delivery(audio, RationalFps(numerator=25, denominator=1))
+    assert (plan.speech_end_ms, plan.end_frame) == (813, 21)
 
 
 @pytest.mark.parametrize(

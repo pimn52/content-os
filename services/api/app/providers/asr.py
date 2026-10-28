@@ -303,6 +303,10 @@ class FasterWhisperASRProvider:
     ) -> TranscriptionResult:
         path = _validate_audio_path(audio_path)
         language_value = _validate_optional_text(language, "language")
+        if language_value is not None:
+            # Audio assets store BCP-47 tags such as zh-CN and en-US; Whisper
+            # accepts its base language code (zh, en) instead.
+            language_value = language_value.replace("_", "-").split("-", 1)[0].lower()
         prompt_value = _validate_optional_text(prompt, "prompt")
         if self.local_only and prompt is not None:
             raise ASRInputError("independent ASR forbids a prompt")

@@ -58,8 +58,9 @@ def legacy(tmp_path, admit_talking_run, monkeypatch):
         visual_requirement='creator_speaking',visual_requirement_reason='Synthetic explicit speaking requirement')) for i in range(5)]
     draft=ProjectDraft(project_id=pid,version=1,script_revision=1,script=copy,scenes=scenes,updated_at=now)
     ProjectDraftRepository(db).save(draft)
-    key='synthetic-operator-key-000000000000000000000000000000'
-    monkeypatch.setenv('CONTENT_OS_EXECUTION_ADMISSION_KEY_HASHES',json.dumps({'fixture':hashlib.sha256(key.encode()).hexdigest()}))
+    key='synthetic-operator-key-for-tests-0001'
+    monkeypatch.setenv('CONTENT_OS_EXECUTION_ADMISSION_KEY_HASHES',json.dumps({
+        'fixture-operator':hashlib.sha256(key.encode()).hexdigest()}))
     from app.db import BudgetPolicyRepository
     from app.domain.models import BudgetPolicy
     BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',allow_unknown_cost=True,max_calls=1,updated_at=now))
@@ -68,7 +69,7 @@ def legacy(tmp_path, admit_talking_run, monkeypatch):
 
 
 def use_and_batch(service,pid,context,key,*,suffix=''):
-    root=service.root;terms=root/'synthetic-terms.txt';terms.write_text('Synthetic fixture permission, never runtime license evidence')
+    root=service.root;terms=root/f'synthetic-terms{suffix}.txt';terms.write_text(f'Synthetic fixture permission {suffix}, never runtime license evidence')
     evidence=dict(source='synthetic',version='fixture',terms_reference=terms.name,terms_sha256=hashlib.sha256(terms.read_bytes()).hexdigest(),
         applicability='synthetic exact test use',permits_intended_activity=True)
     def save(name,value):
@@ -82,101 +83,99 @@ def use_and_batch(service,pid,context,key,*,suffix=''):
         findings=['No real rights or quality claims'],
         dependency_findings=[dict(evidence,dependency=d) for d in ['retained_media_composition','local_renderer_and_tools',*context['proof']['dependencies']]])
     use=service.adopt(pid,save('use'+suffix+'.json',report),key)
-    service.adopt_batch(pid,save('batch.json',dict(policy='evaluation-composition-v1',project_id=str(pid),master_audio_id=str(context['audio'].id),
-        authorization_reference=terms.name,authorization_sha256=evidence['terms_sha256'],scene_ids=[],max_renders=1,findings=['Synthetic one-render grant'])),key)
+    assert use.actor_id == 'fixture-operator'
+    batch=service.adopt_batch(pid,save(f'batch{suffix}.json',dict(policy='evaluation-composition-v1',project_id=str(pid),master_audio_id=str(context['audio'].id),
+        revision_sha256=context['request_sha256'],selection=context['selection'].model_dump(mode='json'),
+        authorization_reference=terms.name,authorization_sha256=evidence['terms_sha256'],scene_ids=[],max_renders=1,
+        findings=['Synthetic one-render grant for this exact revision'])),key)
+    assert batch['actor_id'] == 'fixture-operator'
     return use
 
 
-def test_ordinary_retained_preflight_start_no_generation_history_or_new_calls(legacy):
-    db,pid,asset,audio,_,draft,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    # An obsolete generation payload cannot become a media consumption dependency.
-    db.connection.execute("UPDATE jobs SET payload=json_set(payload,'$.payload.planned_context',json('{\"obsolete\":true}'))")
-    selection=service.retained_selection(pid,style);context=service._context(pid,selection)
-    assert selection.master_run_id is None and selection.master_audio_id==audio.id
-    assert len(selection.talking_runs)==5 and len(set(selection.talking_runs.values()))==1
-    spec=context['spec'];assert len(spec.scenes)==6
-    assert [(s.visual.clip_start_ms,s.visual.clip_end_ms) for s in spec.scenes[:5]]==[(i*1000,(i+1)*1000) for i in range(5)]
-    assert spec.master_narration.end_ms==5300 and spec.scenes[-1].narration_start_ms==5000
-    assert not spec.scenes[-1].caption and not spec.scenes[-1].captions and spec.scenes[-1].visual.asset_id is None
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.stop_reasons==('composition_use_admission_required',)
-    assert not any(a.required and a.kind in {'voice','talking','analysis'} for a in plan.actions)
-    with pytest.raises(UseAdmissionError):service.current_use(pid,context)
-    use=use_and_batch(service,pid,context,key)
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.status=='ready_for_authorized_dispatch'
-    runs=ProductionRunService(db,db.data_root)
-    run=runs.start(pid,idempotency_key='normal',expected_fingerprint=plan.fingerprint,style_tokens=style,purpose='internal_evaluation')
-    assert runs.start(pid,idempotency_key='different-key',expected_fingerprint=plan.fingerprint,style_tokens=style,purpose='internal_evaluation').id==run.id
-    job=JobRepository(db).get(run.render_job_id)
-    assert job.type==JobType.RENDER and job.payload.video_spec==spec
-    assert run.talking_review_policy_version==1  # No policy2 history is manufactured.
-    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
-    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
-    with pytest.raises(UseAdmissionError):require_evaluation_lane_closed(db,job)
-    with pytest.raises(UseAdmissionError):ExecutionScopeService(db,db.data_root).prepare(pid,purpose='internal_evaluation')
-    service.revoke(pid,use.id,'Synthetic permission withdrawn',key)
-    with pytest.raises(UseAdmissionError):service.require_current_job(job)
 
 
-@pytest.mark.parametrize("footage", [False, True])
-def test_new_narration_consumes_graphics_and_authorized_footage_in_same_worker(legacy,footage):
-    from app.domain.models import GraphicCardPlan, VisualIntent
-    db,pid,_,audio,_,draft,key=legacy
-    scenes=[s.model_copy(update=dict(preferred_sources=[SourceKind.TYPOGRAPHY],fallback_sources=[],
-        visual_requirement="explanatory",visual_requirement_reason="Synthetic concept explanation",
-        graphic_plan=GraphicCardPlan(kind="diagram",treatment="diagram_flow",points=[f"Input {i}",f"Output {i}"])))
-        for i,s in enumerate(draft.scenes)]
-    source=None
-    if footage:
-        path=db.data_root/'original.media';path.write_bytes(b'SYNTHETIC authorized full-frame footage')
-        source=_asset(2,source_kind='user_asset').model_copy(update=dict(source_file=str(path),duration_ms=5000,
-            content_hash=hashlib.sha256(path.read_bytes()).hexdigest(),metadata={'r1_usage':'production','project_id':str(pid)}))
-        AssetRepository(db).create(source)
-        clip=ClipRepository(db).create(Clip(asset_id=source.id,start_ms=0,end_ms=5000,asset_duration_ms=5000,
-            transcript='word2',visual_description='word2',quality_score=1))
-        scenes[2]=scenes[2].model_copy(update=dict(preferred_sources=[SourceKind.USER_ASSET],
-            visual_requirement='action_evidence',visual_requirement_reason='Synthetic exact source demonstration',
-            visual_intent=VisualIntent(subject='word2',action='word2',description='word2')))
-    draft=draft.model_copy(update={'scenes':scenes,'version':draft.version+1});ProjectDraftRepository(db).save(draft)
-    service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    selection=service.retained_selection(pid,style);assert selection.talking_runs=={}
-    context=service._context(pid,selection);assert context['spec'] is not None and not context['missing']
-    assert all(v['run'] is None for v in context['inputs'].values())
-    if source:
-        assert context['inputs'][scenes[2].id]['asset'].id==source.id
-        assert 'source:'+str(source.id) in context['proof']['dependencies']
-        assert context['spec'].scenes[2].visual.vertical_reframe_mode=='contain'
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.status=='blocked' and 'composition_use_admission_required' in plan.stop_reasons
-    use=use_and_batch(service,pid,context,key)
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.status=='ready_for_authorized_dispatch' and plan.video_spec==context['spec']
-    runs=ProductionRunService(db,db.data_root)
-    result=runs.start(pid,idempotency_key='new-topic',expected_fingerprint=plan.fingerprint,style_tokens=style,purpose='internal_evaluation')
-    job=JobRepository(db).get(result.render_job_id)
-    assert job.payload.video_spec==plan.video_spec and service.require_current_job(job)['spec']==plan.video_spec
-    assert job.type is JobType.RENDER and result.voice_job_id is None
-    assert db.connection.execute('SELECT count(*) FROM jobs WHERE project_id=?',(str(pid),)).fetchone()[0]==2
-    from app.renderer import RemotionRenderer
-    from test_remotion_renderer import _renderer_project
-    renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
-        renderer_dir=_renderer_project(db.data_root/'new-topic-props'))
-    for scene in plan.video_spec.scenes:
-        renderer._validate_scene(scene,plan.video_spec.fps,project_id=pid,master_audio_id=audio.id,
-            validate_scene_narration=False,composition_job_id=job.id)
-    if source:
-        repo=AssetRepository(db)
-        repo.update(source.model_copy(update={'metadata':{**source.metadata,'project_id':str(uuid4())}}))
-        with pytest.raises(UseAdmissionError,match='composition_source_not_authorized'):service.require_current_job(job)
-        repo.update(source.model_copy(update={'metadata':{**source.metadata,'source_derivation':{}}}))
-        with pytest.raises(UseAdmissionError,match='composition_source_derivation_changed'):service.require_current_job(job)
-        repo.update(source)
-        path.write_bytes(b'Changed source')
-        with pytest.raises(UseAdmissionError,match='composition_source_bytes_changed'):service.require_current_job(job)
-    else:
-        service.revoke(pid,use.id,'Synthetic revocation',key)
-        with pytest.raises(UseAdmissionError):service.require_current_job(job)
+def test_composition_fence_ignores_unrelated_commits_and_rejects_revision_change(legacy):
+    import sqlite3
+    db,pid,_,_,_,_,_=legacy
+    service=EvaluationCompositionService(db,db.data_root)
+    context=service._context(pid,service.retained_selection(pid,VisualStyleTokens()))
+    other=sqlite3.connect(db.path,isolation_level=None)
+    try:
+        other.execute("INSERT INTO content_opportunities(id,dedupe_key,status,created_at,payload) VALUES ('unrelated','unrelated','new','now','{}')")
+        assert service._fence(pid,context)["request_sha256"]==context["request_sha256"]
+        other.execute("UPDATE project_drafts SET version=version+1,payload=json_set(payload,'$.version',version+1) WHERE project_id=?",(str(pid),))
+    finally:
+        other.close()
+    with pytest.raises(UseAdmissionError):
+        service._fence(pid,context)
+
+
+
+
+
+
+
+
+def test_revision_batch_migration_preserves_old_run_and_allows_unique_audio_revision_slots(tmp_path):
+    import sqlite3
+    from app.db.migrations import CURRENT_SCHEMA_VERSION,apply_migrations
+    path=tmp_path/'composition-v54.sqlite3';connection=sqlite3.connect(path,isolation_level=None)
+    connection.execute('PRAGMA foreign_keys=ON')
+    connection.executescript('''
+        CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY NOT NULL,applied_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE projects(id TEXT PRIMARY KEY NOT NULL);
+        CREATE TABLE production_runs(id TEXT PRIMARY KEY NOT NULL);
+        CREATE TABLE audio_assets(id TEXT PRIMARY KEY NOT NULL);
+        CREATE TABLE jobs(id TEXT PRIMARY KEY NOT NULL);
+        CREATE TABLE evaluation_composition_batches(
+            id TEXT PRIMARY KEY NOT NULL,project_id TEXT NOT NULL REFERENCES projects(id),
+            master_run_id TEXT REFERENCES production_runs(id),authorization_sha256 TEXT NOT NULL UNIQUE,
+            master_audio_id TEXT REFERENCES audio_assets(id),CHECK((master_run_id IS NULL)!=(master_audio_id IS NULL)),
+            UNIQUE(project_id,master_run_id),UNIQUE(project_id,master_audio_id));
+        CREATE TABLE evaluation_composition_owners(
+            run_id TEXT PRIMARY KEY NOT NULL REFERENCES production_runs(id),project_id TEXT NOT NULL REFERENCES projects(id),
+            job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),render_id TEXT NOT NULL UNIQUE,
+            batch_id TEXT NOT NULL REFERENCES evaluation_composition_batches(id),request_sha256 TEXT NOT NULL,
+            job_sha256 TEXT NOT NULL,scope_fingerprint TEXT NOT NULL);
+        CREATE TABLE evaluation_composition_slots(
+            batch_id TEXT NOT NULL REFERENCES evaluation_composition_batches(id),slot TEXT NOT NULL,
+            operation_id TEXT NOT NULL UNIQUE,PRIMARY KEY(batch_id,slot));
+        CREATE TABLE evaluation_composition_records(
+            kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,payload_sha256 TEXT NOT NULL,PRIMARY KEY(kind,id));
+        CREATE TABLE evaluation_talking_operations(id TEXT PRIMARY KEY NOT NULL);
+        CREATE TABLE evaluation_talking_recoveries(
+            predecessor_id TEXT PRIMARY KEY NOT NULL REFERENCES evaluation_talking_operations(id),
+            successor_id TEXT NOT NULL UNIQUE REFERENCES evaluation_talking_operations(id),
+            project_id TEXT NOT NULL REFERENCES projects(id),batch_id TEXT NOT NULL REFERENCES evaluation_composition_batches(id),
+            slot TEXT NOT NULL,payload_sha256 TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(batch_id,slot));
+    ''')
+    connection.executemany('INSERT INTO schema_migrations(version) VALUES (?)',((v,) for v in range(1,55)))
+    connection.execute("INSERT INTO projects VALUES ('p')")
+    connection.execute("INSERT INTO audio_assets VALUES ('a')")
+    connection.execute("INSERT INTO production_runs VALUES ('r')")
+    connection.execute("INSERT INTO jobs VALUES ('j')")
+    connection.execute("INSERT INTO evaluation_composition_batches VALUES ('b','p',NULL,?,'a')",('d'*64,))
+    connection.execute("INSERT INTO evaluation_composition_owners VALUES ('r','p','j','render','b',?,?,?)",('e'*64,'f'*64,'a'*64))
+    connection.execute("INSERT INTO evaluation_composition_slots VALUES ('b','render','r')")
+    connection.execute("INSERT INTO evaluation_talking_operations VALUES ('pred')")
+    connection.execute("INSERT INTO evaluation_talking_operations VALUES ('succ')")
+    connection.execute("INSERT INTO evaluation_talking_recoveries VALUES ('pred','succ','p','b','talking:scene',?,'{}')",('7'*64,))
+
+    assert apply_migrations(connection)==CURRENT_SCHEMA_VERSION
+    assert connection.execute("SELECT visual_source_uses FROM production_runs").fetchone()[0]=="[]"
+    assert tuple(connection.execute('SELECT id,revision_sha256 FROM evaluation_composition_batches').fetchone())==('b',None)
+    assert tuple(connection.execute('SELECT run_id,job_id,batch_id FROM evaluation_composition_owners').fetchone())==('r','j','b')
+    assert tuple(connection.execute('SELECT batch_id,slot,operation_id FROM evaluation_composition_slots').fetchone())==('b','render','r')
+    assert tuple(connection.execute('SELECT predecessor_id,successor_id,batch_id FROM evaluation_talking_recoveries').fetchone())==('pred','succ','b')
+    assert connection.execute('PRAGMA foreign_keys').fetchone()[0]==1
+    connection.execute("INSERT INTO evaluation_composition_batches(id,project_id,authorization_sha256,master_audio_id,revision_sha256) VALUES ('b2','p',?,'a',?)",('1'*64,'2'*64))
+    connection.execute("INSERT INTO evaluation_composition_batches(id,project_id,authorization_sha256,master_audio_id,revision_sha256) VALUES ('b3','p',?,'a',?)",('3'*64,'4'*64))
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("INSERT INTO evaluation_composition_batches(id,project_id,authorization_sha256,master_audio_id,revision_sha256) VALUES ('b4','p',?,'a',?)",('5'*64,'2'*64))
+    assert connection.execute('PRAGMA foreign_key_check').fetchall()==[]
+    connection.close()
+
+
 
 
 @pytest.mark.parametrize('change',['hash','copy','consent','project','review'])
@@ -199,310 +198,16 @@ def test_current_media_safety_fails_without_fallback_generation(legacy,change):
     assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
 
 
-@pytest.mark.parametrize('outcome',['completed','renderer_failure','generic_handler'])
-def test_one_normal_worker_preserves_private_result_accounting_and_once_only(legacy,monkeypatch,outcome):
-    """Synthetic subprocess/QA only: no media render or provider call."""
-    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    context=service._context(pid,service.retained_selection(pid,style));use=use_and_batch(service,pid,context,key)
-    runs=ProductionRunService(db,db.data_root)
-    def start(key):
-        return runs.start(pid,idempotency_key=key,expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
-    run=start('worker');job=JobRepository(db).get(run.render_job_id)
-    from app.renderer import RemotionRenderer
-    from app.jobs.handlers import RenderVideoJobHandler
-    from app.jobs.runner import JobRunner
-    from app.jobs.store import JobStore
-    from app.db import ProviderCallRepository
-    from test_remotion_renderer import _Runner,_renderer_project
-    from app import presentation_repair
-    fake=_Runner(returncode=1 if outcome=='renderer_failure' else 0)
-    renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
-        renderer_dir=_renderer_project(db.data_root/'renderer'),runner=fake)
-    handler=RenderVideoJobHandler(ProjectRepository(db),renderer,db.data_root/'renders')
-    monkeypatch.setattr(presentation_repair,'measure_render_output',lambda path,spec:dict(
-        state='verified',sha256=hashlib.sha256(path.read_bytes()).hexdigest(),scope='synthetic_technical_only'))
-    selected=handler if outcome!='generic_handler' else lambda _:pytest.fail('untrusted callback consumed restricted media')
-    runner=JobRunner(JobStore(db),{JobType.RENDER:selected},worker_id='normal-render',lease_duration=timedelta(minutes=5),max_attempts=1)
-    finished=runner.run_once(job_id=job.id)
-    assert finished.status==(JobStatus.COMPLETED if outcome=='completed' else JobStatus.FAILED)
-    diagnostic=db.data_root/'render-diagnostics'/str(job.id)/'attempt-1.json'
-    if outcome=='renderer_failure':
-        report=json.loads(diagnostic.read_text(encoding='utf-8'))
-        assert report['stage']=='remotion_video'
-        assert report['exception_type']=='RenderProcessError' and report['returncode']==1
-    else:
-        assert not diagnostic.exists()
-    assert runner.run_once(job_id=job.id) is None
-    assert start('another-key').id==run.id
-    calls=ProviderCallRepository(db).list_all()
-    assert len(calls)==(0 if outcome=='generic_handler' else 1)
-    if calls:
-        assert calls[0].status==('completed' if outcome=='completed' else 'failed')
-        assert calls[0].estimated_cost == job.payload.video_spec.estimated_cost
-        if outcome=='completed':
-            assert calls[0].actual_cost == job.payload.video_spec.estimated_cost
-            assert calls[0].actual_cost.amount is None and calls[0].actual_cost.currency is None
-        else:
-            from app.budget import BudgetLimitError
-            with pytest.raises(BudgetLimitError):runs.resume(pid,run.id)
-    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
-    if outcome!='completed':
-        assert runs.get(pid,run.id).status=='render_failed'
-        with pytest.raises(UseAdmissionError):service.media(pid,run.id,'internal_evaluation')
-        return
-    path=service.media(pid,run.id,'internal_evaluation')
-    assert path.read_bytes()==b'minimal-muxed-mp4'
-    with pytest.raises(UseAdmissionError):service.media(uuid4(),run.id,'internal_evaluation')
-    with pytest.raises(UseAdmissionError):service.media(pid,run.id,'commercial_production')
-    from app.media.audio_access import require_ordinary_media
-    with pytest.raises(UseAdmissionError):require_ordinary_media(db,db.data_root,path,kind='render',subject_id=job.payload.render_id)
-    JobRepository(db).update(finished.model_copy(update=dict(status=JobStatus.FAILED)))
-    assert runs.get(pid,run.id).status=='render_failed'
-    assert runs.resume(pid,run.id).status=='render_completed_awaiting_review'
-    assert len(fake.calls)==2
-    service.revoke(pid,use.id,'Fixture revoked',key)
-    assert runs.get(pid,run.id).status=='render_failed'
-    with pytest.raises(UseAdmissionError):service.media(pid,run.id,'internal_evaluation')
 
 
-@pytest.mark.parametrize('preview_fails',[False,True])
-def test_official_short_preview_keeps_completed_history_and_one_independent_call(legacy,monkeypatch,preview_fails):
-    import asyncio
-    from fastapi import HTTPException
-    from starlette.requests import Request
-    from app.evaluation_composition_api import preview as preview_endpoint
-    from app.domain.evaluation_master import MasterAdoption
-    from app.main import create_app
-    from app.db import BudgetPolicyRepository,ProviderCallRepository
-    from app.domain.models import BudgetPolicy
-    from app.renderer import RemotionRenderer
-    from app.jobs.handlers import RenderVideoJobHandler
-    from app.jobs.runner import JobRunner
-    from app.jobs.store import JobStore
-    from app import presentation_repair
-    from test_remotion_renderer import _Runner,_renderer_project
-    db,pid,_,audio,_,_,key=legacy
-    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',max_calls=2,
-        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
-    service=EvaluationCompositionService(db,db.data_root)
-    c=service._context(pid,service.retained_selection(pid,VisualStyleTokens()))
-    use_and_batch(service,pid,c,key)
-    original=ProductionRunService(db,db.data_root).start(pid,idempotency_key='original-complete',
-        expected_fingerprint=c['request_sha256'],style_tokens=VisualStyleTokens(),purpose='internal_evaluation')
-    fake=_Runner();renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
-        renderer_dir=_renderer_project(db.data_root/'preview-renderer'),runner=fake)
-    runner=JobRunner(JobStore(db),{JobType.RENDER:RenderVideoJobHandler(ProjectRepository(db),renderer,db.data_root/'renders')},
-        worker_id='preview-fixture',lease_duration=timedelta(minutes=5),max_attempts=1)
-    ranges=[]
-    def qa(path,spec,**kwargs):
-        ranges.append(kwargs.get('frame_range'))
-        return dict(state='verified',sha256=hashlib.sha256(path.read_bytes()).hexdigest(),scope='synthetic_technical_only')
-    monkeypatch.setattr(presentation_repair,'measure_render_output',qa)
-    assert runner.run_once(job_id=original.render_job_id).status is JobStatus.COMPLETED
-    old_job=tuple(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(original.render_job_id),)).fetchone())
-    old_call=ProviderCallRepository(db).list_all()[0].model_dump(mode='json')
-    full_slot=tuple(db.connection.execute("SELECT * FROM evaluation_composition_slots WHERE slot='render'").fetchone())
-    old_binding=service.records.get('binding',original.id)
-    style=VisualStyleTokens(name='content-os-portrait-comparison')
-    c=service._context(pid,service.retained_selection(pid,style));use=use_and_batch(service,pid,c,key,suffix='-preview')
-    report=dict(policy='evaluation-composition-v1',project_id=str(pid),selection=c['selection'].model_dump(mode='json'),
-        request_sha256=c['request_sha256'],authorization_reference='synthetic-terms.txt',
-        authorization_sha256=hashlib.sha256((db.data_root/'synthetic-terms.txt').read_bytes()).hexdigest(),
-        start_frame=30,end_frame=60,max_renders=1)
-    path=db.data_root/'preview.json';path.write_text(json.dumps(report),encoding='utf-8')
-    body=dict(review_reference=path.name,review_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),idempotency_key='preview-once')
-    monkeypatch.setenv('CONTENT_OS_DATA_ROOT',str(db.data_root));app=create_app(db.path,database_startup_mode='existing');app.state.database=db
-    def post(body,operator=key):
-        request=Request({'type':'http','app':app,'headers':[(b'x-content-os-execution-admission-key',operator.encode())]})
-        return asyncio.run(preview_endpoint(pid,MasterAdoption.model_validate(body),request))
-    with pytest.raises(HTTPException) as invalid:post(body,'invalid')
-    assert invalid.value.status_code==409
-    preview=post(body);job=JobRepository(db).get(UUID(preview['render_job_id']))
-    assert job.payload.video_spec==c['spec'] and job.id!=original.render_job_id
-    assert post(dict(body,idempotency_key='another-key'))['id']==preview['id']
-    assert len(ProviderCallRepository(db).list_all())==1
-    bad=db.data_root/'bad-preview.json'
-    for end in [30,9999]:
-        bad.write_text(json.dumps(dict(report,end_frame=end)),encoding='utf-8')
-        with pytest.raises(ValueError):service.start_preview(pid,MasterAdoption(review_reference=bad.name,
-            review_sha256=hashlib.sha256(bad.read_bytes()).hexdigest(),idempotency_key='bad'),key)
-    bad.write_text(json.dumps(dict(report,start_frame=31)),encoding='utf-8')
-    with pytest.raises(UseAdmissionError,match='allowance_spent'):service.start_preview(pid,MasterAdoption(
-        review_reference=bad.name,review_sha256=hashlib.sha256(bad.read_bytes()).hexdigest(),idempotency_key='new-grant'),key)
-    fake.returncode=1 if preview_fails else 0
-    finished=runner.run_once(job_id=job.id)
-    assert finished.status is (JobStatus.FAILED if preview_fails else JobStatus.COMPLETED)
-    calls=ProviderCallRepository(db).list_all();assert len(calls)==2
-    call=next(v for v in calls if v.id!=UUID(old_call['id']))
-    assert call.mode=='assisted_test' and call.idempotency_key==job.idempotency_key
-    assert call.idempotency_key!=old_call['idempotency_key'] and runner.run_once(job_id=job.id) is None
-    if preview_fails:
-        with pytest.raises(UseAdmissionError,match='no_retry'):service.reconcile(pid,UUID(preview['id']))
-    else:
-        assert ranges==[None,(30,60)]
-        assert any('--frames=30-59' in a[0] for a in fake.calls)
-        assert any('atrim=start=1.0:end=2.0,asetpts=PTS-STARTPTS' in a[0] for a in fake.calls)
-        assert service.require_result(finished)[0].is_file()
-    correction_c=service._context(pid,service.retained_selection(pid,VisualStyleTokens(name='content-os-subject-first')))
-    correction_use=use_and_batch(service,pid,correction_c,key,suffix='-correction')
-    authorization=db.data_root/'correction-authorization.txt';authorization.write_text('Explicit synthetic second-preview permission')
-    correction_report=dict(report,selection=correction_c['selection'].model_dump(mode='json'),
-        request_sha256=correction_c['request_sha256'],correction_of=preview['id'],
-        authorization_reference=authorization.name,authorization_sha256=hashlib.sha256(authorization.read_bytes()).hexdigest())
-    def correction_request(name,changes=None):
-        target=db.data_root/(name+'.json');target.write_text(json.dumps(dict(correction_report,**(changes or {}))),encoding='utf-8')
-        return MasterAdoption(review_reference=target.name,review_sha256=hashlib.sha256(target.read_bytes()).hexdigest(),idempotency_key=name)
-    corrected_body=correction_request('correction-once')
-    if preview_fails:
-        with pytest.raises(UseAdmissionError,match='requires_completed_changed_plan'):
-            service.start_preview(pid,corrected_body,key)
-    else:
-        with pytest.raises(UseAdmissionError,match='new_authorization_required'):
-            service.start_preview(pid,correction_request('old-authorization',dict(
-                authorization_reference=report['authorization_reference'],authorization_sha256=report['authorization_sha256'])),key)
-        with pytest.raises(UseAdmissionError,match='requires_completed_changed_plan'):
-            unchanged=correction_request('unchanged-plan',dict(selection=c['selection'].model_dump(mode='json'),request_sha256=c['request_sha256']))
-            service._preview_report(pid,unchanged.review_reference,unchanged.review_sha256,c)
-        from app.budget import BudgetLimitError
-        from app.db import BudgetPolicyRepository
-        with pytest.raises(BudgetLimitError):service.start_preview(pid,corrected_body,key)
-        policies=BudgetPolicyRepository(db)
-        policies.save(policies.get_by_project(pid).model_copy(update={'max_calls':3}))
-        correction_id=service.start_preview(pid,corrected_body,key)
-        assert service.start_preview(pid,corrected_body.model_copy(update={'idempotency_key':'repeat-correction'}),key)==correction_id
-        corrected_job=JobRepository(db).get(UUID(service.records.owner(run_id=correction_id)['job_id']))
-        assert corrected_job.idempotency_key!=job.idempotency_key
-        assert ':preview_correction:' in corrected_job.idempotency_key
-        assert runner.run_once(job_id=corrected_job.id).status is JobStatus.COMPLETED
-        assert service.require_result(JobRepository(db).get(corrected_job.id))[0].is_file()
-        assert len(ProviderCallRepository(db).list_all())==3
-        with pytest.raises(UseAdmissionError,match='allowance_spent'):
-            service.start_preview(pid,correction_request('second-correction-grant',{'start_frame':31}),key)
-        service.revoke(pid,correction_use.id,'Fixture correction revocation',key)
-        with pytest.raises(UseAdmissionError):service.require_current_job(corrected_job)
-    assert tuple(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(original.render_job_id),)).fetchone())==old_job
-    assert ProviderCallRepository(db).get(UUID(old_call['id'])).model_dump(mode='json')==old_call
-    assert tuple(db.connection.execute("SELECT * FROM evaluation_composition_slots WHERE slot='render'").fetchone())==full_slot
-    assert service.records.get('binding',original.id)==old_binding
-    service.revoke(pid,use.id,'Fixture revocation',key)
-    with pytest.raises(UseAdmissionError):service.require_current_job(job)
 
 
-def test_retained_budget_and_immutable_selection_reject_before_job_creation(legacy):
-    from app.db import BudgetPolicyRepository
-    from app.production_runs import ProductionRunNotReady
-    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
-    budgets=BudgetPolicyRepository(db)
-    from app.domain.models import BudgetPolicy
-    budgets.save(BudgetPolicy(project_id=pid,max_calls=0,allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
-    with pytest.raises(ProductionRunNotReady):
-        ProductionRunService(db,db.data_root).start(pid,idempotency_key='blocked',expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
-    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
 
 
-def test_explicit_resume_does_not_replace_failure_without_provider_call(legacy):
-    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
-    runs=ProductionRunService(db,db.data_root)
-    run=runs.start(pid,idempotency_key='recover',expected_fingerprint=context['request_sha256'],style_tokens=style,purpose='internal_evaluation')
-    jobs=JobRepository(db);old=jobs.get(run.render_job_id)
-    jobs.update(old.model_copy(update=dict(status=JobStatus.FAILED,attempt=1,error_code='composition_render_failed')))
-    history=dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),ProjectDraftRepository(db).get(pid),
-        style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.status=='blocked' and 'composition_render_reconciliation_required' in plan.stop_reasons
-    with pytest.raises(UseAdmissionError,match='composition_render_reconciliation_required'):
-        runs.resume(pid,run.id)
-    assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==history
-    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
-    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
 
 
-def test_explicit_resume_replaces_failed_provider_call_once_and_result_is_readable(legacy,monkeypatch):
-    """A failed real reservation gets one independent synthetic Worker completion."""
-    from app.db import BudgetPolicyRepository,ProviderCallRepository
-    from app.domain.models import BudgetPolicy
-    from app.renderer import RemotionRenderer
-    from app.jobs.handlers import RenderVideoJobHandler
-    from app.jobs.runner import JobRunner
-    from app.jobs.store import JobStore
-    from app import presentation_repair
-    from test_remotion_renderer import _Runner,_renderer_project
-
-    db,pid,_,_,_,draft,key=legacy
-    BudgetPolicyRepository(db).save(BudgetPolicy(project_id=pid,currency='CNY',max_calls=2,
-        allow_unknown_cost=True,updated_at=datetime.now(timezone.utc)))
-    service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
-    runs=ProductionRunService(db,db.data_root)
-    run=runs.start(pid,idempotency_key='recorded-call-recovery',expected_fingerprint=context['request_sha256'],
-        style_tokens=style,purpose='internal_evaluation')
-    old=JobRepository(db).get(run.render_job_id)
-    def worker(renderer):
-        handler=RenderVideoJobHandler(ProjectRepository(db),renderer,db.data_root/'renders')
-        return JobRunner(JobStore(db),{JobType.RENDER:handler},worker_id='recovery-test',
-            lease_duration=timedelta(minutes=5),max_attempts=1)
-    qa=lambda path,spec:dict(state='verified',sha256=hashlib.sha256(path.read_bytes()).hexdigest(),scope='synthetic_technical_only')
-    monkeypatch.setattr(presentation_repair,'measure_render_output',qa)
-    failed_renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
-        renderer_dir=_renderer_project(db.data_root/'recovery-failed-renderer'),runner=_Runner(returncode=1))
-    assert worker(failed_renderer).run_once(job_id=old.id).status is JobStatus.FAILED
-    old_job_history=dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())
-    calls=ProviderCallRepository(db)
-    old_call=calls.get_by_idempotency_key(old.idempotency_key)
-    assert old_call is not None and old_call.status=='failed'
-    old_call_history=old_call.model_dump(mode='json')
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),ProjectDraftRepository(db).get(pid),
-        style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.status=='blocked' and 'composition_render_recovery_requires_resume' in plan.stop_reasons
-
-    replacement_run=runs.resume(pid,run.id);replacement=JobRepository(db).get(replacement_run.render_job_id)
-    assert replacement.id!=old.id and replacement.status is JobStatus.PENDING
-    assert replacement.idempotency_key==old.idempotency_key+':recovery'
-    assert replacement.payload.video_spec==old.payload.video_spec and replacement.payload.render_id!=old.payload.render_id
-    assert runs.resume(pid,run.id).render_job_id==replacement.id
-    assert len(calls.list_for_project(pid))==1
-    assert calls.get_by_idempotency_key(old.idempotency_key).model_dump(mode='json')==old_call_history
-    assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==old_job_history
-    pending_plan=build_production_preflight(db,ProjectRepository(db).get(pid),ProjectDraftRepository(db).get(pid),
-        style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert pending_plan.status=='blocked' and 'composition_render_already_dispatched' in pending_plan.stop_reasons
-
-    completed_renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),
-        renderer_dir=_renderer_project(db.data_root/'recovery-complete-renderer'),runner=_Runner())
-    assert worker(completed_renderer).run_once(job_id=replacement.id).status is JobStatus.COMPLETED
-    new_call=calls.get_by_idempotency_key(replacement.idempotency_key)
-    assert new_call is not None and new_call.status=='completed' and new_call.id!=old_call.id
-    assert calls.get_by_idempotency_key(old.idempotency_key).model_dump(mode='json')==old_call_history
-    assert dict(db.connection.execute('SELECT * FROM jobs WHERE id=?',(str(old.id),)).fetchone())==old_job_history
-    saved_path,evidence=service.require_result(replacement)
-    assert saved_path.read_bytes()==b'minimal-muxed-mp4'
-    assert evidence['evidence']['sha256']==hashlib.sha256(saved_path.read_bytes()).hexdigest()
-    assert service.media(pid,run.id,'internal_evaluation')==saved_path
-    assert runs.resume(pid,run.id).render_job_id==replacement.id
-    assert len(calls.list_for_project(pid))==2
 
 
-def test_failed_composition_recovery_rejects_revoked_permission_and_unregistered_output(legacy):
-    db,pid,_,_,_,draft,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    context=service._context(pid,service.retained_selection(pid,style));receipt=use_and_batch(service,pid,context,key)
-    runs=ProductionRunService(db,db.data_root)
-    run=runs.start(pid,idempotency_key='blocked-recovery',expected_fingerprint=context['request_sha256'],
-        style_tokens=style,purpose='internal_evaluation')
-    job=JobRepository(db).get(run.render_job_id)
-    JobRepository(db).update(job.model_copy(update=dict(status=JobStatus.FAILED,attempt=1,error_code='composition_render_failed')))
-    staged=service.output_path(service.records.owner(run_id=run.id)).with_name('staged.mp4')
-    staged.parent.mkdir(parents=True,exist_ok=True);staged.write_bytes(b'unregistered partial output')
-    with pytest.raises(UseAdmissionError,match='composition_render_reconciliation_required'):
-        runs.resume(pid,run.id)
-    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
-    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
-    staged.unlink()
-    service.revoke(pid,receipt.id,'Synthetic permission withdrawn',key)
-    with pytest.raises(UseAdmissionError):runs.resume(pid,run.id)
-    assert db.connection.execute('SELECT count(*) FROM jobs').fetchone()[0]==2
-    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
 
 
 def test_known_cny_cost_still_obeys_amount_limit(legacy):
@@ -539,55 +244,8 @@ def test_approved_display_copy_uses_word_positions_without_rewriting_asr(legacy)
     assert _approved_scene_captions(audio,[scene],scene,0,end)==[]
 
 
-def test_only_normal_run_and_media_routes_remain(legacy,monkeypatch):
-    import asyncio,httpx
-    from app.main import create_app
-    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
-    monkeypatch.setenv('CONTENT_OS_DATA_ROOT',str(db.data_root))
-    app=create_app(db.path);app.state.database=db
-    async def check():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as api:
-            base=f'/projects/{pid}'
-            plan=await api.post(base+'/production-preflight',json={'purpose':'internal_evaluation'})
-            assert plan.status_code==200
-            response=await api.post(base+'/production-runs',json=dict(purpose='internal_evaluation',idempotency_key='normal-api',expected_fingerprint=plan.json()['fingerprint']))
-            assert response.status_code==201,response.text
-            run=response.json();assert (await api.get(base+'/production-runs/'+run['id'])).status_code==200
-            resumed=await api.post(base+'/production-runs/'+run['id']+'/resume')
-            assert resumed.status_code==200 and resumed.json()['render_job_id']==run['render_job_id']
-            for operation in ['voice-dispatch','talking-dispatch','presentation-repair']:
-                assert (await api.post(base+'/production-runs/'+run['id']+'/'+operation,json={})).status_code==409
-            history=await api.get(base+'/evaluation-composition/runs')
-            assert history.status_code==200 and [r['id'] for r in history.json()]==[run['id']]
-            for method,path in [('GET','selections'),('GET','runs/'+run['id']),('POST','runs/'+run['id']+'/reconcile'),('GET','runs/'+run['id']+'/media')]:
-                assert (await api.request(method,base+'/evaluation-composition/'+path)).status_code==404
-            assert (await api.get(base+'/renders/'+run['evaluation_composition']['render_id']+'?purpose=internal_evaluation')).status_code==403
-            cancelled=await api.post(base+'/production-runs/'+run['id']+'/cancel')
-            assert cancelled.status_code==200 and cancelled.json()['status']=='cancelled'
-            assert JobRepository(db).get(UUID(run['render_job_id'])).status==JobStatus.CANCELLED
-    asyncio.run(check())
 
 
-@pytest.mark.parametrize('tamper',['binding','scope','slot','owner','terms'])
-def test_normal_job_keeps_exact_identity_and_current_license_checks(legacy,tamper):
-    db,pid,_,_,_,_,key=legacy;service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens()
-    c=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,c,key)
-    run=ProductionRunService(db,db.data_root).start(pid,idempotency_key='identity',expected_fingerprint=c['request_sha256'],style_tokens=style,purpose='internal_evaluation')
-    job=JobRepository(db).get(run.render_job_id)
-    if tamper=='binding':
-        binding=service.records.get('binding',run.id);binding['proof']['audio_sha256']='f'*64
-        service.records.save('binding',run.id,binding,update=True)
-    elif tamper=='scope':
-        db.connection.execute("DELETE FROM execution_use_scopes WHERE subject_kind='render'")
-    elif tamper=='slot':
-        db.connection.execute("UPDATE evaluation_composition_slots SET operation_id=? WHERE slot='render'",(str(uuid4()),))
-    elif tamper=='owner':
-        db.connection.execute('DELETE FROM evaluation_composition_owners')
-    else:
-        (db.data_root/'synthetic-terms.txt').write_text('Changed after adoption')
-    with pytest.raises(UseAdmissionError):service.require_current_job(job)
-    assert db.connection.execute('SELECT count(*) FROM provider_call_records').fetchone()[0]==0
 
 
 @pytest.fixture
@@ -611,31 +269,6 @@ def portrait(legacy):
     return service.derive(request)
 
 
-@pytest.mark.parametrize('style_name',['content-os-subject-first','content-os-editorial'])
-def test_normal_visual_route_edit_plan_spec_and_renderer_share_verified_portrait(legacy,portrait,style_name):
-    from app.domain.models import GraphicCardPlan
-    from app.renderer import RemotionRenderer
-    from test_remotion_renderer import _renderer_project
-    db,pid,_,_,_,draft,key=legacy
-    draft=draft.model_copy(update={'version':draft.version+1,'scenes':[s.model_copy(update={'graphic_plan':GraphicCardPlan(kind='text_card',treatment='headline',points=['word0 / word1'])}) for s in draft.scenes]})
-    ProjectDraftRepository(db).save(draft)
-    service=EvaluationCompositionService(db,db.data_root);style=VisualStyleTokens(name=style_name)
-    context=service._context(pid,service.retained_selection(pid,style));use_and_batch(service,pid,context,key)
-    plan=build_production_preflight(db,ProjectRepository(db).get(pid),draft,style_tokens=style,purpose='internal_evaluation',data_root=db.data_root)
-    assert plan.status=='ready_for_authorized_dispatch' and all(d.selected_candidate.asset_id==portrait.asset.id for d in plan.scenes)
-    run=ProductionRunService(db,db.data_root).start(pid,idempotency_key='portrait',expected_fingerprint=plan.fingerprint,style_tokens=style,purpose='internal_evaluation')
-    job=JobRepository(db).get(run.render_job_id);spec=job.payload.video_spec
-    assert all(s.visual.asset_id==portrait.asset.id and s.portrait_presentation.value=='portrait_panel' for s in spec.scenes[:5])
-    assert all(s.graphic_text=='word0 / word1' and s.subtitle_treatment.value=='timed_captions' for s in spec.scenes[:5])
-    assert spec.edit_plan.scenes[0].graphic_text==spec.scenes[0].graphic_text
-    renderer=RemotionRenderer(AssetRepository(db),ClipRepository(db),audios=AudioAssetRepository(db),renderer_dir=_renderer_project(db.data_root/'props-renderer'))
-    prepared={s.scene_id:renderer._validate_scene(s,spec.fps,project_id=pid,master_audio_id=context['audio'].id,
-        validate_scene_narration=False,composition_job_id=job.id) for s in spec.scenes}
-    stage=db.data_root/'props-stage';stage.mkdir()
-    props=renderer._stage_props(spec,prepared,stage,'synthetic',None)
-    source=props['sceneSources'][spec.scenes[0].scene_id]
-    assert source['styleTokens']['name']==style_name and source['graphicText']=='word0 / word1'
-    assert source['verticalReframeMode']=='contain' and source['sourceBottomCropRatio']==0
 
 
 @pytest.mark.parametrize('invalid',['bytes','evidence','interval'])
@@ -687,23 +320,37 @@ def test_absolute_timing_full_master_and_neutral_tail(fps,tmp_path):
         assert props["sceneSources"][tail.scene_id]["graphicTreatment"]=="none"
 
 
-def test_db_fence_tolerates_only_heartbeat_renewal(tmp_path):
-    from datetime import datetime,timezone
-    from app.db import Database
-    from app.domain.models import Job,JobType
-    from app.jobs.store import JobStore
-    with Database(tmp_path/"fence.sqlite3") as db:
-        service=EvaluationCompositionService(db,tmp_path)
-        now=datetime.now(timezone.utc)
-        job=Job(type=JobType.RENDER,created_at=now,updated_at=now,idempotency_key="fence")
-        JobRepository(db).create(job)
-        store=JobStore(db)
-        claimed=store.claim("fixture",timedelta(minutes=5),max_attempts=1,job_id=job.id)
-        before=service._token()
-        assert store.heartbeat(claimed.id,"fixture",timedelta(minutes=5))
-        assert service._token()==before
-        db.connection.execute("UPDATE jobs SET lease_owner='other' WHERE id=?",(str(job.id),))
-        assert service._token()!=before
+def test_retained_composition_derives_comparison_crop_from_the_scene_interval():
+    from app.assembly.evaluation_composition import assemble_retained_composition
+    from app.domain.models import (AudioAsset,CandidateAsset,CostCategory,RationalFps,TranscriptSegment,
+        UsageCost,VisualIntent,VisualStyleTokens)
+    from test_video_spec_assembly import _project
+    project=_project(RationalFps(numerator=30,denominator=1))
+    scene=_scene(project,0,1001).model_copy(update={"visual_intent":VisualIntent(
+        subject="bitrate comparison",action="side-by-side comparison",description="compare the same source image")})
+    asset=_asset(1).model_copy(update={"duration_ms":5000,"width":1280,"height":720})
+    clip=Clip(asset_id=asset.id,start_ms=0,end_ms=5000,asset_duration_ms=5000)
+    asset=asset.model_copy(update={"metadata":{"visual_analysis":{str(clip.id):{
+        "source_content_hash":asset.content_hash,"clip_interval":{"start_ms":0,"end_ms":1034},
+        "comparison_layout":"side_by_side_equal_halves","subtitle_regions":[[.3,.9,.4,.05]],
+        "evidence_reference":"synthetic-used-scene-interval","coverage":"full_interval_continuous",
+        "covered_start_ms":0,"covered_end_ms":1034,
+    }}}})
+    audio=AudioAsset(source_file="synthetic.wav",content_hash="a"*64,duration_ms=1001,sample_rate=24000,channels=1,
+        authorization_reference="synthetic",imported_at=project.created_at,transcript_source="synthetic",
+        transcript_segments=[TranscriptSegment(start_ms=0,end_ms=1001,text=scene.voice_text)])
+    candidate=CandidateAsset(scene_plan_id=scene.id,source_kind=SourceKind.USER_ASSET,asset_id=asset.id,clip_id=clip.id,
+        match_score=.9,why=["synthetic comparison"],estimated_cost={"category":CostCategory.USER_ASSET,"amount":"0","currency":"USD"})
+    spec=assemble_retained_composition(project,audio,[(scene,0,1001)],
+        {scene.id:{"asset":asset,"clip":clip,"candidate":candidate}},
+        VisualStyleTokens(name="content-os-portrait-comparison"))
+    plan_scene=spec.edit_plan.scenes[0]
+    assert spec.scenes[0].duration_frames==31
+    assert plan_scene.portrait_presentation.value=="stacked_comparison"
+    assert plan_scene.source_bottom_crop_ratio==pytest.approx(74/720)
+    assert plan_scene.source_subtitle_evidence_reference=="synthetic-used-scene-interval"
+    assert spec.scenes[0].visual.source_bottom_crop_ratio==plan_scene.source_bottom_crop_ratio
+    assert spec.scenes[0].visual.vertical_reframe_evidence_reference==plan_scene.source_subtitle_evidence_reference
 
 
 def test_worker_uses_one_render_handler_independent_of_legacy_policy(tmp_path,monkeypatch):

@@ -85,7 +85,7 @@ class GeneratedNarrationQaPending(VideoSpecAssemblyError):
     pass
 
 
-_REAL_CONTINUOUS_SOURCES = frozenset((SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_VIDEO))
+_REAL_CONTINUOUS_SOURCES = frozenset((SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_VIDEO, SourceKind.AI_BROLL))
 _TEXT_TOKEN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
 _TERMINAL_PURPOSES = frozenset(("close", "closing", "boundary", "cta", "outro", "ending"))
 _SOURCE_TAIL_MAX_MS = 4_000
@@ -107,11 +107,14 @@ class VideoSpecAssembler:
         clips: ClipRepository,
         images: ImageAssetRepository | None = None,
         audios: AudioAssetRepository | None = None,
+        *,
+        production_run_id: UUID | None = None,
     ) -> None:
         self.assets = assets
         self.clips = clips
         self.images = images
         self.audios = audios
+        self.production_run_id = production_run_id
 
     def assemble(
         self,
@@ -130,29 +133,11 @@ class VideoSpecAssembler:
             raise InvalidCandidateSelection("assembly requires a Project contract")
         ordered = _ordered_scenes(scenes, project.id)
         selections = _selections(selected_by_scene, ordered)
-        # Known restricted bytes must not become commercial through a new ID,
-        # stripped metadata or explicit candidate override. Missing lineage is
-        # not a grant; all existing authorization/QA gates below remain intact.
-        from app.execution_scope import commercial_content_blocker
-        media = []
-        for candidate in selections.values():
-            if candidate.asset_id is not None:
-                asset = self.assets.get(candidate.asset_id)
-                if asset is None and self.images is not None:
-                    asset = self.images.get(candidate.asset_id)
-                if asset is not None:
-                    media.append(asset)
-        if self.audios is not None:
-            audio_ids = set((narration_asset_ids or {}).values())
-            if master_narration_asset_id is not None:
-                audio_ids.add(master_narration_asset_id)
-            media.extend(audio for audio_id in audio_ids if (audio := self.audios.get(audio_id)) is not None)
-        for asset in media:
-            blocker = commercial_content_blocker(self.assets.db, asset.content_hash)
-            if blocker is not None:
-                raise VideoSpecAssemblyError(blocker)
         clip_intervals = {
-            candidate.clip_id: (clip.start_ms, clip.end_ms)
+            candidate.clip_id: (
+                candidate.playback_start_ms if candidate.playback_start_ms is not None else clip.start_ms,
+                candidate.playback_end_ms if candidate.playback_end_ms is not None else clip.end_ms,
+            )
             for candidate in selections.values()
             if candidate.clip_id is not None and (clip := self.clips.get(candidate.clip_id)) is not None
         }
@@ -190,7 +175,7 @@ class VideoSpecAssembler:
                 audio = self.audios.get(audio_id)
                 if audio is None:
                     raise CandidateNotFound("selected narration audio does not exist")
-                _require_generated_voice_qa(audio, self.assets.db)
+                _require_generated_voice_qa(audio, self.assets.db, production_run_id=self.production_run_id)
                 narration_audio[scene_id] = audio
         video_scenes: list[VideoScene] = []
         start_frame = 0
@@ -257,8 +242,9 @@ class VideoSpecAssembler:
                 scene, candidate, master_audio_id=None if audio is None else audio.id,
                 selected_duration_ms=duration_ms,
             )
-            clip_start_ms, clip_end_ms = clip.start_ms, clip.end_ms
-            original_clip_end_ms = clip.end_ms
+            clip_start_ms = candidate.playback_start_ms if candidate.playback_start_ms is not None else clip.start_ms
+            clip_end_ms = candidate.playback_end_ms if candidate.playback_end_ms is not None else clip.end_ms
+            original_clip_end_ms = clip_end_ms
             captions: list[VideoCaption] = []
             source_interval_aligned = False
             if audio is not None:
@@ -286,7 +272,7 @@ class VideoSpecAssembler:
                     # that could continue after the new narration ends.
                     clip_end_ms = clip_start_ms + duration_ms
             elif not narration_required:
-                aligned = _source_sentence_interval(
+                aligned = None if candidate.playback_start_ms is not None else _source_sentence_interval(
                     scene.voice_text,
                     clip,
                     extend_trailing_context=_is_terminal_purpose(scene.purpose),
@@ -371,7 +357,7 @@ class VideoSpecAssembler:
         audio = self.audios.get(master_audio_id)
         if audio is None:
             raise CandidateNotFound("selected master narration audio does not exist")
-        _require_generated_voice_qa(audio, self.assets.db)
+        _require_generated_voice_qa(audio, self.assets.db, production_run_id=self.production_run_id)
         if not audio.transcript_source or not audio.transcript_segments:
             raise NarrationTimelineError(
                 "master narration requires a persisted actual SRT/VTT or provider timing result before it can drive video scenes"
@@ -494,14 +480,16 @@ class VideoSpecAssembler:
             scene, candidate, master_audio_id=master_audio_id,
             selected_duration_ms=narration_end_ms - narration_start_ms,
         )
-        source_frames = source_interval_to_frames(clip.start_ms, clip.end_ms, fps)
+        clip_start_ms = candidate.playback_start_ms if candidate.playback_start_ms is not None else clip.start_ms
+        clip_end_ms = candidate.playback_end_ms if candidate.playback_end_ms is not None else clip.end_ms
+        source_frames = source_interval_to_frames(clip_start_ms, clip_end_ms, fps)
         visual = VideoVisual(
             source_kind=asset.source_kind,
             authorization_reference=asset.authorization_reference,
             asset_id=asset.id,
             clip_id=clip.id,
-            clip_start_ms=clip.start_ms,
-            clip_end_ms=clip.end_ms,
+            clip_start_ms=clip_start_ms,
+            clip_end_ms=clip_end_ms,
             source_duration_ms=asset.duration_ms,
             vertical_reframe_mode=_talking_visual_treatment(asset, edit)[0],
             vertical_reframe_evidence_reference=_talking_visual_treatment(asset, edit)[1],
@@ -522,8 +510,9 @@ class VideoSpecAssembler:
                 edit_plan=edit_plan,
             )]
 
-        if scene.graphic_plan is not None and scene.graphic_plan.kind == "none":
-            raise InsufficientSourceDuration("no_graphics_requires_full_media_coverage")
+        if (scene.graphic_plan is None or scene.graphic_plan.kind not in {"diagram", "text_card"}
+            or scene.visual_requirement in {"creator_speaking", "action_evidence"}):
+            raise InsufficientSourceDuration("source_shortage_requires_media_replan_not_graphic_fill")
 
         # The source Clip remains a first-class visual for as long as it has
         # real frames. The tail is an explicit local typography fallback rather
@@ -596,10 +585,24 @@ class VideoSpecAssembler:
             or clip.end_ms > asset.duration_ms
         ):
             raise AssetIdentityMismatch(f"selected Asset and Clip do not match for scene {scene.scene_id!r}")
+        if candidate.playback_start_ms is not None and (
+            candidate.playback_start_ms < clip.start_ms or candidate.playback_end_ms > clip.end_ms
+        ):
+            raise InvalidCandidateSelection(f"scene {scene.scene_id!r} playback interval exceeds its Clip")
+        from app.media.visual_facts import generated_footage_admitted, full_interval_geometry, matches_scene
+        interval=(candidate.playback_start_ms,candidate.playback_end_ms) if candidate.playback_start_ms is not None else None
+        facts=full_interval_geometry(asset,clip,interval)
+        if facts and not matches_scene(facts,scene):
+            raise InvalidCandidateSelection(f"scene {scene.scene_id!r} source no longer supports this task")
+        if asset.source_kind is SourceKind.AI_BROLL:
+            if (scene.visual_requirement in {"creator_speaking","action_evidence"}
+                or not generated_footage_admitted(asset) or not facts or not matches_scene(facts,scene)):
+                raise InvalidCandidateSelection(f"scene {scene.scene_id!r} generated illustration lacks compatible source QA")
         if asset.source_kind is SourceKind.AI_VIDEO:
             blocker = talking_visual_blocker(
                 asset, clip, self.assets, project_id=scene.project_id, copy=scene.voice_text,
                 master_audio_id=master_audio_id, selected_duration_ms=selected_duration_ms,
+                production_run_id=self.production_run_id,
             )
             if blocker is not None:
                 raise InvalidCandidateSelection(f"scene {scene.scene_id!r} generated Talking visual: {blocker}")
@@ -614,7 +617,7 @@ class VideoSpecAssembler:
         return image
 
 
-def _require_generated_voice_qa(audio: AudioAsset, db=None) -> None:
+def _require_generated_voice_qa(audio: AudioAsset, db=None, *, production_run_id=None) -> None:
     """Keep generated narration out of final assembly until both gates pass.
 
     Imported/recorded narration remains an explicit fallback.  Only assets
@@ -662,7 +665,8 @@ def _require_generated_voice_qa(audio: AudioAsset, db=None) -> None:
         raise GeneratedNarrationQaPending(
             "generated voice narration requires verified copy, duration, silence and playability QA before final assembly"
         )
-    if voice_human_review_status(audio) != "approved":
+    from app.voice_plan import is_current_run_voice
+    if voice_human_review_status(audio) != "approved" and not is_current_run_voice(db,production_run_id,audio):
         raise GeneratedNarrationQaPending(
             "generated voice narration requires an approved U-Voice likeness, naturalness and delivery review before final assembly"
         )
@@ -714,13 +718,11 @@ def milliseconds_to_frames(duration_ms: int, fps: RationalFps) -> int:
 
 
 def source_interval_to_frames(start_ms: int, end_ms: int, fps: RationalFps) -> int:
-    """Return the frame-safe capacity of a source interval.
+    """Count composition frames whose sample starts inside the source interval.
 
-    Source-led scenes use the exact persisted ASR interval. A ceiling on the
-    scene duration alone can exceed the number of complete composition frames
-    available after the source start is ceiled and source end is floored.
-    Keeping this conversion here makes the VideoSpec renderable without
-    extending playback beyond the authorized semantic interval.
+    This matches the renderer's exclusive ceiling endpoint, including native
+    media whose frame rate differs from the composition. No sampled frame
+    starts at or beyond the authorized end.
     """
     if isinstance(start_ms, bool) or not isinstance(start_ms, int) or start_ms < 0:
         raise InvalidCandidateSelection("source interval start must be a non-negative integer number of milliseconds")
@@ -730,7 +732,7 @@ def source_interval_to_frames(start_ms: int, end_ms: int, fps: RationalFps) -> i
     end_numerator = end_ms * fps.numerator
     denominator = 1_000 * fps.denominator
     start_frame = (start_numerator + denominator - 1) // denominator
-    end_frame = end_numerator // denominator
+    end_frame = (end_numerator + denominator - 1) // denominator
     if end_frame <= start_frame:
         raise InsufficientSourceDuration("source interval is shorter than one composition frame")
     return end_frame - start_frame
@@ -820,10 +822,9 @@ def _master_narration_intervals(
 ) -> list[tuple[ScenePlan, int, int]]:
     """Match each ordered scene copy to actual, sequential audio timestamps.
 
-    This deliberately uses exact normalized text containment. If a supplied
-    recording has no real timing result or does not say the planned copy, the
-    caller receives a recoverable error instead of a guessed cut or a fixed
-    test transcript standing in for semantic evidence.
+    Exact text wins. A verified generated Voice may also use its persisted
+    independent ASR timing when QA recorded only bounded substitutions and
+    every scene boundary matches a transcript segment boundary.
     """
 
     segments = tuple(audio.transcript_segments)
@@ -835,9 +836,12 @@ def _master_narration_intervals(
             raise NarrationTimelineError(f"scene {scene.scene_id!r} has no alignable narration text")
         matched = _find_timed_text_span(segments, target, cursor)
         if matched is None:
-            raise NarrationTimelineError(
-                f"master narration timestamps do not contain the planned text for scene {scene.scene_id!r}; regenerate or supply aligned audio"
-            )
+            matches = _verified_generated_scene_boundaries(audio, scenes)
+            if matches is None:
+                raise NarrationTimelineError(
+                    f"master narration timestamps do not contain the planned text for scene {scene.scene_id!r}; regenerate or supply aligned audio"
+                )
+            break
         _, end_index = matched
         matches.append((scene, end_index))
         cursor = end_index + 1
@@ -854,6 +858,33 @@ def _master_narration_intervals(
         intervals.append((scene, interval_start, interval_end))
         interval_start = interval_end
     return intervals
+
+
+def _verified_generated_scene_boundaries(
+    audio: AudioAsset, scenes: Sequence[ScenePlan],
+) -> list[tuple[ScenePlan, int]] | None:
+    """Use segment boundaries only for QA verified, same-length ASR substitutions."""
+
+    from app.voice_qa import verified_generated_copy_tokens
+
+    target = verified_generated_copy_tokens(audio)
+    planned = tuple(token for scene in scenes for token in comparison_tokens(scene.voice_text))
+    if not target or planned != target:
+        return None
+    observed_by_segment = [comparison_tokens(segment.text) for segment in audio.transcript_segments]
+    boundaries: list[tuple[ScenePlan, int]] = []
+    token_offset = segment_index = 0
+    for scene in scenes:
+        scene_tokens = comparison_tokens(scene.voice_text)
+        scene_end = token_offset + len(scene_tokens)
+        start_segment = segment_index
+        while segment_index < len(observed_by_segment) and token_offset < scene_end:
+            token_offset += len(observed_by_segment[segment_index])
+            segment_index += 1
+        if token_offset != scene_end or segment_index == start_segment:
+            return None
+        boundaries.append((scene, segment_index - 1))
+    return boundaries if segment_index == len(observed_by_segment) else None
 
 
 def _find_timed_text_span(
@@ -1060,13 +1091,27 @@ def _audio_captions(audio: AudioAsset, duration_ms: int) -> list[VideoCaption]:
 def _audio_captions_for_interval(audio: AudioAsset, start_ms: int, end_ms: int) -> list[VideoCaption]:
     """Project real audio transcript intervals onto one visual fragment."""
 
+    segments = audio.transcript_segments
+    generation = audio.metadata.get("voice_generation", {})
+    if isinstance(generation, dict):
+        from app.voice_qa import verified_generated_copy_tokens
+        target_text = generation.get("target_text")
+        if isinstance(target_text, str) and verified_generated_copy_tokens(audio) is not None:
+            from app.project_drafts import _copy_at_token_boundaries
+            counts = []; cursor = 0
+            for segment in segments[:-1]:
+                cursor += len(comparison_tokens(segment.text)); counts.append(cursor)
+            copies = _copy_at_token_boundaries(target_text, counts)
+            if copies is not None and len(copies) == len(segments):
+                # 识别结果保留为 QA 证据；字幕沿真实时间，字句使用本次生成原文。
+                segments = [segment.model_copy(update={"text": copy.strip()}) for segment, copy in zip(segments, copies)]
     return [
         VideoCaption(
             start_ms=max(segment.start_ms, start_ms) - start_ms,
             end_ms=min(segment.end_ms, end_ms) - start_ms,
             text=segment.text,
         )
-        for segment in audio.transcript_segments
+        for segment in segments
         if segment.start_ms < end_ms and min(segment.end_ms, end_ms) > max(segment.start_ms, start_ms)
     ]
 

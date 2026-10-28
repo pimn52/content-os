@@ -1,155 +1,95 @@
-# Media, Asset Intelligence and Hybrid Asset Routing
+# 媒体资产与选择
 
-## Product responsibility
+Asset 记录原始媒体、来源、入库授权和哈希；Clip 是确切连续区间。Run 沿用入库授权，按场景意图、适配、画幅、时长、占用程度和质量证据选素材，不能把检索分数当作视觉通过。以下为产品规则，实现缺口见本页末及 [STATUS](../../STATUS.md)。
 
-Turn creator-owned media into reusable, searchable production assets and choose the lowest-cost adequate visual route for each content need.
+画面描述须区分采样观察与完整区间证据。分析保留实际帧时间、帧哈希和来源；旧描述只作线索。已核验区间由路由传至装配，避重不能擅自后移、时长不足不能缩短充数。原字幕须按实际播放区间核验；仅有明确裁除证据时沿用底部裁除，否则先分析或换素材，关闭新字幕不算处理完成。
 
-## User outcome
+普通自动制作以用户主题和主张组织内容。已有素材目录提供真实可选画面，不限制内容范围；选用时遵守确切 Clip 和可用时长。缺少合适画面时保存外部检索或 AI 画面需求及表达目的，不能假称已取得，也不强推补拍或字卡。
 
-The creator uploads or imports media once. Content OS should preserve the original media, derive reusable clips and metadata, and avoid forcing repeated manual cutting for every new video.
+目录已有区间证据可复用；缺少时按主题召回，在采样点所在细分镜头内分析不超过 6 秒的候选。单帧描述不作区间证据。缺实拍时仍可按已配置的人物能力规划。
 
-## Core objects
+场景选定后、语音与口型前，核对真实视频与用途、混杂镜头、字幕和关键画面。目录与用途核验每批最多 3 段、累计 24 秒及 12 MiB，每次尝试最多 3 批；用途选择够用即停止。绑定旁白、文字强调、图形与画面要求；实测时长变化仅在原核验区间内复用。成功事实复用，缺不可替代的证据时如实停止。
 
-- Asset
-- Clip
-- AudioAsset
-- analysis / transcript evidence
-- Candidate
-- ShootTask
-- Asset usage evidence
+普通界面可沿用失败任务的稿件和成功取材继续，保存原失败并创建新的核验尝试，不能改键静默重发。候选与输入保存在原任务诊断目录；改稿或换源后不冒用旧结果。核验按项目预算预留制作后段调用，新增调用照常记账。获取窗口累计实际获取工作时间，不含两次取材之间的 QA 或用户等候；次数与预算不重置，硬中断未结清耗时保守处理。
 
-## Media model
+单个候选返回字段异常时仅隔离该候选，保留其余结果、原始错误及用量，不猜测修值。无效 QA 与合法的用途否定分开：同次尝试不重发，显式新尝试可仅补核无效候选；合法正负事实复用，旧账目可据对应调用补标。候选身份不完整、重复、场景范围错配或响应截断仍整批拒绝；没有合格替代时在语音、口型前停止。
 
-Original video remains continuous. Clips are first-class playback intervals. Keyframes and derived observations support understanding/search; they do not replace the source video.
+采样点旁附既有细分镜头的时长提示，供规划安排。够用时优先在细分镜头内取段，不因语速余量跨镜头；几何切点不代表语义变化，较长连续候选仍须核验整个上传视频。核验代理长边不超 960，不裁剪、不放大，使用原帧率与零起点；源文件与成片分辨率不受影响。核验超时明确报错、保留证据，不自动重试。
 
-### Horizontal-source reuse: contract and missing assessment
+## 选择规则
 
-A local fixed-crop derivation contract/service exists. It accepts an authorized source interval, a crop matching an explicitly selected portrait output, supplied subtitle rectangles and asserted full-interval clearance, then requests a separate Asset/Clip with parent/transform metadata. Output stays1080px wide; its even `output_height` may be1080–1920, with1920 as the unchanged9:16 default. For example1440 gives9:12 and1680 gives9:14. These are source viewport proportions, independent of the final9:16 VideoSpec. Matching crop/output aspects avoid distortion. The ordinary web media panel exposes9:12,9:14,9:16 and square proportions, exact interval/pixel fields, a bounding rectangle containing all known source subtitles and an explicit full-interval review assertion/reference. It checks interval coverage and geometric subtitle overlap. It does not detect faces, track motion or infer burned-in text.
+- 分镜记录观众应理解、相信或感受什么。视频核验区分直接表达、准确辅助、环境相关及未知；环境相关不能充当操作证据，机器用途认可须明确质量合格，未知或缺失不升级为通过。
+- 核验沿用规划的表达任务：解释性场景可使用原定的应景辅助画面，不要求每个镜头独立证明旁白知识；原计划明确要求的操作、界面和结果仍须真实可见。任务规则进入用途缓存键，旧 QA 不改写、不自动放行。
+- 本地候选先按表达作用和匹配度筛选，再做整片联合选择。每步保留最多 64 个组合，比较无意重复、同源横屏次选过度使用、历史占用及本人素材价值；没有来源配额，不保证全局最优。组合展开复用已解析来源，避免反复扫描历史库。
+- 明确回扣、事实引用和梗可有意复用；新语音/口型仍沿用来源冲突检查。选择记录保留任务、来源、匹配理由与整片重复指标，随现有素材事实供下游读取。
+- 普通镜头可在已核验范围内换用不重叠区间，选定起止时间须传到装配；真实旁白改变时长后重新调度。无法避让时保留重复时长证据，不因原样素材可复用就抹去本片重复，也不一律禁止有意引用。
+- 已知外部出处不因上传或入库变成本人创作。AI 补充画面用独立来源类型，沿用生成时的模型准入记录，并核验实际内容；不能进入本人讲话或真实操作证据的位置。
 
-The panel can load the authorized local source with current-byte SHA-256 verification and display the fixed crop outline over native video playback. The preview is bounded to360px width while retaining its source aspect. The outline helps manual composition assessment; no sampled-frame or automatic positive conclusion follows. Editing the source identity, proportion, crop, interval, subtitle claim or evidence reference clears the prior review selection. An identical submission reuses its idempotency identity; a successful derivative refreshes normal Assets/Clips for later candidate selection. Backend rejection stays visible, and creation followed by refresh failure is distinguished from creation failure. UI handler tests/build, local browser synthetic playback/request checks and actual synthetic geometry remain distinct from a real creator derivative or publishable composition. Automatic choice and drag-to-crop remain unimplemented.
+- 应景是核心，同时保留个人表达与辨识度。能够胜任时优先本人表达与素材；明显更适合的外部资料可优先。本人出镜可由已有参考、语音克隆与对口型共同实现，不要求重拍流畅口播。
+- 按本次用途判断复用：改写语音/口型的新表演须避免无意的动作重置；原样事实引用、对照、梗/meme 与栏目标识允许有意复用。人物身份、素材标签、是否生成和原片区间重叠，都不能单独决定禁用或豁免。
+- 占用程度反映其他有效作品对相关内容的实际使用及本次用途；素材年龄、距上次使用天数和 Clip 次数不能替代它。同作品候选不按多个版本累计占用。
+- 已认可、同文案同区间的 TalkingRun 可复用。确切项目、音频、来源和复核必须匹配；外部人物不能冒充创作者本人。
+- 人物讲话需要本人合格素材或已准入 Talking。图形主画面须有独立的内容表达需要；解释性分类、允许图文备选或制作便宜，都不能作为缺素材时改推图文的理由。
+- 画面不足时寻找其他合适来源并调整选材、布局或整体画幅；无法替代的内容保留具体缺口。检索弱不等于必须补拍，未知适配和未知价格不能写成已通过或零成本。
+- 选择、裁切和比较画面绑定源文件哈希、Clip 及实际播放区间。静态关键帧不能证明整段字幕/人物安全。损失必要画面不能用排版调整伪装解决。
+- 短视频优先竖屏适配，无安全竖裁空间时先找合适素材或安全布局。横屏须明确选择，不能因素材占比自动改横版；横版不自动优先选择竖裁衍生片。不以大字卡填补素材缺口，换画幅也不能掩盖无意重复。
+- 已采用的负面反馈只约束相同素材、区间和呈现方式；不封禁原素材的其他合法用途。新替代方案仍需独立核对。
+- 已核验确切播放区间的同源对照可按比较目的使用；仍检查实际呈现、必要证据及横屏大比例问题。
+- 人物参考按合格连续区间、实际旁白和本片占用统一调度；已有画面通过 `preferred_clip_id` 指定来源，下游核验并沿用。外部或 AI 需求保存用途，取得合格素材后才能进入装配。
+- 选择“本人讲解 + 说明画面”时保留本人讲话，实拍与图文按表达需要安排。同一 ProductionRun 新生成的 Talking 可在技术 QA 后进入待审成片；人工质量仍待最终判断。
 
-Before the full-interval declaration, the normal panel offers a read-only viewport-feasibility check. It verifies current source bytes, Clip coverage, crop/output geometry, supplied subtitle overlap and exact persisted negative crop evidence. It shows retained pixel area and uniform scaling; these are tradeoffs, not semantic content coverage or recovered detail. Unknown subtitles and known conflicts are explicit stops; clean geometry still leaves face/head clearance, motion and effective quality unknown. The check creates no Asset, Clip, Job or human receipt and does not evaluate execution admission. Geometry/source changes discard the result; stale responses cannot bind another input. Local Asset/Clip playback resolves portable paths against the configured data root, including from a different process CWD, and rejects relative escapes and network paths. Legacy absolute paths retain their existing behavior.
+## 作品、版本与占用
 
-Suitable full-screen portrait footage remains the preferred result when it meets source, framing and quality requirements. A square/wider source viewport or containment is a disclosed compromise for limited input, not the new default quality target. A user accepting one exact constrained composition does not establish a general preference for square footage or approve unrelated crops/sources.
+| 情形 | 产品行为 |
+|---|---|
+| 正常自动制作 | 唯一有效成片自动承接作品的发布目标并计入占用，无需补点“接受”或提前选版。 |
+| 修改、返工、多版比较 | 保留同作品候选，共享来源、不互抢、不按多条待发布作品累计。未选定不等于弃用，生成新版不自动淘汰旧版。 |
+| 用户选定版本 | 在决策处显示选定版锁定、弃用版释放、关联排期及导出影响；明确弃用后只释放不再被其他保留版本或作品使用的部分。 |
+| 多版导出 | 展示版本关系、共享来源及实际冲突；比较用途可继续比较，多版分别走向发布则按实际使用检查。跨平台/画幅适配不自动变成多条独立作品。 |
+| 明确不发布的试做、练习或比较 | 不挤占正式作品的发布用料；保留素材使用、版本、成本与 QA。研发与产品使用同一链路，不增加内部评估开关。 |
+| 失败、取消或明确不予使用 | 释放不再服务保留版本的占用，保留调用与来源证据；不删除已经发生的发布史。 |
+| 已发布 | 按回执或有来源的记录保留实际使用；后续可否再用仍按本次用途判断，不作全局永久禁用。 |
 
-The final canvas must not force every source rectangle to the same aspect.
-Supported transforms should prioritize comfortable subject scale/headroom,
-retained content/context, subtitle readability and usable resolution; text is
-optional supporting information, not mandatory filler for unused canvas.
-An input may support a publishable result, a useful result with disclosed
-limitations, or no suitable result within current capability. The required
-product choice is to show the supported presentation options, their concrete
-tradeoffs, evidence/unknowns and any better-input alternative, then let the user
-select an outcome. The fixed-crop panel provides a narrow manual choice flow;
-automatic planning and normal final-composition choices remain incomplete. Aesthetic compromise does not
-relax consent/license/provenance, verified capability or required human reviews,
-and acceptance of a limited result is not a blanket R1/publishability pass.
+系统依据创作与发布设置、当前有效版本、用户修改/选版/导出、排期与发布任务主动识别走向并保存依据。正常自动链路沿既定设置继续；用户介入后在实际决策处说明影响，不在生成前要求最终选择。不把“尚未发布”当作不发布，也不把渲染成功或下载当作发布成功。
 
-The derivation API requires the caller's full-interval review claim to name the exact crop, source hash, method/version and coverage; the service checks current source bytes even on idempotent replay and probes output before import. These are integrity and provenance guards, **not** independent face tracking or subtitle recognition. A caller's human-review label is still an assertion, not an automatic suitability result. Earlier unsuccessful narrow crops remain negative evidence. One selected square treatment now has exact user comfort/clearance, real normal-API Asset/whole-Clip persistence, byte identity with the reviewed output, idempotent replay and existing downstream Talking/Master/source validation. This establishes one assisted, user-reviewed derivative path; automatic suitability, ordinary UI creation/selection, final composition acceptance and repeatability remain separate unverified capabilities.
+作品关系由创作任务及派生关系确定，不能仅凭同项目、不同 Run、不同文件哈希推断。来源区间用于追溯实际内容，不直接等于禁用区间；声音身份参考本身不占可见画面容量。
 
-The required product boundary is interval-and-transform-scoped eligibility: source identity/hash, exact interval, crop, method/version, coverage, confidence and accept/reject/unknown reasons. Changing any bound input invalidates the conclusion. Useful intervals come from actual material; conversational duration examples are not limits or qualifying thresholds.
+## 外部视频获取
 
-Preserve later contradictory visual observations alongside a supplied human clearance claim. The selected square's final-render inspection still found a brief lateral hair boundary cutoff; API acceptance of the claim does not establish independently verified full-head completeness. Aesthetic acceptance as a limited-input result remains distinct from unconditional clearance, final composition quality and publication admission.
+外部网络素材是低成本常态供给；AI 新生成单独计算预算、效果与失败成本。来源获取顺序不决定应景、本人表达和整片选材优先级。
 
-A persisted negative-only crop-assessment seam now accepts face-box observations bound to an Asset hash, Clip, exact interval/crop, method/version, coverage, evidence class and reference. An observed face box crossing the proposed crop rejects only that proposal; missing or inside-only observations remain unknown. Fixture-class observations cannot drive routing. An explicit crop proposal lets normal routing/preflight avoid a known-bad choice and use an unaffected alternative, while vertical derivation blocks the matching crop before FFmpeg. Without a proposal, the Router does not reject the entire Clip. This is supplied assisted observation evidence, not an installed automatic detector or a positive eligibility assessment; actual source bytes are rechecked at derivation, not during metadata-only routing.
+### 通道与卡点
 
-Acceptable head movement means movement within the composition's quality tolerance, not an immobile face. Face/head clearance, continuity, effective resolution and subtitle interaction must be assessed over the entire used interval. Sparse observations alone cannot prove full-interval safety. Insufficient coverage stays unknown, requiring a bounded further check, a focused judgment or another visual route.
+| 通道 | 统一实现 | 仍须验证的边界 |
+|---|---|---|
+| 素材 API | Pexels／Pixabay／Coverr 共用搜索、缓存、配额、下载、入库与分析；适配器只处理鉴权、响应及版本差异。 | Pexels 有真实记录；另两家缺 Key。账号鉴权/套餐、配额窗口、响应字段、下载版本和网络按共同卡点验，不重做公共链路。 |
+| 免 Key 目录 | Commons 沿用同一入库与用途核验。 | 样本成功，国内网络可达性受限。 |
+| 网页搜索/抓取 | API 与 Worker 共用能力连接；DeepSeek、Kimi 及后续适配器实现同一 Search/Fetch 契约。自动制作在图库不足时进入后备。 | 已有两家工具调用记录；新增自动后备仅通过夹具，真实供给效果待验。聊天或看视频能力不自动等于搜索/抓取能力。 |
+| 公开原文件 | 通用 JSON-LD VideoObject 解析，不逐站写特例；明确原文件、作者与已接开放许可后沿原入库。编码尺寸未知时下载后探测。 | 普通摘要、播放器、登录/付费页及未公开原文件无法据此交付。Coverr/Hubble 保留既有来源规则，不能用通用解析绕过。 |
+| AI 新生成 | 与外部获取分开预算及核验。 | 通用生成端未接，不以搜索工具冒充。 |
 
-Cropping away a subtitle region can create subtitle-clear material without inpainting, but only if the remaining image clears the quality bar. Unknown subtitle regions are not absence of subtitles. An uncropped portrait panel is another explicit presentation choice, not an automatic quality pass.
+### 调用策略
 
-The original stays unchanged. Derived outputs must retain source rights/consent and generation admission, resolve portable paths through the data root, and become consumable only after transform/QA persistence succeeds. Cropping never bypasses Voice/Talking review. The current service still relies on a supplied full-interval judgment; do not equate its fixture success with an autonomous decision.
+- 已有素材参与规划与联合选材；stock 查询用简短对象与动作关键词，完整镜头要求留在场景意图与理由。初轮优先素材 API；用途否定后先未试图库、再网页后备、最后同源缓存次选。没有缓存替代的需求先取得换源机会。来源顺序由现有配置控制；不读取裸环境 Key 值。
+- 默认每条制作最多 3 次图库查询、2 次网页搜索、2 次公开页解析、1 次必要 Fetch；首轮最多 3 次文件获取，用途不符后只补一轮、最多再取 2 份，总计不超过 5 次。下载失败也占尝试数；耗尽后停止检索。
+- 全部共享获取窗口 120 秒、单文件 32 MiB；单项处理可能延后。每次新外调在预算预留事务中留足解析/下载与语音、口型、核验后段额度，不自动增加项目预算。
+- 搜索已有原始 HTML 可直接解析；公开页直读失败时才考虑已声明的 Fetch。只有实际源页结构化元数据可登记原文件，模型摘要与猜出的链接不作依据。搜索、Fetch、解析、文件及后续 QA 保存关联。
+- 同词合并，成功事实与文件可复用；失败不重发同一请求，其他已连接来源只在剩余额度内接替。获取工作时间耗尽后仅恢复已完成成果，不重置次数；QA 和用户等候不消耗获取窗口。Fetch 成功后中断沿同一账目恢复解析，不再付费抓一次。
+- 核验前，同源、同哈希、同起点且已完整核验可呈现的长区间可覆盖其前缀候选，保留一个名额；仅交叠、不同起点或未核验区间不合并，不移动动作。批次上限仍保留具体场景与候选淘汰原因。
+- 取得文件后进入同一镜头分析、确切区间用途核验、联合选择与装配；不重复索权。解析/下载通过不等于应景、事实主张或成片质量通过，不以大字卡填缺。
+- 初轮本地候选落选、候选为空或联合组合失败，也可触发外取补缺，无需初稿预先声明缺素材；批次上限带有具体缺口时同样适用。只补原计划允许 stock 的非人物场景，保留原文和证据要求；补缺与既有请求共享原任务的一轮补检、调用和耗时上限。哈希、预算或核验执行错误停止，不借补缺重试。仍有缺口不得进入制作。
+- 普通自动制作的外取留出一次画面调整额度：规划 1 次及既定最多 3 批复核，另留生产后段；已有成功核验仍不足、继续核验会用掉这部分资源时，转入一次调整。首批可直接完成时不强制无用调整。批次上限可携带已有事实转交，超时、哈希或请求失败仍停止，不重发。已有可用完整区间保持原边界，不按旁白余量重截。
+- 画面调整只返回各场景的视觉意图和素材选择，文案、主张、证据要求、图解及顺序由原稿保留；不能因模型重写说明字段而浪费后续制作机会，实际改动仍留证核验。
+- 人物容量不足时，仅使用原稿明确给出的切题实拍备选；保留必要出镜及完整旁白。真实配时或画面调整后仍有缺口时，沿原任务台账补取和核验；搜索、下载、用时及补缺轮次不重置。
 
-This fixed-crop service excludes source audio explicitly; the transform records
-that fact and narration must come from the selected approved audio path where
-needed. Real synthetic9:16/9:12 tests establish output dimensions and interval
-duration, not face clearance, creator quality or eligibility of an actual clip.
+接入能力、配置状态和真实验证分开报告；配置 Key 只表示连接文件存在。无 Key 的提供商保留共同契约及待验卡点，不阻塞其它通道。国内多网络稳定性、任意主题命中率和完整视频验收尚未证明。当前结果见 [STATUS](../../STATUS.md)。
 
-For a video track beginning after the nominal container origin, fixed-crop output uses FFmpeg's native-rate zero-origin frame alignment: the first frame extends over the leading gap. This timing treatment is retained in transform provenance; it does not invent motion or pad a missing ending. The full requested duration check remains strict. Real offset-source and missing-end tests distinguish the two cases. An inspected output is not an admitted derivative without the existing full-interval human declaration and import/provenance checks.
+## 当前能力与缺口
 
-For a source-native portrait Talking reference, a separate exact-Clip assessment contract can retain a supplied full-interval review claim for face/head clearance, motion continuity, subtitle clearance and effective quality, bound to current source bytes/hash, method/version, reviewer and evidence reference. A fixture cannot yield a positive or negative routing decision; partial/unknown evidence remains unknown. A complete assisted claim is labeled `review_claimed_suitable`, not automatically detected suitability or generated Talking quality. Horizontal material cannot pass as source-native portrait through this contract; its transform/crop suitability remains a separate unresolved decision.
+已有本地导入、入库授权、哈希去重、Clip、基础检索、Shoot Task、来源追溯和渲染用料记录。真实鉴权与文件验证目前仅覆盖 Pexels、Commons 样本；取得后经原本地分析、区间用途核验与联合选择。分批核验与普通 UI 同稿恢复通过夹具，新链路真实成片与跨主题稳定性未通过。来源追溯仅覆盖相同哈希及已登记派生链，未知转码或缺失发布史不能保证识别。
 
-Where supported, one import may derive:
+路由不因横屏占比、缺素材或裁剪失败改推图文。默认 9:16，横屏需在普通 UI 明确选择；保留完整帧的技术预检仍不代表应景或视觉审核通过。源字幕未知时不叠加新字幕，也不能据此假称已解决原字幕冲突。
 
-- metadata / ffprobe evidence;
-- audio;
-- transcript;
-- clip boundaries;
-- keyframes / visual observations;
-- search/index inputs.
+表达任务、三类已有候选及整片联合选择通过夹具的选材、路由和装配检查；通用 AI 画面生成端未接入，未取得的需求仍显示缺口。普通 UI 成片验收未通过，原收尾缺口未证明解决。
 
-The existing `index_clips` asset Job optionally accepts explicit `clip_ids` to
-refresh only selected source observations and embeddings. The scope must be
-nonempty, unique and belong to the Asset; it is part of Job idempotency. Absent
-scope retains whole-asset analysis. An explicit selected-Clip request can set
-`index_embeddings=false` to use the existing visual pipeline without constructing
-an Embedding dependency or creating an Embedding call. The visual stage can
-complete without reporting indexing complete; normal default indexing still
-requires an indexer and rejects a missing one before Vision. The Worker processes only
-those Clips, updates their facts atomically and preserves all unselected Clips
-and geometry. Existing per-keyframe Vision and indexing Embedding accounting
-remain in force, including completion of the successful Embedding call. This
-allows bounded refresh of legacy source facts without repeating an entire
-source analysis. It does not grant source suitability or visual acceptance.
-
-## Hybrid Asset Router
-
-The Asset Router answers **what visual/content route should satisfy a scene**. It does not choose the compute provider. The preferences below are product policy; not every branch is implemented in automatic routing.
-
-### TALKING preference
-
-1. original creator Talking when the original words already match;
-2. authorized generated/lip-synced creator Talking;
-3. authorized digital twin/avatar only as explicit fallback;
-4. capture gap when a small new recording is cheaper or safer.
-
-### B-roll preference
-
-1. creator / historical production-authorized media;
-2. low-friction capture;
-3. screenshot / static / typography;
-4. stock when supported;
-5. AI image/video only when justified, supported and budgeted.
-
-The decided D028 follow-on applies retained final-render rejection at the source-plus-presentation proposal boundary. An adopted constraint can avoid the same bytes, exact interval and effective treatment for that creator; it does not change the source Asset's quality/admission status. A different interval, derivative or layout remains governed by existing evidence requirements. This configuration-use matching is pending implementation and separate from the implemented negative crop-assessment seam above.
-
-## Capture / Shoot List
-
-A missing visual may create an optional, concrete capture task. Capture is part of the asset strategy, not a failure mode.
-
-An explicitly reasoned explanatory scene may plan typography first and retain
-real media as fallback, provided no preferred generated Talking/Talking Profile
-requires a person. This is the narrow planner source-priority exception;
-mixed preferred-source ordering, creator/action requirements and media
-admission are unchanged. It does not certify explanatory classification,
-source suitability or final quality.
-
-## Product boundaries
-
-- Asset ranking must retain provenance.
-- Unknown price is not treated as zero.
-- Real creator media is preferred when it clears the quality threshold.
-- Generated Talking assets must pass required QA/human gates before normal assembly.
-- A future provider change must not require changing ScenePlan semantics.
-
-## Current capability
-
-Normal production preflight and retained composition consume saved explicit
-footage selections before lexical retrieval. Reuse rechecks Asset/Clip identity,
-source kind, interval length, configured use, rights reference, project scope
-and known crop rejection. An explicit selection is neither a semantic score
-nor source-suitability approval; missing indices do not force new capture,
-and source, Talking and render gates remain independent.
-
-Local import, hash dedupe, continuous Clips, transcript/analysis boundaries, candidate routing, optional Shoot Tasks, usage records and real-media-first selection are implemented foundations.
-
-In explicit lexical mode, token overlap is weaker retrieval evidence, not semantic or visual suitability verification. The router preserves the combined-score threshold. Below it, explicitly preferred typography or an explicitly declared `explanatory` scene allowing typography fallback can become the recommendation with a planning-intent reason. Preferred AI_VIDEO and declared `creator_speaking`/`action_evidence` block that substitution. Strong eligible video matches still take precedence. Typography appearing only in fallback_sources on an unknown scene does not establish adequacy.
-
-The explicit visual requirement is editorial intent, not a media-quality pass. For `creator_speaking`, normal preflight requires native creator footage with exact transcript/audio evidence or admitted generated Talking; absent it, new Talking is requested only when preferred AI_VIDEO already authorizes that route, otherwise the requirement stays unresolved as capture. An action-evidence scene cannot be replaced by typography merely to fill a retrieval gap. EditPlan assembly independently rejects direct typography selection for explicit creator/action requirements. This does not positively verify that footage actually depicts the necessary action. Legacy plans stay unknown; current real plans are not reclassified. The existing adopted exact-use-avoidance lane retains its legacy unknown-scene behavior, but explicit creator/action requirements now prevent its typography substitution too. General model classification correctness and automatic material-aware replanning remain unproven.
-
-When eligible video candidates are below threshold on lexical evidence, the optional capture proposal retains an unresolved-route explanation. Normal preflight additionally reports `visual_route_unresolved` and remains blocked. Its legacy `capture_required` code/production_need are retained for API compatibility, not proof that filming is necessary. No source is declared visually unusable from a text score. Required Talking, source rights/suitability, crop/subtitle, exact-use constraint, Voice and budget gates remain independent. General automatic fallback adequacy and visual replanning remain missing capabilities.
-
-The normal Router can discover an admitted TalkingRun and its already verified vertical derivatives for the same project and exact reviewed speech, even without its optional search index. The retained-media consumer uses this same discovery instead of separately choosing only the original assembled Clip. Eligible derivatives receive a bounded portrait-fit preference after existing full-interval safety/provenance/byte checks; no transform or new crop is requested. Failed evidence leaves the reviewed complete original as an alternative, with actual selection-specific authorization still required. A shared persisted-Run check also protects explicit VideoSpec selection and rendering, including rejection of a scene that would cut off the last timed word. Pending/rejected/missing-evidence children are not production candidates. This is not general AI_VIDEO eligibility or automatic face/crop/subtitle assessment; new-topic copy must still match eligible speech, and unsupported supplementary-material requirements remain explicit gaps.
-
-EditPlan supports containment, declared static-crop evidence, semantic graphics and portrait-panel presentation. The existing source vision analysis now returns equal left/right comparison layout and normalized burned-subtitle rectangles (including outlines/shadows, excluding evidentiary labels). These sampled facts are persisted in existing Asset metadata with source hash, explicitly named clip_interval and keyframe reference; stale hashes or unrelated intervals are unknown. Clip identity bounds are not observation coverage. sampled_keyframe remains candidate information, even when no subtitles are observed; it cannot authorize interval-wide clipping or a new caption overlay. Planning and Renderer require full_interval_continuous with covered_start_ms/covered_end_ms covering the selected Clip before using comparison clearance. The current single-keyframe pipeline never emits that coverage, and local frame inspection is not a user review. No new mandatory human-review workflow is introduced. Normal selection prefers a verified same-source, exact-interval portrait derivative, or an equally relevant native portrait alternative; a comparison must not lose one half to obtain portrait footage. A weaker unrelated portrait source does not displace stronger semantic evidence. Without an appropriate alternative or evidenced safe crop, ordinary footage without editorial graphic content uses the complete frame centered in `full_canvas`, rather than a small top panel with empty space. Comparison intent plus a known equal-half layout and sufficient interval clearance selects synchronized upper/lower viewports even with the default style; the explicit comparison style remains selectable. The current split supports 16:9 sources only. The two viewports touch and preserve proportions while maximizing the caption-safe area. Known bottom-band subtitle bounds determine the minimum clipping strip with a two-source-pixel outline guard; no fixed60px removal is assumed. Unknown layout/subtitle geometry, sampled-only coverage or subtitles overlapping required picture stop planning before Render. If removing a burned-subtitle band also cuts required subject pixels, this is a source limitation; spacing/scale changes do not constitute lossless subtitle removal. Existing EditPlan/VideoSpec crop and evidence fields carry this decision, and Renderer rechecks current source facts. Source-use exclusions cannot silently treat a cropped presentation as complete containment. No extra Provider, Planner, table, model invocation or automatic derivative generation is introduced. Contract/offline regressions establish propagation and layout arithmetic only; sampled detection accuracy, moving subtitles and real full-interval suitability remain unverified until actual source/runtime evidence exists.
-
-Explicitly adopted retained source/presentation-use constraints are evaluated in normal production preflight, separately from asset retrieval/admission. The source remains discoverable; exact same-byte/interval/treatment uses carry the constraint version, original evidence and excluded/unresolved decision. Only independently eligible intent-preserving alternatives can replace the recommendation; otherwise the original requirement remains unmet. Different layouts/intervals or regenerated bytes do not inherit either a ban or an approval. See TIMELINE_RENDER_LEARNING.md for intake, scope and execution coverage. This is not automatic asset-defect detection or learned suitability.
+已接通作品派生关系、候选共存、默认占用、试做目标和选版影响预览；评分改用其他作品已用区间的覆盖程度，不按年龄或次数排序。原样引用允许复用，新语音/口型表演检查来源动作重复。引用目的仍主要来自场景规划，未形成完整的用途识别能力。多版导出、自动发布、多帧视觉检索和完整素材替换/停用/删除待完成。当前实测见 STATUS。

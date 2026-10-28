@@ -1,9 +1,6 @@
-"""Durable use restrictions, separate from media QA and inference authority.
+"""Evidence helpers for isolated internal evaluation modules.
 
-Sidecars leave legacy canonical payloads unchanged. These application-only
-methods are not an issuance API: inference requires current provider receipts.
-A retained render may carry an empty internal-only restriction; its existing
-Composition media-use receipt, owned Job and finite slot authorize consumption.
+Ordinary production does not read or write these scopes.
 """
 from __future__ import annotations
 
@@ -443,6 +440,7 @@ def read_job_scope(db: Database, job: Job) -> ExecutionUseScope | None:
     require_claim(db, job, scope)
     return scope
 
+# Isolated compatibility helpers; ordinary product entry points must not call these.
 
 def commercial_content_blocker(db: Database, content_hash: str) -> str | None:
     """Structural deny for known restrictions, including copied/reimported bytes.

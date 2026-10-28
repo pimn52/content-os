@@ -66,6 +66,33 @@
       "format": "date-time",
       "title": "Used At",
       "type": "string"
+    },
+    "source_start_ms": {
+      "anyOf": [
+        {
+          "description": "Milliseconds from the source start.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Start Ms"
+    },
+    "source_end_ms": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source End Ms"
     }
   },
   "required": [

@@ -43,6 +43,34 @@
           "default": null,
           "title": "Clip Id"
         },
+        "playback_start_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Playback Start Ms"
+        },
+        "playback_end_ms": {
+          "anyOf": [
+            {
+              "description": "Milliseconds from the source start.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Playback End Ms"
+        },
         "match_score": {
           "maximum": 1,
           "minimum": 0,
@@ -116,6 +144,7 @@
         "stock",
         "ai_image",
         "ai_video",
+        "ai_broll",
         "typography",
         "screenshot",
         "chart",

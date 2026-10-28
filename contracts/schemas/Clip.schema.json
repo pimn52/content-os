@@ -1,5 +1,15 @@
 {
   "$defs": {
+    "GazeDirection": {
+      "description": "Visible face direction recorded for a Talking reference, never inferred later.",
+      "enum": [
+        "camera",
+        "away",
+        "uncertain"
+      ],
+      "title": "GazeDirection",
+      "type": "string"
+    },
     "ProjectFormat": {
       "enum": [
         "vertical",
@@ -8,6 +18,71 @@
       ],
       "title": "ProjectFormat",
       "type": "string"
+    },
+    "TalkingReferenceAssessment": {
+      "additionalProperties": false,
+      "description": "Sourced evidence about a specific reference Clip's usable performance.\n\nThese fields describe observed source material.  They are deliberately\ndistinct from Talking-provider capabilities: an audio-driven lip-sync\nmodel may preserve an observed gaze, but must not be treated as able to\ncreate a new one.",
+      "properties": {
+        "schema_version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "start_gaze": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GazeDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "end_gaze": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GazeDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expression_labels": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Expression Labels",
+          "type": "array"
+        },
+        "burned_in_subtitles": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Burned In Subtitles"
+        },
+        "evidence_reference": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Evidence Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_reference"
+      ],
+      "title": "TalkingReferenceAssessment",
+      "type": "object"
     },
     "TranscriptSegment": {
       "additionalProperties": false,
@@ -80,6 +155,61 @@
       "exclusiveMinimum": 0,
       "title": "Asset Duration Ms",
       "type": "integer"
+    },
+    "reference_source_timebase": {
+      "anyOf": [
+        {
+          "const": "analysis_wav",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reference Source Timebase"
+    },
+    "reference_source_file": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reference Source File"
+    },
+    "reference_source_content_hash": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reference Source Content Hash"
+    },
+    "reference_source_duration_ms": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reference Source Duration Ms"
     },
     "transcript": {
       "anyOf": [
@@ -277,6 +407,17 @@
       "default": false,
       "title": "Talking Candidate",
       "type": "boolean"
+    },
+    "talking_reference_assessment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TalkingReferenceAssessment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "voice_candidate": {
       "default": false,

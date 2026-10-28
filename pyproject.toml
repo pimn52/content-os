@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.110,<1",
   "opencc-python-reimplemented>=0.1.7,<1",
+  "pypinyin>=0.55,<0.56",
   "python-multipart>=0.0.9,<1",
   "uvicorn>=0.29,<1",
   "pydantic>=2,<3",

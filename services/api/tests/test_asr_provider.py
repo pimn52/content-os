@@ -268,6 +268,23 @@ def test_local_faster_whisper_adapter_maps_timestamped_segments_without_network(
     assert calls == [(str(audio), {"language": "zh", "initial_prompt": "保留专有名词", "vad_filter": True})]
 
 
+def test_local_faster_whisper_normalizes_locale_language_tag(tmp_path: Path) -> None:
+    audio = tmp_path / "local.wav"
+    audio.write_bytes(b"audio")
+    seen: list[object] = []
+
+    class Model:
+        def transcribe(self, _path: str, **kwargs: object):
+            seen.append(kwargs.get("language"))
+            return iter(()), type("Info", (), {"language": "zh"})()
+
+    FasterWhisperASRProvider("tiny", model_factory=lambda *_args, **_kwargs: Model()).transcribe(
+        audio, language="zh-CN",
+    )
+
+    assert seen == ["zh"]
+
+
 def test_local_faster_whisper_retains_individual_word_times(tmp_path: Path) -> None:
     audio = tmp_path / "local.wav"
     audio.write_bytes(b"audio")

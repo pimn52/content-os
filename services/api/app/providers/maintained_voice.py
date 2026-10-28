@@ -2,6 +2,9 @@
 from pathlib import Path
 import os
 import random
+import re
+import json
+import hashlib
 from types import SimpleNamespace
 from typing import Literal
 
@@ -43,6 +46,18 @@ def _load_runtime():
     return SimpleNamespace(numpy=numpy, torch=torch, soundfile=soundfile, model_class=OmniVoice)
 
 
+def narration_scene_spans(text):
+    """自动规划以空行分隔完整场景；保留场景内的连续表达及原文位置。"""
+    spans=[];cursor=0
+    for part in re.split(r"\n\s*\n",text):
+        start=text.index(part,cursor);cursor=start+len(part)
+        left=start+len(part)-len(part.lstrip());right=cursor-len(part)+len(part.rstrip())
+        if left<right:spans.append((left,right,text[left:right]))
+    if not spans or len(spans)>100:
+        raise ExecutionPreparationError("maintained_voice_scene_count_invalid")
+    return spans
+
+
 def execute_maintained_clone(*, data_root, model_root, parameters, inputs):
     """Offline maintained loader; caller owns authorization and durable accounting.
 
@@ -74,6 +89,10 @@ def execute_maintained_clone(*, data_root, model_root, parameters, inputs):
         if type(rate) is not int or not 0 < rate <= 192_000:
             raise ExecutionPreparationError("maintained_clone_rate_invalid")
         reference = read_reference(request, rate)
+        spans=narration_scene_spans(request.text)
+        manifest_path=target.with_suffix('.segments.json')
+        if manifest_path.exists():
+            raise ExecutionPreparationError("maintained_clone_output_conflict")
         runtime = _load_runtime()
         np, torch, sf = runtime.numpy, runtime.torch, runtime.soundfile
         random.seed(params.seed)
@@ -90,17 +109,34 @@ def execute_maintained_clone(*, data_root, model_root, parameters, inputs):
             raise ExecutionPreparationError("maintained_clone_loaded_configuration_changed")
         loaded.eval()
         waveform = np.asarray(reference.samples, dtype=np.float32)
-        audio = loaded.generate(text=request.text, language=request.language,
-            ref_text=request.reference_text, ref_audio=(waveform, rate), instruct=None,
-            duration=None, voice_clone_prompt=None, generation_config=None, **params.generation_kwargs())
-        if not isinstance(audio, (list, tuple)) or len(audio) != 1:
-            raise ExecutionPreparationError("maintained_clone_output_invalid")
-        output = audio[0]
-        if (type(output) is not np.ndarray or output.ndim != 1 or output.dtype != np.dtype("float32")
-            or not 0 < output.size <= params.output_max_frames
-            or 44 + 2*output.size > params.output_max_bytes
-            or not np.isfinite(output).all() or (np.abs(output) > 1).any()):
-            raise ExecutionPreparationError("maintained_clone_output_invalid")
+        outputs=[];segments=[];total=0
+        parts_dir=target.parent/(target.stem+'.parts')
+        manifest={"state":"running","text_sha256":hashlib.sha256(request.text.encode('utf8')).hexdigest(),
+            "sample_rate":rate,"segments":segments}
+        if len(spans)>1:
+            parts_dir.mkdir(exist_ok=False)
+            with manifest_path.open('x',encoding='utf8') as stream:json.dump(manifest,stream,ensure_ascii=False)
+        for index,(start,end,text) in enumerate(spans):
+            audio=loaded.generate(text=text,language=request.language,
+                ref_text=request.reference_text,ref_audio=(waveform,rate),instruct=None,
+                duration=None,voice_clone_prompt=None,generation_config=None,**params.generation_kwargs())
+            if not isinstance(audio,(list,tuple)) or len(audio)!=1:
+                raise ExecutionPreparationError("maintained_clone_output_invalid")
+            output=audio[0]
+            if (type(output) is not np.ndarray or output.ndim!=1 or output.dtype!=np.dtype('float32')
+                or output.size<=0 or total+output.size>params.output_max_frames
+                or 44+2*(total+output.size)>params.output_max_bytes
+                or not np.isfinite(output).all() or (np.abs(output)>1).any()):
+                raise ExecutionPreparationError("maintained_clone_output_invalid")
+            segment={"start_char":start,"end_char":end,"start_sample":total,"end_sample":total+int(output.size)}
+            if len(spans)>1:
+                part_path=parts_dir/f'{index:03}.wav'
+                with part_path.open('xb') as stream:sf.write(stream,output,rate,format=params.output_format,subtype=params.output_subtype)
+                segment['source_file']=part_path.relative_to(root).as_posix()
+                segment['sha256']=hashlib.sha256(part_path.read_bytes()).hexdigest()
+            segments.append(segment);outputs.append(output);total+=int(output.size)
+            if len(spans)>1:manifest_path.write_text(json.dumps(manifest,ensure_ascii=False),encoding='utf8')
+        output=outputs[0] if len(outputs)==1 else np.concatenate(outputs)
         # Exclusive creation prevents overwriting a source or a previous attempt.
         with target.open("xb") as stream:
             sf.write(stream, output, rate, format=params.output_format, subtype=params.output_subtype)
@@ -109,6 +145,9 @@ def execute_maintained_clone(*, data_root, model_root, parameters, inputs):
             or observed.samplerate != rate or observed.frames != output.size
             or target.stat().st_size > params.output_max_bytes):
             raise ExecutionPreparationError("maintained_clone_export_invalid")
+        if len(spans)>1:
+            manifest.update(state='completed',audio_sha256=hashlib.sha256(target.read_bytes()).hexdigest())
+            manifest_path.write_text(json.dumps(manifest,ensure_ascii=False),encoding='utf8')
         return target
     except ExecutionPreparationError:
         raise

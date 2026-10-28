@@ -48,7 +48,9 @@ def make_dual_case(talking_case,monkeypatch):
     path=root/"dual-origin.json";path.write_text(json.dumps(origin));o["origin_reference"]=reference(path,root)
     from app.runtime_inventory import RuntimeInventoryStore
     inventories={app.descriptor.sha256:app,engine.descriptor.sha256:engine}
-    monkeypatch.setattr(RuntimeInventoryStore,"read_v2",lambda _self,descriptor:inventories[descriptor.sha256])
+    original_read=RuntimeInventoryStore.read_v2
+    monkeypatch.setattr(RuntimeInventoryStore,"read_v2",lambda _self,descriptor,**kwargs:
+        inventories[descriptor.sha256] if descriptor.sha256 in inventories else original_read(_self,descriptor,**kwargs))
     return SimpleNamespace(options=o,root=root,request=c.request,origin=origin,origin_path=path,app=app,engine=engine)
 
 

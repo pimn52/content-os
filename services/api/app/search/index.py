@@ -14,7 +14,7 @@ import re
 from typing import Iterable, Literal, Sequence
 from uuid import UUID
 
-from app.db import ClipRepository, Database
+from app.db import AssetRepository, ClipRepository, Database
 from app.domain.models import Clip, ProjectFormat
 
 
@@ -76,7 +76,7 @@ class ClipIndex:
 class ClipSearchHit:
     clip: Clip
     score: float
-    score_basis: Literal["embedding_similarity", "lexical_overlap"] = "embedding_similarity"
+    score_basis: Literal["embedding_similarity", "lexical_overlap", "planner_selection"] = "embedding_similarity"
 
 
 class ClipIndexRepository:
@@ -265,6 +265,8 @@ class ClipTextSearchService:
         query_terms = _lexical_terms(query)
         if not query_terms:
             raise IndexError("search query must contain searchable text")
+        from app.external_media import external_catalogue_text
+        catalogue = {asset.id: external_catalogue_text(asset) for asset in AssetRepository(self.db).list()}
         clips = ClipRepository(self.db).list()
         scored: list[tuple[float, str, Clip]] = []
         for clip in clips:
@@ -281,7 +283,7 @@ class ClipTextSearchService:
                     raise IndexError("talking_candidate filter must be boolean")
                 if clip.talking_candidate != talking_candidate:
                     continue
-            clip_terms = _lexical_terms(_clip_content_text(clip))
+            clip_terms = _lexical_terms(_clip_content_text(clip) + " " + catalogue.get(clip.asset_id, ""))
             overlap = query_terms.intersection(clip_terms)
             if not overlap:
                 continue
