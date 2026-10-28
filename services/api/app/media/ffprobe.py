@@ -16,6 +16,10 @@ class ProbeError(RuntimeError):
     pass
 
 
+class ProbeDecodeError(ProbeError):
+    """Structured AVERROR_INVALIDDATA evidence, distinct from tool failures."""
+
+
 class ProbeBinaryMissing(ProbeError):
     pass
 
@@ -206,16 +210,42 @@ class FFProbeAdapter:
             metadata={"format": format_info if isinstance(format_info, dict) else {}, "streams": streams},
         )
 
-    def _probe_document(self, path: str | Path) -> dict[str, Any]:
+    def probe_video_frames(self, path: str | Path) -> dict[str, Any]:
+        """Decode the complete video track; container/audio duration is not coverage."""
+        document = self._probe_document(path, count_video_frames=True)
+        streams = document.get("streams")
+        if not isinstance(streams, list) or len(streams) != 1 or not isinstance(streams[0], dict):
+            raise ProbeInvalid("decoded video stream evidence is unavailable")
+        video = streams[0]
+        try:
+            frames = int(video["nb_read_frames"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProbeInvalid("decoded video frame count is unavailable") from exc
+        if frames <= 0 or isinstance(video["nb_read_frames"], bool):
+            raise ProbeInvalid("decoded video frame count is invalid")
+        return {"frame_count": frames, "duration_ms": _duration_from_probe(None, video),
+                "fps": _fps_from_video(video)}
+
+    def _probe_document(self, path: str | Path, *, count_video_frames: bool = False) -> dict[str, Any]:
         argv = [*self.command, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)]
+        if count_video_frames:
+            argv = [*self.command, "-v", "error", "-err_detect", "explode", "-select_streams", "v:0",
+                    "-count_frames", "-print_format", "json", "-show_error", "-show_streams", str(path)]
         try:
             completed = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=self.timeout_seconds, check=False)
         except FileNotFoundError as exc:
             raise ProbeBinaryMissing(f"ffprobe binary not found: {self.command[0]}") from exc
         except subprocess.TimeoutExpired as exc:
             raise ProbeTimeout(f"ffprobe timed out after {self.timeout_seconds:g}s") from exc
-        if completed.returncode != 0:
+        if completed.returncode != 0 or count_video_frames and completed.stderr.strip():
             detail = completed.stderr.strip()[:500]
+            if count_video_frames:
+                try:
+                    failure = json.loads(completed.stdout).get("error", {})
+                except (ValueError, TypeError, AttributeError):
+                    failure = {}
+                if isinstance(failure, dict) and failure.get("code") == -1094995529:
+                    raise ProbeDecodeError("ffprobe decoded invalid media data")
             raise ProbeError(f"ffprobe failed ({completed.returncode}): {detail}")
         try:
             document = json.loads(completed.stdout)

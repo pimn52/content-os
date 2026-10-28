@@ -160,6 +160,7 @@ def _failed_independent_qa(path, run, binding, *, check="output_duration_drift",
         report = {"job_id": str(qa.id), "automated_verified": False, "checks": checks,
             "evidence_reference": f"talking-qa-job:{qa.id}:output:{output.content_hash}"}
         if change == "unknown_check": checks.append("unclassified_face_failure")
+        elif change == "legacy_probe": checks[1] = "output_probe_failed"
         elif change == "voice": checks[-1] = "narration_copy_qa_not_verified"
         elif change == "qa_identity": report["job_id"] = str(uuid4())
         elif change == "qa_hash": report["evidence_reference"] = "talking-qa-job:stale:output:" + "0" * 64
@@ -173,7 +174,7 @@ def _failed_independent_qa(path, run, binding, *, check="output_duration_drift",
         return current, assets.get(output.id), jobs.get(qa.id)
 
 
-@pytest.mark.parametrize("check", ["output_duration_drift", "output_not_playable_video_audio", "output_probe_failed"])
+@pytest.mark.parametrize("check", ["output_duration_drift", "output_not_playable_video_audio"])
 def test_independent_output_qa_failure_repairs_only_scene_and_preserves_master(tmp_path, monkeypatch, check):
     path = tmp_path / "qa-repair.sqlite"
     with TestClient(create_app(path)) as client:
@@ -201,7 +202,7 @@ def test_independent_output_qa_failure_repairs_only_scene_and_preserves_master(t
             assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
 
 
-@pytest.mark.parametrize("change", ["unknown_check", "voice", "qa_identity", "qa_hash", "admission"])
+@pytest.mark.parametrize("change", ["unknown_check", "voice", "qa_identity", "qa_hash", "admission", "legacy_probe"])
 def test_unknown_or_upstream_qa_failure_never_regenerates_talking(tmp_path, monkeypatch, change):
     path = tmp_path / "qa-stop.sqlite"
     with TestClient(create_app(path)) as client:

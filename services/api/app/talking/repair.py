@@ -202,8 +202,10 @@ class TalkingRepairService:
                          "sha256": output.content_hash, "report": report},
                     ])
                     checks = report.get("checks") if isinstance(report, dict) else None
-                    output_failures = {"output_probe_failed", "output_not_playable_video_audio", "output_duration_drift"}
-                    known_checks = output_failures | {"output_playable_video_audio", "output_duration_matches_narration", "narration_copy_qa_verified"}
+                    output_failures = {"output_not_playable_video_audio", "output_duration_drift",
+                        "output_video_frames_short", "output_video_duration_drift", "output_video_decode_failed", "output_video_rate_mismatch"}
+                    known_checks = output_failures | {"output_playable_video_audio", "output_duration_matches_narration",
+                        "narration_copy_qa_verified", "output_video_frames_verified"}
                     if isinstance(checks, list) and "narration_copy_qa_not_verified" in checks:
                         action = "replan"
                         reasons.append("talking_qa_narration_requires_voice_repair")

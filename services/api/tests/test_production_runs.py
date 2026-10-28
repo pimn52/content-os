@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 import pytest
+from test_talking_frame_qa import FrameProbeFixture
 
 from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, TalkingProfileRepository, VoiceProfileRepository
 from app.domain.models import Asset, AudioAsset, Clip, ConsentRecord, IPProfile, JobStatus, JobType, Project, ProviderMachineCapabilityProfile, RationalFps, ScenePlan, SourceKind, TalkingProfile, TalkingReferenceAssessment, TranscriptSegment, VisualIntent, VoiceHumanReview, VoiceProfile
@@ -972,7 +973,7 @@ def test_planned_talking_fake_worker_preserves_qa_pending_and_call_ledger(tmp_pa
             assert audio.source_file.endswith("narration.wav")
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(b"fixture Talking output")
-            return TalkingSynthesisResult(output, provider_version="fixture-v1")
+            return TalkingSynthesisResult(output, provider_version="fixture-v1", expected_video_fps=RationalFps(numerator=25, denominator=1))
 
     with Database(path) as db:
         class Importer:
@@ -1045,6 +1046,7 @@ def _completed_planned_talking_output(
             authorization_reference=binding["authorization_reference"],
             imported_at=datetime.now(timezone.utc), metadata={"talking_generation": {
                 "job_id": str(job.id), "qa_state": "pending",
+                "expected_video_fps": {"numerator": 25, "denominator": 1},
                 "planned_context": job.payload.planned_context.model_dump(mode="json"),
                 "talking_profile_id": binding["talking_profile_id"],
                 "reference_clip_id": binding["reference_clip_id"],
@@ -1071,7 +1073,7 @@ def _fixture_qa_ready_planned_talking(client, path, monkeypatch, *, target_durat
     assert advanced.status_code == 200, advanced.text
     binding = advanced.json()["talking_source_bindings"][0]
 
-    class Probe:
+    class Probe(FrameProbeFixture):
         def probe(self, checked):
             assert checked == source
             return ProbeMetadata(duration_ms=3000, width=1080, height=1920,
@@ -1115,7 +1117,7 @@ def test_planned_talking_qa_handoff_is_idempotent_and_allows_final_video_review(
     with TestClient(create_app(path)) as client:
         assert client.get(f"/projects/{project_id}/production-runs/{waiting['id']}").json() == qa_run
 
-        class Probe:
+        class Probe(FrameProbeFixture):
             def probe(self, checked: Path) -> ProbeMetadata:
                 assert checked == source
                 return ProbeMetadata(

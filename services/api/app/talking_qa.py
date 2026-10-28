@@ -1,8 +1,8 @@
 """Evidence-based promotion of a generated Talking asset for assembly.
 
-The provider produces a pending ``AI_VIDEO`` asset.  Only an independent
-container/audio/new-word evaluation may mark its automated QA state verified;
-human likeness and visible sync judgment intentionally remain separate.
+The provider produces a pending ``AI_VIDEO`` asset. Independent container,
+decoded-frame and upstream narration checks own automated QA; creator likeness
+and visible sync judgment remain separate.
 """
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from app.domain.models import Asset, AudioAsset, SourceKind
-from app.media.ffprobe import ProbeError, ProbeMetadata
+from app.domain.models import Asset, AudioAsset, SourceKind, RationalFps
+from app.media.ffprobe import ProbeError, ProbeDecodeError, ProbeMetadata, ProbeBinaryMissing, ProbeTimeout, ProbeMalformed, ProbeInvalid
 
 
 class TalkingQaError(ValueError):
@@ -29,6 +29,10 @@ class TalkingQaReport:
     missing_token_count: int | None = None
     duplicate_token_count: int | None = None
     substitution_token_count: int | None = None
+    video_frames: int | None = None
+    expected_video_frames: int | None = None
+    video_duration_ms: int | None = None
+    video_fps: dict | None = None
 
     def __post_init__(self) -> None:
         if not self.checks or any(not isinstance(item, str) or not item.strip() for item in self.checks):
@@ -59,6 +63,7 @@ class TalkingHumanReview:
 
 class TalkingOutputProbe(Protocol):
     def probe(self, path: str | Path) -> ProbeMetadata: ...
+    def probe_video_frames(self, path: str | Path) -> dict: ...
 
 
 def verify_talking_output(
@@ -70,10 +75,10 @@ def verify_talking_output(
     duration_tolerance_ms: int = 80,
     expected_duration_ms: int | None = None,
 ) -> TalkingQaReport:
-    """Run independent container/timing checks on a real Talking output.
+    """Run independent container/timing/decoded-frame checks on a Talking output.
 
     This deliberately does not infer visible lip-sync or creator likeness.
-    Those remain the explicit U-Talking gate. Narration copy coverage is also
+    Those require a recorded quality judgment. Narration copy coverage is also
     owned by the upstream Voice QA record; this function requires that record
     to be verified instead of treating requested text as evidence.
     """
@@ -97,7 +102,7 @@ def verify_talking_output(
     try:
         metadata = probe.probe(output)
     except (ProbeError, OSError, ValueError):
-        return TalkingQaReport(False, ("output_probe_failed",), evidence_reference.strip(), playable=False)
+        return TalkingQaReport(False, ("output_probe_unavailable",), evidence_reference.strip())
     streams = metadata.metadata.get("streams") if isinstance(metadata.metadata, dict) else None
     stream_types = {
         stream.get("codec_type")
@@ -112,6 +117,45 @@ def verify_talking_output(
         if duration_drift_ms <= duration_tolerance_ms
         else "output_duration_drift"
     )
+    video_frames = expected_video_frames = video_duration_ms = None
+    video_fps = None
+    video_verified = False
+    try:
+        inspector = getattr(probe, "probe_video_frames", None)
+        if inspector is None:
+            raise ProbeInvalid("decoded frame evidence is unavailable")
+        frames = inspector(output)
+        if not isinstance(frames, dict):
+            raise ProbeInvalid("decoded frame evidence is invalid")
+        video_frames, video_duration_ms, fps = frames.get("frame_count"), frames.get("duration_ms"), frames.get("fps")
+        if (type(video_frames) is not int or video_frames <= 0
+                or type(video_duration_ms) is not int or video_duration_ms <= 0 or not isinstance(fps, RationalFps)):
+            video_frames = video_duration_ms = None
+            raise ProbeInvalid("decoded frame evidence is invalid")
+        video_fps = fps.model_dump(mode="json")
+        try:
+            expected_fps = RationalFps.model_validate(generation.get("expected_video_fps"))
+        except ValueError as exc:
+            raise ProbeInvalid("independent output frame rate is unavailable") from exc
+        duration = expected_duration_ms or narration.duration_ms
+        expected_video_frames = (duration * expected_fps.numerator + 1000 * expected_fps.denominator - 1) // (1000 * expected_fps.denominator)
+        rate_matches = fps.numerator * expected_fps.denominator == expected_fps.numerator * fps.denominator
+        video_verified = (video_frames >= expected_video_frames and video_duration_ms >= duration
+                          and abs(video_duration_ms - duration) <= duration_tolerance_ms and rate_matches)
+        if video_verified:
+            checks.append("output_video_frames_verified")
+        elif video_frames < expected_video_frames or video_duration_ms < duration:
+            checks.append("output_video_frames_short")
+        elif not rate_matches:
+            checks.append("output_video_rate_mismatch")
+        else:
+            checks.append("output_video_duration_drift")
+    except (ProbeBinaryMissing, ProbeTimeout, ProbeMalformed, ProbeInvalid, OSError):
+        checks.append("output_video_evidence_unavailable")
+    except ProbeDecodeError:
+        checks.append("output_video_decode_failed")
+    except ProbeError:
+        checks.append("output_video_evidence_unavailable")
     voice_generation = narration.metadata.get("voice_generation")
     voice_qa = voice_generation.get("qa") if isinstance(voice_generation, dict) else None
     copy_coverage = voice_qa.get("copy_coverage") if isinstance(voice_qa, dict) else None
@@ -132,7 +176,7 @@ def verify_talking_output(
         and duplicate_token_count == 0
     )
     checks.append("narration_copy_qa_verified" if copy_verified else "narration_copy_qa_not_verified")
-    verified = playable and duration_drift_ms <= duration_tolerance_ms and copy_verified
+    verified = playable and duration_drift_ms <= duration_tolerance_ms and copy_verified and video_verified
     return TalkingQaReport(
         verified,
         tuple(checks),
@@ -143,6 +187,7 @@ def verify_talking_output(
         missing_token_count=missing_token_count if isinstance(missing_token_count, int) and not isinstance(missing_token_count, bool) else None,
         duplicate_token_count=duplicate_token_count if isinstance(duplicate_token_count, int) and not isinstance(duplicate_token_count, bool) else None,
         substitution_token_count=substitution_token_count if isinstance(substitution_token_count, int) and not isinstance(substitution_token_count, bool) else None,
+        video_frames=video_frames, expected_video_frames=expected_video_frames, video_duration_ms=video_duration_ms, video_fps=video_fps,
     )
 
 
@@ -180,6 +225,9 @@ def apply_talking_qa(asset: Asset, report: TalkingQaReport) -> Asset:
         updated_generation["qa"]["duplicate_token_count"] = report.duplicate_token_count
     if report.substitution_token_count is not None:
         updated_generation["qa"]["substitution_token_count"] = report.substitution_token_count
+    for name in ("video_frames", "expected_video_frames", "video_duration_ms", "video_fps"):
+        if (value := getattr(report, name)) is not None:
+            updated_generation["qa"][name] = value
     metadata["talking_generation"] = updated_generation
     return asset.model_copy(update={"metadata": metadata})
 

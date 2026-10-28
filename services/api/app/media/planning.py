@@ -565,7 +565,7 @@ class VisualMaterialResolver:
         return dict(list(distinct.items())[:8]), list(requests.values())
 
     def resolve(self, project, scenes, job_id, *, work_id=None, acquired_assets=None, attempt_id=None,revision_reserve_calls=0,
-                reserved_source_uses=(),after_master=False,remaining_talking_calls=1):
+                reserved_source_uses=(),after_master=False,remaining_talking_calls=1,supplement_reserve_calls=0):
         scenes = split_footage_clauses(scenes)
         windows, requests = self._windows(project, scenes, acquired_assets)
         if not requests: return scenes
@@ -582,42 +582,69 @@ class VisualMaterialResolver:
         windows,_=self._bound_scope(project,windows,requests,job_id,"source-analysis")
         source_assets = list({asset.id:asset for asset, _ in windows.values()}.values())
         self._require_bytes(source_assets)
-        keys = {r["scene_key"] for r in requests}
-        reusable = self._analysis_facts(project,windows)
-        def complete_match_observations(facts):
+        def missing_requests(facts, needed):
             matches = facts.get("scene_matches", {})
-            if facts.get("coverage") != "video_interval_analysis" or not keys <= set(matches):
-                return False
-            for scene in scenes:
-                if not _needs_footage(scene) or scene.visual_requirement != "action_evidence":
-                    continue
-                match = matches[scene_visual_key(scene)]
-                if match.get("supported") and match.get("subject_verified") is None:
-                    return False
-            return True
-        pending = {identity:window for identity,window in windows.items()
-            if _analysis_pending(reusable[identity],complete_match_observations(reusable[identity]),job_id,attempt_id)}
+            missing = []
+            for request in needed:
+                match = matches.get(request["scene_key"], {})
+                if match.get("analysis_valid") is False:
+                    if attempt_id is not None and match.get("analysis_attempt_key") != _analysis_attempt_key(job_id, attempt_id):
+                        missing.append(request)
+                    continue  # An invalid answer is unknown; never silently repeat it.
+                if (facts.get("coverage") != "video_interval_analysis" or not match
+                    or request.get("visual_requirement") == "action_evidence"
+                    and match.get("supported") and match.get("subject_verified") is None):
+                    missing.append(request)
+            return missing
         try:
             return self._select(project,scenes,windows,work_id,reserved_source_uses=reserved_source_uses)
         except MaterialResolutionError as initial:
             failure=initial
-        for index,(batch,videos) in enumerate(self._batches(pending)):
+        index = 0
+        while True:
+            # Only unresolved uses need new observations. Unchanged admitted
+            # scene matches remain valid after local timing/occupancy checks.
+            unresolved = {scene.scene_id for scene in scenes if any(
+                reason in {f"material_scene_unresolved:{scene.scene_id}", f"material_combination_unresolved:{scene.scene_id}"}
+                or reason.startswith(f"material_source_unavailable:{scene.scene_id}:") for reason in failure.reasons)}
+            for scene_index, scene in enumerate(scenes):
+                if f"material_combination_unresolved:{scene.scene_id}" in failure.reasons:
+                    # A prior choice may consume the only option for this
+                    # scene. Observe missing alternatives in that prefix too.
+                    unresolved.update(value.scene_id for value in scenes[:scene_index + 1] if _needs_footage(value))
+            needed_keys = {scene_visual_key(scene) for scene in scenes if scene.scene_id in unresolved}
+            needed = [request for request in requests if not needed_keys or request["scene_key"] in needed_keys]
+            reusable = self._analysis_facts(project, windows)
+            pending, request_sets = {}, {}
+            for identity, window in windows.items():
+                missing = missing_requests(reusable[identity], needed)
+                if missing and _analysis_pending(reusable[identity], False, job_id, attempt_id):
+                    pending[identity], request_sets[identity] = window, missing
+            if not pending:
+                raise failure
             if index>=_MAX_BATCHES:
                 raise MaterialResolutionError(*failure.reasons,"material_analysis_batch_limit",
                     candidate_rejections=failure.candidate_rejections)
+            # Do not ask a candidate to repeat a known answer just because
+            # another candidate is missing a different use in the same batch.
+            batch_requests = request_sets[next(iter(pending))]
+            keys = {request["scene_key"] for request in batch_requests}
+            compatible = {identity: window for identity, window in pending.items()
+                if {request["scene_key"] for request in request_sets[identity]} == keys}
+            batch, videos = next(self._batches(compatible))
             try:
-                self._analyze(project,batch,requests,job_id,selection_clip_ids=tuple(windows),
+                self._analyze(project,batch,batch_requests,job_id,selection_clip_ids=tuple(windows),
                     videos=videos,attempt_id=attempt_id,revision_reserve_calls=revision_reserve_calls,after_master=after_master,
-                    remaining_talking_calls=remaining_talking_calls)
+                    remaining_talking_calls=remaining_talking_calls,supplement_reserve_calls=supplement_reserve_calls)
             except MaterialResolutionError as resource:
-                if resource.reasons!=("material_analysis_revision_due",):raise
+                if resource.reasons not in {("material_analysis_revision_due",), ("material_acquisition_due",)}:raise
                 raise MaterialResolutionError(*failure.reasons,*resource.reasons,
                     candidate_rejections=failure.candidate_rejections) from resource
+            index += 1
             try:
                 return self._select(project,scenes,windows,work_id,reserved_source_uses=reserved_source_uses)
             except MaterialResolutionError as current:
                 failure=current
-        raise failure
 
     def _video_input(self,identity,asset,clip):
         path = self.extractor.extract_video_interval(asset, clip.start_ms, clip.end_ms)
@@ -665,7 +692,7 @@ class VisualMaterialResolver:
                 batch,videos,duration,size={},[],0,0
         if batch:yield batch,videos
 
-    def _reserve_tail(self,project,job_id,stage,key,revision_reserve_calls=0,after_master=False,remaining_talking_calls=1):
+    def _reserve_tail(self,project,job_id,stage,key,revision_reserve_calls=0,after_master=False,remaining_talking_calls=1,supplement_reserve_calls=0):
         from app.budget import BudgetLimitError,snapshot
         from app.db import BudgetPolicyRepository,ProviderCallRepository
         project_calls=ProviderCallRepository(self.db).list_for_project(project.id)
@@ -682,16 +709,20 @@ class VisualMaterialResolver:
             if policy is None:continue
             calls=ProviderCallRepository(self.db).list() if policy.project_id is None else project_calls
             # 第一批仍可直接完成；已核验却不足时，优先保留一次调整及复核，而非耗尽候选。
-            if (stage=="source-analysis" and revision_reserve_calls and any(call.status=="completed" for call in previous)
+            reserve_calls = supplement_reserve_calls or revision_reserve_calls
+            if (stage=="source-analysis" and reserve_calls and any(call.status=="completed" for call in previous)
                 and policy.max_calls is not None):
                 remaining=policy.max_calls-snapshot(calls,policy.currency).calls
-                if tail+revision_reserve_calls<=remaining<tail+revision_reserve_calls+1:
-                    raise MaterialResolutionError("material_analysis_revision_due")
+                # A completed supplement may already own the remaining
+                # budget. Yield to its durable ledger even when only the
+                # production tail remains; replay must not recheck old clips.
+                if remaining<tail+reserve_calls+1:
+                    raise MaterialResolutionError("material_acquisition_due" if supplement_reserve_calls else "material_analysis_revision_due")
             if policy.max_calls is not None and snapshot(calls,policy.currency).calls+1+tail>policy.max_calls:
                 raise BudgetLimitError("material_analysis_tail_budget","素材核验不能耗尽后续语音、口型与渲染额度")
 
     def _analyze(self,project,windows,requests,job_id,*,stage="source-analysis",catalogue_clip_ids=None,selection_clip_ids=None,
-                 videos=None,attempt_id=None,revision_reserve_calls=0,reservation_guard=None,after_master=False,remaining_talking_calls=1):
+                 videos=None,attempt_id=None,revision_reserve_calls=0,reservation_guard=None,after_master=False,remaining_talking_calls=1,supplement_reserve_calls=0):
         source_assets=list({asset.id:asset for asset,_ in windows.values()}.values())
         self._require_bytes(source_assets)
         keys={r["scene_key"] for r in requests}
@@ -728,7 +759,7 @@ class VisualMaterialResolver:
             return self.provider.analyze_intervals(videos, requests)
         def reserve():
             self._reserve_tail(project,job_id,stage,key,revision_reserve_calls,after_master=after_master,
-                remaining_talking_calls=remaining_talking_calls)
+                remaining_talking_calls=remaining_talking_calls,supplement_reserve_calls=supplement_reserve_calls)
             if reservation_guard is not None:
                 reservation_guard()
         call=None
@@ -771,6 +802,22 @@ class VisualMaterialResolver:
                 old = facts.get(str(clip.id), {})
                 invalid_fields=_invalid_analysis_fields(validation_issues,observed.clip_id)
                 valid=invalid_fields is None
+                if (not valid and old.get("coverage") == "video_interval_analysis"
+                    and old.get("analysis_valid") is not False and old.get("source_content_hash") == current.content_hash
+                    and old.get("clip_interval") == {"start_ms": clip.start_ms, "end_ms": clip.end_ms}):
+                    # A malformed new use does not erase independent, valid
+                    # observations for other uses of the exact same bytes.
+                    matches = dict(old.get("scene_matches", {}))
+                    for scene_key in keys:
+                        matches[scene_key] = {**matches.get(scene_key, {}), "analysis_valid": False,
+                            "analysis_attempt_key": _analysis_attempt_key(job_id, attempt_id),
+                            "analysis_invalid_fields": invalid_fields}
+                    facts[str(clip.id)] = {**old, "scene_matches": matches}
+                    metadata["visual_analysis"] = facts
+                    if previous is not None:
+                        self.clips.upsert(previous)
+                    self.assets.update(current.model_copy(update={"metadata": metadata}))
+                    continue
                 matches={key:match for key,match in old.get("scene_matches",{}).items() if key not in keys}
                 if valid:
                     matches.update({key:{"scene_key":key,"supported":False,"score":0.0,"reason":"本次核验未认可该用途"}
@@ -829,6 +876,7 @@ class VisualMaterialResolver:
                 if asset is not None and asset.source_kind is SourceKind.AI_BROLL and scene.visual_requirement=="action_evidence":
                     reasons.append("generated_not_factual_evidence")
                 if not facts:reasons.append("interval_analysis_unavailable")
+                elif match.get("analysis_valid") is False:reasons.append("visual_purpose_unknown")
                 elif not match.get("supported") or match.get("score",0)<_MIN_MATCH or not matches_scene(facts,scene):
                     reasons.append("visual_purpose_mismatch")
                 if facts and not facts.get("source_subtitle_clearance_verified"):reasons.append("subtitle_clearance_unverified")

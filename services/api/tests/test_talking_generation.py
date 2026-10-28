@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 import pytest
+from test_talking_frame_qa import FrameProbeFixture
 
 from app.budget import ProviderCallLedger
 from app.db import AssetRepository, AudioAssetRepository, BudgetPolicyRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, ProviderCallRepository, TalkingProfileRepository
@@ -144,7 +145,7 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
                 assert options.parameter_sources == {"provider_tail_context": "local_verified"}
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_bytes(b"generated-video")
-                return TalkingSynthesisResult(output_path, provider_version="test-version")
+                return TalkingSynthesisResult(output_path, provider_version="test-version", expected_video_fps=RationalFps(numerator=25, denominator=1))
 
         class Importer:
             def __init__(self, root: Path) -> None:
@@ -175,6 +176,7 @@ def test_talking_job_requires_verified_new_narration_and_persists_video_provenan
         assert video.metadata["talking_generation"]["provider"] == "test-talking"
         assert video.metadata["talking_generation"]["reference_clip_id"] == str(reference_clip.id)
         assert video.metadata["talking_generation"]["qa_state"] == "pending"
+        assert RationalFps.model_validate(video.metadata["talking_generation"]["expected_video_fps"]) == RationalFps(numerator=25, denominator=1)
         assert video.metadata["talking_generation"]["terminal_face_closeout"] is True
         assert video.metadata["talking_generation"]["terminal_delivery_end_ms"] == 1_000
         assert video.metadata["talking_generation"]["execution_parameters"] == {"provider_tail_context": 600}
@@ -430,7 +432,8 @@ def test_talking_output_qa_requires_real_playable_video_audio_and_matching_narra
         source_kind=SourceKind.AI_VIDEO, source_file=str(video), content_hash="k" * 64,
         duration_ms=1_000, width=720, height=1_280, fps=RationalFps(numerator=25, denominator=1), has_audio=True,
         authorization_reference="talking-consent-1", imported_at=datetime.now(timezone.utc),
-        metadata={"talking_generation": {"provider": "latentsync", "qa_state": "pending"}},
+        metadata={"talking_generation": {"provider": "latentsync", "qa_state": "pending",
+            "expected_video_fps": {"numerator": 25, "denominator": 1}}},
     )
     narration = AudioAsset(
         source_file=str(tmp_path / "narration.wav"), content_hash="l" * 64, duration_ms=1_000,
@@ -444,7 +447,7 @@ def test_talking_output_qa_requires_real_playable_video_audio_and_matching_narra
     narration_path = Path(narration.source_file)
     narration_path.write_bytes(b"narration")
 
-    class Probe:
+    class Probe(FrameProbeFixture):
         def probe(self, path: Path) -> ProbeMetadata:
             assert path == video
             return ProbeMetadata(

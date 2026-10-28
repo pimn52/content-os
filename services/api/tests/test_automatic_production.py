@@ -343,8 +343,12 @@ def test_one_input_preserves_person_and_never_downgrades_uncovered_speech_to_gra
                         "job_id":str(job.id),"project_id":pid,"planned_context":context.model_dump(mode="json"),"talking_profile_id":str(payload.talking_profile_id),"reference_clip_id":str(payload.reference_clip_id),
                         "narration_audio_id":str(payload.narration_audio_id),"provider":context.expected_provider,"model":context.expected_model,
                         "master_slice_start_ms":0,"master_slice_end_ms":1200,"reference_window_start_ms":payload.reference_window_start_ms,
-                        "reference_window_end_ms":payload.reference_window_end_ms,"qa_state":"pending"}}))
+                        "reference_window_end_ms":payload.reference_window_end_ms,"expected_video_fps":{"numerator":25,"denominator":1},"qa_state":"pending"}}))
             class Probe:
+                def probe_video_frames(self, path):
+                    # Synthetic frame evidence for this local fixture.
+                    return {"frame_count": 30, "duration_ms": 1200,
+                        "fps": RationalFps(numerator=25, denominator=1)}
                 def probe(self,path):
                     return ProbeMetadata(duration_ms=1200,width=1080,height=1920,fps=RationalFps(numerator=25,denominator=1),has_audio=True,
                         metadata={"streams":[{"codec_type":"video"},{"codec_type":"audio"}]})

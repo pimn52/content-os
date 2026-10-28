@@ -201,7 +201,7 @@ class VideoProductionService:
         missing=[]
         for reason in failure.reasons:
             prefix,_,detail=reason.partition(":")
-            if (reason in {"material_analysis_revision_due","material_analysis_batch_limit"}
+            if (reason in {"material_analysis_revision_due","material_analysis_batch_limit","material_acquisition_due"}
                 and failure.candidate_rejections):continue
             if prefix in {"material_scene_unresolved","material_combination_unresolved"} and detail in by_id:continue
             scene_id,_,source=detail.rpartition(":")
@@ -260,7 +260,8 @@ class VideoProductionService:
                     "remaining_talking_calls":extra.get("remaining_talking_calls",1)} if measured_scenes is not None else {}))
             if replacement is None:raise
             return self.material_resolver.resolve(project,scenes,self.material_acquirer.resolution_scope(origin_id),
-                work_id=work_id,acquired_assets=replacement,**{key:value for key,value in extra.items() if key!="acquired_assets"})
+                work_id=work_id,acquired_assets=replacement,**{key:value for key,value in extra.items()
+                    if key not in {"acquired_assets", "supplement_reserve_calls"}})
 
     def _reserve_planning_tail(self,project,*,needs_analysis=True,analysis_calls=1,after_master=False,remaining_talking_calls=1):
         tail=4 if project.presentation_style=="creator_led" else 3
@@ -438,7 +439,10 @@ class VideoProductionService:
             origin_id=(getattr(start.payload,'resume_from_job_id',None) or start.id) if start else UUID(row['id'])
             revised=self._resolve_with_supplement(project,revised,start,origin_id,uuid5(UUID(row['id']),'measured-materials'),
                 UUID(row['work_id'] or row['id']),{"reserved_source_uses":reserved,"after_master":True,
-                    "remaining_talking_calls":len(allocations)},
+                    "remaining_talking_calls":len(allocations),
+                    "supplement_reserve_calls":3 if self.material_acquirer is not None and any(
+                        scene.visual_requirement != "creator_speaking" and scene.preferred_sources[0] is not SourceKind.TYPOGRAPHY
+                        and SourceKind.STOCK in (*scene.preferred_sources, *scene.fallback_sources) for scene in revised) else 0},
                 visual_scenes=visual_scenes,measured_scenes=scheduled,master_audio_id=master.id)
         evidence=Path(self.root)/"render-diagnostics"/row['id']/"motion-schedule.json"
         evidence.parent.mkdir(parents=True,exist_ok=True)

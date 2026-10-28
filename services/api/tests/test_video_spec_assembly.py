@@ -726,6 +726,7 @@ def test_master_narration_uses_spoken_boundaries_instead_of_generated_silence_ta
                 dict(start_char=5,end_char=9,start_sample=24_000,end_sample=48_000)]}
         audio=AudioAsset(source_file=str(tmp_path/'voice.wav'),content_hash='a'*64,duration_ms=2000,
             sample_rate=24_000,channels=1,authorization_reference='fixture',imported_at=NOW,
+            transcript_source='fixture:independent-asr',
             transcript_segments=[TranscriptSegment(start_ms=0,end_ms=1100,text='清晰嘛'),
                 TranscriptSegment(start_ms=1100,end_ms=1950,text='先看对比')],metadata={'voice_generation':generation})
         audio=audio.model_copy(update={"transcript_segments":[TranscriptSegment(start_ms=0,end_ms=900,text='清晰吗'),

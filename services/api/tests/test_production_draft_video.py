@@ -76,6 +76,7 @@ def test_same_run_qa_enqueues_review_video_without_child_human_gate(tmp_path, ch
             authorization_reference=payload.authorization_reference,
             metadata={"talking_generation": {
                 "job_id": str(job.id), "qa_state": "pending", "human_review_state": "pending",
+                "expected_video_fps": {"numerator":25, "denominator":1},
                 "planned_context": payload.planned_context.model_dump(mode="json"),
                 "talking_profile_id": str(payload.talking_profile_id),
                 "reference_clip_id": str(payload.reference_clip_id),
@@ -91,6 +92,10 @@ def test_same_run_qa_enqueues_review_video_without_child_human_gate(tmp_path, ch
         service.reconcile_completed_talking_job(job_id)
 
         class Probe:
+            def probe_video_frames(self, path):
+                # Synthetic frame evidence for this local fixture.
+                return {"frame_count": 75, "duration_ms": 3000,
+                    "fps": RationalFps(numerator=25, denominator=1)}
             def probe(self, path):
                 return ProbeMetadata(duration_ms=3000, width=1080, height=1920,
                     fps=RationalFps(numerator=25, denominator=1), has_audio=True,

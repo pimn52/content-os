@@ -657,7 +657,7 @@ def _run_product_queue(config,db,runner,stop):
                 if render and render.status is JobStatus.COMPLETED:continue
             pending=IN_PROGRESS_REASONS
             reasons=json.loads(row["waiting_stop_reasons"])
-            if (any(not value.startswith(pending) for value in reasons)
+            if (any(not value.startswith(pending) and value != 'planned_talking_qa_failed' for value in reasons)
                 or json.loads(row["voice_qa_auto_stop_reasons"])):continue
             if row["start_job_id"]:
                 parent=JobRepository(db).get(UUID(row["start_job_id"]))
@@ -677,7 +677,15 @@ def _run_product_queue(config,db,runner,stop):
                     repaired=repair.reconcile_automatic_qa_failure(UUID(row['project_id']),UUID(row['id']))
                 except (ProductionRunNotReady,ProductionRunConflict,LookupError):continue
                 if repaired is None:continue
+                if 'planned_talking_qa_failed' in reasons:
+                    with db.transaction(immediate=True):
+                        current=db.connection.execute('SELECT waiting_stop_reasons FROM production_runs WHERE id=?',(row['id'],)).fetchone()
+                        kept=[value for value in json.loads(current[0]) if value != 'planned_talking_qa_failed']
+                        db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',(json.dumps(kept),row['id']))
+                    if any(not value.startswith(pending) for value in kept):continue
                 _,jobs=_production_run_jobs(db,UUID(row['id']))
+            elif 'planned_talking_qa_failed' in reasons:
+                continue
             for job in jobs:
                 if job.status is JobStatus.COMPLETED:
                     runner.reconcile_completed(job)

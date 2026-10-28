@@ -125,6 +125,7 @@ def plan_talking_audio_slice(
     start_segment_index: int,
     end_segment_index: int,
     max_duration_ms: int,
+    delivery_interval_ms: tuple[int, int] | None = None,
 ) -> TalkingAudioSlicePlan:
     """Plan one bounded slice from complete adjacent verified intervals.
 
@@ -149,6 +150,14 @@ def plan_talking_audio_slice(
     _require_ordered_intervals(segments, master.duration_ms)
     selected = segments[start_segment_index:end_segment_index]
     start_ms, end_ms = selected[0].start_ms, selected[-1].end_ms
+    if delivery_interval_ms is not None:
+        expected = derive_talking_delivery_interval(master,
+            start_segment_index=start_segment_index, end_segment_index=end_segment_index)
+        if (not isinstance(delivery_interval_ms, tuple) or len(delivery_interval_ms) != 2
+            or any(type(value) is not int for value in delivery_interval_ms)
+            or delivery_interval_ms != expected):
+            raise TalkingSlicePlanningError("Talking delivery interval must match complete persisted transcript boundaries")
+        start_ms, end_ms = expected
     duration_ms = end_ms - start_ms
     if duration_ms > max_duration_ms:
         raise TalkingSlicePlanningError(
@@ -162,6 +171,28 @@ def plan_talking_audio_slice(
         transcript_source=master.transcript_source or "",
         start_segment_index=start_segment_index,
         end_segment_index=end_segment_index,
+    )
+
+
+def derive_talking_delivery_interval(
+    master: AudioAsset, *, start_segment_index: int, end_segment_index: int,
+) -> tuple[int, int]:
+    """Include only adjacent unspoken context in the contiguous master timeline.
+
+    The independent speech intervals remain unchanged. A visual scene owns
+    the gap immediately before its first complete segment and, for the last
+    segment only, the trailing master context.
+    """
+    _require_verified_master(master)
+    segments = tuple(master.transcript_segments)
+    if (type(start_segment_index) is not int or type(end_segment_index) is not int
+        or start_segment_index < 0 or end_segment_index <= start_segment_index
+        or end_segment_index > len(segments)):
+        raise TalkingSlicePlanningError("Talking slice transcript interval is out of range")
+    _require_ordered_intervals(segments, master.duration_ms)
+    return (
+        0 if start_segment_index == 0 else segments[start_segment_index - 1].end_ms,
+        master.duration_ms if end_segment_index == len(segments) else segments[end_segment_index - 1].end_ms,
     )
 
 
@@ -302,4 +333,4 @@ def _require_ordered_intervals(segments: tuple[TranscriptSegment, ...], duration
         previous_end = segment.end_ms
 
 
-__all__ = ["TalkingAudioSlicePlan", "TalkingAudioSliceSeriesPlan", "TalkingReferenceWindowPlan", "TalkingSliceExtractionError", "TalkingSlicePlanningError", "extract_talking_audio_slice", "plan_source_forward_reference_windows", "plan_talking_audio_slice", "plan_talking_audio_slice_series"]
+__all__ = ["TalkingAudioSlicePlan", "TalkingAudioSliceSeriesPlan", "TalkingReferenceWindowPlan", "TalkingSliceExtractionError", "TalkingSlicePlanningError", "derive_talking_delivery_interval", "extract_talking_audio_slice", "plan_source_forward_reference_windows", "plan_talking_audio_slice", "plan_talking_audio_slice_series"]

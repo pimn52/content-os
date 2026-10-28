@@ -15,7 +15,7 @@ from uuid import UUID
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, provider_call_input_digest
 from app.db import AssetRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, JobRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, TalkingProfileRepository, VoiceProfileRepository
 from app.execution_admission import UseAdmissionError
-from app.domain.models import Asset, AudioAsset, AudioAssetTranscriptionJobPayload, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, SourceKind, TalkingGenerationJobPayload, TalkingQaJobPayload, UsageCost, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceQaJobPayload
+from app.domain.models import Asset, AudioAsset, AudioAssetTranscriptionJobPayload, Clip, CostCategory, Job, JobStatus, JobType, ProviderCallRecord, RationalFps, SourceKind, TalkingGenerationJobPayload, TalkingQaJobPayload, UsageCost, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceQaJobPayload
 from app.voice_delivery import VoiceDeliveryTextError, validate_voice_delivery_text
 from app.voice_boundary_alignment import align_voice_boundaries, voice_asset_project_id
 from app.voice_observation import VoiceObservationError, _resolve_source_path, observe_voice_performance
@@ -759,6 +759,13 @@ class TalkingQaJobHandler:
             updated = apply_talking_qa(output, report)
         except TalkingQaError:
             raise JobExecutionError("talking_qa_invalid", "Talking technical QA evidence is invalid", retryable=False) from None
+        try:
+            with path.open("rb") as stream:
+                measured_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError:
+            raise JobExecutionError("talking_qa_output_changed", "Talking output changed during QA", retryable=False) from None
+        if measured_hash != output.content_hash:
+            raise JobExecutionError("talking_qa_output_changed", "Talking output changed during QA", retryable=False)
         metadata = dict(updated.metadata)
         updated_generation = dict(metadata["talking_generation"])
         qa = dict(updated_generation["qa"])
@@ -874,7 +881,7 @@ class TalkingGenerationJobHandler:
             raise JobExecutionError("talking_provider_invalid", "talking provider does not expose safe runtime identity", retryable=False)
         if profile.provider != provider_name.strip():
             raise JobExecutionError("talking_profile_provider_mismatch", "talking profile does not belong to the configured provider", retryable=False)
-        def require_planned_context() -> None:
+        def require_planned_context():
             if job.payload.planned_context is None:
                 return
             from app.production_runs import ProductionRunConflict, ProductionRunNotReady, ProductionRunService
@@ -882,7 +889,7 @@ class TalkingGenerationJobHandler:
             if importer_data_root is None:
                 raise JobExecutionError("planned_talking_data_root_missing", "planned Talking requires a configured data root", retryable=False)
             try:
-                ProductionRunService(self._assets.db, importer_data_root).require_talking_job_admission(
+                planned_slice = ProductionRunService(self._assets.db, importer_data_root).require_talking_job_admission(
                     job, provider=provider_name.strip(), model=model.strip(),
                     runtime=self._execution_runtime, machine_id=self._execution_machine_id,
                 )
@@ -890,6 +897,7 @@ class TalkingGenerationJobHandler:
                     "SELECT 1 FROM talking_repairs WHERE replacement_job_id = ?", (str(job.id),),
                 ).fetchone() is not None:
                     raise ProductionRunNotReady(("talking_repair_accounting_required",))
+                return planned_slice
             except ProductionRunNotReady as exc:
                 raise JobExecutionError(
                     exc.reasons[0], "planned Talking admission changed before provider execution", retryable=False,
@@ -898,7 +906,7 @@ class TalkingGenerationJobHandler:
                 raise JobExecutionError(
                     "planned_talking_admission_conflict", "planned Talking admission is no longer valid", retryable=False,
                 ) from exc
-        require_planned_context()
+        planned_slice = require_planned_context()
         # Core persists media paths portably beneath ``content-os-data``.  A
         # Worker may run from ``services/api`` (or another directory), so make
         # the provider-facing narration path concrete at the same data-root
@@ -915,7 +923,7 @@ class TalkingGenerationJobHandler:
         temporary_slice: tempfile.TemporaryDirectory[str] | None = None
         if job.payload.slice_start_segment_index is not None:
             try:
-                slice_plan = plan_talking_audio_slice(provider_narration, start_segment_index=job.payload.slice_start_segment_index, end_segment_index=job.payload.slice_end_segment_index or 0, max_duration_ms=job.payload.slice_max_duration_ms or 0)
+                slice_plan = planned_slice or plan_talking_audio_slice(provider_narration, start_segment_index=job.payload.slice_start_segment_index, end_segment_index=job.payload.slice_end_segment_index or 0, max_duration_ms=job.payload.slice_max_duration_ms or 0)
                 self._output_root.mkdir(parents=True, exist_ok=True)
                 temporary_slice = tempfile.TemporaryDirectory(prefix="content-os-talking-slice-", dir=str(self._output_root))
                 provider_narration = extract_talking_audio_slice(
@@ -990,6 +998,8 @@ class TalkingGenerationJobHandler:
             metadata = dict(video.metadata)
             metadata["talking_generation"] = {
                 "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
+                "expected_video_fps": None if getattr(result, "expected_video_fps", None) is None
+                    else RationalFps.model_validate(result.expected_video_fps).model_dump(mode="json"),
                 "talking_profile_id": str(profile.id), "reference_clip_id": str(reference.clip_id), "reference_subtitle_crop_bottom_ratio": reference.subtitle_crop_bottom_ratio, "narration_audio_id": str(narration.id),
                 "job_id": str(job.id), "attempt": job.attempt, "qa_state": "pending",
                 "planned_context": None if job.payload.planned_context is None else job.payload.planned_context.model_dump(mode="json"),

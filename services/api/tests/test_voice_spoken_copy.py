@@ -35,10 +35,14 @@ def test_single_reading_homophones_preserve_literal_evidence_and_timing(tmp_path
         voice_text=target, duration_target_ms=2000, visual_intent=VisualIntent(),
         preferred_sources=[SourceKind.AI_VIDEO], visual_requirement="creator_speaking",
         visual_requirement_reason="fixture")
-    assert _unique_scene_speech_span(saved, [scene], scene.id) == (0, 1800)
+    assert _unique_scene_speech_span(saved, [scene], scene.id) == (0, 2000)
     changed_words = dict(saved.metadata["voice_word_timing"], words=[dict(start_ms=0, end_ms=1800, text="话面元图")])
     changed = saved.model_copy(update={"metadata": {**saved.metadata, "voice_word_timing": changed_words}})
-    assert _unique_scene_speech_span(changed, [scene], scene.id) is None
+    # Delivery consumes the QA-bound persisted clauses, not mutable word points.
+    assert _unique_scene_speech_span(changed, [scene], scene.id) == (0, 2000)
+    changed_transcript = saved.model_copy(update={"transcript_segments": [
+        saved.transcript_segments[0].model_copy(update={"text": "别的语音"})]})
+    assert _unique_scene_speech_span(changed_transcript, [scene], scene.id) is None
 
 
 @pytest.mark.parametrize("target,observed", [

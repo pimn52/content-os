@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Mapping, Protocol
 from uuid import UUID
 
-from app.domain.models import AudioAsset, TalkingProfile
+from app.domain.models import AudioAsset, TalkingProfile, RationalFps
 
 
 class TalkingError(RuntimeError):
@@ -46,6 +46,7 @@ class TalkingProviderResponseError(TalkingError):
 class TalkingSynthesisResult:
     video_path: Path
     provider_version: str | None = None
+    expected_video_fps: RationalFps | None = None
 
 
 @dataclass(frozen=True)

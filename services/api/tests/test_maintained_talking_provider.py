@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.providers import maintained_talking as maintained
+from app.domain.models import RationalFps
 from app.providers.talking import (
     TalkingConfigurationError, TalkingExecutionOptions, TalkingProviderResponseError,
     TalkingReference, TalkingSynthesisResult,
@@ -42,7 +43,7 @@ def test_normal_provider_reuses_owned_engine_without_evaluation_admission(dual_c
                    for row in owner.options["resource_copies"])
         output = owner.private / "output.mp4"
         output.write_bytes(b"synthetic model output")
-        return TalkingSynthesisResult(output, "1.5")
+        return TalkingSynthesisResult(output, "1.5", expected_video_fps=RationalFps(numerator=25, denominator=1))
 
     monkeypatch.setattr(maintained.OwnedDualLatentSync, "synthesize", synthesize)
     p = provider(c)
@@ -52,6 +53,7 @@ def test_normal_provider_reuses_owned_engine_without_evaluation_admission(dual_c
     result = p.synthesize(c.request.profile, c.request.narration, reference(c), target, options)
 
     assert result.video_path == target and result.provider_version == "1.5"
+    assert result.expected_video_fps == RationalFps(numerator=25, denominator=1)
     assert received[0][1].reference_start_ms == c.request.reference_start_ms
     assert received[0][1].reference_end_ms == c.request.reference_end_ms
     assert received[0][2]["execution_options"] is options

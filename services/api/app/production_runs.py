@@ -222,77 +222,20 @@ class TalkingSourceContext(BaseModel):
 
 
 def _unique_scene_speech_span(audio, scenes, scene_plan_id: UUID) -> tuple[int, int] | None:
-    """Use admitted word timing where QA substitutions preserve token positions."""
-    from app.voice_qa import verified_generated_copy_tokens
-    evidence = audio.metadata.get("voice_word_timing", {})
-    target = tuple(t for scene in scenes for t in comparison_tokens(scene.voice_text))
-    words = evidence.get("words", [])
-    if (target and target == verified_generated_copy_tokens(audio)
-            and evidence.get("source_sha256") == audio.content_hash and words):
-        observed, edges, previous = [], {0: 0}, 0
-        for word in words:
-            start, end = word.get("start_ms"), word.get("end_ms")
-            tokens = comparison_tokens(word.get("text", ""))
-            if (type(start) is not int or type(end) is not int or start < previous
-                    or end <= start or end > audio.duration_ms or not tokens):
-                break
-            observed.extend(tokens); edges[len(observed)] = end; previous = end
-        else:
-            spoken = tuple(token for segment in audio.transcript_segments for token in comparison_tokens(segment.text))
-            # Use the same admitted copy as Voice QA, with the original word
-            # positions; never cut inside a word or trust a different transcript.
-            if tuple(observed) == spoken:
-                cursor = 0
-                for scene in scenes:
-                    end = cursor + len(comparison_tokens(scene.voice_text))
-                    if cursor not in edges or end not in edges:
-                        break
-                    if scene.id == scene_plan_id:
-                        return edges[cursor], edges[end]
-                    cursor = end
-    # Historical assets without position-preserving word timing keep exact matching.
-
-    segments = tuple(audio.transcript_segments)
-    if (not audio.transcript_source or not segments or any(
-        item.start_ms < 0 or item.end_ms <= item.start_ms or item.end_ms > audio.duration_ms
-        or (index and item.start_ms < segments[index - 1].end_ms)
-        for index, item in enumerate(segments)
-    )):
+    """Use complete stored speech segments on the same contiguous delivery clock."""
+    from app.voice_boundary_alignment import scene_narration_segment_spans
+    from app.talking.slices import derive_talking_delivery_interval
+    spans = scene_narration_segment_spans(audio, scenes)
+    if spans is None:
         return None
-    states: dict[tuple[int, tuple[int, int] | None], int] = {(-1, None): 1}
-    for scene in scenes:
-        target = "".join(comparison_tokens(scene.voice_text))
-        if not target:
-            return None
-        candidates: list[tuple[int, int]] = []
-        for start in range(len(segments)):
-            spoken = ""
-            for end in range(start, len(segments)):
-                spoken += "".join(comparison_tokens(segments[end].text))
-                if spoken == target:
-                    candidates.append((start, end))
-                if not target.startswith(spoken) or len(spoken) >= len(target):
-                    break
-        if not candidates:
-            return None
-        next_states: dict[tuple[int, tuple[int, int] | None], int] = {}
-        for (last_end, selected), count in states.items():
-            for start, end in candidates:
-                if start <= last_end:
-                    continue
-                choice = (start, end) if scene.id == scene_plan_id else selected
-                key = (end, choice)
-                next_states[key] = min(2, next_states.get(key, 0) + count)
-        if not next_states or len(next_states) > 10_000:
-            return None
-        states = next_states
-    if sum(states.values()) != 1:
-        return None
-    selected = next(iter(states))[1]
-    if selected is None:
-        return None
-    first, last = selected
-    return segments[first].start_ms, segments[last].end_ms
+    for scene, (first, end) in zip(scenes, spans):
+        if scene.id == scene_plan_id:
+            try:
+                return derive_talking_delivery_interval(audio,
+                    start_segment_index=first, end_segment_index=end)
+            except TalkingSlicePlanningError:
+                return None
+    return None
 
 
 def _run_from_row(db: Database, row) -> ProductionRun:
@@ -683,7 +626,8 @@ class ProductionRunService:
                 raise ProductionRunNotReady(("talking_master_interval_invalid",))
             segments = [item for item in master.transcript_segments
                         if item.start_ms >= master_start_ms and item.end_ms <= master_end_ms]
-            if (not segments or segments[0].start_ms != master_start_ms or segments[-1].end_ms != master_end_ms
+            expected_interval = _unique_scene_speech_span(master, sorted(draft.scenes, key=lambda item: item.order), scene_plan_id)
+            if (not segments or expected_interval != (master_start_ms, master_end_ms)
                 or any(item.start_ms < previous.end_ms for previous, item in zip(segments, segments[1:]))
                 or not _matches_interval_copy(target_scene.voice_text, master.transcript_segments,
                     master_start_ms, master_end_ms, audio=master)):
@@ -908,6 +852,7 @@ class ProductionRunService:
             slice_plan = plan_talking_audio_slice(
                 master, start_segment_index=indices[0], end_segment_index=indices[-1] + 1,
                 max_duration_ms=limit,
+                delivery_interval_ms=(current.master_start_ms, current.master_end_ms),
             )
         except TalkingSlicePlanningError as exc:
             raise ProductionRunNotReady(("talking_scene_exceeds_verified_duration_bound",)) from exc
@@ -1118,8 +1063,8 @@ class ProductionRunService:
     def require_talking_job_admission(
         self, job: Job, *, provider: str, model: str, runtime: str | None, machine_id: str | None,
         _new_inference: bool = True,
-    ) -> None:
-        """Fail before ProviderCall when any planned dependency has changed."""
+    ):
+        """Validate the planned identity and return its exact delivery slice."""
         if not isinstance(job.payload, TalkingGenerationJobPayload) or job.payload.planned_context is None:
             raise ProductionRunNotReady(("planned_talking_context_missing",))
         context = job.payload.planned_context
@@ -1157,6 +1102,7 @@ class ProductionRunService:
                 or job.payload.reference_window_start_ms != source_start
                 or job.payload.reference_window_end_ms != source_end):
                 raise ProductionRunNotReady(("planned_talking_execution_snapshot_changed",))
+            return slice_plan
 
     def _require_talking_output(self, project_id: UUID, run_id: UUID, binding: TalkingSourceBinding, job: Job):
         """Select one immutable generated output, never an arbitrary AI video."""
@@ -1548,12 +1494,25 @@ class ProductionRunService:
         segments = [] if master is None else [segment for segment in master.transcript_segments
                                                if segment.start_ms >= binding.master_start_ms
                                                and segment.end_ms <= binding.master_end_ms]
+        from app.talking.slices import derive_talking_delivery_interval
+        indices = [] if master is None else [index for index, segment in enumerate(master.transcript_segments)
+            if segment in segments]
+        interval_valid = False
+        if indices:
+            try:
+                interval_valid = derive_talking_delivery_interval(master,
+                    start_segment_index=indices[0], end_segment_index=indices[-1] + 1) == (
+                        binding.master_start_ms, binding.master_end_ms)
+            except TalkingSlicePlanningError:
+                pass
+            if not require_current_plan:
+                interval_valid = interval_valid or (segments[0].start_ms, segments[-1].end_ms) == (
+                    binding.master_start_ms, binding.master_end_ms)
         if (clip is None or clip.talking_reference_assessment is None
             or clip.talking_reference_assessment.burned_in_subtitles is not False
             or source is None
             or not has_approved_voice_quality(self.db, master, production_run_id=run_id)
-            or not segments or segments[0].start_ms != binding.master_start_ms
-            or segments[-1].end_ms != binding.master_end_ms
+            or not segments or not interval_valid
             or (require_current_plan and not _matches_interval_copy(scene.voice_text, master.transcript_segments,
                 binding.master_start_ms, binding.master_end_ms, audio=master))):
             raise ProductionRunNotReady(("planned_talking_source_or_speech_changed",))
@@ -2212,10 +2171,6 @@ class ProductionRunService:
         selections = {item.scene_plan_id: item.selected_candidate for item in preflight.scenes}
         if any(value is None for value in selections.values()):
             raise ProductionRunNotReady(("visual_selection_incomplete",))
-        final_scene = max(draft.scenes, key=lambda item: item.order)
-        terminal_talking = (production_run_id is not None
-                            and final_scene.visual_requirement == "creator_speaking"
-                            and selections[final_scene.id].source_kind is SourceKind.AI_VIDEO)
         try:
             spec = VideoSpecAssembler(
                 AssetRepository(self.db), ClipRepository(self.db), ImageAssetRepository(self.db),
@@ -2225,7 +2180,7 @@ class ProductionRunService:
                 project, draft.scenes, selections,
                 master_narration_asset_id=preflight.reusable_master_audio_id,
                 narration_required=True, edit_plan=preflight.preliminary_edit_plan,
-                terminal_talking_delivery=terminal_talking,
+                terminal_talking_delivery=False,
             )
         except VideoSpecAssemblyError as exc:
             raise ProductionRunNotReady((f"video_spec_assembly_failed:{exc}",)) from exc

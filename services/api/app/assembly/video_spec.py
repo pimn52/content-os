@@ -829,8 +829,15 @@ def _master_narration_intervals(
 
     segments = tuple(audio.transcript_segments)
     cursor = 0
-    matches: list[tuple[ScenePlan, int]] = []
-    for scene in scenes:
+    from app.voice_boundary_alignment import scene_narration_segment_spans
+    spans = scene_narration_segment_spans(audio, scenes)
+    generation = audio.metadata.get("voice_generation")
+    if (spans is None and isinstance(generation, dict)
+        and isinstance(generation.get("target_text"), str)):
+        raise NarrationTimelineError("generated master must map the complete ordered copy to persisted speech segments")
+    matches: list[tuple[ScenePlan, int]] = ([] if spans is None else
+        [(scene, end - 1) for scene, (_, end) in zip(scenes, spans)])
+    for scene in (() if spans is not None else scenes):
         target = "".join(comparison_tokens(scene.voice_text))
         if not target:
             raise NarrationTimelineError(f"scene {scene.scene_id!r} has no alignable narration text")

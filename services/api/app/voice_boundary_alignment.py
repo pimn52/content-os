@@ -14,6 +14,46 @@ from app.narration_performance import derive_narration_boundary_map
 from app.voice_qa import comparison_tokens
 
 
+def scene_narration_segment_spans(audio: AudioAsset, scenes) -> tuple[tuple[int, int], ...] | None:
+    """Partition the whole admitted copy at persisted, ordered segment edges.
+
+    Returned end indices are exclusive. Word timing is upstream evidence for
+    the stored segments, never an extra caller-selected cut within a segment.
+    """
+    from app.voice_qa import verified_generated_copy_tokens
+    segments = tuple(audio.transcript_segments)
+    if (not audio.transcript_source or not segments or any(
+        item.start_ms < 0 or item.end_ms <= item.start_ms or item.end_ms > audio.duration_ms
+        or (index and item.start_ms < segments[index - 1].end_ms)
+        for index, item in enumerate(segments)
+    )):
+        return None
+    observed = tuple(token for segment in segments for token in comparison_tokens(segment.text))
+    admitted = verified_generated_copy_tokens(audio)
+    generation = audio.metadata.get("voice_generation")
+    qa = generation.get("qa") if isinstance(generation, dict) else None
+    if isinstance(qa, dict) and {"source_sha256", "target_text_sha256", "transcript_sha256"}.intersection(qa) and admitted is None:
+        return None
+    planned = tuple(token for scene in scenes for token in comparison_tokens(scene.voice_text))
+    if not planned or planned != (admitted if admitted is not None else observed):
+        return None
+    sizes = [len(comparison_tokens(segment.text)) for segment in segments]
+    spans = []
+    index = 0
+    for scene in scenes:
+        needed = len(comparison_tokens(scene.voice_text))
+        if not needed:
+            return None
+        start, count = index, 0
+        while index < len(sizes) and count < needed:
+            count += sizes[index]
+            index += 1
+        if count != needed:
+            return None
+        spans.append((start, index))
+    return tuple(spans) if index == len(segments) else None
+
+
 def align_voice_boundaries(
     copy: str,
     word_evidence: object,

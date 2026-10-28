@@ -109,10 +109,14 @@ def test_one_input_runs_two_person_scenes_without_stopping_after_first_qa(tmp_pa
                         "provider": context.expected_provider, "model": context.expected_model,
                         "master_slice_start_ms": index * 1200, "master_slice_end_ms": (index + 1) * 1200,
                         "reference_window_start_ms": payload.reference_window_start_ms,
-                        "reference_window_end_ms": payload.reference_window_end_ms, "qa_state": "pending"}},
+                        "reference_window_end_ms": payload.reference_window_end_ms, "expected_video_fps": {"numerator":25, "denominator":1}, "qa_state": "pending"}},
                 ))
 
             class Probe:
+                def probe_video_frames(self, path):
+                    # Synthetic frame evidence for this local fixture.
+                    return {"frame_count": 30, "duration_ms": 1200,
+                        "fps": RationalFps(numerator=25, denominator=1)}
                 def probe(self, path):
                     return ProbeMetadata(duration_ms=1200, width=1080, height=1920,
                         fps=RationalFps(numerator=25, denominator=1), has_audio=True,

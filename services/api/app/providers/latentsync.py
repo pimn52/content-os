@@ -18,7 +18,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 from typing import Callable, Sequence
 
-from app.domain.models import AudioAsset, CostCategory, TalkingProfile, UsageCost
+from app.domain.models import AudioAsset, CostCategory, TalkingProfile, UsageCost, RationalFps
 
 from .talking import (
     TalkingConfigurationError,
@@ -35,7 +35,6 @@ LATENTSYNC_PROVIDER = "latentsync"
 LATENTSYNC_MODEL = "LatentSync-1.5"
 LATENTSYNC_PROCESSING_RESOLUTION_PX = 256
 LATENTSYNC_STATED_MINIMUM_VRAM_GB = 6.5
-RAW_OUTPUT_DURATION_TOLERANCE_MS = 80
 # This is adapter timing needed to give the model a small pre-speech visual
 # runway.  It is intentionally not a product setting: the only user-tunable
 # close-out control is the post-speech silence owned by LatentSync.
@@ -243,6 +242,7 @@ class LatentSyncProvider:
             # unrelated tail or fail before inference.  The Clip remains the
             # source of truth; only this provider boundary stages the window.
             self._stage_reference(reference, staged, duration_ms, model_duration_ms)
+            self._require_video_frames(staged, model_duration_ms, "staged reference")
             if closeout.enabled:
                 self._prepare_terminal_closeout_audio(
                     narration_path,
@@ -273,7 +273,7 @@ class LatentSyncProvider:
 
         if not target.is_file() or target.stat().st_size == 0:
             raise TalkingProviderResponseError("LatentSync did not produce a local video file")
-        return TalkingSynthesisResult(target, provider_version="1.5")
+        return TalkingSynthesisResult(target, provider_version="1.5", expected_video_fps=RationalFps(numerator=25, denominator=1))
 
     @staticmethod
     def _model_duration_ms(duration_ms: int) -> int:
@@ -319,6 +319,8 @@ class LatentSyncProvider:
             "-t",
             f"{min(duration_ms, target_duration_ms) / 1000:.3f}",
             "-an",
+            "-r",
+            "25",
             "-c:v",
             "libx264",
             "-preset",
@@ -460,15 +462,9 @@ class LatentSyncProvider:
     ) -> None:
         """Restore the exact narration duration and use the original audio."""
         if not generated.is_file() or generated.stat().st_size == 0:
-            raise TalkingProviderResponseError("LatentSync did not produce a local video file")
-        filter_graph = (
-            f"[0:v]tpad=stop_mode=clone:stop_duration={duration_ms / 1_000:.3f}[v]"
-            if leading_context_ms == 0
-            else (
-                f"[0:v]trim=start={leading_context_ms / 1_000:.3f}:"
-                f"duration={duration_ms / 1_000:.3f},setpts=PTS-STARTPTS[v]"
-            )
-        )
+            raise TalkingProviderResponseError("LatentSync raw output video file is missing or empty")
+        filter_graph = (f"[0:v]trim=start={leading_context_ms / 1_000:.3f}:"
+                        f"duration={duration_ms / 1_000:.3f},setpts=PTS-STARTPTS[v]")
         argv = [
             *self.ffmpeg_command,
             "-hide_banner",
@@ -502,13 +498,17 @@ class LatentSyncProvider:
         self._execute(argv, "output duration normalization")
 
     def _require_raw_output_covers_narration(self, generated: Path, narration_duration_ms: int) -> None:
-        """Reject an upstream truncation before a final-frame pad can hide it."""
+        """Require decoded video coverage independently of any audio stream."""
+        self._require_video_frames(generated, narration_duration_ms, "raw output")
+
+    def _require_video_frames(self, generated: Path, duration_ms: int, label: str) -> None:
         if not generated.is_file() or generated.stat().st_size == 0:
-            raise TalkingProviderResponseError("LatentSync did not produce a local video file")
+            raise TalkingProviderResponseError(f"LatentSync {label} video file is missing or empty")
         argv = [
             *self.ffprobe_command,
             "-v", "error",
-            "-show_entries", "format=duration",
+            "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=nb_read_frames,avg_frame_rate,duration",
             "-of", "json",
             str(generated),
         ]
@@ -517,21 +517,30 @@ class LatentSyncProvider:
         except FileNotFoundError as exc:
             raise TalkingConfigurationError("LatentSync FFprobe runtime executable is unavailable") from exc
         except subprocess.TimeoutExpired as exc:
-            raise TalkingTimeout("LatentSync raw output probe timed out") from exc
+            raise TalkingTimeout(f"LatentSync {label} probe timed out") from exc
         except TimeoutError as exc:
-            raise TalkingTimeout("LatentSync raw output probe timed out") from exc
+            raise TalkingTimeout(f"LatentSync {label} probe timed out") from exc
         except OSError as exc:
-            raise TalkingConfigurationError("LatentSync raw output probe could not be started") from exc
+            raise TalkingConfigurationError(f"LatentSync {label} probe could not be started") from exc
         if completed.returncode != 0:
-            raise TalkingProviderResponseError("LatentSync raw output could not be probed")
+            raise TalkingProviderResponseError(f"LatentSync {label} could not be probed")
         try:
             probe = json.loads(completed.stdout)
-            seconds = probe["format"]["duration"]
-            duration_ms = round(float(seconds) * 1_000)
+            streams = probe["streams"]
+            if len(streams) != 1:
+                raise ValueError("missing video stream")
+            stream = streams[0]
+            frames = int(stream["nb_read_frames"])
+            rate = stream["avg_frame_rate"].split("/")
+            numerator, denominator = (int(part) for part in rate)
+            seconds = float(stream["duration"])
+            if denominator <= 0 or numerator != 25 * denominator or not math.isfinite(seconds) or seconds <= 0 or frames <= 0:
+                raise ValueError("invalid video evidence")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise TalkingProviderResponseError("LatentSync raw output duration is invalid") from exc
-        if duration_ms + RAW_OUTPUT_DURATION_TOLERANCE_MS < narration_duration_ms:
-            raise TalkingProviderResponseError("LatentSync raw output is shorter than the driving narration")
+            raise TalkingProviderResponseError(f"LatentSync {label} video frame evidence is invalid") from exc
+        required_frames = (duration_ms * 25 + 999) // 1000
+        if frames < required_frames or seconds * 1000 + 0.001 < duration_ms:
+            raise TalkingProviderResponseError(f"LatentSync {label} video is shorter than required")
 
     def _run_inference(self, video_path: Path, audio_path: Path, target: Path) -> None:
         def runtime_argument(path: Path) -> str:

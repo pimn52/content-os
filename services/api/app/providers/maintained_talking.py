@@ -141,7 +141,7 @@ class MaintainedLatentSyncProvider:
                 engine_files=engine_files, model_artifacts=runtime["model_artifacts"],
                 output_sha256=output_sha, qa_state="pending")
             target.with_suffix(".execution.json").write_text(json.dumps(evidence, ensure_ascii=False), encoding="utf-8")
-            return TalkingSynthesisResult(target, provider_version=result.provider_version)
+            return TalkingSynthesisResult(target, provider_version=result.provider_version, expected_video_fps=result.expected_video_fps)
         except BaseException as exc:
             temporary._finalizer.detach()
             (private / "failure.json").write_text(json.dumps(dict(output_admitted=False, retry_automatically=False)), encoding="utf-8")

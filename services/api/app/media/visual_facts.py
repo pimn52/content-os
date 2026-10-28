@@ -146,7 +146,8 @@ def matches_scene(facts, scene):
     if facts.get("coverage") != "video_interval_analysis":
         return True
     match = facts.get("scene_matches", {}).get(scene_visual_key(scene), {})
-    return (match.get("supported") is True and match.get("score", 0) >= .65
+    return (match.get("analysis_valid") is not False
+        and match.get("supported") is True and match.get("score", 0) >= .65
         and match.get("quality_adequate") is True
         and (scene.visual_requirement!="action_evidence"
             or match.get("fit")=="direct" and match.get("subject_verified") is True))
