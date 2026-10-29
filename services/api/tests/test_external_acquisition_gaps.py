@@ -287,7 +287,7 @@ def test_selected_or_person_only_plan_records_original_for_later_cutaway_without
         resolver=SimpleNamespace(check_configuration=lambda *args:None,check_external_configuration=lambda *args:None,
             selected_materials_ready=lambda *args:True,resolve=halt)
         production=VideoProductionService(db,tmp_path,material_resolver=resolver,material_acquirer=acquirer)
-        production._require_talking_coverage=lambda *args:None
+        production._prepare_initial_visuals=lambda project,draft,*args,**kwargs:draft
         with pytest.raises(RuntimeError,match='fixture_after_record'):
             production.plan(job,object(),object())
         assert acquirer.original_scenes(job.id)==(original,)

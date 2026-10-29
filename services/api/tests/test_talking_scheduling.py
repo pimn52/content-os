@@ -1,13 +1,18 @@
 """真实旁白调度；只替换原稿明确允许的画面，不制造质量结论。"""
 from uuid import uuid4
 from types import SimpleNamespace
+from datetime import datetime, timezone
+from itertools import combinations
 
 import pytest
 from pydantic import ValidationError
 
 from app.db import Database
-from app.domain.models import ScenePlan, VisualIntent
-from app.talking.pool import build_talking_pool, TalkingPoolCapacityError
+from app.domain.models import (Asset, Clip, ConsentRecord, ProviderMachineCapabilityProfile,
+    RationalFps, ScenePlan, TalkingProfile, VisualIntent)
+from app.providers.maintained_talking import MaintainedLatentSyncProvider
+from app.talking.pool import (TalkingPool, TalkingPoolEntry, allocate_talking_windows,
+    build_talking_pool, TalkingPoolCapacityError, required_talking_reference_duration_ms)
 from app.talking.scheduling import schedule_talking_scenes
 from test_talking_pool import pool_fixture
 
@@ -53,6 +58,83 @@ def test_short_reference_keeps_the_feasible_complete_sentence_without_clipping_o
         assert [s.voice_text for s in revised]==[s.voice_text for s in original]
         assert [s.duration_target_ms for s in revised]==[3480,2360,3540]
         assert len(allocations)==1 and allocations[0].narration_duration_ms==2360
+
+
+def short_latentsync_pool(duration=3200):
+    """已合格竖屏池的纯调度夹具；不创建数据库或媒体，不初始化模型。"""
+    now=datetime.now(timezone.utc)
+    asset=Asset(source_file='fixture:portrait-motion',content_hash='a'*64,duration_ms=duration,
+        width=1080,height=1920,fps=RationalFps(numerator=25,denominator=1),
+        authorization_reference='fixture:ingestion',imported_at=now)
+    clip=Clip(asset_id=asset.id,start_ms=0,end_ms=duration,asset_duration_ms=duration)
+    profile=TalkingProfile(name='本人动作',provider=MaintainedLatentSyncProvider.provider_name,
+        reference_clip_ids=[clip.id],consent=ConsentRecord(subject_name='本人',basis='self',
+            confirmed=True,confirmed_at=now),created_at=now)
+    capability=ProviderMachineCapabilityProfile(capability='talking',mode='local',
+        provider=MaintainedLatentSyncProvider.provider_name,model=MaintainedLatentSyncProvider.model,
+        runtime='fixture',machine_id='fixture',readiness='configured',provenance_source='fixture',updated_at=now)
+    return TalkingPool((TalkingPoolEntry(profile,clip,asset,capability,0,duration,asset.content_hash,0,duration),))
+
+
+def test_183c_clauses_prefer_complete_closing_with_real_frame_alignment():
+    pool=short_latentsync_pool()
+    provider=MaintainedLatentSyncProvider  # 只调用真实静态对齐规则，不加载运行时。
+    project=SimpleNamespace(id=uuid4())
+    texts=['同一段视频，','复杂运动画面需要更多码率；','静态画面用很低码率就能很清晰。','编码器好坏也差很多。']
+    durations=[1400,2100,2820,1500]
+    original=[scene(project,index,alternative=True,duration=duration).model_copy(update={'voice_text':text})
+        for index,(text,duration) in enumerate(zip(texts,durations))]
+    assert [required_talking_reference_duration_ms(provider,duration,3200) for duration in durations]==[1920,2560,3200,1920]
+    for pair in combinations(durations,2):
+        with pytest.raises(TalkingPoolCapacityError):
+            allocate_talking_windows(pool,pair,talking_provider=provider)
+    revised,allocations=schedule_talking_scenes(pool,original,talking_provider=provider)
+    assert [s.visual_requirement for s in revised]==['explanatory']*3+['creator_speaking']
+    assert revised[-1]==original[-1]
+    assert len(allocations)==1 and allocations[0].narration_duration_ms==1500
+    assert (allocations[0].start_ms,allocations[0].end_ms)==(0,1920)
+    assert [s.voice_text for s in revised]==texts
+    assert [s.duration_target_ms for s in revised]==durations
+    for before,after in zip(original[:3],revised[:3]):
+        assert after.visual_intent==before.supporting_visual_intent
+        assert after.preferred_sources==before.fallback_sources
+        assert after.graphic_plan is None and after.material_request is None
+        assert set(after.preferred_sources).issubset({'user_asset','historical_asset','stock','ai_broll'})
+    assert (allocations[0].entry.asset.width,allocations[0].entry.asset.height)==(1080,1920)
+
+
+@pytest.mark.parametrize('text',['同一段视频，','请看这个设置：','Consider this,','Look here:', '“请看这个设置：”'])
+def test_setup_speech_is_still_eligible_when_complete_sentence_does_not_fit(text):
+    project=SimpleNamespace(id=uuid4())
+    original=[scene(project,0,alternative=True,duration=1400).model_copy(update={'voice_text':text}),
+        scene(project,1,alternative=True,duration=3500)]
+    revised,allocations=schedule_talking_scenes(short_latentsync_pool(),original,
+        talking_provider=MaintainedLatentSyncProvider)
+    assert revised[0]==original[0] and revised[1].visual_requirement=='explanatory'
+    assert len(allocations)==1 and allocations[0].narration_duration_ms==1400
+
+
+def test_sentence_preference_does_not_change_required_speech_or_missing_punctuation():
+    project=SimpleNamespace(id=uuid4())
+    pool=short_latentsync_pool()
+    closing=scene(project,1,alternative=True,duration=1500)
+    required=scene(project,0,duration=1400).model_copy(update={'voice_text':'同一段视频，'})
+    revised,allocations=schedule_talking_scenes(pool,[required,closing],talking_provider=MaintainedLatentSyncProvider)
+    assert revised[0]==required and revised[1].visual_requirement=='explanatory'
+    assert len(allocations)==1 and allocations[0].narration_duration_ms==1400
+    unpunctuated=scene(project,0,alternative=True,duration=1400).model_copy(update={'voice_text':'本人开场没有句末标点'})
+    revised,_=schedule_talking_scenes(pool,[unpunctuated,closing],talking_provider=MaintainedLatentSyncProvider)
+    assert revised[0]==unpunctuated and revised[1].visual_requirement=='explanatory'
+
+
+def test_sentence_preference_keeps_all_speech_when_capacity_is_sufficient():
+    project=SimpleNamespace(id=uuid4())
+    original=[scene(project,0,alternative=True,duration=1400).model_copy(update={'voice_text':'同一段视频，'}),
+        scene(project,1,alternative=True,duration=1500)]
+    revised,allocations=schedule_talking_scenes(short_latentsync_pool(4000),original,
+        talking_provider=MaintainedLatentSyncProvider)
+    assert revised==tuple(original) and len(allocations)==2
+    assert [(value.start_ms,value.end_ms) for value in allocations]==[(0,1920),(1920,3840)]
 
 
 def test_indispensable_visible_performance_does_not_downgrade_or_remove_all_creator(tmp_path):

@@ -362,9 +362,9 @@ def test_worker_uses_one_render_handler_independent_of_legacy_policy(tmp_path,mo
     monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','evaluation-composition-v1')
     with Database(cfg.db_path) as db:
         runner=build_runner(cfg,db)
-        assert type(runner._handlers[JobType.RENDER]) is RenderVideoJobHandler
+        assert type(runner._handlers[JobType.RENDER].__wrapped__) is RenderVideoJobHandler
         monkeypatch.setenv('CONTENT_OS_RENDER_EXECUTION_POLICY','unknown')
-        assert type(build_runner(cfg,db)._handlers[JobType.RENDER]) is RenderVideoJobHandler
+        assert type(build_runner(cfg,db)._handlers[JobType.RENDER].__wrapped__) is RenderVideoJobHandler
 
 
 @pytest.mark.parametrize("change", [None, "stale", "missing", "inside_word", "unverified", "overlap"])

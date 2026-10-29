@@ -31,7 +31,7 @@ def test_capacity_failure_with_existing_alternatives_skips_revision(tmp_path, mo
     for name, value in (("ProjectRepository", project), ("ProjectDraftRepository", draft),
                         ("AudioAssetRepository", master)):
         monkeypatch.setattr(f"app.video_production.{name}", lambda db, value=value: SimpleNamespace(get=lambda _: value))
-    pool = SimpleNamespace(summary=lambda **_: {"max_narration_duration_ms": 1000, "longest_continuous_ms": 1000})
+    pool = SimpleNamespace(entries=(object(),),occupancy_state='known',summary=lambda **_: {"max_narration_duration_ms": 1000, "longest_continuous_ms": 1000})
     monkeypatch.setattr("app.talking.pool.build_talking_pool", lambda *a, **kw: pool)
     monkeypatch.setattr("app.video_production._split_talking_master_clauses", lambda *a, **kw: scenes)
     monkeypatch.setattr("app.assembly.video_spec._master_narration_intervals", lambda *a: [(s, 0, 1000) for s in scenes])

@@ -121,6 +121,27 @@ class BoundedExternalAcquirer:
             raise ExternalAcquisitionError("画面调整不能改变原稿或增加生成请求", "external_acquisition_changed") from exc
         return tuple(sorted(result,key=lambda value:value.order))
 
+    @staticmethod
+    def _validated_estimated(scenes, estimated):
+        """估算只展开已允许的切题备选；不改原稿，也不宣称真实配时。"""
+        from app.talking.scheduling import supporting_footage_scene
+        try:
+            originals=tuple(scenes)
+            result=tuple(ScenePlan.model_validate(value.model_dump(mode="json") if isinstance(value,ScenePlan) else value)
+                for value in estimated)
+            if len(result)!=len(originals):raise ValueError("estimated scene count changed")
+            changed=False
+            for original,scene in zip(originals,result):
+                if scene==original:continue
+                if scene!=supporting_footage_scene(original):raise ValueError("unplanned estimated visual")
+                changed=True
+            if (not changed or any(scene.visual_requirement=='creator_speaking' for scene in originals)
+                and not any(scene.visual_requirement=='creator_speaking' for scene in result)):
+                raise ValueError("estimated projection must preserve creator speech")
+            return result
+        except (ValueError,TypeError,AttributeError) as exc:
+            raise ExternalAcquisitionError("估算取材只能使用原稿明确允许的切题备选并保留本人出镜", "external_acquisition_changed") from exc
+
     def _motion_revision_authorized(self, job_id, visuals, master_audio_id):
         path=self.root/"render-diagnostics"/str(job_id)
         try:
@@ -233,12 +254,8 @@ class BoundedExternalAcquirer:
                         if (original.visual_requirement!="creator_speaking" or original.supporting_visual_intent is None
                             or scene.visual_requirement!="explanatory"):
                             raise ValueError("measured scene changed visual requirement")
-                        expected=expected.model_copy(update={"visual_intent":original.supporting_visual_intent,
-                            "supporting_visual_intent":None,"preferred_clip_id":None,
-                            "preferred_sources":[source for source in original.fallback_sources if source in footage],
-                            "fallback_sources":[],"graphic_plan":None,"material_request":None,
-                            "visual_requirement":"explanatory",
-                            "visual_requirement_reason":"沿用原稿允许的切题实拍覆盖同一段完整旁白，保留其它本人出镜。"})
+                        from app.talking.scheduling import supporting_footage_scene
+                        expected=supporting_footage_scene(expected)
                     if scene != expected:
                         raise ValueError("measured scene changed content or unplanned visuals")
             if cursor!=len(intervals):
@@ -275,7 +292,7 @@ class BoundedExternalAcquirer:
         if not path.exists():
             return scenes
         state = json.loads(path.read_text(encoding="utf-8"))
-        if not state.get("gap_scenes") and not state.get("visual_scenes") and not state.get("measured_scenes"):
+        if not state.get("gap_scenes") and not state.get("visual_scenes") and not state.get("measured_scenes") and not state.get("estimated_scenes"):
             return scenes
         if state.get("scene_fingerprint") != self._scene_fingerprint(scenes):
             raise ExternalAcquisitionError("原计划已改变，不能复用补缺需求", "external_acquisition_changed")
@@ -288,14 +305,17 @@ class BoundedExternalAcquirer:
             active,master=self._validated_measured(project,active,state["measured_scenes"],state.get("master_audio_id"))
             if master.content_hash!=state.get("master_content_hash"):
                 raise ExternalAcquisitionError("已登记旁白发生变化", "external_acquisition_changed")
+        elif state.get("estimated_scenes"):
+            active=self._validated_estimated(scenes,state["estimated_scenes"])
         gaps = {scene.scene_id:scene for scene in self._validated_gaps(active,state.get("gap_scenes",()))}
         from app.media.planning import split_footage_clauses
         return tuple(gaps.get(scene.scene_id,scene) for scene in split_footage_clauses(active))
 
-    def acquire(self, project, scenes, job_id, *, supplement_for=(), gap_scenes=(), visual_scenes=None,
+    def acquire(self, project, scenes, job_id, *, supplement_for=(), gap_scenes=(), visual_scenes=None, estimated_scenes=None,
                 measured_scenes=None, master_audio_id=None, remaining_talking_calls=1):
         scenes = tuple(scenes)
         gap_scenes = tuple(gap_scenes)
+        estimated = self._validated_estimated(scenes,estimated_scenes) if estimated_scenes is not None else None
         supplement_for = tuple(" ".join(query.split()) for query in supplement_for)
         queries = self._queries(scenes)
         path = self.root / "render-diagnostics" / str(job_id) / "external-materials.json"
@@ -315,6 +335,13 @@ class BoundedExternalAcquirer:
             raise ExternalAcquisitionError("原计划已改变，不能复用旧任务的获取记录", "external_acquisition_changed")
         # 保留旧需求指纹；原本没有外取需求的场景也须锁定，补缺不能借机改稿。
         state["scene_fingerprint"] = scene_fingerprint
+        if state.get("estimated_scenes"):
+            previous=self._validated_estimated(scenes,state["estimated_scenes"])
+            if estimated is not None and estimated!=previous:
+                raise ExternalAcquisitionError("估算备选已登记，不能改写原取材需求", "external_acquisition_changed")
+            estimated=previous
+        if estimated is not None:
+            state["estimated_scenes"]=[scene.model_dump(mode="json") for scene in estimated]
         motion = bool(state.get("motion_revision"))
         if motion:self._motion_revision_authorized(job_id,state["visual_scenes"],state.get("master_audio_id"))
         active = self._validated_visuals(scenes,state["visual_scenes"],motion=motion) if state.get("visual_scenes") else scenes
@@ -344,18 +371,29 @@ class BoundedExternalAcquirer:
                 if (measured != tuple(ScenePlan.model_validate(value) for value in state["measured_scenes"])
                     or str(master.id)!=state.get("master_audio_id") or master.content_hash!=state.get("master_content_hash")):
                     raise ExternalAcquisitionError("真实配时已登记，不能重置取材轮次", "external_acquisition_changed")
-            elif state.get("supplement"):
+            elif state.get("supplement") and estimated is None:
                 return None
+            if not state.get("measured_scenes") and estimated is not None and state.get("gap_scenes"):
+                # 估算的需求与已耗额度留档；真实分句可选择其它人物段，不能沿用旧场景ID/时长。
+                state["estimated_gap_scenes"]=state.pop("gap_scenes")
             active=measured
             state.update(measured_scenes=[scene.model_dump(mode="json") for scene in measured],
                 master_audio_id=str(master.id),master_content_hash=master.content_hash,
                 remaining_talking_calls=remaining_talking_calls)
+        elif estimated is not None:
+            active=estimated
         # 原查询保留供旧调用恢复；当前画面只为原来源准入内的缺口增加查询。
         for query,group in self._queries(active).items():
             queries[query]=group
+        if state.get("estimated_gap_scenes"):
+            archived=self._validated_gaps(estimated,state["estimated_gap_scenes"])
+            for query,group in self._queries(archived).items():
+                queries.setdefault(query,[]).extend(group)
         persisted_gaps = self._validated_gaps(active,state.get("gap_scenes",()))
         if gap_scenes:
             incoming = self._validated_gaps(active,gap_scenes)
+            if not persisted_gaps and state.get("supplement") and state.get("estimated_gap_scenes"):
+                return None  # 已耗唯一补缺；实测可以复用原素材，不能再取得一轮下载。
             if (persisted_gaps and incoming != persisted_gaps
                     or not persisted_gaps and state.get("supplement")
                     or not {" ".join(scene.material_request.query.split()) for scene in incoming}.issubset(supplement_for)):

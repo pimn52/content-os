@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.db import Database, IPProfileRepository, ProjectRepository
+from app.db import Database, IPProfileRepository, JobRepository, ProjectRepository
 from app.domain.models import IPProfile, Job, JobStatus, JobType, Project, RationalFps, TalkingQaJobPayload
 from app.jobs.runner import JobExecutionError, JobRunner
 from app.jobs.store import JobStore
@@ -76,6 +76,9 @@ def _install_runner(monkeypatch, handler, *, completed=None):
         runner = JobRunner(JobStore(db), {job_type: handler for job_type in config.job_types},
             worker_id=config.worker_id, lease_duration=timedelta(seconds=30), max_attempts=config.max_attempts,
             on_completed=None if completed is None else lambda job: completed(db, job))
+        from app.video_production import VideoProductionService
+        runner.production_service=VideoProductionService(db,config.data_root)
+        runner.production_service.runs=Service(db,config.data_root)
         monkeypatch.setattr(runner, "recover_expired", forbidden)
         return runner
 
@@ -208,6 +211,151 @@ def test_retryable_failure_stops_run_and_restart_without_claiming_later_work(tmp
         assert pending.status is JobStatus.PENDING and pending.attempt == 0
 
 
+def test_automatic_once_returns_failure_without_claiming_later_work(tmp_path, monkeypatch):
+    path = tmp_path / "automatic-failure.sqlite"
+    db, project, now = _fixture(path)
+    with db:
+        first = _job(db, project, now, "first")
+        later = _job(db, project, now, "later")
+        run_id = _production(db, project, now, [{"talking_job_id": str(first.id)}, {"talking_job_id": str(later.id)}])
+        db.connection.execute("UPDATE production_runs SET automatic=1 WHERE id=?", (str(run_id),))
+    seen = []
+
+    def failing(job):
+        seen.append(job.id)
+        raise JobExecutionError("provider_failed", "Failure evidence retained", retryable=True)
+
+    _install_runner(monkeypatch, failing)
+    config = _config(path, run_id, once=True)
+    assert run(config) == 1 and run(config) == 1
+    assert seen == [first.id]
+    with Database(path) as db:
+        assert JobStore(db).get(first.id).attempt == 1
+        assert JobStore(db).get(later.id).attempt == 0
+
+
+@pytest.mark.parametrize("selected,expected", [
+    (JobType.GENERATE_TALKING, {JobType.GENERATE_TALKING, JobType.VERIFY_TALKING}),
+    (JobType.VERIFY_VOICE, {JobType.GENERATE_VOICE, JobType.VERIFY_VOICE}),
+])
+def test_startup_replays_only_the_current_worker_stage_group(tmp_path, monkeypatch, selected, expected):
+    path = tmp_path / "startup.sqlite"
+    db, project, now = _fixture(path)
+    with db:
+        voice = _job(db, project, now, "voice", JobType.GENERATE_VOICE)
+        voice_qa = _job(db, project, now, "voice-qa", JobType.VERIFY_VOICE)
+        talking = _job(db, project, now, "talking")
+        talking_qa = _job(db, project, now, "talking-qa", JobType.VERIFY_TALKING)
+        run_id = _production(db, project, now, [{"talking_job_id": str(talking.id), "talking_qa_job_id": str(talking_qa.id)}])
+        db.connection.execute("UPDATE production_runs SET automatic=1,voice_job_id=?,voice_qa_job_id=? WHERE id=?",
+            (str(voice.id), str(voice_qa.id), str(run_id)))
+        for job in (voice, voice_qa, talking, talking_qa):
+            JobRepository(db).update(job.model_copy(update={"status": JobStatus.COMPLETED}))
+    seen = []
+
+    def build(config, db):
+        from app.video_production import VideoProductionService
+        runner = JobRunner(JobStore(db), {selected: lambda _: pytest.fail("no generation should run")},
+            worker_id=config.worker_id, lease_duration=timedelta(seconds=30), max_attempts=1)
+        runner.production_service = VideoProductionService(db, config.data_root)
+        monkeypatch.setattr(runner.production_service, "completed", lambda job, types: seen.append((job.type, set(types))))
+        return runner
+
+    monkeypatch.setattr("app.worker_cli.build_runner", build)
+    config = parse_config(["--db", str(path), "--once", "--job-type", selected.value])
+    assert run(config) == 0
+    assert {kind for kind, _ in seen} == expected
+    assert all(types == {selected} for _, types in seen)
+    with Database(path) as db:
+        assert db.connection.execute("SELECT voice_qa_auto_stop_reasons FROM production_runs WHERE id=?",
+            (str(run_id),)).fetchone()[0] == '[]'
+
+
+@pytest.mark.parametrize("case,allowed", [
+    ("failed_parent", False), ("cancelled_parent", False), ("unknown_stop", False),
+    ("active", True), ("manual", True), ("media", True),
+])
+def test_targeted_job_uses_central_admission_before_claim(tmp_path, monkeypatch, case, allowed):
+    path = tmp_path / "target-admission.sqlite"
+    db, project, now = _fixture(path)
+    job_type = JobType.ANALYZE_ASSET if case == "media" else JobType.GENERATE_VOICE
+    with db:
+        target = _job(db, project, now, "target", job_type)
+        if case != "media":
+            parent = _job(db, project, now, "start", JobType.PLAN_CONTENT)
+            parent_status = JobStatus.CANCELLED if case == "cancelled_parent" else JobStatus.FAILED if case in {"failed_parent", "manual"} else JobStatus.COMPLETED
+            JobRepository(db).update(parent.model_copy(update={"status": parent_status}))
+            run_id = _production(db, project, now, [], stage="voice")
+            db.connection.execute("UPDATE production_runs SET automatic=?,start_job_id=?,voice_job_id=?,waiting_stop_reasons=? WHERE id=?",
+                (int(case != "manual"), str(parent.id), str(target.id),
+                 json.dumps(["automatic_stop:unclassified_failure"] if case == "unknown_stop" else []), str(run_id)))
+    seen = []
+    _install_runner(monkeypatch, lambda job: seen.append(job.id))
+    config = parse_config(["--db", str(path), "--job-id", str(target.id), "--once",
+        "--max-attempts", "1", "--job-type", job_type.value])
+    assert run(config) == (0 if allowed else 1)
+    assert seen == ([target.id] if allowed else [])
+    with Database(path) as db:
+        current = JobStore(db).get(target.id)
+        assert current.attempt == int(allowed)
+        assert current.status is (JobStatus.COMPLETED if allowed else JobStatus.PENDING)
+
+
+def test_completed_target_stays_a_successful_noop_for_a_sealed_run(tmp_path, monkeypatch):
+    path = tmp_path / "completed-target.sqlite"
+    db, project, now = _fixture(path)
+    with db:
+        parent = _job(db, project, now, "start", JobType.PLAN_CONTENT)
+        target = _job(db, project, now, "render", JobType.RENDER)
+        JobRepository(db).update(parent.model_copy(update={"status": JobStatus.FAILED}))
+        JobRepository(db).update(target.model_copy(update={"status": JobStatus.COMPLETED}))
+        run_id = _production(db, project, now, [], stage="render", render_job_id=target.id)
+        db.connection.execute("UPDATE production_runs SET automatic=1,start_job_id=? WHERE id=?",
+            (str(parent.id), str(run_id)))
+    _install_runner(monkeypatch, lambda _: pytest.fail("completed Job must not execute"))
+    config = parse_config(["--db", str(path), "--job-id", str(target.id), "--once",
+        "--max-attempts", "1", "--job-type", "render"])
+    assert run(config) == 0 and run(config) == 0
+    with Database(path) as db:
+        current = JobStore(db).get(target.id)
+        assert current.status is JobStatus.COMPLETED and current.attempt == 0
+
+
+@pytest.mark.parametrize("case,allowed", [("failed_parent", False), ("unknown_stop", False), ("manual", True)])
+def test_unscoped_worker_checks_the_center_before_executing_a_production_handler(tmp_path, monkeypatch, case, allowed):
+    from app.worker_cli import build_runner
+    path = tmp_path / "unscoped-admission.sqlite"
+    db, project, now = _fixture(path)
+    with db:
+        parent = _job(db, project, now, "start", JobType.PLAN_CONTENT)
+        target = _job(db, project, now, "voice", JobType.GENERATE_VOICE)
+        JobRepository(db).update(parent.model_copy(update={"status":
+            JobStatus.COMPLETED if case == "unknown_stop" else JobStatus.FAILED}))
+        run_id = _production(db, project, now, [], stage="voice")
+        db.connection.execute("UPDATE production_runs SET automatic=?,start_job_id=?,voice_job_id=?,waiting_stop_reasons=? WHERE id=?",
+            (int(case != "manual"), str(parent.id), str(target.id),
+             json.dumps(["automatic_stop:unclassified_failure"] if case == "unknown_stop" else []), str(run_id)))
+    seen = []
+    monkeypatch.setattr("app.worker_cli._build_voice_provider", lambda *args: object())
+    monkeypatch.setattr("app.worker_cli.VoiceGenerationJobHandler", lambda *args: lambda job: seen.append(job.id))
+
+    def build(config, db):
+        runner = build_runner(config, db)
+        monkeypatch.setattr(runner.production_service, "completed", lambda *args: None)
+        return runner
+
+    monkeypatch.setattr("app.worker_cli.build_runner", build)
+    config = parse_config(["--db", str(path), "--data-root", str(tmp_path), "--once",
+        "--max-attempts", "1", "--job-type", "generate_voice"])
+    assert run(config) == 0
+    assert seen == ([target.id] if allowed else [])
+    with Database(path) as db:
+        current = JobStore(db).get(target.id)
+        assert current.attempt == 1
+        assert current.status is (JobStatus.COMPLETED if allowed else JobStatus.FAILED)
+        assert current.error_code == (None if allowed else "production_stopped")
+
+
 def test_expired_scoped_lease_stops_without_rerunning_or_recovering_unrelated_job(tmp_path, monkeypatch):
     path = tmp_path / "expired.sqlite"
     db, project, now = _fixture(path)
@@ -225,6 +373,23 @@ def test_expired_scoped_lease_stops_without_rerunning_or_recovering_unrelated_jo
         assert JobStore(db).get(target.id).status is JobStatus.FAILED
         preserved = JobStore(db).get(unrelated.id)
         assert preserved.status is JobStatus.RUNNING and preserved.attempt == 1
+
+
+def test_automatic_once_reports_a_claim_exhausted_lease_without_claiming_later_work(tmp_path, monkeypatch):
+    path = tmp_path / "automatic-expired.sqlite"
+    db, project, now = _fixture(path)
+    with db:
+        target = _job(db, project, now, "target")
+        later = _job(db, project, now, "later")
+        JobStore(db).claim("interrupted", timedelta(seconds=1), max_attempts=3,
+            job_id=target.id, now=now - timedelta(minutes=1))
+        run_id = _production(db, project, now, [{"talking_job_id": str(target.id)}, {"talking_job_id": str(later.id)}])
+        db.connection.execute("UPDATE production_runs SET automatic=1 WHERE id=?", (str(run_id),))
+    _install_runner(monkeypatch, lambda _: pytest.fail("exhausted or later work must not execute"))
+    assert run(_config(path, run_id, once=True)) == 1
+    with Database(path) as db:
+        assert JobStore(db).get(target.id).status is JobStatus.FAILED
+        assert JobStore(db).get(later.id).attempt == 0
 
 
 def test_idle_resident_wait_is_interruptible(tmp_path, monkeypatch):

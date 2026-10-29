@@ -11,6 +11,26 @@ function mount(request){
   });
   return {h,poll:async()=>{await poll();await h.flush();}};
 }
+test('production center owns diagnosis and stop decisions shown by the ordinary UI',async()=>{
+  let status={start_job_id:'job1',status:'diagnosing_qa',next_action:'diagnose_qa',responsible_stage:'talking',
+    stop_reasons:[],error_code:null,elapsed_ms:4000,run:{id:'run1',waiting_stop_reasons:['planned_talking_qa_failed']},phases:[]};
+  const calls=[];
+  const f=mount(async(path,options)=>{calls.push(options);return path.endsWith('/talking-pool')?null:status;});
+  await f.h.flush();
+  assert.match(f.h.text(),/正在检查并安排局部修复/);
+  assert.match(f.h.text(),/当前工序：人物画面/);
+  assert.equal(f.h.find('button','开始制作短视频').props.disabled,true);
+  status={...status,status:'failed',next_action:'stopped',stop_reasons:['automatic_stop:talking_scene_repair_already_attempted']};
+  await f.poll();
+  assert.match(f.h.text(),/本次制作未完成/);
+  assert.equal(f.h.find('button','开始制作短视频').props.disabled,false);
+  status={...status,status:'render_completed_awaiting_review'};
+  await f.poll();
+  assert.match(f.h.text(),/本次制作未完成/);
+  assert.doesNotMatch(f.h.text(),/成片已输出/);
+  assert.ok(calls.every(value=>!value?.method));
+  f.h.unmount();
+});
 test('one start submits only the topic; all subsequent progress is read-only polling',async()=>{
   const calls=[];let status=null;
   const f=mount(async(path,options)=>{

@@ -39,7 +39,7 @@ def test_short_video_defaults_to_portrait_before_planning_and_never_follows_sour
         comparison=ScenePlan(project_id=project.id,scene_id='comparison',order=0,purpose='并排对比',voice_text='对比画质',duration_target_ms=1000,
             visual_intent=VisualIntent(subject='同原片左右对比'),preferred_sources=['user_asset'],visual_requirement='action_evidence',visual_requirement_reason='比较原片')
         explanation=comparison.model_copy(update={'id':uuid4(),'scene_id':'explain','order':1,'duration_target_ms':9000})
-        draft=SimpleNamespace(scenes=[comparison,explanation])
+        draft=SimpleNamespace(scenes=[comparison,explanation],script='对比画质对比画质')
         plan=SimpleNamespace(fingerprint='fixture',scenes=[SimpleNamespace(scene_plan_id=comparison.id,visual_role=EditVisualRole.FOOTAGE,
             selected_candidate=SimpleNamespace(asset_id=asset.id),production_need='none')],stop_reasons=())
         def generate(db,chosen,*args,**kwargs):
@@ -216,7 +216,7 @@ def test_measured_voice_alignment_failure_keeps_specific_stop_reason_and_origina
             script_revision=draft.script_revision,voice_audio_id=str(master.id))
         with pytest.raises(ProductionRunNotReady) as failed:
             service._prepare_measured_plan(row)
-        assert failed.value.reasons==('talking_motion_capacity_insufficient',)
+        assert failed.value.reasons==('creator_talking_reference_not_configured',)
         assert ProjectDraftRepository(db).get(project.id)==draft
         assert ProviderCallRepository(db).list_for_project(project.id)==[]
 
@@ -375,12 +375,10 @@ def test_one_input_preserves_person_and_never_downgrades_uncovered_speech_to_gra
                 JobType.GENERATE_VOICE:voice,JobType.VERIFY_VOICE:voice_qa,JobType.GENERATE_TALKING:talking,
                 JobType.VERIFY_TALKING:TalkingQaJobHandler(AssetRepository(db),data_root=tmp_path,probe=Probe()),JobType.RENDER:render}
             def completed(job):
-                if job.type is JobType.GENERATE_VOICE:service.runs.reconcile_completed_voice_job(job.id)
-                elif job.type is JobType.GENERATE_TALKING:service.runs.reconcile_completed_talking_job(job.id)
-                elif job.type is JobType.VERIFY_TALKING:service.runs.reconcile_completed_talking_qa_job(job.id)
                 service.completed(job)
                 if job.type is JobType.RENDER:stop.set()
             runner=JobRunner(JobStore(db),handlers,worker_id="product-worker",lease_duration=timedelta(minutes=1),max_attempts=1,on_completed=completed)
+            runner.production_service=service
             # Bound the fixture even if a product transition fails.
             from threading import Timer
             timeout=Timer(3,stop.set);timeout.start()
@@ -390,8 +388,8 @@ def test_one_input_preserves_person_and_never_downgrades_uncovered_speech_to_gra
             diagnostics=[value.read_text(encoding="utf-8") for value in (tmp_path/"render-diagnostics").glob("**/*.json")]
             if opening_ms==6000:
                 assert status["status"]=="failed" and status["error_code"]=="talking_motion_capacity_insufficient"
-                assert steps==['voice','voice_qa']
-                assert AudioAssetRepository(db).get(UUID(status['run']['voice_audio_id'])) is not None
+                assert steps==[]  # 不可排的既定人物方案在声音投入前停止。
+                assert status['run'] is None
                 assert ProjectDraftRepository(db).get(project_id).scenes[0].visual_requirement=="creator_speaking"
                 return
             if qa_missing:
@@ -401,7 +399,7 @@ def test_one_input_preserves_person_and_never_downgrades_uncovered_speech_to_gra
             assert status["status"]=="render_completed_awaiting_review",(status,diagnostics)
             expected=["catalogue","planning","material"] if with_footage else []
             if with_footage=='revise':expected+=["revision","material"]
-            assert steps==(["catalogue","planning","voice","voice_qa"]+(["revision"] if motion_revision else [])+["material","talking","render"] if reflow else expected+["voice","voice_qa","talking","render"])
+            assert steps==(["catalogue","planning"]+(["revision"] if motion_revision else [])+["material","voice","voice_qa","talking","render"] if reflow else expected+["voice","voice_qa","talking","render"])
             if reflow:
                 assert steps.count('voice')==1
                 assert ProjectDraftRepository(db).get(project_id).script=='A new creator claim.\n\nA useful diagram.'

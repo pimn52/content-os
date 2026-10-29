@@ -1300,7 +1300,7 @@ class ProductionRunService:
             raise ProductionRunNotReady(("draft_talking_speech_would_be_cut",))
 
     def reconcile_completed_talking_qa_job(self, qa_job_id: UUID) -> ProductionRun | None:
-        """自动衔接技术 QA 与待审成片；失败保留原因，不重新生成。"""
+        """核对 QA 依赖事实；自动制作的后续工序由生产决策中心推进。"""
         job = JobRepository(self.db).get(qa_job_id)
         if (job is None or job.status is not JobStatus.COMPLETED
             or job.type is not JobType.VERIFY_TALKING or not isinstance(job.payload, TalkingQaJobPayload)):
@@ -1320,7 +1320,9 @@ class ProductionRunService:
             verified = {"qa_verified_ready_for_preview", "qa_verified_awaiting_u_talking"}
             if set(states) != required or any(state not in verified for state in states.values()):
                 return run
-            return self.resume(payload.project_id, payload.run_id)
+            # 普通自动制作是否进入装配由唯一生产决策入口决定。
+            # 本服务只确认依赖事实；手动 Run 保留显式复核流程。
+            return run if run.automatic else self.resume(payload.project_id, payload.run_id)
         except (ProductionRunNotReady, ProductionRunConflict, PreflightInputError, ValueError) as exc:
             reasons = exc.reasons if isinstance(exc, ProductionRunNotReady) else ("talking_render_plan_changed",)
             self.db.connection.execute(

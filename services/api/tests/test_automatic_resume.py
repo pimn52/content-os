@@ -160,9 +160,10 @@ def _cached_pipeline(db,c,monkeypatch):
         def check_configuration(self,*args):events.append('configuration')
         def check_external_configuration(self,scenes):events.append('external-configuration')
         def prepare(self,*args):pytest.fail('同稿恢复不能重新准备素材目录')
-        def resolve(self,project,scenes,resolution_scope,*,work_id,acquired_assets,attempt_id):
+        def resolve(self,project,scenes,resolution_scope,*,work_id,acquired_assets,attempt_id,reserved_source_uses):
             events.append(('resolve',resolution_scope,work_id,attempt_id))
             assert acquired_assets is cached_assets
+            assert reserved_source_uses==[]
             return tuple(scenes)
     class Acquirer:
         def acquire(self,project,scenes,origin_id,**kwargs):

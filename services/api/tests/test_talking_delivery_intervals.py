@@ -30,6 +30,7 @@ from app.jobs.handlers import TalkingGenerationJobHandler, TalkingQaJobHandler
 from app.main import create_app
 from app.media.ffprobe import ProbeMetadata
 from app.production_runs import ProductionRunService
+from app.video_production import VideoProductionService
 from app.providers.talking import TalkingSynthesisResult
 from app.talking.slices import extract_talking_audio_slice
 
@@ -270,7 +271,7 @@ def test_run_delivery_intervals_reach_audio_slice_qa_and_assembly(
             qa_runner = JobRunner(JobStore(db), {
                 JobType.VERIFY_TALKING: TalkingQaJobHandler(AssetRepository(db), data_root=tmp_path, probe=Probe()),
             }, worker_id="delivery-QA-fixture", lease_duration=timedelta(minutes=1), max_attempts=1,
-                on_completed=lambda job: service.reconcile_completed_talking_qa_job(job.id))
+                on_completed=VideoProductionService(db,tmp_path).completed)
             for _ in scenes:
                 finished = qa_runner.run_once(allowed_types={JobType.VERIFY_TALKING})
                 assert finished is not None and finished.status is JobStatus.COMPLETED, finished

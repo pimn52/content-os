@@ -142,22 +142,18 @@ def test_one_input_runs_two_person_scenes_without_stopping_after_first_qa(tmp_pa
                 stop.set()
 
             def completed(job):
-                if job.type is JobType.GENERATE_VOICE:
-                    service.runs.reconcile_completed_voice_job(job.id)
-                elif job.type is JobType.GENERATE_TALKING:
-                    service.runs.reconcile_completed_talking_job(job.id)
-                elif job.type is JobType.VERIFY_TALKING:
-                    service.runs.reconcile_completed_talking_qa_job(job.id)
+                service.completed(job)
+                if job.type is JobType.VERIFY_TALKING:
                     if not first_qa:
                         first_qa.append(job.id)
                         recheck_first_qa("generation_pending")
-                service.completed(job)
 
             handlers = {JobType.PLAN_CONTENT: ContentPlanJobHandler(service, Planner(), UnknownProviderCostEstimator()),
                 JobType.GENERATE_VOICE: voice, JobType.VERIFY_VOICE: voice_qa, JobType.GENERATE_TALKING: talking,
                 JobType.VERIFY_TALKING: talking_qa, JobType.RENDER: render}
             runner = JobRunner(JobStore(db), handlers, worker_id="two-person-worker", lease_duration=timedelta(minutes=1),
                 max_attempts=1, on_completed=completed)
+            runner.production_service=service
             timeout = Timer(5, stop.set); timeout.start()
             try:
                 _run_product_queue(SimpleNamespace(once=False, poll_seconds=.01, data_root=tmp_path), db, runner, stop)

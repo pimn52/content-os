@@ -44,7 +44,8 @@ def test_approved_copy_timing_accepts_only_recorded_bounded_asr_substitution(tmp
 
 
 @pytest.mark.parametrize("changed_bytes,assembly_fix", [(False,False), (True,False), (False,True)])
-def test_same_run_qa_enqueues_review_video_without_child_human_gate(tmp_path, changed_bytes, assembly_fix):
+@pytest.mark.parametrize('automatic',[False,True])
+def test_same_run_qa_enqueues_review_video_without_child_human_gate(tmp_path, changed_bytes, assembly_fix,automatic):
     path = tmp_path / "draft.sqlite"
     with TestClient(create_app(path)) as client:
         pid, waiting, binding, _ = _talking_source_fixture(client, path)
@@ -89,6 +90,7 @@ def test_same_run_qa_enqueues_review_video_without_child_human_gate(tmp_path, ch
         ))
         service = ProductionRunService(db, tmp_path)
         run_id = UUID(waiting["id"])
+        db.connection.execute('UPDATE production_runs SET automatic=? WHERE id=?',(int(automatic),str(run_id)))
         service.reconcile_completed_talking_job(job_id)
 
         class Probe:
@@ -108,7 +110,14 @@ def test_same_run_qa_enqueues_review_video_without_child_human_gate(tmp_path, ch
         assert completed.status is JobStatus.COMPLETED, completed.model_dump_json()
         if changed_bytes:
             output_path.write_bytes(b"changed after QA")
-        run = service.reconcile_completed_talking_qa_job(completed.id)
+        facts=service.reconcile_completed_talking_qa_job(completed.id)
+        if automatic:
+            assert facts.render_job_id is None  # 原子依赖服务不再决定自动入渲染。
+        from app.video_production import VideoProductionService
+        center=VideoProductionService(db,tmp_path)
+        center.completed(completed)
+        center.completed(completed)  # 完成事件重放不重复派发渲染。
+        run = service.get(UUID(pid),UUID(waiting['id']))
         if changed_bytes:
             assert run.render_job_id is None
             assert run.waiting_stop_reasons

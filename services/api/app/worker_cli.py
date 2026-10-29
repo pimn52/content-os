@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from functools import wraps
 from pathlib import Path
 from threading import Event
 from typing import Sequence
@@ -22,7 +23,7 @@ from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Databa
 from app.budget import ProviderCallLedger
 from app.domain.models import JobStatus, JobType, VoiceReferenceWindowSelection
 from app.jobs.handlers import AssetAnalysisJobHandler, AssetTranscriptionJobHandler, AudioAssetTranscriptionJobHandler, AssetVisionJobHandler, ExtractedKeyframeResolver, RenderVideoJobHandler, TalkingGenerationJobHandler, TalkingQaJobHandler, VoiceBoundaryAlignmentJobHandler, VoiceGenerationJobHandler, VoiceQaJobHandler
-from app.jobs.runner import JobRunner
+from app.jobs.runner import JobExecutionError, JobRunner
 from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore, AudioAssetJobTargetStore
 from app.jobs.worker import JobWorker
@@ -365,22 +366,27 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
         material_resolver=resolver, material_acquirer=acquirer,planner=planner,planner_cost_estimator=planner_estimator)
     if planner is not None:
         handlers[JobType.PLAN_CONTENT]=ContentPlanJobHandler(automatic,planner,planner_estimator)
+    production_types={JobType.PLAN_CONTENT,JobType.GENERATE_VOICE,JobType.VERIFY_VOICE,
+        JobType.GENERATE_TALKING,JobType.VERIFY_TALKING,JobType.RENDER}
+    for kind,handler in list(handlers.items()):
+        if kind not in production_types:continue
+        @wraps(handler)
+        def admitted(job,execute=handler):
+            if not automatic.job_allowed(job,handlers):
+                raise JobExecutionError('production_stopped','生产决策已停止该任务，未执行工序。',retryable=False)
+            return execute(job)
+        handlers[kind]=admitted
     def completed(job):
-        service=ProductionRunService(db,config.data_root)
-        if job.type is JobType.GENERATE_VOICE:
-            service.reconcile_completed_voice_job(job.id,qa_worker_ready=JobType.VERIFY_VOICE in handlers)
-        elif job.type is JobType.GENERATE_TALKING:
-            service.reconcile_completed_talking_job(job.id,qa_worker_ready=JobType.VERIFY_TALKING in handlers)
-        elif job.type is JobType.VERIFY_TALKING:
-            service.reconcile_completed_talking_qa_job(job.id)
-        automatic.completed(job)
-    return JobRunner(
+        automatic.completed(job, handlers)
+    runner = JobRunner(
         store, handlers, worker_id=config.worker_id,
         lease_duration=timedelta(seconds=config.lease_seconds),
         heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=config.max_attempts,
         resource_keys_by_type=resource_keys,
         on_completed=completed,
     )
+    runner.production_service = automatic
+    return runner
 
 
 def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvider:
@@ -593,21 +599,21 @@ def _run_production_run(config: WorkerConfig, db: Database, runner: JobRunner, s
     row, jobs = _production_run_jobs(db, config.production_run_id)
     if row["stage"] == "cancelled":
         return 0
+    if row['automatic']:
+        return _run_product_queue(config,db,runner,stop,run_id=config.production_run_id)
     if any(job.status in {JobStatus.FAILED, JobStatus.CANCELLED}
            or job.status is JobStatus.PENDING and job.attempt > 0 for job in jobs):
         return 1
     # Recover a completion callback interrupted by process shutdown. These
     # methods reconcile only the exact referenced Job, never the legacy backlog.
-    service = ProductionRunService(db, config.data_root)
+    service = getattr(runner, "production_service", None)
+    if service is None:
+        from app.video_production import VideoProductionService
+        service = VideoProductionService(db, config.data_root)
+        service.runs = ProductionRunService(db, config.data_root)
     for job in jobs:
-        if job.status is not JobStatus.COMPLETED:
-            continue
-        if job.type is JobType.GENERATE_VOICE:
-            service.reconcile_completed_voice_job(job.id, qa_worker_ready=JobType.VERIFY_VOICE in runner.handler_types)
-        elif job.type is JobType.GENERATE_TALKING:
-            service.reconcile_completed_talking_job(job.id, qa_worker_ready=JobType.VERIFY_TALKING in runner.handler_types)
-        elif job.type is JobType.VERIFY_TALKING:
-            service.reconcile_completed_talking_qa_job(job.id)
+        if job.status is JobStatus.COMPLETED:
+            service.completed(job, runner.handler_types)
     while not stop.is_set():
         row, jobs = _production_run_jobs(db, config.production_run_id)
         if row["stage"] == "cancelled":
@@ -644,60 +650,27 @@ def _run_production_run(config: WorkerConfig, db: Database, runner: JobRunner, s
     return 0
 
 
-def _run_product_queue(config,db,runner,stop):
+def _run_product_queue(config,db,runner,stop,*,run_id=None):
     """常驻普通生产 Worker；不取旧孤立生成任务，不重试失败调用。"""
-    from app.video_production import IN_PROGRESS_REASONS
+    service = getattr(runner, "production_service", None)
+    if service is None:
+        raise ValueError('production_decision_center_not_configured')
     while not stop.is_set():
-        candidates=[]
-        for row in db.connection.execute("SELECT id FROM jobs WHERE json_extract(payload,'$.type')='plan_content' AND status IN ('pending','running') ORDER BY created_at"):
-            candidates.append(JobRepository(db).get(UUID(row[0])))
-        for row in db.connection.execute("SELECT * FROM production_runs WHERE stage IN ('voice','awaiting_talking','render')").fetchall():
-            if row["render_job_id"]:
-                render=JobRepository(db).get(UUID(row["render_job_id"]))
-                if render and render.status is JobStatus.COMPLETED:continue
-            pending=IN_PROGRESS_REASONS
-            reasons=json.loads(row["waiting_stop_reasons"])
-            if (any(not value.startswith(pending) and value != 'planned_talking_qa_failed' for value in reasons)
-                or json.loads(row["voice_qa_auto_stop_reasons"])):continue
-            if row["start_job_id"]:
-                parent=JobRepository(db).get(UUID(row["start_job_id"]))
-                if parent and parent.status in {JobStatus.FAILED,JobStatus.CANCELLED}:continue
-            _,jobs=_production_run_jobs(db,UUID(row["id"]))
-            if any(job.status in {JobStatus.FAILED,JobStatus.CANCELLED} for job in jobs):
-                if not row['automatic'] or row['repair_allowance'] <= 0:continue
-                from app.production_runs import ProductionRunNotReady,ProductionRunConflict
-                if row['stage']=='voice' and {JobType.GENERATE_VOICE,JobType.VERIFY_VOICE}<=runner.handler_types:
-                    from app.voice_repair import VoiceRepairService
-                    repair=VoiceRepairService(db,config.data_root)
-                elif {JobType.GENERATE_TALKING,JobType.VERIFY_TALKING}<=runner.handler_types:
-                    from app.talking.repair import TalkingRepairService
-                    repair=TalkingRepairService(db,config.data_root)
-                else:continue
-                try:
-                    repaired=repair.reconcile_automatic_qa_failure(UUID(row['project_id']),UUID(row['id']))
-                except (ProductionRunNotReady,ProductionRunConflict,LookupError):continue
-                if repaired is None:continue
-                if 'planned_talking_qa_failed' in reasons:
-                    with db.transaction(immediate=True):
-                        current=db.connection.execute('SELECT waiting_stop_reasons FROM production_runs WHERE id=?',(row['id'],)).fetchone()
-                        kept=[value for value in json.loads(current[0]) if value != 'planned_talking_qa_failed']
-                        db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',(json.dumps(kept),row['id']))
-                    if any(not value.startswith(pending) for value in kept):continue
-                _,jobs=_production_run_jobs(db,UUID(row['id']))
-            elif 'planned_talking_qa_failed' in reasons:
-                continue
-            for job in jobs:
-                if job.status is JobStatus.COMPLETED:
-                    runner.reconcile_completed(job)
-            _,jobs=_production_run_jobs(db,UUID(row["id"]))
-            candidates.extend(jobs)
+        candidates = service.queue_jobs(runner.handler_types,run_id=run_id)
+        if run_id is not None:
+            decision=service.decision_for_run(run_id,runner.handler_types)
+            if decision['next_action']=='review':return 0
+            if decision['next_action']=='stopped':return 1
         processed=False
         for job in candidates:
-            if job.type in runner.handler_types and job.status in {JobStatus.PENDING,JobStatus.RUNNING}:
-                result=runner.run_once(allowed_types=runner.handler_types,job_id=job.id)
-                if result is not None:
-                    processed=True
-                    break
+            result=runner.run_once(allowed_types=runner.handler_types,job_id=job.id)
+            if result is None and run_id is not None and service.decision_for_run(run_id,runner.handler_types)['next_action']=='stopped':
+                return 1
+            if result is not None:
+                if run_id is not None and config.once and result.status is JobStatus.FAILED:
+                    return 1
+                processed=True
+                break
         if not processed:
             media_types=runner.handler_types & {JobType.ANALYZE_ASSET,JobType.TRANSCRIBE_AUDIO,JobType.TRANSCRIBE_AUDIO_ASSET,JobType.INDEX_CLIPS}
             if media_types:
@@ -726,17 +699,17 @@ def run(config: WorkerConfig, *, stop_event: Event | None = None) -> int:
         if config.job_id is not None:
             # Targeted claim can reclaim this Job's expired lease itself.
             # Leave unrelated backlog and bulk recovery/reconciliation alone.
+            job=JobRepository(db).get(config.job_id)
+            if job is not None and job.status in {JobStatus.PENDING,JobStatus.RUNNING}:
+                service=getattr(runner,"production_service",None)
+                if service is None:
+                    from app.video_production import VideoProductionService
+                    service=VideoProductionService(db,config.data_root)
+                if not service.job_allowed(job,runner.handler_types):
+                    return 1
             runner.run_once(allowed_types=runner.handler_types, job_id=config.job_id)
             return 0
-        if {JobType.GENERATE_VOICE, JobType.VERIFY_VOICE} & set(config.job_types):
-            ProductionRunService(db, config.data_root).reconcile_completed_voice_jobs_once(
-                qa_worker_ready=JobType.VERIFY_VOICE in runner.handler_types,
-            )
-        if {JobType.GENERATE_TALKING, JobType.VERIFY_TALKING} & set(config.job_types):
-            ProductionRunService(db, config.data_root).reconcile_completed_talking_jobs_once(
-                qa_worker_ready=JobType.VERIFY_TALKING in runner.handler_types,
-            )
-            ProductionRunService(db, config.data_root).reconcile_completed_talking_qa_jobs_once()
+        runner.production_service.recover_completed(runner.handler_types)
         if config.once:
             runner.recover_expired()
             runner.run_once(allowed_types=runner.handler_types)

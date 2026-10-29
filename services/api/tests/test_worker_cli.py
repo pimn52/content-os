@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -86,7 +87,7 @@ def test_talking_qa_worker_is_local_and_needs_no_generation_provider(tmp_path: P
         ])
         runner = build_runner(config, db)
         assert runner.handler_types == {JobType.VERIFY_TALKING}
-        assert runner._handlers[JobType.VERIFY_TALKING].__class__.__name__ == "TalkingQaJobHandler"
+        assert runner._handlers[JobType.VERIFY_TALKING].__wrapped__.__class__.__name__ == "TalkingQaJobHandler"
 
 
 def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +227,7 @@ def test_talking_worker_builds_explicit_latentsync_provider(tmp_path: Path, monk
     try:
         config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_talking"])
         runner = build_runner(config, db)
-        handler = runner._handlers[JobType.GENERATE_TALKING]
+        handler = runner._handlers[JobType.GENERATE_TALKING].__wrapped__
         provider = handler._provider
         assert provider.__class__.__name__ == "LatentSyncProvider"
         assert provider.provider_name == "latentsync"
@@ -244,7 +245,7 @@ def test_maintained_talking_worker_keeps_ordinary_handler_and_runtime_identity(t
     monkeypatch.setattr("app.providers.maintained_talking.configured_maintained_talking_provider", lambda *_args: provider)
     with Database(tmp_path / "talking.sqlite") as db:
         config = parse_config(["--once", "--db", str(db.path), "--job-type", "generate_talking"])
-        handler = build_runner(config, db)._handlers[JobType.GENERATE_TALKING]
+        handler = build_runner(config, db)._handlers[JobType.GENERATE_TALKING].__wrapped__
         assert handler.__class__.__name__ == "TalkingGenerationJobHandler"
         assert handler._provider is provider and handler._ledger is not None
         assert handler._execution_runtime == provider.runtime_label
@@ -264,7 +265,7 @@ def test_voice_worker_builds_explicit_omnivoice_provider(tmp_path: Path, monkeyp
     try:
         config = parse_config(["--once", "--db", str(db_path), "--job-type", "generate_voice"])
         runner = build_runner(config, db)
-        provider = runner._handlers[JobType.GENERATE_VOICE]._provider
+        provider = runner._handlers[JobType.GENERATE_VOICE].__wrapped__._provider
         assert provider.__class__.__name__ == "OmniVoiceProvider"
         assert provider.provider_name == "omnivoice"
         assert runner._resource_keys_by_type == {JobType.GENERATE_VOICE: config.gpu_resource_key}
@@ -290,7 +291,7 @@ def test_maintained_voice_uses_normal_job_handler_without_operator_secret(tmp_pa
     with Database(tmp_path / "voice.sqlite") as db:
         config = parse_config(["--once", "--db", str(db.path), "--data-root", str(tmp_path), "--job-type", "generate_voice"])
         runner = build_runner(config, db)
-        handler = runner._handlers[JobType.GENERATE_VOICE]
+        handler = runner._handlers[JobType.GENERATE_VOICE].__wrapped__
         assert handler.__class__.__name__ == "VoiceGenerationJobHandler"
         assert handler._ledger is not None
         assert handler._provider.model == str(model)
@@ -372,6 +373,7 @@ def test_once_uses_fake_runner_and_closes_database(tmp_path: Path, monkeypatch):
 
     class FakeRunner:
         handler_types = frozenset({JobType.VERIFY_VOICE})
+        production_service = SimpleNamespace(recover_completed=lambda handler_types: calls.append('reconcile'))
         def recover_expired(self):
             return []
         def run_once(self, **kwargs):
@@ -388,15 +390,6 @@ def test_once_uses_fake_runner_and_closes_database(tmp_path: Path, monkeypatch):
             closed.append(self.path)
 
     monkeypatch.setattr("app.worker_cli.Database", RecordingDatabase)
-    class FakeProductionRunService:
-        def __init__(self, db, data_root):
-            pass
-        def reconcile_completed_voice_jobs_once(self, *, qa_worker_ready):
-            assert qa_worker_ready is True
-            calls.append("reconcile")
-            return ()
-
-    monkeypatch.setattr("app.worker_cli.ProductionRunService", FakeProductionRunService)
     config = parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "verify_voice"])
     assert run(config) == 0
     assert calls == ["reconcile", "run"]
@@ -474,7 +467,7 @@ def test_render_worker_composes_audio_and_image_repositories(tmp_path: Path):
     db = Database(tmp_path / "render.sqlite")
     try:
         runner = build_runner(parse_config(["--once", "--db", str(tmp_path / "render.sqlite"), "--job-type", "render"]), db)
-        renderer = runner._handlers[JobType.RENDER]._renderer
+        renderer = runner._handlers[JobType.RENDER].__wrapped__._renderer
         assert renderer.audios is not None
         assert renderer.images is not None
     finally:
