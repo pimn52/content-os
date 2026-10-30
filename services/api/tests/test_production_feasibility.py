@@ -267,7 +267,8 @@ def test_longer_real_master_reallocates_entire_batch_and_retains_voice(tmp_path,
             for scene in saved_draft.scenes if scene.visual_requirement=='creator_speaking']))
     run_id=uuid4()
     row=dict(project_id=str(project.id),id=str(run_id),draft_version=1,script_revision=1,
-        voice_audio_id=str(master.id),start_job_id=None,work_id=None,repair_allowance=1)
+        voice_audio_id=str(master.id),start_job_id=None,work_id=None,repair_allowance=1,stage='voice')
+    service.db.connection.execute.return_value.fetchone.return_value=row
     before=master.model_dump()
     service._prepare_measured_plan(row)
     assert len(saved)==1 and saved[0]['script']==draft.script
@@ -287,4 +288,35 @@ def test_longer_real_master_reallocates_entire_batch_and_retains_voice(tmp_path,
     assert evidence['feasibility']['requested_talking_ms']==9820
     assert evidence['feasibility']['allocated_reference_ms']==2560
     assert master.model_dump()==before and service.voice_provider.mock_calls==[]
-    assert service.runs.mock_calls==[] and service._motion_revision.mock_calls==[]
+    service.runs._require_bound_voice_master.assert_called_once_with(row,master.id)
+    assert service._motion_revision.mock_calls==[]
+
+
+@pytest.mark.parametrize('known_alignment',[True,False])
+def test_real_clause_boundaries_fit_fragmented_pool_without_unnecessary_planning_revision(tmp_path,monkeypatch,known_alignment):
+    project,draft=_case(alternatives=False)
+    texts=['先观察复杂运动。','再看细节。','然后比较静态画面。','最后总结。']
+    whole=draft.scenes[1].model_copy(update={'order':0,'voice_text':''.join(texts),'duration_target_ms':9600})
+    draft=draft.model_copy(update={'script':whole.voice_text,'scenes':[whole]})
+    master=_master([whole.model_copy(update={'voice_text':text}) for text in texts],durations=[3000,1800,3000,1800])
+    service,_=_service(tmp_path,monkeypatch,project,draft,master)
+    if not known_alignment:service.talking_provider=None
+    first=short_latentsync_pool(6400).entries[0]
+    second=short_latentsync_pool(4480).entries[0]
+    second=replace(second,asset=second.asset.model_copy(update={'content_hash':'c'*64}),source_hash='c'*64)
+    pool=TalkingPool((first,second))
+    before=master.model_dump(),draft.model_dump()
+    result=service._visual_feasibility(project,draft.scenes,script=draft.script,master=master,pool=pool)
+    if not known_alignment:
+        assert result.reason=='talking_motion_capacity_insufficient' and result.allocations==()
+        assert result.summary()['alignment_state']=='unknown'
+        assert (master.model_dump(),draft.model_dump())==before
+        return
+    assert result.reason is None and [s.duration_target_ms for s in result.scheduled]==[3000,1800,3000,1800]
+    assert [s.voice_text for s in result.scheduled]==texts
+    assert [a.needed_reference_ms for a in result.allocations]==[3200,1920,3200,1920]
+    assert sum(a.needed_reference_ms for a in result.allocations)==10240
+    assert all(scene.visual_requirement=='creator_speaking' for scene in result.scheduled)
+    assert [(start,end) for _,start,end in _master_narration_intervals(master,result.scheduled)]==[(0,3000),(3000,4800),(4800,7800),(7800,9600)]
+    assert (master.model_dump(),draft.model_dump())==before
+    assert service.voice_provider.mock_calls==[] and service.runs.mock_calls==[]

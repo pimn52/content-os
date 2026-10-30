@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 
+MIN_SCENE_MATCH_SCORE = .65
+
 
 def subtitle_keep_height(height, regions, *, machine=False):
     """机器定位留出边缘误差，连续人工复核保持其既有裁除精度。"""
@@ -147,7 +149,7 @@ def matches_scene(facts, scene):
         return True
     match = facts.get("scene_matches", {}).get(scene_visual_key(scene), {})
     return (match.get("analysis_valid") is not False
-        and match.get("supported") is True and match.get("score", 0) >= .65
+        and match.get("supported") is True and match.get("score", 0) >= MIN_SCENE_MATCH_SCORE
         and match.get("quality_adequate") is True
         and (scene.visual_requirement!="action_evidence"
             or match.get("fit")=="direct" and match.get("subject_verified") is True))

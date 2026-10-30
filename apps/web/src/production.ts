@@ -7,6 +7,7 @@ export type ProductionPlan = {
   scenes: Array<{ scene_plan_id: string; scene_id: string; production_need: string; suitability: string; subtitle_treatment: string; burned_in_subtitles: string; reasons: string[] }>;
   actions: Array<{ kind: string; required: boolean; reason: string; cost: { amount: string | null; currency: string | null } }>;
 };
+export type ProductionNextAction = "continue" | "diagnose_qa" | "diagnose_quality" | "diagnose_semantic" | "verify_material" | "review" | "stopped";
 export type ProductionRun = {
   id: string; project_id: string; status: string; preflight_fingerprint: string; render_job_id: string | null;
   talking_review_policy_version?: 1 | 2;
@@ -70,7 +71,23 @@ export function requestError(body: { detail?: unknown }, status: number): string
   return `请求失败 (${status})`;
 }
 export function preflightReasonLabel(reason: string): string {
+  if (reason === "multiple_quality_findings_require_joint_scoped_plan") return "同一成片有多个独立问题，尚需合并为局部修正方案；保留全部成果，不只修最后一个问题。";
+  if (reason.startsWith("quality_scoped_fix_required:")) return "质量问题已交回对应工序；局部修正能力或诊断尚不完整，已有成果保留。";
   const sourceReasons: Record<string,string> = {
+    source_semantic_use_rejected: "该来源区间已确认不适合相同表达任务，需要重新选材；其它用途和合格成果保留。",
+    semantic_video_provider_unavailable: "支持视频对照的核验器尚未就绪，未发起复验；已有成果保留。",
+    material_semantic_recheck_not_configured: "后台尚未配置实际画面复验，未开始新渲染；已有成果保留。",
+    semantic_budget_call_limit: "剩余额度不足以完成所需画面复验，已有成果与调用记录保留。",
+    semantic_budget_amount_limit: "当前预算不足以覆盖画面复验的费用估计，已有成果保留。",
+    semantic_budget_unknown_cost: "核验费用未知，现有预算不允许本次调用；已有成果保留。",
+    presentation_render_budget_blocked: "额度不足以完成本次渲染及所需复检，已有成果保留。",
+    material_semantic_recheck_not_passed: "替换场景尚未通过实际画面复验，新片和合格声音、人物结果已保留。",
+    material_semantic_recheck_required: "先完成当前换材版本的实际画面复验，装配反馈与已有成果已保留。",
+    material_semantic_recheck_stale: "复验对应的输入已经变化，旧结果不用于当前成片。",
+    presentation_material_replacement_unavailable: "没有已核验且适合整片的替代画面，原片和合格声音、人物结果已保留。",
+    presentation_joint_material_repair_not_supported: "本版还有其它质量问题，尚不能合并为完整局部修正；保留全部反馈和成果。",
+    presentation_material_basis_changed: "原诊断的来源或依赖已变化，尚未派发新渲染。",
+    presentation_material_policy_changed: "素材呈现约束已变化，需要重新核对本次局部替换。",
     budget_call_limit: "当前项目调用额度已用完，尚未开始新制作。",
     video_production_already_running: "本项目已有视频在制作，请等待当前结果。",
     creator_talking_reference_not_configured: "请先在创作者资料中配置可用的人像参考。",
@@ -79,6 +96,9 @@ export function preflightReasonLabel(reason: string): string {
     talking_motion_occupancy_unresolved: "人物素材的使用记录尚未核实，暂未派发新的人物画面。",
     talking_qa_narration_requires_voice_repair: "问题来自旁白，需要先修复声音；不会重复生成人物画面。",
     automatic_draft_changed: "制作中的稿件发生变化，本次已停止，请用当前稿件重新开始。",
+    automatic_production_changed: "制作记录已推进或变更，旧配时结果未覆盖当前状态。",
+    automatic_master_changed: "本次旁白或其质量记录已变化，旧配时结果未采用，已有成果保留。",
+    master_scene_timing_unresolved: "旁白与镜头的时间绑定尚未完成，合格旁白已保留，需要重新配时。",
     planning_tail_budget: "剩余额度不足以完成规划、核验和后续制作，已保留当前成果与预算。",
     visual_revision_changed_content: "画面调整改变了旁白或证据要求，本次未采用，原方案已保留。",
     automatic_resume_source_not_latest_failed: "这次制作状态已变化，请刷新后继续当前任务。",
@@ -86,6 +106,7 @@ export function preflightReasonLabel(reason: string): string {
     scene_planner_response_invalid: "内容规划返回了不符合契约的方案，本次已停止，检查原因已保存。",
     "scene_planner_response_invalid:opening_context": "开场缺少主体，不能为缩短人物台词删掉主题。请保留完整开场并调整出镜位置。",
     voice_qa_failed: "新旁白未通过文案、静音或可播放性检查，证据已保留，尚未进入口型与渲染。",
+    voice_quality_review_rejected: "本次旁白已被质量审核打回，需定位并修复声音；合格人物画面和其它成果保留，不自动重做整片。",
     budget_chain_call_limit: "剩余额度不足以覆盖制作所需的最少调用，已在启动前停止。",
     visual_route_unresolved: "画面方案尚未解决，需要保留内容并调整选材或竖屏布局。",
     source_suitability_unknown: "选段还缺少画面事实核验，文件哈希或单帧描述不能代替。",

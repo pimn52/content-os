@@ -20,6 +20,24 @@ def _cost(amount: str | None) -> dict[str, object]:
     return value
 
 
+def test_explicit_zero_external_charge_is_currency_neutral_but_paid_and_unknown_costs_are_not(tmp_path):
+    with TestClient(create_app(tmp_path/'zero-render.sqlite')) as client:
+        pid=_project(client)
+        assert client.put(f'/projects/{pid}/budget',json={'currency':'CNY','max_calls':3,'max_amount':'0','allow_unknown_cost':False}).status_code==200
+        request={'idempotency_key':'free-local-render','operation':'render','mode':'runtime','provider':'local-render',
+            'model':'remotion-ffmpeg','input_source':'fixture:render','estimated_cost':{'category':'render','amount':'0','currency':'USD'}}
+        reserved=client.post(f'/projects/{pid}/provider-calls/reserve',json=request)
+        assert reserved.status_code==201,reserved.text
+        assert reserved.json()['budget']['snapshot']['unknown_cost_calls']==0
+        assert reserved.json()['budget']['snapshot']['known_amount']=='0'
+        paid=client.post(f'/projects/{pid}/provider-calls/reserve',json={**request,'idempotency_key':'paid',
+            'estimated_cost':{'category':'render','amount':'.01','currency':'USD'}})
+        assert paid.status_code==409 and paid.json()['detail']=='currency_mismatch'
+        unknown=client.post(f'/projects/{pid}/provider-calls/reserve',json={**request,'idempotency_key':'unknown',
+            'estimated_cost':{'category':'render'}})
+        assert unknown.status_code==409 and unknown.json()['detail']=='unknown_cost'
+
+
 def test_provider_call_reservation_is_idempotent_and_budgeted(tmp_path: Path) -> None:
     with TestClient(create_app(tmp_path / "budget.sqlite3")) as client:
         project_id = _project(client)

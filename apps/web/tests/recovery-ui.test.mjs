@@ -27,6 +27,49 @@ async function observe(harness, finding = 'duplicate_text') {
   await harness.change('观察理由', 'fixture observed duplicate'); await harness.change('证据引用', 'fixture:00:00');
   await harness.submit('登记此 Render');
 }
+
+test('a qualified material replacement describes its exact scope and retains the existing render action',async()=>{
+  const f=setup('presentation');const h=mount('presentation',f);
+  h.setProps({request:async(path,options)=>{
+    const value=await f.fixture.request(path,options);
+    return path.includes('/presentation-repair-plan?')?{...value,action:'render_revision',assessment_state:'known',
+      responsible_stage:'material',material_replacements:[{scene_id:'scene-1'}],semantic_recheck_calls:1,external_charge_ceiling:'unknown',required_capability:[],
+      diagnoses:[{observation_id:'material-observation',finding:'semantic_mismatch',scope:{scene_id:'scene-1',start_ms:0,end_ms:3000},
+        responsible_stage:'material',assessment_state:'known',evidence_current:true,machine_diagnosis:{state:'known'}}]}:value;
+  }});
+  await h.flush();await observe(h,'semantic_mismatch');await h.click('读取修复候选');
+  assert.match(h.text(),/仅替换问题场景画面/);assert.match(h.text(),/保留原时轴、字幕文字、旁白及其它人物画面/);
+  assert.match(h.text(),/新输出再进行 1 次实际画面复验，之后仍待整片人审/);
+  assert.match(h.text(),/画面复验 1 次/);assert.match(h.text(),/外部费用待核实，受现有预算约束/);
+  assert.doesNotMatch(h.text(),/外部收费上限 0/);
+  assert.ok(h.nodes('button').some(node=>String(node.props.children).includes('按此方案建立新 Render')));
+  assert.equal(f.fixture.load().records.length,0);assert.equal(f.fixture.load().used,0);h.unmount();
+});
+
+for(const outcome of ['pass','failed','unknown'])test(`material history waits for actual picture recheck then reads ${outcome} without a QA action`,async()=>{
+  const f=setup('presentation');let poll;let recheck=null;const calls=[];
+  const h=mount('presentation',f,{setInterval:fn=>{poll=fn;return 1;},clearInterval:()=>{}});
+  h.setProps({request:async(path,options)=>{
+    calls.push({path,options});
+    if(path.endsWith('/presentation-repairs'))return [{id:'material-repair',reason:'仅替换场景素材',replacement_job_id:recoveryIds.oldJob,
+      status:'completed',final_review_state:'not_submitted',technical_qa:{state:'verified'},semantic_recheck:recheck,
+      plan:{predecessor_job:{id:'predecessor',payload:{}},changes:[],semantic_recheck_calls:1,material_replacements:[{scene_id:'scene-1'}]}}];
+    return f.fixture.request(path,options);
+  }});
+  await h.flush();
+  assert.match(h.text(),/正在复核替换后的实际画面/);
+  assert.equal(h.nodes('section').filter(node=>node.props['aria-label']==='完整成片审核').length,0);
+  assert.ok(!h.nodes('button').some(button=>/接受此版|QA|重配音/.test(String(button.props.children))));
+  assert.equal(typeof poll,'function');
+  recheck={state:outcome,assessment_state:outcome==='unknown'?'unknown':'known',responsible_stage:'material',
+    evidence_current:true,limitations:['audio_not_observed'],required_capability:[],scope:{scene_id:'scene-1'}};
+  await poll();await h.flush();
+  assert.match(h.text(),outcome==='pass'?/替换场景的机器画面复验通过，仍待整片人审/:outcome==='failed'?/画面复验未通过；保留现有成果/:/画面尚未确认符合讲述含义；保留现有成果/);
+  assert.match(h.text(),/不评价听感自然度、口型同步，也不代表整片通过/);
+  assert.equal(h.nodes('section').filter(node=>node.props['aria-label']==='完整成片审核').length,1);
+  assert.ok(calls.every(value=>!value.options?.method));
+  assert.equal(f.fixture.load().records.length,0);assert.equal(f.fixture.load().used,0);h.unmount();
+});
 test('Voice UI replaces failed take, keeps pending/completed history and exposes a fresh six-dimension review after QA', async () => {
   const f = setup('voice'); const h = mount('voice', f); await h.flush();
   await h.click('检查 Voice 修复方案');
@@ -52,9 +95,13 @@ test('Voice segment repair describes the retained good audio and still submits t
   const f = setup('voice'); const h = mount('voice', f); const confirmations = [];
   h.setProps({ request: async (path, options) => {
     const value = await f.fixture.request(path, options);
-    return path.endsWith('/voice-repair-plan') ? { ...value, execution_granularity: 'segment' } : value;
+    return path.endsWith('/voice-repair-plan') ? { ...value, execution_granularity: 'segment', responsible_stage: 'voice', assessment_state: 'known',
+      scope: { scene_id: null, start_ms: 1000, end_ms: 2400, generation_segment_index: 1, start_char: 8, end_char: 19 },
+      preserves: { master_audio_id: recoveryIds.oldAudio, reused_segment_sha256: ['retained-good-pcm-hash'] }, required_capability: [] } : value;
   }, confirmAction: message => { confirmations.push(message); return true; } });
   await h.flush(); await h.click('检查 Voice 修复方案');
+  assert.match(h.text(), /责任工序：声音/); assert.match(h.text(), /当前声音 · 1000–2400 ms/);
+  assert.match(h.text(), /原生成第 2 段 · 文案字符 8–19/); assert.match(h.text(), /retained-good-pcm-hash/);
   await h.change('修复理由', '已定位第二段缺词'); await h.submit('按方案修复声音');
   assert.match(confirmations[0], /只重做已定位的缺陷段，保留其它合格声音/);
   assert.equal(f.fixture.load().records.length, 1);
@@ -78,13 +125,121 @@ test('presentation UI binds the exact playable fixture hash, displays the semant
   assert.ok(!next.nodes('button').some(node => String(node.props.children).includes('按此方案建立新 Render')));
   next.unmount();
 });
-test('unknown/source findings expose replan links and no apply control; authorization and allowance are visible stops', async () => {
+test('joint presentation repair shows every diagnosis and submits one revision for the complete candidate', async () => {
+  const f=setup('presentation');const h=mount('presentation',f);
+  h.setProps({request:async(path,options)=>{
+    const value=await f.fixture.request(path,options);
+    if(!path.includes('/presentation-repair-plan'))return value;
+    return {...value,responsible_stage:'assembly',assessment_state:'known',required_capability:[],diagnoses:[
+      {observation_id:'duplicate',finding:'duplicate_text',scope:{scene_id:'scene-1',start_ms:0,end_ms:3000},assessment_state:'known'},
+      {observation_id:'overlay',finding:'text_overlay',scope:{scene_id:'scene-1',start_ms:0,end_ms:3000},assessment_state:'known'},
+    ]};
+  }});
+  await h.flush();await observe(h);await h.click('读取修复候选');
+  assert.match(h.text(),/本次一并处理 2 项问题，只建立一个修订版本/);
+  assert.match(h.text(),/新标题重复了旁白全文/);assert.match(h.text(),/文字与人物画面重叠/);
+  assert.match(h.text(),/Voice 0 次 · Talking 0 次/);
+  await h.change('本次修复理由','合并修复同一版本');await h.submit('按此方案建立新 Render');
+  assert.equal(f.fixture.load().records.length,1);
+  assert.equal(f.fixture.load().operations.filter(value=>value==='apply_presentation_repair').length,1);
+  h.unmount();
+});
+test('unknown/source findings preserve results and do not send the creator to rewrite the whole draft', async () => {
   const f = setup('presentation'); const h = mount('presentation', f); await h.flush(); await observe(h, 'unknown_subtitles');
   await h.click('读取修复候选'); assert.match(h.text(), /presentation_source_interval_or_layout_replan_required/);
   assert.equal(h.nodes('form').filter(node => JSON.stringify(node.props.children).includes('本次修复理由')).length, 0);
-  assert.ok(h.nodes('a').some(node => node.props.href === '#production-preflight')); h.unmount();
+  assert.match(h.text(), /保留现有成果/);
+  assert.ok(!h.nodes('a').some(node => ['#production-preflight', '#project-draft-editor'].includes(node.props.href))); h.unmount();
   const v = setup('voice'); v.fixture.setDenied(true); const vh = mount('voice', v); await vh.flush(); await vh.click('检查 Voice 修复方案');
   assert.match(vh.text(), /voice_repair_consent_changed/); assert.equal(vh.nodes('form').length, 0); vh.unmount();
+});
+test('scoped quality findings expose the responsible stage, exact retained work and missing capability without generation', async () => {
+  for (const [finding, stage, label, capability, capabilityText] of [
+    ['voice_naturalness', 'voice', '声音', 'exact_audio_naturalness_diagnosis', '诊断确切音频的自然度'],
+    ['talking_naturalness', 'talking', '人物画面', 'exact_talking_naturalness_diagnosis', '诊断确切人物输出的自然度'],
+    ['visible_sync', 'unknown', '责任待定位', 'render_vs_talking_sync_diagnosis', '对照确切成片、人物段与旁白，定位生成或装配造成的音画不同步'],
+    ['semantic_mismatch', 'unknown', '责任待定位', 'exact_scene_narration_visual_semantics_diagnosis', '诊断本场景讲述与画面含义的匹配'],
+    ['narrative_rhythm', 'timing', '配时与节奏', 'exact_scene_delivery_vs_edit_timing_diagnosis', '区分声音讲述与剪辑配时造成的节奏问题'],
+  ]) {
+    const f = setup('presentation'); const h = mount('presentation', f);
+    h.setProps({ request: async (path, options) => {
+      const value = await f.fixture.request(path, options);
+      return path.includes('/presentation-repair-plan?') ? { ...value, action: 'scoped_fix_required',
+        responsible_stage: stage, assessment_state: 'unknown', scope: { scene_id: 'scene-1', start_ms: 240, end_ms: 960 },
+        preserves: { master_audio_id: recoveryIds.oldAudio, talking_job_ids: ['retained-talking-job'],
+          talking_output_asset_ids: ['retained-talking-output'], scene_plan_ids: ['retained-scene-plan'] },
+        required_capability: [capability] } : value;
+    } });
+    await h.flush();
+    assert.ok(h.nodes('option').some(node=>node.props.value===finding));
+    await observe(h, finding); await h.click('读取修复候选');
+    assert.match(h.text(), new RegExp(`责任工序：${label}`)); assert.match(h.text(), /待补证据，尚未定位可执行修复/);
+    assert.match(h.text(), /scene-1 · 240–960 ms/); assert.match(h.text(), new RegExp(capabilityText));
+    for (const id of [recoveryIds.oldAudio, 'retained-talking-job', 'retained-talking-output', 'retained-scene-plan']) assert.ok(h.text().includes(id));
+    assert.ok(!h.nodes('button').some(node => String(node.props.children).includes('按此方案建立新 Render')));
+    assert.ok(!h.nodes('a').some(node => ['#production-preflight', '#project-draft-editor'].includes(node.props.href)));
+    assert.equal(f.fixture.load().records.length, 0); assert.equal(f.fixture.load().used, 0); h.unmount();
+  }
+});
+test('machine semantic diagnoses keep every finding, explain current evidence and never expose media repair',async()=>{
+  for(const [stage,current] of [['assembly',true],['material',true],['assembly',false]]){
+    const f=setup('presentation');const h=mount('presentation',f);const requests=[];
+    h.setProps({request:async(path,options)=>{
+      requests.push({path,options});const value=await f.fixture.request(path,options);
+      if(!path.includes('/presentation-repair-plan?'))return value;
+      return {...value,action:'scoped_fix_required',responsible_stage:current?stage:'unknown',assessment_state:current?'known':'unknown',changes:[],
+        required_capability:['configured_video_comparison_provider','current_render_semantic_diagnosis','semantic_layout_correction','scoped_material_replacement'],
+        diagnoses:[{observation_id:'semantic',finding:'semantic_mismatch',responsible_stage:stage,assessment_state:current?'known':'unknown',
+          scope:{scene_id:'scene-1',start_ms:0,end_ms:3000},evidence_current:current,
+          machine_diagnosis:{source:'machine_semantic_comparison',method:'same_scene_render_source_video_comparison',
+            provider:'fixture-hidden-provider',model:'fixture-hidden-model',call_id:'fixture-hidden-call',state:'known',limitations:['audio_not_observed']}},
+          {observation_id:'duplicate',finding:'duplicate_text',scope:{scene_id:'scene-1',start_ms:0,end_ms:3000},assessment_state:'known'}]};
+    }});
+    await h.flush();await observe(h,'semantic_mismatch');await h.click('读取修复候选');await h.flush();
+    assert.match(h.text(),/本版保留 2 项问题，尚未建立修订版本/);
+    assert.match(h.text(),/新标题重复了旁白全文/);
+    assert.match(h.text(),/机器仅对照静音画面与旁白文字/);
+    assert.match(h.text(),/不评价听感自然度、口型同步，也不代表最终人审通过/);
+    assert.match(h.text(),current?new RegExp(`已定位本项责任：${stage==='assembly'?'字幕与装配':'素材与用途'}，局部修正仍待核验`):/原诊断证据已失效，需重新定位/);
+    for(const label of ['配置可对照视频的画面核验能力','核验当前成片与原素材的画面语义','修正受影响场景的语义呈现','仅替换受影响场景的素材'])assert.ok(h.text().includes(label));
+    assert.doesNotMatch(h.text(),/fixture-hidden|configured_video_comparison_provider|current_render_semantic_diagnosis|semantic_layout_correction|scoped_material_replacement/);
+    assert.ok(!h.nodes('button').some(node=>String(node.props.children).includes('按此方案建立新 Render')));
+    assert.equal(f.fixture.load().records.length,0);assert.equal(f.fixture.load().used,0);
+    const writes=requests.filter(value=>value.options?.method);
+    assert.equal(writes.length,1);assert.ok(writes[0].path.endsWith('/presentation-observations'));
+    assert.ok(!f.fixture.load().operations.includes('apply_presentation_repair'));h.unmount();
+  }
+});
+test('an explicitly unknown assessment cannot expose a render action and automatic observations keep their source', async () => {
+  const f = setup('presentation'); const h = mount('presentation', f);
+  h.setProps({ request: async (path, options) => {
+    const value = await f.fixture.request(path, options);
+    return path.includes('/presentation-repair-plan?') ? { ...value, assessment_state: 'unknown', responsible_stage: 'unknown',
+      observation: { ...value.observation, source: 'deterministic_spec_qa' }, required_capability: ['需核对确切成片与装配方案'] } : value;
+  } });
+  await h.flush(); await observe(h); await h.click('读取修复候选');
+  assert.match(h.text(), /自动方案检查引用/); assert.match(h.text(), /责任待定位/);
+  assert.ok(!h.nodes('button').some(node => String(node.props.children).includes('按此方案建立新 Render')));
+  assert.equal(f.fixture.load().records.length, 0); h.unmount();
+});
+test('unsupported or unknown Voice quality plans retain exact work and never offer a whole take regeneration', async () => {
+  for (const action of ['replan', 'scoped_fix_required', 'regenerate_take']) {
+    const f = setup('voice'); const h = mount('voice', f);
+    h.setProps({ request: async (path, options) => {
+      const value = await f.fixture.request(path, options);
+      return path.endsWith('/voice-repair-plan') ? { ...value, action, failure_kind: 'subjective', assessment_state: 'unknown', responsible_stage: 'voice',
+        scope: { scene_id: null, start_ms: null, end_ms: null }, stop_reasons: [], required_capability: ['exact_audio_quality_failure_localization'],
+        preserves: { master_audio_id: recoveryIds.oldAudio, master_audio_sha256: 'original-audio-hash', talking_job_ids: ['keep-talking-job'],
+          talking_output_asset_ids: ['keep-talking-output'], scene_plan_ids: ['keep-scene-plan'], render_job_id: 'keep-render-job' } } : value;
+    } });
+    await h.flush(); await h.click('检查 Voice 修复方案');
+    assert.match(h.text(), /保留当前音频和其它合格成果/); assert.match(h.text(), /先补齐声音诊断/);
+    assert.match(h.text(), /责任工序：声音/); assert.match(h.text(), /待补证据，尚未定位可执行修复/); assert.match(h.text(), /将声音质量缺陷定位到确切片段/);
+    for (const id of [recoveryIds.oldAudio, 'original-audio-hash', 'keep-talking-job', 'keep-talking-output', 'keep-scene-plan', 'keep-render-job']) assert.ok(h.text().includes(id));
+    assert.ok(!h.nodes('a').some(node => ['#production-preflight', '#project-draft-editor'].includes(node.props.href)));
+    assert.ok(!h.nodes('button').some(node => String(node.props.children).includes('按方案修复声音')));
+    assert.equal(f.fixture.load().records.length, 0); h.unmount();
+  }
 });
 test('server observations survive loss of the local observation cache', async () => {
   const f=setup('presentation'); const h=mount('presentation',f); await h.flush(); await observe(h,'source_change'); h.unmount();

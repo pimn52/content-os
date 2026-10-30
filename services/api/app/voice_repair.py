@@ -38,11 +38,16 @@ class VoiceRepairPlan(BaseModel):
     project_id: UUID
     run_id: UUID
     fingerprint: str
-    action: Literal["regenerate_take", "replan", "stop"]
+    action: Literal["regenerate_take", "scoped_fix_required", "replan", "stop"]
     failure_kind: Literal["technical", "copy_qa", "subjective", "unassessed", "invalid_request"]
     stop_reasons: tuple[str, ...]
     evidence: dict[str, JsonValue]
     remaining_run_repairs: int
+    responsible_stage: Literal["voice", "unknown"] = "voice"
+    assessment_state: Literal["known", "unknown"] = "unknown"
+    scope: dict[str, JsonValue] = Field(default_factory=dict)
+    preserves: dict[str, JsonValue] = Field(default_factory=dict)
+    required_capability: tuple[str, ...] = ()
     max_tts_calls: Literal[1] = 1
     max_qa_asr_calls: Literal[1] = 1
     external_charge_ceiling: Literal["0"] = "0"
@@ -220,8 +225,8 @@ class VoiceRepairService:
             if voice_human_review_status(audio) == "approved":
                 reasons.append("voice_repair_approved_master_not_replaceable")
             elif generation.get("human_review") is not None or voice_human_review_status(audio) == "rejected":
-                kind, action = "subjective", "replan"
-                reasons.append("voice_repair_human_judgment_requires_replan")
+                kind, action = "subjective", "scoped_fix_required"
+                reasons.append("voice_repair_quality_localization_required")
             elif (qa.status == JobStatus.FAILED and qa.error_code == "voice_qa_failed"
                   and qa.type == JobType.VERIFY_VOICE and qa.project_id == project
                   and qa.payload.narration_audio_id == audio.id and qa.payload.target_text == job.payload.text
@@ -236,7 +241,7 @@ class VoiceRepairService:
                     try:
                         segment_repair = _failed_generation_segment(audio, self.production.data_root)
                         if job.payload.delivery_text is not None or job.payload.narration_performance_plan is not None:
-                            raise VoiceQaError("voice_repair_segment_delivery_requires_replan")
+                            raise VoiceQaError("voice_repair_segment_delivery_diagnosis_required")
                         kind, action = "copy_qa", "regenerate_take"
                     except VoiceQaError as exc:
                         reasons.append(str(exc))
@@ -289,7 +294,33 @@ class VoiceRepairService:
                     "execution": expected, "worker_execution": receipt, "qa_capability": None if qa_cap is None else qa_cap.model_dump(mode="json"),
                     "budgets": self._budgets(project), "draft_version": row["draft_version"], "script_revision": row["script_revision"],
                     "segment_repair": segment_repair}
+        known = kind == "copy_qa" or (kind == "technical" and job is not None and job.error_code == "voice_temporarily_unavailable")
+        required = [] if known else ["exact_audio_quality_failure_localization" if kind == "subjective"
+            else "voice_request_correction" if kind == "invalid_request" else "exact_audio_failure_diagnosis"]
+        if "voice_repair_requires_unconsumed_voice_stage" in reasons:
+            required.append("consumed_voice_dependency_repair")
+        if "voice_repair_segment_delivery_diagnosis_required" in reasons:
+            required.append("voice_generation_segment_delivery_binding")
+        scope = {"scene_id": None, "start_ms": 0 if audio else None, "end_ms": None if audio is None else audio.duration_ms}
+        if segment_repair is not None:
+            part = audio.metadata["voice_generation"]["generation_segments"][segment_repair["index"]]
+            scope.update(start_ms=part["start_sample"] * 1000 // audio.sample_rate,
+                end_ms=(part["end_sample"] * 1000 + audio.sample_rate - 1) // audio.sample_rate,
+                generation_segment_index=segment_repair["index"], start_char=part["start_char"], end_char=part["end_char"])
+        draft = ProjectDraftRepository(self.db).get(project)
+        bindings = json.loads(row["talking_source_bindings"])
+        preserves = {"master_audio_id": None if audio is None else str(audio.id),
+            "master_audio_sha256": None if audio is None else audio.content_hash,
+            "voice_job_id": row["voice_job_id"], "voice_qa_job_id": row["voice_qa_job_id"], "render_job_id": row["render_job_id"],
+            "talking_job_ids": [binding["talking_job_id"] for binding in bindings if binding.get("talking_job_id")],
+            "talking_output_asset_ids": [binding["talking_output_asset_id"] for binding in bindings if binding.get("talking_output_asset_id")],
+            "scene_plan_ids": [] if draft is None or draft.version != row["draft_version"] or draft.script_revision != row["script_revision"]
+                else [str(scene.id) for scene in draft.scenes],
+            "reused_segment_sha256": [] if segment_repair is None else segment_repair["reused_segment_sha256"],
+            "reuse_admission": "unchanged_dependencies_only"}
         values = dict(project_id=project, run_id=run, action=action, failure_kind=kind,
+                      responsible_stage="voice", assessment_state="known" if known else "unknown", scope=scope,
+                      preserves=preserves, required_capability=tuple(required),
                       stop_reasons=tuple(dict.fromkeys(reasons)), evidence=evidence, remaining_run_repairs=remaining,
                       execution_granularity="segment" if segment_repair is not None else "whole_take")
         draft_plan = VoiceRepairPlan(fingerprint="0" * 64, **values)
@@ -322,7 +353,7 @@ class VoiceRepairService:
             plan = self.plan(project, run)
             if plan.fingerprint != request.expected_fingerprint:
                 raise ProductionRunConflict("voice_repair_plan_stale")
-            if plan.action != "regenerate_take":
+            if plan.action != "regenerate_take" or plan.assessment_state != "known":
                 raise ProductionRunNotReady(plan.stop_reasons)
             row = self._row(project, run)
             original = JobRepository(self.db).get(UUID(row["voice_job_id"]))

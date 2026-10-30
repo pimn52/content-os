@@ -106,6 +106,11 @@ def test_automatic_segment_repair_preserves_good_pcm_and_rechecks_full_master(tm
             assert plan.action == "regenerate_take", plan
             assert plan.execution_granularity == "segment"
             assert plan.evidence["segment_repair"]["index"] == 1
+            assert plan.responsible_stage == "voice" and plan.assessment_state == "known"
+            assert plan.scope == {"scene_id": None, "start_ms": 1000, "end_ms": 2000,
+                "generation_segment_index": 1, "start_char": 9, "end_char": len("A fresh\n\ncreator point.")}
+            assert plan.preserves["master_audio_id"] == str(original_id)
+            assert plan.preserves["reused_segment_sha256"] == [parts[0]["sha256"]]
             original = AudioAssetRepository(db).get(original_id)
             record = service.reconcile_automatic_qa_failure(project, run)
             assert service.reconcile_automatic_qa_failure(project, run) is None
@@ -209,6 +214,7 @@ def test_ordinary_queue_leaves_failed_zero_allowance_run_untouched(tmp_path):
         def forbidden(job):pytest.fail('没有返工额度的旧失败任务不能被自动执行')
         runner=JobRunner(JobStore(db),{JobType.GENERATE_VOICE:forbidden,JobType.VERIFY_VOICE:forbidden},
             worker_id='old-failed',lease_duration=timedelta(minutes=1),max_attempts=1)
+        runner.production_service=VideoProductionService(db,tmp_path)
         _run_product_queue(SimpleNamespace(once=True,poll_seconds=.01,data_root=tmp_path),db,runner,Event())
         assert db.connection.execute('SELECT voice_qa_auto_stop_reasons FROM production_runs WHERE id=?',(str(run),)).fetchone()[0]==before
         assert used_repairs(db,run)==0 and len(ProviderCallRepository(db).list_for_project(project))==calls_before
@@ -255,6 +261,7 @@ def test_ordinary_queue_repairs_one_voice_segment_and_advances_without_manual_re
         runner = JobRunner(JobStore(db), {JobType.GENERATE_VOICE:voice, JobType.VERIFY_VOICE:qa,
             JobType.RENDER:render}, worker_id="ordinary-voice-repair", lease_duration=timedelta(minutes=1),
             max_attempts=1, on_completed=completed)
+        runner.production_service = service
         timeout = Timer(2, stop.set); timeout.start()
         try:
             _run_product_queue(SimpleNamespace(once=False,poll_seconds=.01,data_root=tmp_path),db,runner,stop)

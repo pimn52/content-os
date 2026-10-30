@@ -14,7 +14,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.assembly.edit_plan import EditPlanPreflightError, resolve_edit_plan, _default_edit_plan, presentation_for_style
+from app.assembly.edit_plan import (EditPlanPreflightError, resolve_edit_plan, _default_edit_plan,
+    presentation_for_style, review_edit_plan, dominant_landscape_fallback)
 from app.media.visual_facts import full_interval_geometry, footage_geometry, matches_scene
 from app.budget import snapshot
 from app.costs import estimate_whole_production
@@ -328,6 +329,10 @@ def build_production_preflight(
             if not checked_source_bytes[asset.id]:
                 stop.append(f"source_content_hash_mismatch:{scene.scene_id}")
         playback_interval = _playback_interval(candidate, clip, routing_durations[scene.id])
+        if candidate is not None and candidate.asset_id is not None and candidate.clip_id is not None:
+            from app.media.semantic_rejections import candidate_rejections
+            if candidate_rejections(db,scene,candidate,fps=project.fps,duration_ms=routing_durations[scene.id]):
+                stop.append(f'source_semantic_use_rejected:{scene.scene_id}')
         source_facts = full_interval_geometry(asset, clip, playback_interval)
         if source_facts and not matches_scene(source_facts, scene):
             stop.append(f"source_scene_mismatch:{scene.scene_id}")
@@ -513,7 +518,11 @@ def build_production_preflight(
                         routing_durations[entry.scene_plan_id]) if entry.selected_clip_id else None,
                     portrait_output=project.format is ProjectFormat.VERTICAL) for entry in base_plan.scenes],
             )
-            resolve_edit_plan(project, scenes, selections, clip_intervals=intervals, supplied=preliminary_edit_plan)
+            preliminary_edit_plan = resolve_edit_plan(project, scenes, selections, clip_intervals=intervals, supplied=preliminary_edit_plan)
+            preliminary_edit_plan = review_edit_plan(preliminary_edit_plan, scenes, selections,
+                durations_ms=routing_durations, clip_intervals=intervals, assets=assets, source_uses=allocated_uses,
+                timing_basis="measured_master" if reusable_master is not None and not master_timing_unaligned else "estimated_scene_duration",
+                portrait_output=project.format is ProjectFormat.VERTICAL)
             planned={entry.scene_plan_id:entry for entry in preliminary_edit_plan.scenes}
             decisions=[decision.model_copy(update={
                 "subtitle_treatment":planned[decision.scene_plan_id].subtitle_treatment,
@@ -523,14 +532,8 @@ def build_production_preflight(
         except (EditPlanPreflightError, ValueError) as exc:
             preliminary_edit_plan = None
             stop.extend(("preliminary_edit_plan_conflict",f"visual_presentation_unresolved:{exc}"))
-    if preliminary_edit_plan is not None and project.format is ProjectFormat.VERTICAL:
-        stop.extend(_dominant_landscape_fallback(
-            ((scene.scene_id, scene.duration_target_ms, entry.selected_asset_id,
-              entry.visual_role, entry.portrait_presentation)
-             for scene in routing_scenes
-             for entry in preliminary_edit_plan.scenes if entry.scene_plan_id == scene.id),
-            assets,
-        ))
+    if preliminary_edit_plan is not None:
+        stop.extend(preliminary_edit_plan.whole_video.stop_reasons)
     cost = estimate_whole_production(selected, required_scene_count=len(scenes), actions=actions)
     policy_repo = BudgetPolicyRepository(db)
     policies = [policy for policy in (policy_repo.get_by_project(None), policy_repo.get_by_project(project.id)) if policy is not None]
@@ -601,23 +604,8 @@ def dominant_landscape_fallback_in_spec(spec: VideoSpec, assets: AssetRepository
 
 
 def _dominant_landscape_fallback(scenes, assets: AssetRepository) -> tuple[str, ...]:
-    """A horizontal fallback is valid; making one shot most of a portrait video is not."""
-    from app.domain.models import PortraitPresentation
-
-    footage = {}
-    total = 0
-    for scene_id, duration, asset_id, role, presentation in scenes:
-        total += duration
-        if role is not EditVisualRole.FOOTAGE or asset_id is None or presentation is not PortraitPresentation.FULL_CANVAS:
-            continue
-        asset = assets.get(asset_id)
-        if asset is not None and asset.width > asset.height:
-            footage.setdefault(asset_id, []).append((scene_id, duration))
-    return tuple(
-        "landscape_fallback_dominates_video:" + ",".join(scene_id for scene_id, _ in uses)
-        for uses in footage.values()
-        if sum(duration for _, duration in uses) * 2 > total
-    )
+    """Compatibility for old callers; EditPlan owns the shared whole-video rule."""
+    return dominant_landscape_fallback(scenes, assets)
 
 
 def _reviewed_native_planned(db, project, scene, asset, clip, master):

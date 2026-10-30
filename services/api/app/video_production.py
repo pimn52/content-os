@@ -3,6 +3,7 @@ from datetime import datetime,timezone
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from typing import Literal, TypedDict
 from uuid import UUID,uuid5
 
 from app.db import (ProjectRepository,ProjectDraftRepository,IPProfileRepository,JobRepository,
@@ -17,8 +18,23 @@ from app.project_drafts import save_project_draft,_split_talking_master_clauses
 from app.budget import snapshot
 from app.planning_input import short_video_project,normalize_automatic_graphics,automatic_graphic_gaps
 from app.media.planning import VisualMaterialResolver
+from app.voice_qa import voice_human_review_status
 
 IN_PROGRESS_REASONS=("talking_source_not_bound:","talking_qa_run_not_implemented:","talking_exact_preview_review_required:","talking_u_review_run_not_implemented:")
+DIAGNOSTIC_ACTIONS=frozenset({'diagnose_qa','diagnose_quality','diagnose_semantic','verify_material'})
+
+
+class ProductionDecision(TypedDict):
+    """当前执行决策；Job/Run 状态只描述已落盘的工序事实。"""
+    status: Literal['diagnosing_qa','failed'] | None
+    next_action: Literal['continue','review','stopped','diagnose_qa','diagnose_quality','diagnose_semantic','verify_material']
+    responsible_stage: str
+    stop_reasons: list[str]
+    quality_diagnosis: dict | None
+    material_recheck: dict | None
+    material_repair_id: str | None
+    next_job_id: str | None
+    next_job_type: str | None
 
 
 @dataclass(frozen=True)
@@ -47,12 +63,13 @@ class VisualFeasibility:
 
 class VideoProductionService:
     def __init__(self,db,data_root,*,voice_provider=None,talking_provider=None,material_resolver=None,material_acquirer=None,
-                 planner=None,planner_cost_estimator=None):
+                 planner=None,planner_cost_estimator=None,semantic_diagnoser=None):
         self.db,self.root=db,data_root
         self.voice_provider,self.talking_provider=voice_provider,talking_provider
         self.material_resolver = material_resolver
         self.material_acquirer = material_acquirer
         self.planner,self.planner_cost_estimator=planner,planner_cost_estimator
+        self.semantic_diagnoser=semantic_diagnoser
         self.runs=ProductionRunService(db,data_root,talking_provider=talking_provider)
 
     def enqueue(self,project_id,topic,key,*,candidate_of_run_id=None,resume_from_job_id=None,expected_draft_version=None):
@@ -113,10 +130,7 @@ class VideoProductionService:
             if active:
                 raise ProductionRunNotReady(("video_production_already_running",))
             for row in self.db.connection.execute("SELECT id FROM production_runs WHERE project_id=? AND automatic=1 AND stage IN ('voice','awaiting_talking','render')",(str(project_id),)).fetchall():
-                current=self.runs.get(project_id,UUID(row[0]))
-                from app.production_runs import production_run_jobs
-                dbrow, jobs = production_run_jobs(self.db, current.id)
-                if current.status != "render_completed_awaiting_review" and self._queue_decision(dbrow, jobs, set(JobType))["next_action"] != "stopped":
+                if self.decision_for_run(UUID(row[0]),set(JobType))['next_action'] not in {'review','stopped'}:
                     raise ProductionRunNotReady(("video_production_already_running",))
             now=datetime.now(timezone.utc)
             return JobRepository(self.db).create(Job(project_id=project_id,type=JobType.PLAN_CONTENT,
@@ -393,13 +407,16 @@ class VideoProductionService:
         if pool is None:
             pool=build_talking_pool(self.db,project.id,talking_provider=self.talking_provider,
                 data_root=self.root,run_id=run_id,work_id=work_id)
-        prepared=tuple(scenes)
+        originals=prepared=tuple(scenes)
         if master is not None:
             capacity=pool.summary(talking_provider=self.talking_provider)
             maximum=capacity['max_narration_duration_ms'] or capacity['longest_continuous_ms']
-            prepared=_split_talking_master_clauses(self.db,project,script,list(scenes),master=master,max_segment_ms=maximum)
-            prepared=tuple(scene.model_copy(update={'duration_target_ms':end-start})
-                for scene,start,end in _master_narration_intervals(master,prepared))
+            def measured_scenes(*,merge_clauses=True):
+                split=_split_talking_master_clauses(self.db,project,script,list(originals),master=master,
+                    max_segment_ms=maximum,merge_clauses=merge_clauses)
+                return tuple(scene.model_copy(update={'duration_target_ms':end-start})
+                    for scene,start,end in _master_narration_intervals(master,split))
+            prepared=measured_scenes()
         basis='measured_master' if master is not None else 'estimated_scene_duration'
         if any(scene.visual_requirement=='creator_speaking' for scene in prepared) and not pool.entries:
             reason='talking_motion_occupancy_unresolved' if pool.occupancy_state!='known' else 'creator_talking_reference_not_configured'
@@ -408,6 +425,15 @@ class VideoProductionService:
             scheduled,allocations=schedule_talking_scenes(pool,prepared,talking_provider=self.talking_provider)
             return VisualFeasibility(pool,prepared,scheduled,allocations,basis)
         except TalkingPoolCapacityError as exc:
+            if master is not None and exc.reason=='talking_motion_capacity_insufficient' and capacity.get('alignment_state')=='known':
+                finer=measured_scenes(merge_clauses=False)
+                if finer!=prepared:
+                    try:
+                        scheduled,allocations=schedule_talking_scenes(pool,finer,talking_provider=self.talking_provider)
+                        return VisualFeasibility(pool,finer,scheduled,allocations,basis)
+                    except TalkingPoolCapacityError as fine_error:
+                        if fine_error.reason!='talking_motion_capacity_insufficient':
+                            return VisualFeasibility(pool,finer,finer,(),basis,fine_error.reason)
             if master is None and exc.reason=='talking_motion_capacity_insufficient':
                 capacity=pool.summary(talking_provider=self.talking_provider)
                 longest=capacity['max_narration_duration_ms'] or capacity['longest_continuous_ms']
@@ -564,6 +590,15 @@ class VideoProductionService:
                 for scene,allocation in zip((scene for scene in scheduled if scene.visual_requirement=='creator_speaking'),allocations)]},
             ensure_ascii=False,indent=2),encoding="utf-8")
         with self.db.transaction(immediate=True):
+            current=self.db.connection.execute('SELECT * FROM production_runs WHERE id=? AND project_id=?',
+                (row['id'],row['project_id'])).fetchone()
+            if current is None or current['stage']!='voice' or dict(current)!=dict(row):
+                raise ProductionRunNotReady(('automatic_production_changed',))
+            if ProjectDraftRepository(self.db).get(project.id)!=draft:
+                raise ProductionRunNotReady(('automatic_draft_changed',))
+            if AudioAssetRepository(self.db).get(master.id)!=master:
+                raise ProductionRunNotReady(('automatic_master_changed',))
+            self.runs._require_bound_voice_master(current,master.id)
             saved=save_project_draft(self.db,project,script=draft.script,topic=draft.topic,scenes=revised,
                 routes=(),confirmed=(),video_spec=None,evidence_refs=draft.evidence_refs,accept_scene_plan_with_new_script=True)
             self.db.connection.execute("UPDATE production_runs SET draft_version=?,script_revision=? WHERE id=?",
@@ -574,6 +609,7 @@ class VideoProductionService:
                 visual_dependency_fingerprint=value.visual_dependency_fingerprint).model_dump(mode="json")
                 for value in plan.scenes if value.production_need=="new_talking"]
             self.db.connection.execute("UPDATE production_runs SET talking_dependencies=? WHERE id=?",(json.dumps(deps),row["id"]))
+            return self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(row['id'],)).fetchone()
 
     def advance(self,project_id,run_id):
         row=self.db.connection.execute("SELECT * FROM production_runs WHERE id=? AND project_id=? AND automatic=1",
@@ -584,20 +620,41 @@ class VideoProductionService:
         _,jobs=production_run_jobs(self.db,run_id)
         if self._queue_decision(row,jobs,set(JobType))['next_action']!='continue':
             return run
-        if run.status=="awaiting_approved_master":
-            profile,capability=self._voice_choice(project_id)
-            return self.runs.dispatch_voice(project_id,run_id,voice_profile_id=profile.id,capability_profile_id=capability.id)
-        if run.status in {"voice_qa_ready_for_draft","approved_master_ready_to_resume"}:
-            self._prepare_measured_plan(row)
-            run=self.runs.resume(project_id,run_id)
-        if run.status=="awaiting_talking_dependencies":
-            if not any(item.talking_job_id for item in run.talking_source_bindings):
-                return self.runs.dispatch_all_talking(project_id,run_id)
-            required={item.scene_plan_id for item in run.talking_dependencies}
-            states={item.scene_plan_id:item.state for item in run.talking_qa_dependencies}
-            if required and set(states)==required and all(state in {'qa_verified_ready_for_preview','qa_verified_awaiting_u_talking'} for state in states.values()):
-                return self.runs.resume(project_id,run_id)
-        return run
+        expected=row
+        try:
+            if run.status=="awaiting_approved_master":
+                profile,capability=self._voice_choice(project_id)
+                return self.runs.dispatch_voice(project_id,run_id,voice_profile_id=profile.id,capability_profile_id=capability.id)
+            if run.status in {"voice_qa_ready_for_draft","approved_master_ready_to_resume"}:
+                expected=self._prepare_measured_plan(row)
+                self.runs.resume(project_id,run_id)
+                expected=self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(row['id'],)).fetchone()
+                run=self.runs.get(project_id,run_id)
+            if run.status=="awaiting_talking_dependencies":
+                if not any(item.talking_job_id for item in run.talking_source_bindings):
+                    return self.runs.dispatch_all_talking(project_id,run_id)
+                required={item.scene_plan_id for item in run.talking_dependencies}
+                states={item.scene_plan_id:item.state for item in run.talking_qa_dependencies}
+                if required and set(states)==required and all(state in {'qa_verified_ready_for_preview','qa_verified_awaiting_u_talking'} for state in states.values()):
+                    return self.runs.resume(project_id,run_id)
+            return run
+        except (ValueError,RuntimeError) as exc:
+            self._stop_transition(expected,exc)
+            raise
+
+    def _stop_transition(self,expected,error):
+        """只停止实际失败的工序快照，迟到回调不覆盖已推进或取消的 Run。"""
+        reasons=getattr(error,'reasons',None)
+        if not reasons:
+            from app.providers.scene_planner import ScenePlannerError
+            from app.scene_planning import _scene_planner_error_code
+            reasons=((_scene_planner_error_code(error) if isinstance(error,ScenePlannerError)
+                else getattr(error,'code',None) or 'automatic_production_stopped'),)
+        with self.db.transaction(immediate=True):
+            current=self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(expected['id'],)).fetchone()
+            if current is None or current['stage']=='cancelled' or dict(current)!=dict(expected):return
+            self.db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',
+                (json.dumps(['automatic_stop:'+value for value in reasons]),current['id']))
 
     def _job_run(self,job):
         if job.type is JobType.PLAN_CONTENT:
@@ -621,7 +678,7 @@ class VideoProductionService:
     def _completion_types(handler_types):
         supported=set()
         for group in ({JobType.GENERATE_VOICE,JobType.VERIFY_VOICE},
-                      {JobType.GENERATE_TALKING,JobType.VERIFY_TALKING}):
+                      {JobType.GENERATE_TALKING,JobType.VERIFY_TALKING},{JobType.RENDER}):
             if group & set(handler_types):supported.update(group)
         return supported
 
@@ -629,9 +686,10 @@ class VideoProductionService:
         from app.production_runs import production_run_jobs
         supported=self._completion_types(handler_types)
         for row in self.db.connection.execute("SELECT id FROM production_runs WHERE stage IN ('voice','awaiting_talking','render')").fetchall():
-            _,jobs=production_run_jobs(self.db,UUID(row['id']))
+            current,jobs=production_run_jobs(self.db,UUID(row['id']))
             for job in jobs:
                 if job.status is JobStatus.COMPLETED and job.type in supported:
+                    if job.type is JobType.RENDER and not self._current_render_replay(current):continue
                     self.completed(job,handler_types)
 
     def completed(self,job,handler_types=None):
@@ -640,7 +698,10 @@ class VideoProductionService:
         if row is not None and row['automatic']:
             from app.production_runs import production_run_jobs
             _,jobs=production_run_jobs(self.db,UUID(row['id']))
-            if self._queue_decision(row,jobs,handler_types)['next_action']!='continue':
+            decision=self._queue_decision(row,jobs,handler_types)
+            if decision['next_action']=='review' and job.type is JobType.RENDER:
+                self._observe_render_spec(job,row)
+            if decision['next_action']!='continue':
                 return
         if job.type is JobType.GENERATE_VOICE:
             self.runs.reconcile_completed_voice_job(job.id,qa_worker_ready=JobType.VERIFY_VOICE in handler_types)
@@ -653,27 +714,166 @@ class VideoProductionService:
             except (ValueError,RuntimeError) as exc:
                 from app.jobs.handlers import _write_render_failure_diagnostic
                 _write_render_failure_diagnostic(job,self.root,"production_transition",exc)
-                reasons=getattr(exc,"reasons",None)
-                if not reasons:
-                    from app.providers.scene_planner import ScenePlannerError
-                    from app.scene_planning import _scene_planner_error_code
-                    reasons=((_scene_planner_error_code(exc) if isinstance(exc,ScenePlannerError)
-                        else getattr(exc,"code",None) or "automatic_production_stopped"),)
-                with self.db.transaction(immediate=True):
-                    self.db.connection.execute("UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?",(json.dumps(["automatic_stop:"+value for value in reasons]),row["id"]))
 
-    def _queue_decision(self, row, jobs, handler_types):
+    def _presentation_diagnosis(self,row,jobs):
+        """轮询只读当前版本的观察，不重复解码、哈希或调用诊断模型。"""
+        if not row['automatic'] or row['stage']!='render':return None
+        render=next((job for job in jobs if job.type is JobType.RENDER and job.status is JobStatus.COMPLETED),None)
+        if render is None:return None
+        from app.source_usage import SourceUsageService
+        usage=SourceUsageService(self.db)
+        if usage.review(row,exact_render=True)['state']=='approved' or usage.choice(render.project_id,render.payload.render_id)=='discarded':
+            return None  # 已认可或明确弃用的版本不被普通队列重新激活。
+        stored=self.db.connection.execute('SELECT payload FROM presentation_observations WHERE run_id=? AND render_job_id=? ORDER BY rowid DESC',
+            (str(row['id']),str(render.id))).fetchall()
+        if not stored:return None
+        from app.presentation_repair import semantic_observation_diagnosis
+        from app.presentation_diagnosis import diagnosis_for_finding,presentation_correction,summarize_diagnoses
+        findings=[];seen=set()
+        fps=render.payload.video_spec.fps
+        draft=ProjectDraftRepository(self.db).get(render.project_id)
+        for saved in stored:
+            observation=json.loads(saved[0]);item=observation['request'];key=(item['scene_id'],item['finding'])
+            if key in seen:continue
+            seen.add(key)
+            scene=next((scene for scene in render.payload.video_spec.scenes if scene.scene_id==item['scene_id']),None)
+            assessed=semantic_observation_diagnosis(self.db,observation,row,render) or (
+                presentation_correction(render.payload.video_spec,item,draft)['diagnosis'] if scene is not None else diagnosis_for_finding(item['finding']))
+            findings.append(dict(observation_id=observation['id'],finding=item['finding'],source=observation['source'],
+                needs_semantic_diagnosis=item['finding']=='semantic_mismatch' and 'machine_diagnosis' not in observation,
+                scope={'scene_id':item['scene_id'],'start_ms':None if scene is None else round(scene.start_frame*1000*fps.denominator/fps.numerator),
+                    'end_ms':None if scene is None else round((scene.start_frame+scene.duration_frames)*1000*fps.denominator/fps.numerator)},
+                **assessed))
+        if len(findings)==1:return findings[0]
+        return dict(observation_id=findings[0]['observation_id'],finding='multiple_findings',source='exact_render_observations',
+            scope={'scene_id':'整片','start_ms':None,'end_ms':None},**summarize_diagnoses(findings),findings=findings)
+
+    def _current_render_replay(self,row):
+        if not row['automatic'] or row['stage']!='render' or not row['start_job_id']:return False
+        latest=self.db.connection.execute("SELECT id FROM jobs WHERE project_id=? AND json_extract(payload,'$.type')='plan_content' ORDER BY rowid DESC LIMIT 1",
+            (row['project_id'],)).fetchone()
+        return latest is not None and latest[0]==row['start_job_id']
+
+    def _observe_render_spec(self,job,row):
+        """记录同版全部确定性装配问题，不冒充语义、口型或自然度检测。"""
+        from app.presentation_repair import PresentationRepairService,PresentationObservationRequest
+        from app.presentation_diagnosis import DETERMINISTIC_PRESENTATION_FINDINGS,presentation_correction
+        from app.source_usage import SourceUsageService
+        usage=SourceUsageService(self.db)
+        if usage.review(row,exact_render=True)['state']=='approved' or usage.choice(job.project_id,job.payload.render_id)=='discarded':return
+        spec=job.payload.video_spec
+        draft=ProjectDraftRepository(self.db).get(job.project_id)
+        known={(item['request']['scene_id'],item['request']['finding']) for item in (
+            json.loads(saved[0]) for saved in self.db.connection.execute(
+                'SELECT payload FROM presentation_observations WHERE run_id=? AND render_job_id=?',(row['id'],str(job.id))))}
+        service=PresentationRepairService(self.db,Path(self.root),Path(self.root)/'renders')
+        digest=None
+        for scene in spec.scenes:
+            for finding in DETERMINISTIC_PRESENTATION_FINDINGS:
+                if (scene.scene_id,finding) in known:continue
+                if not presentation_correction(spec,{'scene_id':scene.scene_id,'finding':finding},draft)['observed']:continue
+                try:
+                    digest=digest or service._hash_render(job)
+                    service.observe(job.project_id,UUID(row['id']),PresentationObservationRequest(
+                        idempotency_key=f'render-spec-qa:{job.id}:{scene.scene_id}:{finding}',render_sha256=digest,
+                        scene_id=scene.scene_id,finding=finding,reason='当前成片规格存在确切的重复文字或已知字幕冲突。',
+                        evidence_reference=f'render-spec:{job.id}:{digest}'),source='deterministic_spec_qa')
+                    known.add((scene.scene_id,finding))
+                except (ValueError,RuntimeError,OSError) as exc:
+                    self._stop_quality_repair(row,getattr(exc,'reasons',None) or ['presentation_output_evidence_unavailable'])
+                    return
+
+    def _stop_quality_repair(self,row,reasons):
+        with self.db.transaction(immediate=True):
+            current=self.db.connection.execute('SELECT stage,render_job_id,waiting_stop_reasons FROM production_runs WHERE id=?',(row['id'],)).fetchone()
+            if current is None or current['stage']!='render' or current['render_job_id']!=row['render_job_id']:return
+            kept=json.loads(current['waiting_stop_reasons'])
+            self.db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',
+                (json.dumps(list(dict.fromkeys([*kept,*(f'automatic_stop:{reason}' for reason in reasons)]))),row['id']))
+
+    def _repair_presentation(self,row,diagnosis):
+        from app.presentation_repair import PresentationRepairService,PresentationRepairRequest
+        from app.production_runs import ProductionRunConflict
+        service=PresentationRepairService(self.db,Path(self.root),Path(self.root)/'renders',semantic_diagnoser=self.semantic_diagnoser)
+        def admit_current():
+            current=self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(row['id'],)).fetchone()
+            if current is None or current['render_job_id']!=row['render_job_id']:
+                raise ProductionRunNotReady(('automatic_presentation_no_longer_current',))
+            decision=self.decision_for_run(UUID(row['id']),set(JobType))
+            if (decision['next_action']!='diagnose_quality' or decision['quality_diagnosis']['observation_id']!=diagnosis['observation_id']):
+                raise ProductionRunNotReady(('automatic_presentation_no_longer_current',))
+        try:
+            plan=service.plan(UUID(row['project_id']),UUID(row['id']),UUID(diagnosis['observation_id']))
+            if plan['action']=='render_revision':
+                service.apply(UUID(row['project_id']),UUID(row['id']),PresentationRepairRequest(
+                    observation_id=UUID(diagnosis['observation_id']),expected_fingerprint=plan['fingerprint'],
+                    idempotency_key=f"automatic-presentation:{diagnosis['observation_id']}",confirmed_action='render_revision',
+                    reason='修正已定位的画面缺陷，复用合格旁白与人物画面，再做整片复检。'),admission_guard=admit_current)
+                return
+            reasons=plan['stop_reasons'] or ['quality_scoped_fix_required:'+plan['responsible_stage']]
+        except (ProductionRunNotReady,ProductionRunConflict,ValueError,LookupError) as exc:
+            reasons=getattr(exc,'reasons',None) or ['presentation_diagnosis_not_executable']
+            if 'automatic_presentation_no_longer_current' in reasons:return
+        self._stop_quality_repair(row,reasons)
+
+    def _material_recheck(self,row,jobs):
+        render=next((job for job in jobs if job.type is JobType.RENDER and job.status is JobStatus.COMPLETED),None)
+        if render is None:return None
+        from app.source_usage import SourceUsageService
+        usage=SourceUsageService(self.db)
+        if usage.review(row,exact_render=True)['state'] in {'approved','rejected'} or usage.choice(render.project_id,render.payload.render_id)=='discarded':return None
+        saved=self.db.connection.execute('SELECT payload FROM presentation_repairs WHERE run_id=? AND replacement_job_id=?',
+            (row['id'],str(render.id))).fetchone()
+        if saved is None:return None
+        record=json.loads(saved[0])
+        if not record['plan'].get('material_replacements'):return None
+        machine=record.get('semantic_recheck')
+        if machine is None:return {'repair_id':record['id'],'result':None}
+        from app.presentation_semantic import material_recheck_is_current
+        current=material_recheck_is_current(self.db,machine,row,render)
+        return {'repair_id':record['id'],'result':{**{key:machine.get(key) for key in (
+            'state','assessment_state','responsible_stage','scope','limitations','required_capability','stop_reasons')},
+            'evidence_current':current if machine.get('binding') is not None else None}}
+
+    def _queue_decision(self, row, jobs, handler_types) -> ProductionDecision:
         reasons = [v for v in json.loads(row["waiting_stop_reasons"]) if not v.startswith(IN_PROGRESS_REASONS)]
         auto_reasons = json.loads(row["voice_qa_auto_stop_reasons"])
         parent = JobRepository(self.db).get(UUID(row["start_job_id"])) if row["start_job_id"] else None
         failed = [j for j in jobs if j.status in {JobStatus.FAILED, JobStatus.CANCELLED}]
         stage = "talking" if row["stage"] == "awaiting_talking" else row["stage"]
         action = "continue"
+        explicit_quality_owner = False
+        diagnosis=self._presentation_diagnosis(row,jobs)
+        material_recheck=self._material_recheck(row,jobs) if row['stage']=='render' else None
         if (row["stage"] == "cancelled" or (row["start_job_id"] and (parent is None or parent.status in {JobStatus.FAILED, JobStatus.CANCELLED}))
             or auto_reasons or any(v != "planned_talking_qa_failed" for v in reasons)):
             action = "stopped"
+        elif row['voice_audio_id'] and (audio:=AudioAssetRepository(self.db).get(UUID(row['voice_audio_id']))) is not None and voice_human_review_status(audio)=='rejected':
+            action,stage='stopped','voice';explicit_quality_owner=True
+            reasons=['voice_quality_review_rejected']
         elif row['stage']=='render' and any(job.type is JobType.RENDER and job.status is JobStatus.COMPLETED for job in jobs):
-            action,stage='review','review'
+            from app.presentation_repair import PRESENTATION_CORRECTIONS
+            if diagnosis is not None:stage=diagnosis['responsible_stage']
+            # 后加装配观察不能以新 Render 洗掉尚未通过的换材复验。
+            if material_recheck is not None and (material_recheck['result'] is None
+                    or material_recheck['result']['state']!='pass' or not material_recheck['result']['evidence_current']):
+                explicit_quality_owner=True
+                if material_recheck['result'] is None:action,stage='verify_material','assembly'
+                else:
+                    action='stopped';stage=material_recheck['result'].get('responsible_stage') or 'unknown'
+                    reasons=material_recheck['result'].get('stop_reasons') or ['material_semantic_recheck_not_passed']
+                    if material_recheck['result']['evidence_current'] is False:
+                        stage='unknown';reasons=['material_semantic_recheck_stale']
+            elif diagnosis is None:action,stage='review','review'
+            elif any(finding.get('needs_semantic_diagnosis') for finding in diagnosis.get('findings',[diagnosis])):
+                action='diagnose_semantic'
+            elif all(finding['assessment_state']=='known' and (finding['finding'] in PRESENTATION_CORRECTIONS or (
+                    finding['finding']=='semantic_mismatch'
+                    and finding['responsible_stage']=='material' and finding.get('evidence_current'))
+                    ) for finding in diagnosis.get('findings',[diagnosis])) and row['repair_allowance']>0:
+                action='diagnose_quality'
+            else:
+                action='stopped';reasons=['quality_scoped_fix_required:'+diagnosis['responsible_stage']]
         elif failed:
             qa = JobType.VERIFY_VOICE if stage == "voice" else JobType.VERIFY_TALKING
             if (row["automatic"] and row["repair_allowance"] > 0
@@ -688,13 +888,34 @@ class VideoProductionService:
             reasons = auto_reasons or ([failed[0].error_code or "job_failed"] if failed else
                 [parent.error_code or 'production_start_'+parent.status.value] if parent is not None
                     and parent.status in {JobStatus.FAILED,JobStatus.CANCELLED} else ["production_stopped"])
+        if action=='stopped' and not explicit_quality_owner:
+            # Run停在哪一阶段不等于缺陷归哪一道工序；只映射已明确的失败原因。
+            if diagnosis and any(reason.removeprefix('automatic_stop:').startswith('presentation_') for reason in reasons):
+                stage=diagnosis['responsible_stage']
+            for reason in reasons:
+                code=reason.removeprefix('automatic_stop:').partition(':')[0]
+                if code.startswith(('scene_planner_','visual_revision_')) or code=='planning_tail_budget':
+                    stage='planning';break
+                if code.startswith(('semantic_','material_semantic_recheck_')):
+                    stage='assembly';break
+                if code.startswith(('material_','external_acquisition_','landscape_fallback_','source_usage_','source_semantic_','talking_motion_')) or code=='creator_talking_reference_not_configured':
+                    stage='material';break
+                if code in {'draft_talking_interval_mismatch','draft_talking_speech_would_be_cut','master_narration_interval_mismatch','master_scene_timing_unresolved'}:
+                    stage='timing';break
+                if code=='talking_qa_narration_requires_voice_repair':
+                    stage='voice';break
+                if code in {'preliminary_edit_plan_conflict','visual_presentation_unresolved'}:
+                    stage='assembly';break
         next_job=next((job for job in jobs if job.status in {JobStatus.PENDING,JobStatus.RUNNING}),None) if action=='continue' else None
-        return {"status": "diagnosing_qa" if action == "diagnose_qa" else ("failed" if action == "stopped" else None),
+        return {"status": "diagnosing_qa" if action in DIAGNOSTIC_ACTIONS else ("failed" if action == "stopped" else None),
             "next_action": action, "responsible_stage": stage, "stop_reasons": reasons,
+            "quality_diagnosis":diagnosis,
+            'material_recheck':None if material_recheck is None else material_recheck['result'],
+            'material_repair_id':None if material_recheck is None else material_recheck['repair_id'],
             "next_job_id":str(next_job.id) if next_job is not None else None,
             "next_job_type":next_job.type.value if next_job is not None else None}
 
-    def decision_for_run(self,run_id,handler_types):
+    def decision_for_run(self,run_id,handler_types) -> ProductionDecision:
         from app.production_runs import production_run_jobs
         row,jobs=production_run_jobs(self.db,run_id)
         return self._queue_decision(row,jobs,handler_types)
@@ -709,14 +930,39 @@ class VideoProductionService:
         query="SELECT * FROM production_runs WHERE stage IN ('voice','awaiting_talking','render')"
         for row in self.db.connection.execute(query+(' AND id=?' if run_id is not None else ''),
             (str(run_id),) if run_id is not None else ()).fetchall():
-            if row["render_job_id"]:
-                render=JobRepository(self.db).get(UUID(row["render_job_id"]))
-                if render and render.status is JobStatus.COMPLETED:continue
+            if row['render_job_id'] and self._current_render_replay(row):
+                render=JobRepository(self.db).get(UUID(row['render_job_id']))
+                if render and render.status is JobStatus.COMPLETED and self.decision_for_run(UUID(row['id']),handler_types)['next_action']=='review':
+                    self._observe_render_spec(render,row)
+                    row=self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(row['id'],)).fetchone()
             pending=IN_PROGRESS_REASONS
             reasons=json.loads(row["waiting_stop_reasons"])
             _,jobs=production_run_jobs(self.db,UUID(row["id"]))
             decision=self._queue_decision(row,jobs,handler_types)
             if decision["next_action"] == "stopped":continue
+            if decision['next_action']=='verify_material':
+                if JobType.RENDER not in handler_types:continue
+                if self.semantic_diagnoser is None:
+                    from app.presentation_semantic import PresentationSemanticDiagnosis
+                    diagnoser=PresentationSemanticDiagnosis(self.db,self.root,None,None,None)
+                else:diagnoser=self.semantic_diagnoser
+                diagnoser.verify_material_repair(UUID(row['project_id']),UUID(row['id']),UUID(decision['material_repair_id']))
+                continue
+            if decision['next_action']=='diagnose_semantic':
+                if JobType.RENDER not in handler_types:continue
+                finding=next(value for value in decision['quality_diagnosis'].get('findings',[decision['quality_diagnosis']])
+                    if value.get('needs_semantic_diagnosis'))
+                if self.semantic_diagnoser is None:
+                    from app.presentation_semantic import PresentationSemanticDiagnosis
+                    diagnoser=PresentationSemanticDiagnosis(self.db,self.root,None,None,None)
+                else:diagnoser=self.semantic_diagnoser
+                diagnoser.diagnose(UUID(row['project_id']),UUID(row['id']),UUID(finding['observation_id']))
+                continue  # 只保存诊断；语义修正尚无受支持执行器，不由此重生媒体。
+            if decision['next_action']=='diagnose_quality':
+                self._repair_presentation(row,decision['quality_diagnosis'])
+                current,jobs=production_run_jobs(self.db,UUID(row['id']))
+                if self._queue_decision(current,jobs,handler_types)['next_action']=='continue':candidates.extend(jobs)
+                continue
             if decision["next_action"] == "diagnose_qa":
                 from app.production_runs import ProductionRunNotReady,ProductionRunConflict
                 if row['stage']=='voice' and {JobType.GENERATE_VOICE,JobType.VERIFY_VOICE}<=handler_types:
@@ -758,12 +1004,12 @@ class VideoProductionService:
         state=start.status if run is None or start.status in {JobStatus.FAILED,JobStatus.CANCELLED} else run.status
         decision = self._queue_decision(production_run_jobs(self.db, run.id)[0] if run else
             dict(stage='planning',waiting_stop_reasons='[]',voice_qa_auto_stop_reasons='[]',start_job_id=None,
-                automatic=1,repair_allowance=0),jobs[1:] if run else [start],set(JobType))
+                automatic=1,repair_allowance=0,voice_audio_id=None),jobs[1:] if run else [start],set(JobType))
         failed_job=next((job for job in reversed(jobs) if job.status is JobStatus.FAILED),None)
         error=start.error_code or (failed_job.error_code if failed_job else None)
-        if decision and decision["next_action"] == "diagnose_qa":
+        if decision["next_action"] in DIAGNOSTIC_ACTIONS:
             state=decision["status"];error=None
-        elif decision and decision["next_action"] == "stopped":
+        elif decision["next_action"] == "stopped":
             state=run.status if run and (run.status=="cancelled" or run.status.endswith("_failed")) else (start.status if not run else "failed")
             error=error or decision["stop_reasons"][0].removeprefix("automatic_stop:")
         if state=="failed" or str(state).endswith("_failed"):
@@ -780,11 +1026,10 @@ class VideoProductionService:
             **s.material_request.model_dump(mode="json")) for s in draft.scenes if s.material_request]
             if draft and f"content_plan_job:{origin_id}" in draft.evidence_refs else [])
         return dict(start_job_id=str(start.id),topic=start.payload.topic,status=state,
-            next_action=decision["next_action"] if decision else None,
-            responsible_stage=decision["responsible_stage"] if decision else "planning",
-            next_job_id=decision["next_job_id"] if decision else None,
-            next_job_type=decision["next_job_type"] if decision else None,
-            stop_reasons=decision["stop_reasons"] if decision else [],
+            next_action=decision["next_action"],material_recheck=decision['material_recheck'],
+            responsible_stage=decision["responsible_stage"],next_job_id=decision["next_job_id"],
+            next_job_type=decision["next_job_type"],stop_reasons=decision["stop_reasons"],
+            quality_diagnosis=decision['quality_diagnosis'],
             material_requests=material_requests,
             can_resume=resumable,resume_draft_version=draft.version if resumable else None,
             origin_job_id=str(origin_id),

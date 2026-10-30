@@ -10,7 +10,7 @@ from app.video_production import VideoProductionService
 
 def _row(**changes):
     row = dict(waiting_stop_reasons='[]', voice_qa_auto_stop_reasons='[]',
-               start_job_id=None, stage='voice', automatic=1, repair_allowance=1)
+               start_job_id=None, stage='voice', automatic=1, repair_allowance=1,voice_audio_id=None)
     row.update(changes)
     return row
 
@@ -41,6 +41,23 @@ def test_completed_reconciles_before_automatic_advance_and_propagates_worker_cap
     job = SimpleNamespace(type=JobType.GENERATE_VOICE, id='voice')
     service.completed(job, set())
     service.runs.reconcile_completed_voice_job.assert_called_once_with('voice', qa_worker_ready=False)
+
+
+@pytest.mark.parametrize('reason,owner',[
+    ('automatic_stop:material_scene_unresolved:comparison','material'),
+    ('automatic_stop:talking_motion_capacity_insufficient','material'),
+    ('automatic_stop:landscape_fallback_dominates_video:comparison','material'),
+    ('automatic_stop:draft_talking_speech_would_be_cut','timing'),
+    ('automatic_stop:talking_qa_narration_requires_voice_repair','voice'),
+    ('automatic_stop:visual_presentation_unresolved:caption','assembly'),
+    ('automatic_stop:scene_planner_response_invalid','planning'),
+    ('automatic_stop:visual_revision_changed_content','planning'),
+])
+def test_known_failure_returns_to_its_owner_instead_of_the_runs_current_stage(reason,owner):
+    service=VideoProductionService(Mock(),'.')
+    decision=service._queue_decision(_row(stage='voice',waiting_stop_reasons=json.dumps([reason])),[],set(JobType))
+    assert decision['next_action']=='stopped' and decision['responsible_stage']==owner
+    assert decision['next_job_id'] is None
 
 
 @pytest.mark.parametrize('stop',['parent_failed','cancelled','unknown'])

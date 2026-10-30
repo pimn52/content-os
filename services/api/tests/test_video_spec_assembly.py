@@ -449,6 +449,10 @@ def test_legacy_single_scene_narration_uses_measured_audio_duration(tmp_path: Pa
         assert rendered_scene.duration_frames == 24
         assert rendered_scene.narration_start_ms == 0
         assert rendered_scene.narration_end_ms == 800
+        assert spec.edit_plan.whole_video.timing_basis == "rendered_timeline"
+        assert spec.edit_plan.whole_video.duration_ms == 800
+        assert spec.edit_plan.whole_video.scenes[0].duration_ms == 800
+        assert spec.edit_plan.whole_video.source_identity_basis == "source_lineage"
         assert rendered_scene.visual.clip_start_ms == clips[0].start_ms
         assert rendered_scene.visual.clip_end_ms == clips[0].start_ms + 800
         assert [(caption.start_ms, caption.end_ms) for caption in rendered_scene.captions] == [(0, 300), (350, 800)]

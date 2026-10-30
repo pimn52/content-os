@@ -15,7 +15,11 @@ type VoiceAudio = {
   metadata: Record<string, unknown> & { voice_generation?: Record<string, unknown> };
 };
 type RepairPlan = {
-  project_id: string; run_id: string; fingerprint: string; action: "regenerate_take" | "replan" | "stop";
+  project_id: string; run_id: string; fingerprint: string; action: "regenerate_take" | "scoped_fix_required" | "replan" | "stop";
+  responsible_stage?: "material" | "timing" | "voice" | "talking" | "assembly" | "unknown"; assessment_state?: "known" | "unknown";
+  scope?: { scene_id?: string | null; start_ms?: number | null; end_ms?: number | null; generation_segment_index?: number | null; start_char?: number | null; end_char?: number | null };
+  preserves?: { master_audio_id?: string | null; master_audio_sha256?: string | null; talking_job_ids?: string[]; talking_output_asset_ids?: string[]; scene_plan_ids?: string[]; render_job_id?: string | null; reused_segment_sha256?: string[] };
+  required_capability?: string[];
   failure_kind: string; stop_reasons: string[]; remaining_run_repairs: number; max_tts_calls: number;
   max_qa_asr_calls: number; external_charge_ceiling: string; local_compute_cost: null; user_active_minutes: null;
   execution_granularity: string; review_scope: string; worker_readiness: string; evidence: Record<string, unknown>;
@@ -30,6 +34,16 @@ const dimensions = [
   ["likeness", "本人相似度"], ["naturalness", "自然度"], ["emphasis", "重点表达"],
   ["pace", "语速"], ["pauses", "停顿"], ["rhythm", "节奏"],
 ] as const;
+const repairStages: Record<string, string> = { material: "素材与用途", timing: "配时与节奏", voice: "声音", talking: "人物画面", assembly: "字幕与装配", unknown: "责任待定位" };
+const repairCapabilities: Record<string, string> = {
+  exact_audio_naturalness_diagnosis: "诊断确切音频的自然度",
+  consumed_voice_dependency_repair: "声音修改后更新受影响的人物画面与成片",
+  exact_audio_quality_failure_localization: "将声音质量缺陷定位到确切片段",
+  exact_audio_failure_diagnosis: "诊断确切音频或生成失败的原因",
+  voice_request_correction: "修正声音生成请求中的具体问题",
+  voice_generation_segment_delivery_binding: "将声音生成片段与讲述意图准确对应",
+  exact_scene_defect_diagnosis: "定位本场景缺陷的具体原因",
+};
 function errorMessage(reason: unknown) { return reason instanceof Error ? reason.message : "请求失败；请刷新执行状态后重试。"; }
 
 export function ProductionVoicePanel({ projectId, draftVersion, scriptRevision, run, request, confirmAction = message => window.confirm(message), onRunChange }: {
@@ -78,14 +92,14 @@ export function ProductionVoicePanel({ projectId, draftVersion, scriptRevision, 
       if (!active()) return;
       if (value.project_id !== projectId || value.run_id !== run.id) throw new Error("后台修复方案与当前项目/执行不一致，已拒绝使用。");
       setRepairPlan(value);
-      if (value.action !== "regenerate_take") setNotice("后台建议暂停或重规划；下面列出完整停止原因。");
+      if (value.action !== "regenerate_take" || value.assessment_state === "unknown") setNotice("当前尚无可执行的声音修复；下面列出责任范围、待补能力与停止原因。");
     } catch (reason) { if (active()) setError(errorMessage(reason)); }
     finally { if (active()) { locked.current = false; setBusy(false); } }
   }
 
   async function submitRepair(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!repairPlan || repairPlan.action !== "regenerate_take" || repairPlan.stop_reasons.length || repairPlan.remaining_run_repairs <= 0 || !repairReason.trim() || locked.current) return;
+    if (!repairPlan || repairPlan.action !== "regenerate_take" || repairPlan.assessment_state === "unknown" || repairPlan.stop_reasons.length || repairPlan.remaining_run_repairs <= 0 || !repairReason.trim() || locked.current) return;
     const repairDescription = repairPlan.execution_granularity === "segment" ? "只重做已定位的缺陷段，保留其它合格声音" : "重新生成同一旁白全文";
     if (!confirmAction(`${repairDescription}。至多 1 次本地 TTS 与 1 次独立 QA，外部收费上限 ${repairPlan.external_charge_ceiling}。原结果与证据保留，新主旁白重新完整核验并待复核。确认执行？`)) return;
     const token = ++actionEpoch.current; const expected = scope;
@@ -214,13 +228,21 @@ export function ProductionVoicePanel({ projectId, draftVersion, scriptRevision, 
       <h4>声音修复</h4><p>有确切分段核验时仅重做缺陷段，保留其它合格声音。新主旁白须重新完整核验并待复核。</p>
       {!repairPlan && ["voice_failed", "voice_qa_failed", "u_voice_rejected"].includes(run.status) && <button type="button" className="button" disabled={busy} onClick={() => void inspectRepair()}>检查 Voice 修复方案（只读）</button>}
       {repairPlan && <><p>判断：{repairPlan.failure_kind} · {repairPlan.action} · Run 剩余额度 {repairPlan.remaining_run_repairs} · QA：{repairPlan.review_scope}</p>
+        <p>责任工序：{repairStages[repairPlan.responsible_stage ?? "voice"]} · 诊断：{repairPlan.assessment_state === "known" ? "已有本项诊断证据" : repairPlan.assessment_state === "unknown" ? "待补证据，尚未定位可执行修复" : "由后台候选复核"}</p>
+        <p>问题范围：{repairPlan.scope?.scene_id ? `场景 ${repairPlan.scope.scene_id}` : "当前声音"}{repairPlan.scope?.start_ms != null && repairPlan.scope?.end_ms != null ? ` · ${repairPlan.scope.start_ms}–${repairPlan.scope.end_ms} ms` : " · 时间区间待定位"}</p>
+        {repairPlan.scope?.generation_segment_index != null && <p>原生成第 {repairPlan.scope.generation_segment_index + 1} 段{repairPlan.scope.start_char != null && repairPlan.scope.end_char != null ? ` · 文案字符 ${repairPlan.scope.start_char}–${repairPlan.scope.end_char}` : ""}</p>}
+        {!!repairPlan.required_capability?.length && <div><p>待补能力或证据：</p><ul>{repairPlan.required_capability.map(capability => <li key={capability}>{repairCapabilities[capability] ?? capability}</li>)}</ul></div>}
+        {repairPlan.preserves && <><p>保留主旁白：{repairPlan.preserves.master_audio_id ?? "当前尚无主旁白"}{repairPlan.preserves.master_audio_sha256 ? ` · SHA-256 ${repairPlan.preserves.master_audio_sha256}` : ""}</p>
+          <p>保留人物 Job：{repairPlan.preserves.talking_job_ids?.join(" · ") || "当前执行无已绑定人物 Job"}</p><p>保留人物输出：{repairPlan.preserves.talking_output_asset_ids?.join(" · ") || "当前执行无已绑定人物输出"}</p>
+          <p>保留场景方案：{repairPlan.preserves.scene_plan_ids?.join(" · ") || "身份未知"} · 保留成片 Job：{repairPlan.preserves.render_job_id ?? "当前无成片"}</p></>}
+        {!!repairPlan.preserves?.reused_segment_sha256?.length && <p>复用合格声音段 SHA-256：{repairPlan.preserves.reused_segment_sha256.join(" · ")}</p>}
         <p>后台范围：{repairPlan.execution_granularity} · TTS 上限 {repairPlan.max_tts_calls} · QA ASR 上限 {repairPlan.max_qa_asr_calls} · 外部收费上限 {repairPlan.external_charge_ceiling} · Worker 实时就绪：{repairPlan.worker_readiness} · 本机成本/用户时间未知</p>
         {repairPlan.stop_reasons.length > 0 && <ul>{repairPlan.stop_reasons.map(reason => <li className="error" key={reason}>{reason}</li>)}</ul>}
-        {repairPlan.action === "regenerate_take" && <form className="subform" onSubmit={event => void submitRepair(event)}>
+        {repairPlan.action === "regenerate_take" && repairPlan.assessment_state !== "unknown" && <form className="subform" onSubmit={event => void submitRepair(event)}>
           <label>修复理由<input value={repairReason} disabled={busy} onChange={event => setRepairReason(event.target.value)} required maxLength={2000} /></label>
           <button className="button primary" disabled={busy || !repairReason.trim() || repairPlan.stop_reasons.length > 0 || repairPlan.remaining_run_repairs <= 0}>按方案修复声音</button>
         </form>}
-        {repairPlan.action === "replan" && <p className="muted"><a href="#project-draft-editor">编辑当前稿件</a>，保存后<a href="#production-preflight">重新预检整条方案</a>。主观不合格需要重规划；此处不会剪接原音频。</p>}
+        {(repairPlan.action === "scoped_fix_required" || repairPlan.action === "replan" || repairPlan.assessment_state === "unknown") && <p className="muted">此声音缺陷尚未定位可执行的修复范围。保留当前音频和其它合格成果，先补齐声音诊断，再确定需修改的语音片段及下游复检范围。</p>}
       </>}
       {repairRecords.map(record => <article className="scene" key={record.id}><strong>Voice 修复历史 · {record.replacement_job_status ?? "排队"}</strong>
         <p>理由：{record.reason} · 前序 Job：{record.old_job_ids.filter(Boolean).join("、") || "无"} · 前序 AudioAsset：{record.old_audio_id ?? "无"}</p>

@@ -214,10 +214,11 @@ def _write_render_failure_diagnostic(job: Job, root: Path, stage: str, error: Ex
 class RenderVideoJobHandler:
     """Render one persisted VideoSpec to its fixed local output path."""
 
-    def __init__(self, projects: ProjectLookup, renderer: RemotionRenderer, output_root: str | Path) -> None:
+    def __init__(self, projects: ProjectLookup, renderer: RemotionRenderer, output_root: str | Path, *, semantic_diagnoser=None) -> None:
         self._projects = projects
         self._renderer = renderer
         self._output_root = Path(output_root).resolve()
+        self.semantic_diagnoser = semantic_diagnoser
 
     @property
     def db(self):
@@ -244,11 +245,24 @@ class RenderVideoJobHandler:
         stage = "dispatch"
         try:
             if database is not None:
+                from app.media.semantic_rejections import SemanticUseRejected, require_spec_semantics
+                try:
+                    require_spec_semantics(database, payload.video_spec)
+                except SemanticUseRejected as exc:
+                    failure = JobExecutionError(exc.reasons[0], "当前来源区间已有明确的用途不符证据；保留旁白与人物结果，返回素材替换。", retryable=False)
+                    failure.semantic_hits = exc.hits
+                    raise failure from exc
                 from app.source_usage import SourceUsageService, SourceUsageConflict
                 try:
                     SourceUsageService(database).require_render(job)
                 except SourceUsageConflict as exc:
-                    raise JobExecutionError(exc.reason, "画面来源区间重复或已被其他视频占用，请重新规划", retryable=False) from exc
+                    raise JobExecutionError(exc.reason, "画面来源区间重复或已被其他作品占用，返回素材调度并保留合格旁白与人物结果", retryable=False) from exc
+                from app.assembly.edit_plan import review_video_spec
+                reviewed = review_video_spec(payload.video_spec, AssetRepository(database),
+                    source_uses=SourceUsageService(database).spec_uses(payload.video_spec))
+                whole_video = reviewed.edit_plan.whole_video if reviewed.edit_plan is not None else None
+                if whole_video is not None and whole_video.stop_reasons:
+                    raise JobExecutionError(whole_video.stop_reasons[0], "整片画面组合需返回素材调度，保留合格旁白与人物结果", retryable=False)
             if database is not None and payload.video_spec.master_narration is not None:
                 from app.voice_plan import require_project_voice_audio
                 master = AudioAssetRepository(database).get(payload.video_spec.master_narration.audio_asset_id)
@@ -258,11 +272,17 @@ class RenderVideoJobHandler:
             if database is not None and database.connection.execute("SELECT id FROM presentation_repairs WHERE replacement_job_id=?", (str(job.id),)).fetchone():
                 from app.presentation_repair import PresentationRepairService
                 from app.production_runs import ProductionRunNotReady
-                repair_service = PresentationRepairService(database, self._renderer.data_root, self._output_root)
+                repair_service = PresentationRepairService(database, self._renderer.data_root, self._output_root,
+                    semantic_diagnoser=self.semantic_diagnoser)
                 ledger = ProviderCallLedger(database)
                 try:
                     call = repair_service.reserve_render(job)
-                except (ProductionRunNotReady, BudgetLimitError, ProviderCallError, ValueError):
+                except ProductionRunNotReady as error:
+                    reason=next((value for value in error.reasons if value.startswith(('material_recheck_','material_semantic_'))),None)
+                    if reason:
+                        raise JobExecutionError(reason,'实际画面复验的能力或预算尚未就绪，未开始渲染。',retryable=False) from None
+                    raise JobExecutionError("presentation_repair_not_admitted", "presentation repair admission or budget changed", retryable=False) from None
+                except (BudgetLimitError, ProviderCallError, ValueError):
                     raise JobExecutionError("presentation_repair_not_admitted", "presentation repair admission or budget changed", retryable=False) from None
             stage = "renderer"
             run_row = None if database is None else database.connection.execute(

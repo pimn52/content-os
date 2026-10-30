@@ -4,11 +4,22 @@ import { recoveryIdempotencyKey, recoveryIdentity, type ProductionRun } from "./
 type Request = <T>(path: string, options?: RequestInit) => Promise<T>;
 type RenderJob = { id: string; type: string; status: string; render_id: string | null; preview_url: string | null; error_code: string | null };
 type Draft = { scenes: Array<{ id: string; scene_id: string; caption_emphasis: string[] }> };
-type Finding = "duplicate_text" | "known_subtitle_conflict" | "text_overlay" | "face_out_of_frame" | "source_change" | "unknown_subtitles";
-type Observation = { id: string; render_job_id: string; request: { idempotency_key: string; render_sha256: string; scene_id: string; finding: Finding; reason: string; evidence_reference: string } };
+type Finding = "duplicate_text" | "known_subtitle_conflict" | "text_overlay" | "face_out_of_frame" | "source_change" | "unknown_subtitles" | "voice_naturalness" | "talking_naturalness" | "visible_sync" | "semantic_mismatch" | "narrative_rhythm";
+type MachineDiagnosis = { source: string; method: string; provider?: string | null; model?: string | null; call_id?: string | null; state: string; limitations?: string[] };
+type MaterialRecheck = {state:"pass"|"failed"|"unknown";assessment_state:string;responsible_stage:string;limitations:string[];
+  required_capability:string[];evidence_current:boolean|null;scope?:{scene_id?:string;scene_ids?:string[]}|null};
+type Observation = { id: string; render_job_id: string; source?: "human_observation" | "deterministic_spec_qa"; request: { idempotency_key: string; render_sha256: string; scene_id: string; finding: Finding; reason: string; evidence_reference: string } };
 type SceneChange = { scene_id: string; before: Record<string, unknown>; after: Record<string, unknown> };
 type PresentationPlan = {
-  project_id: string; run_id: string; observation: Observation; fingerprint: string; action: "render_revision" | "replan" | "stop"; stop_reasons: string[]; changes: SceneChange[];
+  project_id: string; run_id: string; observation: Observation; fingerprint: string; action: "render_revision" | "scoped_fix_required" | "replan" | "stop"; stop_reasons: string[]; changes: SceneChange[];
+  responsible_stage?: "material" | "timing" | "voice" | "talking" | "assembly" | "unknown"; assessment_state?: "known" | "unknown";
+  scope?: { scene_id: string; start_ms: number | null; end_ms: number | null };
+  preserves?: { master_audio_id: string | null; master_audio_sha256?: string | null; talking_job_ids: string[]; talking_output_asset_ids: string[]; scene_plan_ids: string[] };
+  required_capability?: string[];
+  material_replacements?: Array<{scene_id:string}>;
+  semantic_recheck_calls?: number;
+  diagnoses?: Array<{observation_id:string;finding:Finding;scope:{scene_id:string;start_ms:number;end_ms:number};assessment_state:string;
+    responsible_stage?:string;machine_diagnosis?:MachineDiagnosis;evidence_current?:boolean}>;
   remaining_run_repairs: number; max_local_render_calls: number; voice_calls: number; talking_calls: number;
   external_charge_ceiling: string; local_compute_cost: null; user_active_minutes: null; review_scope: string;
   candidate_spec: { master_narration: { audio_asset_id: string } | null; edit_plan: { scenes: Array<{ scene_id: string; selected_asset_id: string | null }> } | null } | null;
@@ -16,19 +27,49 @@ type PresentationPlan = {
 type RepairRecord = {
   id: string; reason: string; replacement_job_id: string; status: string; final_review_state: string;
   technical_qa: null | { state: string; sha256?: string; width?: number; height?: number; duration_ms?: number; scope?: string };
+  semantic_recheck?: MaterialRecheck | null;
   plan: { observation: Observation; action: string; predecessor_job: { id: string; payload: { render_id?: string; video_spec?: { master_narration?: { audio_asset_id: string } | null } } };
-    changes: SceneChange[]; candidate_spec?: PresentationPlan["candidate_spec"]; remaining_run_repairs: number };
+    changes: SceneChange[]; candidate_spec?: PresentationPlan["candidate_spec"]; remaining_run_repairs: number;
+    semantic_recheck_calls?:number;material_replacements?:Array<{scene_id:string}> };
   provider_calls?: Array<{ status: string; actual_cost: { amount: string | null } | null }>;
 };
 const findings: Array<[Finding, string]> = [
   ["duplicate_text", "新标题重复了旁白全文"],
   ["known_subtitle_conflict", "Timed 字幕与已确认的原字幕冲突"],
   ["text_overlay", "文字与人物画面重叠"],
-  ["face_out_of_frame", "人脸超出画面（需要重规划）"],
-  ["source_change", "需要更换来源或时间区间（需要重规划）"],
-  ["unknown_subtitles", "原字幕情况未知（需要重规划）"],
+  ["face_out_of_frame", "人脸超出画面"],
+  ["source_change", "需要更换来源或时间区间"],
+  ["unknown_subtitles", "原字幕情况未知"],
+  ["voice_naturalness", "声音不自然"],
+  ["talking_naturalness", "人物表演不自然"],
+  ["visible_sync", "人物口型与声音不同步"],
+  ["semantic_mismatch", "画面与讲述含义不匹配"],
+  ["narrative_rhythm", "讲述节奏不合适"],
 ];
 const labels: Record<string, string> = { timed_captions: "按时间显示字幕", none: "不叠加新字幕", headline: "标题", contrast: "对照", key_point: "要点", portrait_panel: "竖屏面板", full_canvas: "铺满画面" };
+const stages: Record<string, string> = { material: "素材与用途", timing: "配时与节奏", voice: "声音", talking: "人物画面", assembly: "字幕与装配", unknown: "责任待定位" };
+const capabilityLabels: Record<string, string> = {
+  joint_scoped_repair_plan: "把同一成片的多个问题合并为局部修正方案",
+  exact_render_text_duplication_diagnosis: "核对确切成片中的文字重复",
+  full_interval_source_subtitle_analysis: "核验本次来源完整区间的原字幕",
+  exact_scene_text_face_layout_diagnosis: "定位本场景文字与人物画面的遮挡",
+  source_vs_render_framing_diagnosis: "区分来源画面与成片裁切造成的人脸出框",
+  scene_source_interval_selection_and_qa: "选择并核验本场景的新来源或区间",
+  scoped_material_replacement: "仅替换受影响场景的素材",
+  exact_audio_naturalness_diagnosis: "诊断确切音频的自然度",
+  consumed_voice_dependency_repair: "声音修改后更新受影响的人物画面与成片",
+  exact_talking_naturalness_diagnosis: "诊断确切人物输出的自然度",
+  render_stage_talking_repair: "成片阶段的人物段修复与复检",
+  render_vs_talking_sync_diagnosis: "对照确切成片、人物段与旁白，定位生成或装配造成的音画不同步",
+  exact_scene_narration_visual_semantics_diagnosis: "诊断本场景讲述与画面含义的匹配",
+  configured_video_comparison_provider: "配置可对照视频的画面核验能力",
+  current_render_semantic_diagnosis: "核验当前成片与原素材的画面语义",
+  semantic_layout_correction: "修正受影响场景的语义呈现",
+  exact_scene_delivery_vs_edit_timing_diagnosis: "区分声音讲述与剪辑配时造成的节奏问题",
+  scoped_timing_reassembly: "仅重排受影响的场景配时",
+  exact_scene_defect_diagnosis: "定位本场景缺陷的具体原因",
+  scene_semantic_short_emphasis_selection: "为本场景选定合适的语义短强调",
+};
 function describe(scene: Record<string, unknown> | undefined) {
   if (!scene) return "无对应场景";
   return [
@@ -39,6 +80,12 @@ function describe(scene: Record<string, unknown> | undefined) {
   ].join(" · ");
 }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : "请求失败；刷新执行状态后检查服务端原因。"; }
+function recheckText(value: MaterialRecheck) {
+  if (value.evidence_current === false) return "替换画面的复验结果已失效；保留成果，需重新定位。";
+  if (value.state === "pass") return "替换场景的机器画面复验通过，仍待整片人审。";
+  return value.state === "failed" ? "替换后的画面复验未通过；保留现有成果，需修正受影响场景。"
+    : "替换后的画面尚未确认符合讲述含义；保留现有成果，需继续定位。";
+}
 function observationStorageKey(projectId: string, runId: string, jobId: string, hash: string) {
   return `content-os-presentation-observation:${projectId}:${runId}:${jobId}:${hash}`;
 }
@@ -62,11 +109,26 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
   ]));
   const identityRef = useRef(identity); identityRef.current = identity;
   const base = `/projects/${projectId}/production-runs/${run.id}`;
-  const canInspect = run.status === "render_completed_awaiting_review" && job?.status === "completed" && !!renderHash && !!renderUrl;
+  const currentRepair = records.find(record => record.replacement_job_id === run.render_job_id);
+  const materialRecheckPending = job?.status === "completed" && !!currentRepair
+    && !!currentRepair.plan.semantic_recheck_calls && !currentRepair.semantic_recheck;
+  const canInspect = run.status === "render_completed_awaiting_review" && job?.status === "completed" && !!renderHash && !!renderUrl && !materialRecheckPending;
   const scenes = draft?.scenes ?? [];
-  const retainedMaster = plan?.candidate_spec?.master_narration?.audio_asset_id ?? run.voice_audio_id ?? run.talking_master_audio_id ?? null;
+  const retainedMaster = plan?.preserves?.master_audio_id ?? plan?.candidate_spec?.master_narration?.audio_asset_id ?? run.voice_audio_id ?? run.talking_master_audio_id ?? null;
+  const semanticDiagnoses = plan?.diagnoses?.filter(item => item.finding === "semantic_mismatch" && item.machine_diagnosis) ?? [];
   const currentScene = scenes.find(item => item.scene_id === sceneId);
   const sceneChoices = useMemo(() => scenes.map(item => ({ id: item.scene_id, label: item.scene_id })), [draft]);
+
+  useEffect(() => {
+    if (!materialRecheckPending) return;
+    const token = epoch.current; const expected = identity;
+    const timer = setInterval(() => {
+      void request<RepairRecord[]>(base + "/presentation-repairs").then(history => {
+        if (token === epoch.current && identityRef.current === expected) setRecords(history);
+      }).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [materialRecheckPending, identity, base, request]);
 
   useEffect(() => {
     const token = ++epoch.current; const expected = identity;
@@ -145,7 +207,7 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
 
   async function submitRepair(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!observation || !plan || plan.action !== "render_revision" || plan.stop_reasons.length || plan.remaining_run_repairs <= 0 || !retainedMaster || !repairReason.trim() || locked.current) return;
+    if (!observation || !plan || plan.action !== "render_revision" || plan.assessment_state === "unknown" || plan.stop_reasons.length || plan.remaining_run_repairs <= 0 || !retainedMaster || !repairReason.trim() || locked.current) return;
     const talkingDependencies = (run.talking_preview_dependencies ?? []).map(item => `${item.scene_plan_id}:${item.series_id}:${item.output_asset_id ?? "no-output"}`).join("、") || "无当前 Run 级 Talking 预览绑定";
     if (!confirmAction(`将基于已显示的改前/改后方案创建新 Render。保留主旁白 ${retainedMaster ?? "身份未知"} 与人物来源绑定 ${talkingDependencies}；不派发 Voice/Talking；新输出技术检查后仍待完整 U-Product 审核。确认执行吗？`)) return;
     const token = epoch.current; const expected = identity; locked.current = true; setBusy(true); setError(""); setNotice("");
@@ -191,7 +253,8 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
   return <section className="draft-editor" aria-label="此执行的成片呈现修复">
     <div className="row-between"><div><span className="kicker">PRESENTATION / RENDER REVISION</span><h3>成片呈现与新版本</h3></div><span className="badge">{run.status}</span></div>
     {error && <p role="alert" className="error">{error}</p>}{notice && <p role="status" className="ok">{notice}</p>}
-    <p className="muted">仅检查完整 Render 文件中的具体场景。记录为人工观察，按当前方案修复后会建立新的 Render；原主旁白、Talking 来源、原版本及审批记录分别保留。</p>
+    <p className="muted">检查完整成片中的具体场景，可登记人工观察或查看自动方案检查。按支持的方案修复后建立新版本，原主旁白、人物结果、原版本及审核记录分别保留。</p>
+    {materialRecheckPending&&<p role="status">正在复核替换后的实际画面。旁白、人物结果和其它场景继续保留；复验后再交整片审核。</p>}
     {job && <p>当前 Render Job {job.id} · {job.status} · {job.error_code ?? "无技术错误码"} · {renderHash ? `SHA-256 ${renderHash}` : "媒体 hash 未读取"}</p>}
     {canInspect && <section aria-label="完整成片审核" className="subform">
       <p>{choice==="selected"?"当前选用版":choice==="discarded"?"不予使用，未发布占用已释放":run.delivery_intent==="draft"?"仅试做与比较：保留使用记录，不挤占正式作品":"作品候选：已保留占用，同作品版本可继续比较"}</p>
@@ -214,23 +277,34 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
       <label>证据引用（如 Render 时间点/人工检查记录）<input value={evidence} disabled={busy} onChange={event => { clearObservationDraft(); setEvidence(event.target.value); }} required maxLength={2000} /></label>
       <button className="button" disabled={busy || !currentScene || !reason.trim() || !evidence.trim()}>确认记录人工观察</button>
     </form>}
-    {observation && <article className="scene"><h4>人工观察引用（读取方案时由后台复核）</h4><p>Render {observation.render_job_id} / SHA-256 {observation.request.render_sha256} · 场景 {observation.request.scene_id} · {findings.find(([key]) => key === observation.request.finding)?.[1]}</p>
+    {observation && <article className="scene"><h4>{observation.source === "deterministic_spec_qa" ? "自动方案检查" : "人工观察"}引用（读取方案时由后台复核）</h4><p>Render {observation.render_job_id} / SHA-256 {observation.request.render_sha256} · 场景 {observation.request.scene_id} · {findings.find(([key]) => key === observation.request.finding)?.[1]}</p>
       <p>{observation.request.reason} · 证据：{observation.request.evidence_reference}</p>
       {!plan && <button type="button" className="button" disabled={busy} onClick={() => void inspectPlan()}>读取修复候选方案</button>}
     </article>}
     {plan && <article className="scene" aria-label="呈现修复候选">
       <h4>后端候选 · {plan.action} · Run 剩余额度 {plan.remaining_run_repairs}</h4>
-      <p>渲染上限 {plan.max_local_render_calls} 次 · Voice {plan.voice_calls} 次 · Talking {plan.talking_calls} 次 · 外部收费上限 {plan.external_charge_ceiling} · 本机成本 / 主动时间未知</p>
-      {(plan.changes ?? []).map(change => <section key={change.scene_id} className="subform"><strong>场景 {change.scene_id}</strong><p>改前：{describe(change.before)}</p><p>改后：{describe(change.after)}</p><p>旁白文案与原音频、来源素材、区间和裁切不由此动作修改。</p></section>)}
+      <p>责任工序：{stages[plan.responsible_stage ?? "unknown"]} · 诊断：{plan.assessment_state === "known" ? "已有本项诊断证据" : plan.assessment_state === "unknown" ? "待补证据，尚未定位可执行修复" : "由后台候选复核"}</p>
+      <p>问题范围：场景 {plan.scope?.scene_id ?? observation?.request.scene_id ?? "未知"}{plan.scope?.start_ms != null && plan.scope?.end_ms != null ? ` · ${plan.scope.start_ms}–${plan.scope.end_ms} ms` : " · 时间区间待定位"}</p>
+      {plan.diagnoses&&plan.diagnoses.length>1&&<><p>{plan.action==="render_revision"?`本次一并处理 ${plan.diagnoses.length} 项问题，只建立一个修订版本。`:`本版保留 ${plan.diagnoses.length} 项问题，尚未建立修订版本。`}</p><ul>{plan.diagnoses.map(item=><li key={item.observation_id}>{item.scope.scene_id} · {findings.find(([key])=>key===item.finding)?.[1]??"质量问题"} · {item.assessment_state==="known"?"已有局部诊断":"待补诊断"}</li>)}</ul></>}
+      {!!semanticDiagnoses.length&&<section aria-label="机器画面语义对照"><h4>机器画面语义对照</h4>
+        <p className="muted">机器仅对照静音画面与旁白文字，不评价听感自然度、口型同步，也不代表最终人审通过。</p>
+        <ul>{semanticDiagnoses.map(item=><li key={item.observation_id}>场景 {item.scope.scene_id} · {item.evidence_current===false?"原诊断证据已失效，需重新定位":item.machine_diagnosis?.state==="known"?`已定位本项责任：${stages[item.responsible_stage??plan.responsible_stage??"unknown"]??"责任待定位"}，${plan.material_replacements?.length?"本方案仅替换问题场景画面":"局部修正仍待核验"}`:"尚未确定本项责任，保留现有成果"}</li>)}</ul>
+      </section>}
+      {!!plan.required_capability?.length && <div><p>待补能力或证据：</p><ul>{plan.required_capability.map(capability => <li key={capability}>{capabilityLabels[capability] ?? capability}</li>)}</ul></div>}
+      <p>渲染上限 {plan.max_local_render_calls} 次 · Voice {plan.voice_calls} 次 · Talking {plan.talking_calls} 次{plan.semantic_recheck_calls?` · 画面复验 ${plan.semantic_recheck_calls} 次`:""} · {plan.external_charge_ceiling==="unknown"?"外部费用待核实，受现有预算约束":`外部收费上限 ${plan.external_charge_ceiling}`} · 本机成本 / 主动时间未知</p>
+      {!!plan.material_replacements?.length&&<p>仅替换已核验的场景素材，保留原时轴、字幕文字、旁白及其它人物画面；{plan.semantic_recheck_calls?`新输出再进行 ${plan.semantic_recheck_calls} 次实际画面复验，之后仍待整片人审。`:"新成片仍需完整质量复核。"}</p>}
+      {(plan.changes ?? []).map(change => <section key={change.scene_id} className="subform"><strong>场景 {change.scene_id}</strong><p>改前：{describe(change.before)}</p><p>改后：{describe(change.after)}</p><p>{plan.material_replacements?.some(item=>item.scene_id===change.scene_id)?"更换本场景来源，并重新核对其字幕与呈现证据；旁白和其它场景保留。":"旁白文案与原音频、来源素材、区间和裁切不由此动作修改。"}</p></section>)}
       <p>保留主旁白：{retainedMaster ?? "身份未知；后端候选/Run 也未给出，不可确认"}</p>
+      {plan.preserves?.master_audio_sha256 && <p>主旁白 SHA-256：{plan.preserves.master_audio_sha256}</p>}
+      {plan.preserves && <><p>保留人物 Job：{plan.preserves.talking_job_ids.join(" · ") || "当前执行无已绑定人物 Job"}</p><p>保留人物输出：{plan.preserves.talking_output_asset_ids.join(" · ") || "当前执行无已绑定人物输出"}</p><p>保留场景方案：{plan.preserves.scene_plan_ids.join(" · ") || "身份未知"}</p></>}
       <p>保留 Talking/人物来源：{(run.talking_preview_dependencies ?? []).map(item => `${item.scene_plan_id}: series ${item.series_id} / output ${item.output_asset_id ?? "无输出"}`).join(" · ") || "当前 Run 无 Talking 预览绑定"}</p>
       <p>画面选择：{plan.candidate_spec?.edit_plan?.scenes?.map(scene => `${scene.scene_id}: ${scene.selected_asset_id ?? "同一版式/无外部素材"}`).join(" · ") || "以原 VideoSpec 为准"}</p>
       {plan.stop_reasons.length > 0 && <ul>{plan.stop_reasons.map(item => <li className="error" key={item}>{item}</li>)}</ul>}
-      {plan.action === "render_revision" && <form className="subform" onSubmit={event => void submitRepair(event)}>
+      {plan.action === "render_revision" && plan.assessment_state !== "unknown" && <form className="subform" onSubmit={event => void submitRepair(event)}>
         <label>本次修复理由<input value={repairReason} disabled={busy} onChange={event => setRepairReason(event.target.value)} required maxLength={2000} /></label>
         <button className="button primary" disabled={busy || !repairReason.trim() || !retainedMaster || plan.stop_reasons.length > 0 || plan.remaining_run_repairs <= 0}>按此方案建立新 Render（后台复核）</button>
       </form>}
-      {plan.action === "replan" && <p className="muted"><a href="#project-draft-editor">编辑当前稿件/场景方案</a>，保存后<a href="#production-preflight">重新预检整条方案</a>。来源、时间段和裁切需要在规划阶段处理。</p>}
+      {(plan.action === "scoped_fix_required" || plan.action === "replan" || plan.assessment_state === "unknown") && <p className="muted">当前缺陷尚无可执行的局部修复。保留现有成果，按责任工序补齐上述诊断或能力，再确定需修改的依赖与复检范围。</p>}
       {plan.action === "stop" && <p className="error">当前不满足修复条件；按上方原因诊断，不重复渲染。</p>}
     </article>}
     {records.map(record => <article className="scene" key={record.id}><h4>呈现修复历史 · 新 Job {record.status}</h4>
@@ -238,6 +312,7 @@ export function PresentationRecoveryPanel({ projectId, run, request, confirmActi
       <p>前序主旁白：{record.plan.predecessor_job.payload.video_spec?.master_narration?.audio_asset_id ?? "未知"} · 当前完整审查：{record.final_review_state}</p>
       {record.plan.changes.map(change => <p key={change.scene_id}>场景 {change.scene_id}：{describe(change.before)} → {describe(change.after)}</p>)}
       {record.technical_qa ? <p>技术 QA：{record.technical_qa.state} · 新文件 hash {record.technical_qa.sha256} · {record.technical_qa.width}×{record.technical_qa.height} · {record.technical_qa.duration_ms} ms · {record.technical_qa.scope}</p> : <p>新输出技术检查尚无可用结果。</p>}
+      {record.semantic_recheck?<><p>{recheckText(record.semantic_recheck)}{record.semantic_recheck.scope?.scene_id&&` 复验场景：${record.semantic_recheck.scope.scene_id}。`}</p><p className="muted">机器只复核替换场景的画面与讲述含义，不评价听感自然度、口型同步，也不代表整片通过。</p></>:!!record.plan.semantic_recheck_calls&&<p>{record.status==="completed"?"正在复核替换后的实际画面。":"新输出完成后将自动复核替换场景的实际画面。"}</p>}
       {(record.provider_calls ?? []).map((call, index) => <small key={index}>本地 Render 调用 · {call.status} · 实际外部费用 {call.actual_cost?.amount ?? "未知"}</small>)}
     </article>)}
   </section>;

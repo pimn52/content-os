@@ -1748,6 +1748,7 @@ class EditPlanScene(ContractModel):
 
     scene_plan_id: UUID
     scene_id: str = Field(min_length=1, max_length=100)
+    visual_task_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
     visual_role: EditVisualRole
     selected_source_kind: SourceKind
     selected_asset_id: UUID | None = None
@@ -1815,12 +1816,53 @@ class EditPlanScene(ContractModel):
         return self
 
 
+class EditSourceInterval(ContractModel):
+    source_key: str
+    start_ms: NonNegativeMs
+    end_ms: PositiveFrames
+
+
+class EditSequenceScene(ContractModel):
+    """Declared information and observed source/timeline facts, not a quality score."""
+
+    scene_id: str
+    start_ms: NonNegativeMs
+    duration_ms: PositiveFrames
+    visual_role: EditVisualRole
+    information_intent: str | None = None
+    information_change: Literal["opening", "declared_changed", "declared_repeated", "unknown"]
+    source_keys: list[str] = Field(default_factory=list)
+    source_intervals: list[EditSourceInterval] = Field(default_factory=list)
+    intentional_reuse: bool = False
+    repeated_source_ms: NonNegativeMs = 0
+
+
+class EditWholeVideo(ContractModel):
+    """Whole-video editorial facts consumed by normal selection and assembly."""
+
+    timing_basis: Literal["estimated_scene_duration", "measured_master", "rendered_timeline"]
+    source_identity_basis: Literal["source_lineage", "selected_asset"] = "selected_asset"
+    duration_ms: PositiveFrames
+    scenes: list[EditSequenceScene]
+    talking_scene_ids: list[str] = Field(default_factory=list)
+    talking_duration_ms: NonNegativeMs = 0
+    first_talking_start_ms: NonNegativeMs | None = None
+    last_talking_end_ms: NonNegativeMs | None = None
+    longest_without_talking_ms: NonNegativeMs = 0
+    unintentional_repeat_ms: NonNegativeMs = 0
+    intentional_repeat_ms: NonNegativeMs = 0
+    same_source_on_information_change_ms: NonNegativeMs = 0
+    same_source_on_information_change_scene_ids: list[str] = Field(default_factory=list)
+    stop_reasons: list[str] = Field(default_factory=list)
+
+
 class EditPlan(ContractModel):
     """Visual-direction bridge from ScenePlan/routed assets to VideoSpec."""
 
     project_id: UUID
     scenes: list[EditPlanScene] = Field(min_length=1, max_length=1_000)
     style_tokens: VisualStyleTokens = Field(default_factory=VisualStyleTokens)
+    whole_video: EditWholeVideo | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def scene_identities_are_unique(self) -> "EditPlan":

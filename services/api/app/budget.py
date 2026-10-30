@@ -73,7 +73,7 @@ def snapshot(records: Sequence[ProviderCallRecord], currency: str) -> BudgetSnap
         cost = record.actual_cost or record.estimated_cost
         if cost.amount is None:
             unknown_cost_calls += 1
-        elif cost.currency != currency:
+        elif cost.amount != 0 and cost.currency != currency:
             unknown_cost_calls += 1
         else:
             known_amount += cost.amount
@@ -92,7 +92,7 @@ def enforce_reservation(
         raise BudgetLimitError("unknown_cost", "provider price is unknown and the budget policy does not allow unknown cost")
     if current.unknown_cost_calls and not policy.allow_unknown_cost and not ignore_existing_unknown_cost:
         raise BudgetLimitError("existing_unknown_cost", "existing provider calls have unknown cost; reconcile them before continuing")
-    if estimated_cost.amount is not None and estimated_cost.currency != policy.currency:
+    if estimated_cost.amount is not None and estimated_cost.amount != 0 and estimated_cost.currency != policy.currency:
         raise BudgetLimitError("currency_mismatch", f"estimated cost currency must be {policy.currency}")
     if policy.max_calls is not None and current.calls + 1 > policy.max_calls:
         raise BudgetLimitError("call_limit", "provider call limit would be exceeded")

@@ -90,6 +90,16 @@ def test_talking_qa_worker_is_local_and_needs_no_generation_provider(tmp_path: P
         assert runner._handlers[JobType.VERIFY_TALKING].__wrapped__.__class__.__name__ == "TalkingQaJobHandler"
 
 
+def test_optional_semantic_provider_configuration_cannot_block_a_ready_render_worker(tmp_path,monkeypatch):
+    def unavailable():raise VisionConfigurationError('fixture unavailable optional provider')
+    monkeypatch.setattr('app.worker_cli._vision_provider_from_env',unavailable)
+    with Database(tmp_path/'optional-semantic.sqlite') as db:
+        runner=build_runner(parse_config(['--once','--job-type','render','--data-root',str(tmp_path)]),db)
+        assert runner.production_service.semantic_diagnoser.provider is None
+        assert JobType.RENDER in runner.handler_types
+        assert runner._handlers[JobType.RENDER].__wrapped__.semantic_diagnoser is runner.production_service.semantic_diagnoser
+
+
 def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"original authorized bytes")

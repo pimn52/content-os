@@ -142,6 +142,8 @@ class RemotionRenderer:
         try:
             if not isinstance(spec, VideoSpec):
                 raise RenderInputError("renderer requires a VideoSpec contract")
+            from app.media.semantic_rejections import require_spec_semantics
+            require_spec_semantics(self.assets.db, spec)
             if not (spec.format is ProjectFormat.VERTICAL and spec.width * 16 == spec.height * 9
                     or spec.format is ProjectFormat.HORIZONTAL and spec.width * 9 == spec.height * 16):
                 raise RenderInputError("renderer accepts 9:16 vertical or 16:9 horizontal VideoSpecs")

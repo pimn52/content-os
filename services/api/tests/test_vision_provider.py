@@ -133,6 +133,21 @@ def test_video_catalogue_observes_source_without_approving_a_future_script(tmp_p
     assert '没有待匹配脚本' in prompt
 
 
+def test_render_source_comparison_requests_explicit_negative_without_claiming_audio_understanding(tmp_path):
+    path=tmp_path/'bounded.mp4';path.write_bytes(b'\x00\x00\x00\x18ftypisom fixture')
+    source=_interval_result('source');render=_interval_result('render')
+    render['matches'][0].update(supported=False,subject_verified=False,fit='context',quality_adequate=True)
+    response={'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'clips':[source,render]})}}]}
+    with _fake_server(200,response) as (url,requests):
+        result=OpenAICompatibleVisionProvider('fixture-key',base_url=url,protocol='chat_completions',video_input=True).analyze_intervals(
+            [{'clip_id':name,'path':str(path),'comparison_role':name} for name in ('source','render')],
+            [{'scene_key':'scene-one','comparison_task':'explicit_render_source_semantic_comparison'}])
+    assert len(requests)==1 and result.clips[1].matches[0].supported is False
+    prompt=json.loads(requests[0][2])['messages'][0]['content'][0]['text']
+    assert '不适合也不能省略' in prompt and '不是诊断置信度' in prompt
+    assert '不判断声音自然度、口型同步或旁白事实真伪' in prompt
+
+
 def test_motion_reference_uses_actual_video_and_explicit_continuous_subinterval_facts(tmp_path):
     path=tmp_path/'motion.mp4';path.write_bytes(b'\x00\x00\x00\x18ftypisom fixture')
     item=_interval_result();item['matches']=[]

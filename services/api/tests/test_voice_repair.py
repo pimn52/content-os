@@ -68,6 +68,10 @@ def test_transient_repair_replay_restart_and_fresh_qa(tmp_path):
         project, run, root, predecessor = setup(client, path)
         plan, request = body(client, root)
         assert plan["action"] == "regenerate_take", plan
+        assert plan["responsible_stage"] == "voice" and plan["assessment_state"] == "known"
+        assert plan["required_capability"] == []
+        assert plan["scope"] == {"scene_id": None, "start_ms": None, "end_ms": None}
+        assert plan["preserves"]["voice_job_id"] == predecessor
         assert plan["max_tts_calls"] == plan["max_qa_asr_calls"] == 1
         assert plan["local_compute_cost"] is None
         response = client.post(root + "/voice-repair", json=request)
@@ -102,6 +106,8 @@ def test_invalid_unknown_failures_stop(tmp_path, code):
         _, _, root, _ = setup(client, path, code=code)
         plan, request = body(client, root)
         assert plan["action"] == "stop"
+        assert plan["responsible_stage"] == "voice" and plan["assessment_state"] == "unknown"
+        assert plan["required_capability"]
         assert client.post(root + "/voice-repair", json=request).status_code == 409
 
 
@@ -123,7 +129,12 @@ def test_changed_or_unknown_scope_cannot_execute(tmp_path, change):
             if change == "qa_unknown": db.connection.execute("DELETE FROM provider_machine_capability_profiles WHERE json_extract(payload,'$.capability')='asr'")
         if change == "draft": client.put(f"/projects/{project}/draft", json={"script": "different", "topic": "changed"})
         if change == "budget": client.put(f"/projects/{project}/budget", json={"currency": "USD", "max_calls": 1, "allow_unknown_cost": True})
-        assert body(client, root)[0]["action"] == "stop"
+        current = body(client, root)[0]
+        assert current["action"] == "stop"
+        if change == "consumed":
+            assert "consumed_voice_dependency_repair" in current["required_capability"]
+        if change == "draft":
+            assert current["preserves"]["scene_plan_ids"] == []  # Never label a newer draft as this Run's retained scenes.
         assert client.post(root + "/voice-repair", json=request).status_code == 409
         assert client.get(root + "/voice-repairs").json() == []
 
@@ -240,7 +251,14 @@ def test_review_composition_and_incomplete_evidence_do_not_regenerate(tmp_path, 
                 jobs = JobRepository(db); qa = jobs.get(UUID(qa_id)); jobs.update(qa.model_copy(update={"error_code": "voice_qa_asr_failed"}))
             if change == "file_changed": (tmp_path / audio.source_file).write_bytes(b"changed")
         plan, request = body(client, root)
-        assert plan["action"] == ("replan" if change == "subjective" else "stop"), plan
+        assert plan["action"] == ("scoped_fix_required" if change == "subjective" else "stop"), plan
+        assert plan["preserves"]["master_audio_id"] == str(audio_id)
+        assert plan["preserves"]["voice_job_id"] == original
+        assert plan["preserves"]["voice_qa_job_id"] == str(qa_id)
+        if change == "subjective":
+            assert plan["responsible_stage"] == "voice" and plan["assessment_state"] == "unknown"
+            assert plan["scope"] == {"scene_id": None, "start_ms": 0, "end_ms": audio.duration_ms}
+            assert "exact_audio_quality_failure_localization" in plan["required_capability"]
         assert client.post(root + "/voice-repair", json=request).status_code == 409
 
 

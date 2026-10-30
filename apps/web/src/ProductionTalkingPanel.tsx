@@ -13,10 +13,32 @@ type Preview = { scene_plan_id: string; series_id: string; job_id: string; outpu
 type Dimension = "visible_sync" | "identity" | "artifacts" | "source_performance" | "continuity" | "publishability";
 type Concern = { id: string; finding: { dimension: Dimension; reason: string; start_ms?: number | null; end_ms?: number | null }; evidence_reference: string; answer: null | { approved: boolean; evidence_reference: string; reason: string } };
 type SeriesReview = { readiness?: string; ready_for_human_continuity_review?: boolean; children?: Array<{ job_id: string; job_status: string; output_asset_id: string | null; automated_qa_state: string; human_review_state: string; blockers: string[] }>; blockers?: string[]; planned_origin_sha256?: string | null; preview_asset_id?: string | null; preview_sha256?: string | null; review_policy_version?: 1 | 2; required_dimensions?: Dimension[]; review_concerns?: Concern[]; continuity_review_state?: string; continuity_review_evidence_reference?: string | null; continuity_review_findings?: string[]; dimensions?: Partial<Record<Dimension, string>> | null; scoped_findings?: Array<{ dimension: Dimension; reason: string; start_ms?: number | null; end_ms?: number | null }>; [key: string]: unknown };
-type RepairPlan = { fingerprint: string; failure_kind: string; action: "regenerate_scene" | "replan" | "stop"; stop_reasons: string[]; findings: Array<{ dimension: string; reason: string; start_ms?: number | null; end_ms?: number | null }>; master_audio_id: string; master_start_ms: number; master_end_ms: number; remaining_run_repairs: number; max_provider_calls: number; external_charge_ceiling: string; currency: string; local_compute_cost: null; user_active_minutes: null; review_scope: string };
+type RepairPlan = { fingerprint: string; failure_kind: string; action: "regenerate_scene" | "scoped_fix_required" | "replan" | "stop"; stop_reasons: string[]; findings: Array<{ dimension: string; reason: string; start_ms?: number | null; end_ms?: number | null }>; master_audio_id: string; master_start_ms: number; master_end_ms: number; remaining_run_repairs: number; max_provider_calls: number; external_charge_ceiling: string; currency: string; local_compute_cost: null; user_active_minutes: null; review_scope: string;
+  responsible_stage?: "material" | "timing" | "voice" | "talking" | "assembly" | "unknown"; assessment_state?: "known" | "unknown";
+  scope?: { scene_id?: string | null; start_ms?: number | null; end_ms?: number | null };
+  preserves?: { master_audio_id?: string | null; master_audio_sha256?: string | null; talking_job_ids?: string[]; talking_output_asset_ids?: string[]; scene_plan_ids?: string[]; render_job_id?: string | null };
+  required_capability?: string[];
+};
 type RepairCallCost = { amount: string | null; currency: string | null } | null;
 type RepairRecord = { id: string; scene_plan_id: string; reason: string; replacement_job_id: string; predecessor_series_id: string | null; successor_series_id: string | null; reused_master_audio_id: string; created_at: string; replacement_job_status?: string; plan?: Pick<RepairPlan, "failure_kind" | "findings">; old_binding?: Pick<Binding, "talking_output_asset_id">; provider_calls?: Array<{ actual_cost: RepairCallCost }>; predecessor_provider_calls?: Array<{ actual_cost: RepairCallCost }> };
 const dimensions: Array<[Dimension, string]> = [["visible_sync", "口型/可见同步"], ["identity", "身份/相似度"], ["artifacts", "脸部/口部伪影"], ["source_performance", "原素材表现保留"], ["continuity", "全片连续性"], ["publishability", "可发布性"]];
+const repairStages: Record<string, string> = { material: "素材与用途", timing: "配时与节奏", voice: "声音", talking: "人物画面", assembly: "字幕与装配", unknown: "责任待定位" };
+const repairCapabilities: Record<string, string> = {
+  exact_audio_naturalness_diagnosis: "诊断确切音频的自然度",
+  consumed_voice_dependency_repair: "声音修改后更新受影响的人物画面与成片",
+  exact_talking_naturalness_diagnosis: "诊断确切人物输出的自然度",
+  render_stage_talking_repair: "成片阶段的人物段修复与复检",
+  scene_source_interval_selection_and_qa: "选择并核验本场景的新来源或区间",
+  scoped_material_replacement: "仅替换受影响场景的素材",
+  exact_scene_defect_diagnosis: "定位本场景缺陷的具体原因",
+  upstream_voice_qa_diagnosis: "核对本场景上游声音的质量检查失败",
+  reference_vs_generated_identity_diagnosis: "区分参考来源与生成画面中的身份问题",
+  source_vs_generated_performance_diagnosis: "区分参考来源与生成画面的表演问题",
+  talking_scene_boundary_continuity_diagnosis: "定位人物段与场景交接的连续性问题",
+  exact_talking_publishability_diagnosis: "诊断确切人物输出的可发布性缺陷",
+  exact_talking_output_diagnosis: "诊断确切人物输出的失败原因",
+  talking_request_correction: "修正人物生成请求中的具体问题",
+};
 async function stableConcernKey(value: unknown) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
   return `web-v2-concern:${Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("")}`;
@@ -132,7 +154,7 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
   }
   async function submitRepair(event: FormEvent<HTMLFormElement>, scene: Scene, plan: RepairPlan) {
     event.preventDefault(); const reason = repairReasons[scene.scene_plan_id]?.trim();
-    if (!reason || plan.action !== "regenerate_scene" || !confirmAction(`确认仅重生成场景 ${scene.scene_id}？该动作最多一次 provider call；外部收费上限 ${plan.external_charge_ceiling} ${plan.currency}；新产物必须通过全新 QA 与完整结果审核。`)) return;
+    if (!reason || plan.action !== "regenerate_scene" || plan.assessment_state === "unknown" || plan.stop_reasons.length || plan.remaining_run_repairs <= 0 || !confirmAction(`确认仅重生成场景 ${scene.scene_id}？该动作最多一次 provider call；外部收费上限 ${plan.external_charge_ceiling} ${plan.currency}；新产物必须通过全新 QA 与完整结果审核。`)) return;
     if (!lock()) return; const expected = repairScope;
     try { await request<RepairRecord>(`/projects/${projectId}/production-runs/${run.id}/talking-repair`, { method: "POST", body: JSON.stringify({ scene_plan_id: scene.scene_plan_id, expected_fingerprint: plan.fingerprint, idempotency_key: talkingRepairKey(projectId, run.id, scene.scene_plan_id, plan.fingerprint), confirmed_action: "regenerate_scene", reason }) });
       if (repairScopeRef.current === expected) { setRepairPlans(previous => { const next = { ...previous }; delete next[scene.scene_plan_id]; return next; }); setRepairReasons(previous => ({ ...previous, [scene.scene_plan_id]: "" })); const records = await request<RepairRecord[]>(`/projects/${projectId}/production-runs/${run.id}/talking-repairs`); if (repairScopeRef.current !== expected) return; setRepairRecords(records); await refreshRun("修复 Job 已创建；前序证据保留，新产物等待新的 QA 和完整审核。"); }
@@ -246,7 +268,7 @@ export function ProductionTalkingPanel({ projectId, run, request, confirmAction 
   </section>;
 }
 
-function RepairControls({ scene, plan, reason, records, canRequestPlan, busy, onLoad, onReason, onSubmit }: {
+export function RepairControls({ scene, plan, reason, records, canRequestPlan, busy, onLoad, onReason, onSubmit }: {
   scene: Scene; plan?: RepairPlan; reason: string; records: RepairRecord[]; canRequestPlan: boolean; busy: boolean;
   onLoad: () => void; onReason: (value: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -257,12 +279,18 @@ function RepairControls({ scene, plan, reason, records, canRequestPlan, busy, on
     {!plan && canRequestPlan && <button type="button" className="button" disabled={busy} onClick={onLoad}>读取当前证据的修复计划</button>}
     {!plan && !canRequestPlan && records.length > 0 && <p>当前 replacement 正在处理中；新的修复计划需等当前证据状态更新后读取。</p>}
     {plan && <><p>决策：{plan.action} · 证据类型：{plan.failure_kind} · 剩余 Run 修复次数：{plan.remaining_run_repairs}</p>
+      <p>责任工序：{repairStages[plan.responsible_stage ?? "talking"]} · 诊断：{plan.assessment_state === "known" ? "已有本项诊断证据" : plan.assessment_state === "unknown" ? "待补证据，尚未定位可执行修复" : "由后台候选复核"}</p>
+      <p>问题范围：场景 {plan.scope?.scene_id ?? scene.scene_id}{plan.scope?.start_ms != null && plan.scope?.end_ms != null ? ` · ${plan.scope.start_ms}–${plan.scope.end_ms} ms` : ` · Master ${plan.master_start_ms}–${plan.master_end_ms} ms`}</p>
+      {!!plan.required_capability?.length && <div><p>待补能力或证据：</p><ul>{plan.required_capability.map(capability => <li key={capability}>{repairCapabilities[capability] ?? capability}</li>)}</ul></div>}
+      {plan.preserves && <><p>保留主旁白：{plan.preserves.master_audio_id ?? "身份未知"}{plan.preserves.master_audio_sha256 ? ` · SHA-256 ${plan.preserves.master_audio_sha256}` : ""}</p>
+        <p>保留人物 Job：{plan.preserves.talking_job_ids?.join(" · ") || "当前执行无已绑定人物 Job"}</p><p>保留人物输出：{plan.preserves.talking_output_asset_ids?.join(" · ") || "当前执行无已绑定人物输出"}</p>
+        <p>保留场景方案：{plan.preserves.scene_plan_ids?.join(" · ") || "身份未知"} · 保留成片 Job：{plan.preserves.render_job_id ?? "当前无成片"}</p></>}
       {plan.findings.map((finding, index) => <p key={`${finding.dimension}:${index}`}>发现 {finding.dimension}：{finding.reason}{finding.start_ms != null || finding.end_ms != null ? ` · ${finding.start_ms ?? "?"}–${finding.end_ms ?? "?"} ms` : ""}</p>)}
       {plan.stop_reasons.map(item => <p key={item} role="alert">停止原因：{item}</p>)}
       <p>执行粒度：整场景（非局部区间替换）· Master {plan.master_audio_id}（{plan.master_start_ms}–{plan.master_end_ms} ms）复用 · 最多 {plan.max_provider_calls} 次 provider call · 外部收费上限 {plan.external_charge_ceiling} {plan.currency} · 本地计算成本未知 · 用户操作时间未知。</p>
       <p>新产物审核范围：{plan.review_scope === "fresh_child_qa_and_policy_required_whole_result_review" ? "新的子片技术 QA + 按当前审核政策完整审查新 TalkingRun" : plan.review_scope}</p>
-      {plan.action === "regenerate_scene" && <form onSubmit={onSubmit}><label>本次修复理由（必填）<textarea value={reason} onChange={event => onReason(event.target.value)} required rows={2} /></label><button className="button primary" disabled={busy || !reason.trim()}>明确确认：只重生成此场景</button></form>}
-      {plan.action !== "regenerate_scene" && <p>此计划不允许重生成；需按上述停止原因重规划或停止。</p>}
+      {plan.action === "regenerate_scene" && plan.assessment_state !== "unknown" && <form onSubmit={onSubmit}><label>本次修复理由（必填）<textarea value={reason} onChange={event => onReason(event.target.value)} required rows={2} /></label><button className="button primary" disabled={busy || !reason.trim() || plan.stop_reasons.length > 0 || plan.remaining_run_repairs <= 0}>明确确认：只重生成此场景</button></form>}
+      {(plan.action !== "regenerate_scene" || plan.assessment_state === "unknown") && <p>此缺陷尚无可执行的局部修复。保留主旁白和其它合格场景，按责任工序补齐所需诊断，再确定需修改的依赖及复检范围。</p>}
     </>}
   </section>;
 }

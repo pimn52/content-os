@@ -168,8 +168,10 @@ class SourceUsageService:
             versions.update((f"render:{job.payload.render_id}", str(job.payload.render_id), str(job.id)))
         return versions
 
-    def review(self, row):
+    def review(self, row, *, exact_render=False):
         versions = self.output_versions(row)
+        if exact_render:
+            versions.difference_update((f"run:{row['id']}",f"draft-{row['draft_version']}"))
         # Exact render feedback takes precedence over older draft-level notes.
         values = [json.loads(value[0]) for value in self.db.connection.execute(
             "SELECT payload FROM content_feedback WHERE project_id=? ORDER BY rowid", (row["project_id"],))]

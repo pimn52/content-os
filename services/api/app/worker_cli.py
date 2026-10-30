@@ -325,7 +325,12 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
     from app.video_production import VideoProductionService,ContentPlanJobHandler
     from app.media.planning import VisualMaterialResolver
     from app.costs import UnknownProviderCostEstimator
-    vision = _vision_provider_from_env() if JobType.PLAN_CONTENT in config.job_types else None
+    vision = None
+    if JobType.PLAN_CONTENT in config.job_types:
+        vision = _vision_provider_from_env()
+    elif JobType.RENDER in config.job_types:
+        try:vision = _vision_provider_from_env()
+        except (VisionConfigurationError,ValueError,OSError):pass  # 可选诊断配置不能阻断已就绪的本地渲染。
     estimator = vision.cost_estimator() if callable(getattr(vision,"cost_estimator",None)) else UnknownProviderCostEstimator()
     resolver = VisualMaterialResolver(db,config.data_root,vision,extractor,
         FFProbeAdapter(config.ffprobe),estimator) if JobType.PLAN_CONTENT in config.job_types else None
@@ -362,8 +367,13 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
         from app.scene_planning import _scene_planner_from_env
         planner=_scene_planner_from_env()
     planner_estimator=UnknownProviderCostEstimator()
+    from app.presentation_semantic import PresentationSemanticDiagnosis
+    semantic_diagnoser=PresentationSemanticDiagnosis(db,config.data_root,vision,extractor,FFProbeAdapter(config.ffprobe),estimator)
+    if JobType.RENDER in handlers:
+        handlers[JobType.RENDER].semantic_diagnoser=semantic_diagnoser
     automatic=VideoProductionService(db,config.data_root,voice_provider=voice_provider,talking_provider=talking_provider,
-        material_resolver=resolver, material_acquirer=acquirer,planner=planner,planner_cost_estimator=planner_estimator)
+        material_resolver=resolver, material_acquirer=acquirer,planner=planner,planner_cost_estimator=planner_estimator,
+        semantic_diagnoser=semantic_diagnoser)
     if planner is not None:
         handlers[JobType.PLAN_CONTENT]=ContentPlanJobHandler(automatic,planner,planner_estimator)
     production_types={JobType.PLAN_CONTENT,JobType.GENERATE_VOICE,JobType.VERIFY_VOICE,

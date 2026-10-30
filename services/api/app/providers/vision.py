@@ -489,8 +489,17 @@ class OpenAICompatibleVisionProvider:
             "burned_in_subtitles 不确定填 null；start_gaze/end_gaze 只描述区间边界实际视线。"
             "不把静止照片、循环、倒放、明显变脸或多镜头拼接列为连续动作参考；整段没有合格区间填 []。\n"
         ) if motion_requested else ""
+        comparison_instructions = (
+            "本次包含 comparison_task=explicit_render_source_semantic_comparison 的成片与原素材对照。"
+            "两段视频必须独立按完全相同的场景用途核验，不因 source/render 角色预设谁正确。"
+            "对该任务，每个 clip_id 都必须显式返回对应 scene_key 的 supported=true 或 false；不适合也不能省略。"
+            "无法确认对象时 subject_verified=null；明确对象不符才为 false，不把未看清当作错误。"
+            "先描述实际看见的对象、动作与保留的信息，不能根据画面上的旁白字幕或任务文字猜测没有出现的对象。"
+            "score 是用途匹配分，不是诊断置信度；质量、用途、对象未确认时保持 unknown/null。"
+            "这里只观察静音画面与已核验旁白文字的对应，不判断声音自然度、口型同步或旁白事实真伪。\n"
+        ) if any(scene.get("comparison_task") == "explicit_render_source_semantic_comparison" for scene in scenes) else ""
         content = [{"type":"text", "text": (
-            "检查以下静音视频原片段，输出 JSON。每个 clip_id 都必须返回且只能返回一次。"
+            "检查以下静音视频片段，输出 JSON。每个 clip_id 都必须返回且只能返回一次。"
             "description 必须在整个上传区间成立；夹有无关画面或无法判断时 content_consistent=false。"
             "检查实际动态画面，不能根据文件名、旁白或主题臆造原片。"
             "subtitle_regions 是整段烧录对白字幕的区域并集，包含描边；未知填 null，无字幕填 []。"
@@ -521,7 +530,7 @@ class OpenAICompatibleVisionProvider:
             "AI 补充画面只能说明或示意，不能证明真实事件、本人亲历或实测；来源不能从文件名猜测。"
             "同时核对计划中的文字强调与图形标签，不能新增未经支持的实测数字或与旁白矛盾。"
             "不得识别或猜测人物身份、敏感属性。机器核验不等于人工质量认可。\n"
-            + motion_instructions
+            + motion_instructions + comparison_instructions
             + "场景用途：" + json.dumps(review_scenes, ensure_ascii=False)
             + "\n输出 JSON schema：" + json.dumps(output_schema, ensure_ascii=False))}]
         if not scenes:

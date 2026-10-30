@@ -18,8 +18,8 @@ from app.db import Database, JobRepository, ProjectRepository, ProviderCallRepos
 from app.domain.models import JobStatus, VideoSpec
 from app.jobs.handlers import RenderVideoJobHandler
 from app.jobs.runner import JobExecutionError
-from app.presentation_repair import PresentationRepairService, PresentationRepairRequest
-from app.production_runs import ProductionRunNotReady
+from app.presentation_repair import PresentationRepairService, PresentationRepairRequest, PresentationObservationRequest, diagnosis_for_finding
+from app.production_runs import ProductionRunNotReady, ProductionRunConflict
 from app.runtime import resolve_local_executable
 from test_production_runs import _ready_fixture
 from test_production_runs import _fixture_reviewable_planned_preview
@@ -127,6 +127,11 @@ def test_revision_replay_restart_preserves_master_and_predecessor(tmp_path):
         digest = hashlib.sha256(output.read_bytes()).hexdigest()
         plan, request = repair_body(client, root, observation)
         assert plan["action"] == "render_revision", plan
+        assert plan["responsible_stage"] == "assembly" and plan["assessment_state"] == "known"
+        assert plan["required_capability"] == []
+        assert plan["preserves"]["master_audio_id"] == str(old.payload.video_spec.master_narration.audio_asset_id)
+        assert plan["preserves"]["render_job_id"] == str(old.id)
+        assert plan["preserves"]["render_sha256"] == digest
         assert plan["candidate_spec"]["scenes"][0]["graphic_text"] == "A fresh point"
         assert plan["candidate_spec"]["master_narration"] == old.payload.video_spec.master_narration.model_dump(mode="json")
         assert plan["candidate_spec"]["scenes"][0]["subtitle_treatment"] == "timed_captions"
@@ -147,17 +152,165 @@ def test_revision_replay_restart_preserves_master_and_predecessor(tmp_path):
         assert client.get(root + "/presentation-repairs").json()[0]["plan"]["predecessor_job"]["id"] == str(old.id)
 
 
-@pytest.mark.parametrize("finding", ["unknown_subtitles", "face_out_of_frame", "source_change", "text_overlay", "known_subtitle_conflict"])
-def test_unsupported_or_unknown_does_not_generate(tmp_path, finding):
+@pytest.mark.parametrize("finding,stage,capability", [
+    ("unknown_subtitles", "material", "full_interval_source_subtitle_analysis"),
+    ("face_out_of_frame", "unknown", "source_vs_render_framing_diagnosis"),
+    ("source_change", "material", "scene_source_interval_selection_and_qa"),
+    ("text_overlay", "assembly", "exact_scene_text_face_layout_diagnosis"),
+    ("known_subtitle_conflict", "material", "full_interval_source_subtitle_analysis"),
+    ("voice_naturalness", "voice", "exact_audio_naturalness_diagnosis"),
+    ("talking_naturalness", "talking", "exact_talking_naturalness_diagnosis"),
+    ("visible_sync", "unknown", "render_vs_talking_sync_diagnosis"),
+    ("semantic_mismatch", "unknown", "exact_scene_narration_visual_semantics_diagnosis"),
+    ("narrative_rhythm", "timing", "exact_scene_delivery_vs_edit_timing_diagnosis"),
+])
+def test_unsupported_or_unknown_does_not_generate(tmp_path, finding, stage, capability):
     path = tmp_path / "presentation.sqlite"
     with TestClient(create_app(path)) as client:
-        project, _, root, _, _, observation = setup(client, path, finding)
-        plan, request = repair_body(client, root, observation)
-        assert plan["action"] != "render_revision"
-        assert client.post(root + "/presentation-repair", json=request).status_code == 409
+        project, run, root, old, output, observation = setup(client, path, finding)
+        master_id = old.payload.video_spec.master_narration.audio_asset_id
         with Database(path) as db:
+            before_master = AudioAssetRepository(db).get(master_id)
+            before_jobs = JobRepository(db).list()
+        plan, request = repair_body(client, root, observation)
+        assert plan["action"] == "scoped_fix_required"
+        assert plan["responsible_stage"] == stage and plan["assessment_state"] == "unknown"
+        assert capability in plan["required_capability"]
+        assert diagnosis_for_finding(finding)["responsible_stage"] == stage
+        target = old.payload.video_spec.scenes[0]
+        fps = old.payload.video_spec.fps
+        assert plan["scope"] == {"scene_id": "hook", "start_ms": target.start_frame * 1000 * fps.denominator // fps.numerator,
+            "end_ms": ((target.start_frame + target.duration_frames) * 1000 * fps.denominator + fps.numerator - 1) // fps.numerator}
+        assert plan["preserves"]["master_audio_id"] == str(master_id)
+        assert plan["preserves"]["master_audio_sha256"] == before_master.content_hash
+        assert plan["preserves"]["talking_job_ids"] == plan["preserves"]["talking_output_asset_ids"] == []
+        assert plan["preserves"]["scene_plan_ids"] == [str(entry.scene_plan_id) for entry in old.payload.video_spec.edit_plan.scenes]
+        assert plan["candidate_spec"] is None and plan["voice_calls"] == plan["talking_calls"] == 0
+        assert client.post(root + "/presentation-repair", json=request).status_code == 409
+        assert client.get(root).json()["render_job_id"] == str(old.id)
+        assert client.get(root).json()["talking_source_bindings"] == run["talking_source_bindings"]
+        assert hashlib.sha256(output.read_bytes()).hexdigest() == plan["preserves"]["render_sha256"]
+        with Database(path) as db:
+            assert AudioAssetRepository(db).get(master_id) == before_master
+            assert JobRepository(db).list() == before_jobs
             assert not ProviderCallRepository(db).list_for_project(UUID(project))
             assert db.connection.execute("SELECT COUNT(*) FROM presentation_repairs").fetchone()[0] == 0
+
+
+def test_observation_source_is_explicit_idempotent_and_cannot_claim_subjective_qa(tmp_path):
+    path = tmp_path / "presentation.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, run, root, _, _, human = setup(client, path)
+        assert human["source"] == "human_observation"
+        with Database(path) as db:
+            service = PresentationRepairService(db, tmp_path, tmp_path / "renders")
+            request = PresentationObservationRequest.model_validate(human["request"])
+            with pytest.raises(ProductionRunConflict, match="idempotency_conflict"):
+                service.observe(UUID(project), UUID(run["id"]), request, source="deterministic_spec_qa")
+            request = request.model_copy(update={"idempotency_key": "spec-qa-once"})
+            observed = service.observe(UUID(project), UUID(run["id"]), request, source="deterministic_spec_qa")
+            assert observed["source"] == "deterministic_spec_qa"
+            assert service.observe(UUID(project), UUID(run["id"]), request, source="deterministic_spec_qa") == observed
+            with pytest.raises(ProductionRunConflict, match="idempotency_conflict"):
+                service.observe(UUID(project), UUID(run["id"]), request)
+            with pytest.raises(ValueError, match="source_invalid"):
+                service.observe(UUID(project), UUID(run["id"]), request, source="automatic_naturalness_pass")
+            for finding in ("voice_naturalness", "talking_naturalness", "visible_sync", "semantic_mismatch", "narrative_rhythm"):
+                with pytest.raises(ValueError, match="deterministic_finding_unsupported"):
+                    service.observe(UUID(project), UUID(run["id"]), request.model_copy(update={"finding": finding}), source="deterministic_spec_qa")
+            assert db.connection.execute("SELECT COUNT(*) FROM presentation_observations").fetchone()[0] == 2
+            assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
+        assert client.post(root + "/presentation-observations", json={**human["request"], "source": "deterministic_spec_qa"}).status_code == 422
+
+
+def test_scoped_quality_observation_remains_bound_to_exact_render_and_scene(tmp_path):
+    path = tmp_path / "presentation.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, _, root, old, output, observation = setup(client, path, "voice_naturalness")
+        wrong_scene = {**observation["request"], "idempotency_key": "wrong-scene", "scene_id": "absent"}
+        assert client.post(root + "/presentation-observations", json=wrong_scene).status_code == 409
+        plan, request = repair_body(client, root, observation)
+        assert plan["action"] == "scoped_fix_required" and plan["assessment_state"] == "unknown"
+        output.write_bytes(output.read_bytes() + b"changed")
+        response = client.get(root + "/presentation-repair-plan", params={"observation_id": observation["id"]})
+        assert response.status_code == 409 and "observation_stale" in response.text
+        assert client.post(root + "/presentation-repair", json=request).status_code == 409
+        assert client.get(root).json()["render_job_id"] == str(old.id)
+        with Database(path) as db:
+            assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
+            assert db.connection.execute("SELECT COUNT(*) FROM presentation_repairs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("finding", ["source_change", "voice_naturalness"])
+def test_independent_findings_require_one_joint_scoped_plan_without_discarding_observations(tmp_path, finding):
+    path = tmp_path / "multiple-findings.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, _, root, old, output, first = setup(client, path)
+        second = client.post(root + "/presentation-observations", json={**first["request"],
+            "idempotency_key": "independent-second-finding", "finding": finding,
+            "reason": "A second unresolved defect on this same exact output."}).json()
+        with Database(path) as db:
+            before_jobs = JobRepository(db).list()
+            before_master = AudioAssetRepository(db).get(old.payload.video_spec.master_narration.audio_asset_id)
+        for selected in (first, second):
+            plan, request = repair_body(client, root, selected)
+            assert plan["action"] == "scoped_fix_required" and plan["assessment_state"] == "unknown"
+            assert f"presentation_{finding}_diagnosis_required" in plan["stop_reasons"]
+            assert plan["required_capability"] and "joint_scoped_repair_plan" not in plan["required_capability"]
+            assert len(plan["diagnoses"]) == 2 and any(item["assessment_state"] == "unknown" for item in plan["diagnoses"])
+            assert {observation["id"] for observation in plan["observations"]} == {first["id"], second["id"]}
+            assert plan["candidate_spec"] is None and plan["changes"] == []
+            assert client.post(root + "/presentation-repair", json=request).status_code == 409
+            assert client.get(root).json()["render_job_id"] == str(old.id)
+        assert hashlib.sha256(output.read_bytes()).hexdigest() == first["request"]["render_sha256"]
+        with Database(path) as db:
+            assert JobRepository(db).list() == before_jobs
+            assert AudioAssetRepository(db).get(before_master.id) == before_master
+            assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
+            assert db.connection.execute("SELECT COUNT(*) FROM presentation_observations").fetchone()[0] == 2
+
+
+def test_repeated_observation_of_same_scene_and_finding_uses_latest_without_blocking_single_fix(tmp_path):
+    path = tmp_path / "repeated-finding.sqlite"
+    with TestClient(create_app(path)) as client:
+        _, _, root, _, _, first = setup(client, path)
+        latest = client.post(root + "/presentation-observations", json={**first["request"],
+            "idempotency_key": "same-finding-with-more-evidence", "reason": "Additional evidence for the same defect."}).json()
+        for selected in (first, latest):
+            plan, _ = repair_body(client, root, selected)
+            assert plan["action"] == "render_revision"
+            assert [observation["id"] for observation in plan["observations"]] == [latest["id"]]
+            assert "joint_scoped_repair_plan" not in plan["required_capability"]
+
+
+def test_automatic_admission_guard_is_atomic_and_idempotent_replay_does_not_reenter_it(tmp_path):
+    path = tmp_path / "guarded-fix.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, run, root, old, _, observation = setup(client, path)
+        _, request = repair_body(client, root, observation)
+        with Database(path) as db:
+            service = PresentationRepairService(db, tmp_path, tmp_path / "renders")
+            before_jobs = JobRepository(db).list()
+            calls = []
+            def denied():
+                assert db.connection.in_transaction
+                calls.append("denied")
+                raise ProductionRunNotReady(("automatic_admission_changed",))
+            with pytest.raises(ProductionRunNotReady, match="automatic_admission_changed"):
+                service.apply(UUID(project), UUID(run["id"]), PresentationRepairRequest.model_validate(request), admission_guard=denied)
+            assert JobRepository(db).list() == before_jobs
+            assert db.connection.execute("SELECT render_job_id FROM production_runs WHERE id=?", (run["id"],)).fetchone()[0] == str(old.id)
+            assert db.connection.execute("SELECT COUNT(*) FROM presentation_repairs").fetchone()[0] == 0
+            def admitted():
+                assert db.connection.in_transaction
+                calls.append("admitted")
+            record = service.apply(UUID(project), UUID(run["id"]), PresentationRepairRequest.model_validate(request), admission_guard=admitted)
+            def forbidden_reentry():
+                pytest.fail("Exact idempotent replay must return before reentering automatic admission.")
+            assert service.apply(UUID(project), UUID(run["id"]), PresentationRepairRequest.model_validate(request), admission_guard=forbidden_reentry) == record
+            assert calls == ["denied", "admitted"]
+            assert len(JobRepository(db).list()) == len(before_jobs) + 1
+            assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
 
 
 def test_worker_measured_output_fresh_qa_and_one_render_limit(tmp_path):
@@ -253,6 +406,11 @@ def test_unchanged_reviewed_talking_candidate_caption_or_panel(tmp_path, monkeyp
         assert response.status_code == 201, response.text
         plan, request = repair_body(client, root, response.json())
         assert plan["action"] == "render_revision", plan
+        assert plan["assessment_state"] == "known" and plan["responsible_stage"] == "assembly"
+        assert plan["preserves"]["master_audio_id"] == bound["master_audio_id"]
+        assert plan["preserves"]["talking_job_ids"] == [bound["talking_job_id"]]
+        assert plan["preserves"]["talking_output_asset_ids"] == [bound["talking_output_asset_id"]]
+        assert plan["preserves"]["reuse_admission"] == "unchanged_dependencies_only"
         candidate = plan["candidate_spec"]["scenes"][0]
         assert candidate["visual"] == scene["visual"]
         assert candidate["caption"] == scene["caption"] and candidate["captions"] == scene["captions"]

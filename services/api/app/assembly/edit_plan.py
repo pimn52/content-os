@@ -5,13 +5,16 @@ import re
 from collections.abc import Mapping, Sequence
 from uuid import UUID
 
-from app.media.visual_facts import _requested_source_interval, footage_geometry, full_interval_geometry, subtitle_keep_height
+from app.media.visual_facts import _requested_source_interval, footage_geometry, full_interval_geometry, scene_visual_key, subtitle_keep_height
 
 from app.domain.models import (
     CandidateAsset,
     EditPlan,
     EditPlanFallback,
     EditPlanScene,
+    EditSequenceScene,
+    EditSourceInterval,
+    EditWholeVideo,
     EditVisualRole,
     GraphicTreatment,
     Project,
@@ -20,6 +23,7 @@ from app.domain.models import (
     SubtitleTreatment,
     TalkingFramingPolicy,
     PortraitPresentation,
+    ProjectFormat,
 )
 
 
@@ -206,7 +210,7 @@ def resolve_edit_plan(
 
     plan = supplied or _default_edit_plan(project, scenes, selections)
     _preflight(plan, project, scenes, selections, clip_intervals)
-    return plan
+    return review_edit_plan(plan, scenes, selections, clip_intervals=clip_intervals)
 
 
 def _default_edit_plan(
@@ -263,6 +267,8 @@ def _preflight(
     for scene in scenes:
         entry = by_scene[scene.id]
         candidate = selections[scene.id]
+        if entry.visual_task_key is not None and entry.visual_task_key != scene_visual_key(scene):
+            raise EditPlanPreflightError("edit_plan_visual_task_changed")
         if scene.graphic_plan is not None:
             if scene.graphic_plan.kind == "unsupported":
                 raise EditPlanPreflightError("graphic_realization_unsupported")
@@ -337,3 +343,162 @@ def _short_text(scene: ScenePlan) -> str:
 
 def _normalized(value: str) -> tuple[str, ...]:
     return tuple(_TEXT_TOKEN.findall(value.casefold()))
+
+
+def information_intent(scene):
+    """Only compare declared intent; different wording is not proof of new information."""
+    value = scene.viewer_takeaway or scene.purpose
+    return value.strip() if value and value.strip() else None
+
+
+def intentional_reuse(scene, asset=None):
+    from app.routing.asset_router import _comparison_intent
+    return (scene.reuse_intent == "reference" or _comparison_intent(scene)
+        or asset is not None and asset.metadata.get("reuse_role") in {"meme", "brand_marker"})
+
+
+def source_overlap_ms(current, previous):
+    """Measure repeated content against the union of prior source intervals."""
+    total = 0
+    for use in current:
+        intervals = sorted((max(use["start_ms"], other["start_ms"]), min(use["end_ms"], other["end_ms"]))
+            for other in previous if use["source_hash"] == other["source_hash"]
+            and max(use["start_ms"], other["start_ms"]) < min(use["end_ms"], other["end_ms"]))
+        end = -1
+        for start, stop in intervals:
+            total += max(0, stop - max(start, end))
+            end = max(end, stop)
+    return total
+
+
+def same_source_information_change(scene, current, previous_scene, previous, *, intentional=False, previous_intentional=False):
+    """A soft alternative preference, never evidence that a shot is inadequate."""
+    if previous_scene is None or scene.order != previous_scene.order + 1 or intentional or previous_intentional:
+        return False
+    before, after = information_intent(previous_scene), information_intent(scene)
+    return bool(before and after and _normalized(before) != _normalized(after)
+        and {use["source_hash"] for use in current}.intersection(use["source_hash"] for use in previous))
+
+
+def dominant_landscape_fallback(scenes, assets):
+    """Share the existing portrait-output guard; no new source or person quota."""
+    footage, total = {}, 0
+    for scene_id, duration, asset_id, role, presentation in scenes:
+        total += duration
+        if role is not EditVisualRole.FOOTAGE or asset_id is None or presentation is not PortraitPresentation.FULL_CANVAS:
+            continue
+        asset = assets.get(asset_id)
+        if asset is not None and asset.width > asset.height:
+            footage.setdefault(asset_id, []).append((scene_id, duration))
+    return tuple("landscape_fallback_dominates_video:" + ",".join(scene_id for scene_id, _ in uses)
+        for uses in footage.values() if sum(duration for _, duration in uses) * 2 > total)
+
+
+def _whole_video(rows, *, timing_basis, portrait_output, assets, source_identity_basis="selected_asset"):
+    entries, previous_uses, previous_keys, previous_intent = [], [], set(), None
+    talking_ids, talking_duration, first_talking, last_talking = [], 0, None, None
+    without_talking, longest_without = 0, 0
+    unintentional, intentional, unchanged_source, unchanged_ids = 0, 0, 0, []
+    for index, row in enumerate(rows):
+        intent = row["information_intent"]
+        change = ("opening" if index == 0 else "unknown" if not intent or not previous_intent else
+            "declared_repeated" if _normalized(intent) == _normalized(previous_intent) else "declared_changed")
+        uses, keys = row["uses"], row["source_keys"]
+        repeated = source_overlap_ms(uses, previous_uses)
+        if row["intentional_reuse"]:
+            intentional += repeated
+        else:
+            unintentional += repeated
+        if (change == "declared_changed" and set(keys).intersection(previous_keys)
+            and not row["intentional_reuse"] and not (entries and entries[-1].intentional_reuse)):
+            unchanged_source += row["duration_ms"]
+            unchanged_ids.append(row["scene_id"])
+        entries.append(EditSequenceScene(scene_id=row["scene_id"], start_ms=row["start_ms"],
+            duration_ms=row["duration_ms"], visual_role=row["visual_role"], information_intent=intent,
+            information_change=change, source_keys=keys, intentional_reuse=row["intentional_reuse"],
+            source_intervals=[EditSourceInterval(source_key=use["source_hash"], start_ms=use["start_ms"],
+                end_ms=use["end_ms"]) for use in uses], repeated_source_ms=repeated))
+        if row["visual_role"] is EditVisualRole.TALKING:
+            talking_ids.append(row["scene_id"])
+            talking_duration += row["duration_ms"]
+            first_talking = row["start_ms"] if first_talking is None else first_talking
+            last_talking = row["start_ms"] + row["duration_ms"]
+            longest_without = max(longest_without, without_talking)
+            without_talking = 0
+        else:
+            without_talking += row["duration_ms"]
+        previous_uses.extend(uses)
+        previous_keys, previous_intent = set(keys), intent
+    longest_without = max(longest_without, without_talking)
+    stops = dominant_landscape_fallback(((row["scene_id"], row["duration_ms"], row["asset_id"],
+        row["visual_role"], row["portrait_presentation"]) for row in rows), assets) if portrait_output else ()
+    return EditWholeVideo(timing_basis=timing_basis, source_identity_basis=source_identity_basis,
+        duration_ms=max(row["start_ms"] + row["duration_ms"] for row in rows),
+        scenes=entries, talking_scene_ids=talking_ids, talking_duration_ms=talking_duration,
+        first_talking_start_ms=first_talking, last_talking_end_ms=last_talking,
+        longest_without_talking_ms=longest_without, unintentional_repeat_ms=unintentional,
+        intentional_repeat_ms=intentional, same_source_on_information_change_ms=unchanged_source,
+        same_source_on_information_change_scene_ids=unchanged_ids, stop_reasons=list(stops))
+
+
+def review_edit_plan(plan, scenes, selections, *, durations_ms=None, clip_intervals=None, assets=None,
+                     source_uses=None, timing_basis="estimated_scene_duration", portrait_output=False):
+    """Refresh the existing EditPlan from current choices and timing without model calls."""
+    durations_ms, clip_intervals = durations_ms or {}, clip_intervals or {}
+    assets = assets if assets is not None else {}
+    task_keys = {scene.id: scene_visual_key(scene) for scene in scenes}
+    entries = [entry.model_copy(update={"visual_task_key": task_keys[entry.scene_plan_id]}) for entry in plan.scenes]
+    by_scene, rows, cursor = {entry.scene_plan_id: entry for entry in entries}, [], 0
+    lineage_known = source_uses is not None
+    for scene in sorted(scenes, key=lambda item: item.order):
+        entry, candidate = by_scene[scene.id], selections[scene.id]
+        duration = durations_ms.get(scene.id, scene.duration_target_ms)
+        asset = assets.get(candidate.asset_id) if candidate.asset_id is not None else None
+        uses = [use for use in source_uses or () if use["scene_id"] == scene.scene_id]
+        if candidate.clip_id is not None and not uses:
+            lineage_known = False
+        source_key = getattr(asset, "content_hash", None) or (f"asset:{candidate.asset_id}" if candidate.asset_id else None)
+        if source_uses is None and candidate.clip_id is not None:
+            interval = clip_intervals.get(candidate.clip_id)
+            start = candidate.playback_start_ms if candidate.playback_start_ms is not None else interval[0] if interval else None
+            end = candidate.playback_end_ms if candidate.playback_end_ms is not None else interval[1] if interval else None
+            if source_key and start is not None and end is not None and start < min(start + duration, end):
+                uses = [dict(source_hash=source_key, start_ms=start, end_ms=min(start + duration, end))]
+        keys = list(dict.fromkeys(use["source_hash"] for use in uses)) or ([source_key] if source_key else [])
+        rows.append(dict(scene_id=scene.scene_id, start_ms=cursor, duration_ms=duration, visual_role=entry.visual_role,
+            information_intent=information_intent(scene), intentional_reuse=intentional_reuse(scene, asset),
+            uses=uses, source_keys=keys, asset_id=candidate.asset_id, portrait_presentation=entry.portrait_presentation))
+        cursor += duration
+    return plan.model_copy(update={"scenes": entries, "whole_video": _whole_video(rows, timing_basis=timing_basis,
+        portrait_output=portrait_output, assets=assets,
+        source_identity_basis="source_lineage" if lineage_known else "selected_asset")})
+
+
+def review_video_spec(spec, assets, *, source_uses=None):
+    """Consume actual output frames and current source lineage before ordinary rendering."""
+    if spec.edit_plan is None:
+        return spec
+    prior = {row.scene_id: row for row in spec.edit_plan.whole_video.scenes} if spec.edit_plan.whole_video else {}
+    rows = []
+    lineage_known = source_uses is not None
+    for scene in sorted(spec.scenes, key=lambda item: item.start_frame):
+        original = prior.get(scene.scene_id)
+        start = (scene.start_frame * 1000 * spec.fps.denominator + spec.fps.numerator - 1) // spec.fps.numerator
+        end = ((scene.start_frame + scene.duration_frames) * 1000 * spec.fps.denominator + spec.fps.numerator - 1) // spec.fps.numerator
+        asset = assets.get(scene.visual.asset_id) if scene.visual.asset_id else None
+        uses = [use for use in source_uses or () if use["scene_id"] == scene.scene_id]
+        if scene.visual.clip_start_ms is not None and not uses:
+            lineage_known = False
+        key = getattr(asset, "content_hash", None) or (f"asset:{scene.visual.asset_id}" if scene.visual.asset_id else None)
+        if source_uses is None and key and scene.visual.clip_start_ms is not None:
+            uses = [dict(source_hash=key, start_ms=scene.visual.clip_start_ms,
+                end_ms=min(scene.visual.clip_end_ms, scene.visual.clip_start_ms + end - start))]
+        rows.append(dict(scene_id=scene.scene_id, start_ms=start, duration_ms=end-start, visual_role=scene.visual_role,
+            information_intent=original.information_intent if original else None,
+            intentional_reuse=original.intentional_reuse if original else False, uses=uses,
+            source_keys=list(dict.fromkeys(use["source_hash"] for use in uses)) or ([key] if key else []),
+            asset_id=scene.visual.asset_id if scene.visual.vertical_reframe_mode.value == "contain" else None,
+            portrait_presentation=scene.portrait_presentation))
+    whole = _whole_video(rows, timing_basis="rendered_timeline", portrait_output=spec.format is ProjectFormat.VERTICAL,
+        assets=assets, source_identity_basis="source_lineage" if lineage_known else "selected_asset")
+    return spec.model_copy(update={"edit_plan": spec.edit_plan.model_copy(update={"whole_video": whole})})

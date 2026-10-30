@@ -200,6 +200,34 @@ class MediaExtractor:
         finally:
             temp.unlink(missing_ok=True)
 
+    def extract_video_frames(self, asset: Asset, start_frame: int, end_frame: int) -> Path:
+        """Extract an exact half-open decoded-frame interval for render diagnosis."""
+        rate, denominator = asset.fps.numerator, asset.fps.denominator
+        available = (asset.duration_ms * rate + 1000 * denominator - 1) // (1000 * denominator)
+        if (type(start_frame) is not int or type(end_frame) is not int
+                or not 0 <= start_frame < end_frame <= available
+                or (end_frame-start_frame) * denominator > 24 * rate):
+            raise ExtractionValidationError("video analysis frames must fit the source and be at most 24 seconds")
+        source = self._source(asset)
+        fps = f"{rate}/{denominator}"
+        output = (self.data_root / "assets" / "analysis-video" / asset.content_hash
+                  / f"frames-{start_frame}-{end_frame}-{rate}-{denominator}-long960-cfr.mp4")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if self._usable(output):
+            return output
+        temp = self._temp_path(output)
+        try:
+            self._run([*self.command, "-y", "-v", "error", "-i", str(source), "-map", "0:v:0", "-an",
+                "-vf", f"trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS,"
+                f"scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"fps=fps={fps}:start_time=0", "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temp)])
+            self._publish(temp, output)
+            self._ensure_output(output)
+            return output
+        finally:
+            temp.unlink(missing_ok=True)
+
     # Friendly plural alias for callers that may later request bounded sets.
     def extract_keyframes(self, asset: Asset, clip: Clip) -> list[KeyframeExtraction]:
         return [self.extract_keyframe(asset, clip)]

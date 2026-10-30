@@ -105,6 +105,69 @@ def test_audio_argv_no_shell_and_idempotent(monkeypatch, tmp_path: Path):
     assert not list(first.path.parent.glob("*.tmp"))
 
 
+def test_exact_frame_proxy_uses_trim_and_separate_cache_without_mutating_source(monkeypatch,tmp_path):
+    source=tmp_path/'source.mp4';source.write_bytes(b'original video bytes')
+    asset=_asset(source,duration_ms=5000)
+    calls=[]
+    def fake_run(argv,**kwargs):
+        calls.append((argv,kwargs));Path(argv[-1]).write_bytes(b'frame proxy')
+        return subprocess.CompletedProcess(argv,0,'','')
+    monkeypatch.setattr(subprocess,'run',fake_run)
+    extractor=MediaExtractor(tmp_path/'data',command=('ffmpeg-fixture',))
+    first=extractor.extract_video_frames(asset,25,50)
+    assert extractor.extract_video_frames(asset,25,50)==first and len(calls)==1
+    assert extractor.extract_video_frames(asset,26,51)!=first and len(calls)==2
+    assert extractor.extract_video_interval(asset,25,50)!=first and len(calls)==3
+    argv,kwargs=calls[0]
+    filters=argv[argv.index('-vf')+1]
+    assert filters.startswith('trim=start_frame=25:end_frame=50,setpts=PTS-STARTPTS,')
+    assert 'min(960,iw)' in filters and 'min(960,ih)' in filters and 'fps=fps=25/1:start_time=0' in filters
+    assert '-an' in argv and '-ss' not in argv and kwargs['shell'] is False
+    assert source.read_bytes()==b'original video bytes'
+
+
+@pytest.mark.parametrize('first,last',[(True,25),(0,False),(-1,25),(25,25),(50,25),(0,126),(0,601)])
+def test_exact_frame_proxy_rejects_invalid_or_out_of_source_range_without_running(monkeypatch,tmp_path,first,last):
+    source=tmp_path/'source.mp4';source.write_bytes(b'original')
+    asset=_asset(source,duration_ms=5000)
+    monkeypatch.setattr(subprocess,'run',lambda *args,**kwargs:pytest.fail('invalid frame input reached ffmpeg'))
+    with pytest.raises(ExtractionValidationError):
+        MediaExtractor(tmp_path/'data').extract_video_frames(asset,first,last)
+
+
+def test_exact_frame_proxy_rejects_more_than_24_seconds_even_inside_source(tmp_path):
+    source=tmp_path/'source.mp4';source.write_bytes(b'original')
+    with pytest.raises(ExtractionValidationError):
+        MediaExtractor(tmp_path/'data').extract_video_frames(_asset(source,duration_ms=60000),0,601)
+
+
+def test_real_ntsc_frame_proxy_keeps_only_selected_scene(tmp_path):
+    ffmpeg=os.environ.get('CONTENT_OS_FFMPEG') or shutil.which('ffmpeg')
+    ffprobe=os.environ.get('CONTENT_OS_FFPROBE') or shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:pytest.skip('local ffmpeg/ffprobe unavailable')
+    source=tmp_path/'three-scenes.mp4'
+    pixels=b''.join(bytes(color)*160*90*30 for color in ((255,0,0),(0,128,0),(0,0,255)))
+    subprocess.run([ffmpeg,'-y','-v','error','-f','rawvideo','-pixel_format','rgb24','-video_size','160x90',
+        '-framerate','30000/1001','-i','pipe:0','-c:v','libx264','-pix_fmt','yuv420p',str(source)],
+        input=pixels,check=True,capture_output=True)
+    digest=hashlib.sha256(source.read_bytes()).hexdigest()
+    probe=FFProbeAdapter(ffprobe);raw=probe.probe(source)
+    asset=Asset(source_file=str(source),content_hash=digest,duration_ms=raw.duration_ms,width=raw.width,height=raw.height,
+        fps=RationalFps(numerator=30000,denominator=1001),authorization_reference='fixture',imported_at=datetime.now(timezone.utc))
+    output=MediaExtractor(tmp_path/'data',command=ffmpeg).extract_video_frames(asset,30,60)
+    frames=probe.probe_video_frames(output)
+    assert frames['frame_count']==30 and frames['fps']==asset.fps
+    assert abs(frames['duration_ms']-1001)<=1
+    decoded=subprocess.run([ffmpeg,'-v','error','-i',str(output),'-f','rawvideo','-pix_fmt','rgb24','pipe:1'],
+        check=True,capture_output=True).stdout
+    assert len(decoded)==160*90*3*30
+    for position in (0,29*160*90*3):
+        red,green,blue=decoded[position:position+3]
+        assert green>100 and red<10 and blue<10
+    assert not probe.probe(output).has_audio
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==digest
+
+
 def test_bounded_source_audio_interval_is_validated_and_idempotent(monkeypatch, tmp_path: Path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")

@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue
 
 from app.db import (
-    AssetRepository, AudioAssetRepository, BudgetPolicyRepository, Database, JobRepository,
+    AssetRepository, AudioAssetRepository, BudgetPolicyRepository, Database, JobRepository, ProjectDraftRepository,
     ProviderCallRepository, TalkingSliceSeriesContinuityReviewRepository,
     TalkingSliceSeriesRepository,
 )
@@ -38,7 +38,7 @@ class TalkingRepairPlan(BaseModel):
     scene_plan_id: UUID
     fingerprint: str
     failure_kind: Literal["technical", "invalid_request", "quality", "unassessed"]
-    action: Literal["regenerate_scene", "replan", "stop"]
+    action: Literal["regenerate_scene", "scoped_fix_required", "replan", "stop"]
     stop_reasons: tuple[str, ...]
     evidence: list[dict[str, JsonValue]]
     findings: list[TalkingReviewFinding]
@@ -46,6 +46,11 @@ class TalkingRepairPlan(BaseModel):
     master_start_ms: int
     master_end_ms: int
     remaining_run_repairs: int
+    responsible_stage: Literal["material", "timing", "voice", "talking", "assembly", "unknown"] = "unknown"
+    assessment_state: Literal["known", "unknown"] = "unknown"
+    scope: dict[str, JsonValue] = Field(default_factory=dict)
+    preserves: dict[str, JsonValue] = Field(default_factory=dict)
+    required_capability: tuple[str, ...] = ()
     max_provider_calls: Literal[1] = 1
     external_charge_ceiling: Literal["0"] = "0"
     currency: Literal["USD"] = "USD"
@@ -179,6 +184,8 @@ class TalkingRepairService:
             reasons.append("talking_scene_repair_already_attempted")
         evidence: list[dict[str, JsonValue]] = [{"type": "generation_job", "record": job.model_dump(mode="json")}]
         findings: list[TalkingReviewFinding] = []
+        failed_dimensions: set[str] = set()
+        upstream_voice = False
         kind, action = "unassessed", "stop"
         if job.status is JobStatus.FAILED:
             kind = "technical"
@@ -207,7 +214,8 @@ class TalkingRepairService:
                     known_checks = output_failures | {"output_playable_video_audio", "output_duration_matches_narration",
                         "narration_copy_qa_verified", "output_video_frames_verified"}
                     if isinstance(checks, list) and "narration_copy_qa_not_verified" in checks:
-                        action = "replan"
+                        action = "scoped_fix_required"
+                        upstream_voice = True
                         reasons.append("talking_qa_narration_requires_voice_repair")
                     elif (qa.error_code == "talking_qa_failed" and binding.talking_series_id is None
                         and output.metadata["talking_generation"].get("qa_state") == "failed"
@@ -240,11 +248,11 @@ class TalkingRepairService:
                 if not review.approved:
                     findings.extend(review.scoped_findings)
                     kind = "quality"
-                    if review.dimensions is not None and any(
-                        outcome == "fail" and dimension not in {"visible_sync", "artifacts"}
-                        for dimension, outcome in review.dimensions.model_dump(exclude={"schema_version"}).items()
-                    ):
-                        reasons.append("talking_failed_dimension_requires_replan")
+                    if review.dimensions is not None:
+                        failed_dimensions.update(dimension for dimension, outcome in
+                            review.dimensions.model_dump(exclude={"schema_version"}).items() if outcome == "fail")
+                    if failed_dimensions - {"visible_sync", "artifacts"}:
+                        reasons.append("talking_failed_dimension_requires_diagnosis")
             policy = TalkingReviewPolicyService(self.db)
             for concern in policy.concerns(project_id, preview.content_hash):
                 answer = policy.answer(concern.id)
@@ -257,14 +265,16 @@ class TalkingRepairService:
                     reasons.append("talking_repair_unanswered_concern")
             evidence.append({"type": "preview", "asset_id": str(preview.id), "sha256": preview.content_hash})
             if kind == "quality":
+                failed_dimensions.update(item.dimension for item in findings)
                 if (findings and all(item.dimension in {"visible_sync", "artifacts"} for item in findings)
-                    and "talking_failed_dimension_requires_replan" not in reasons):
+                    and "talking_failed_dimension_requires_diagnosis" not in reasons):
                     action = "regenerate_scene"
                 else:
-                    action = "replan"
-                    reasons.append("talking_quality_requires_source_presentation_or_intent_replan")
+                    action = "scoped_fix_required"
+                    reasons.append("talking_quality_failure_localization_required")
         if kind == "unassessed":
             reasons.append("talking_repair_requires_persisted_failure_evidence")
+        known = action == "regenerate_scene"
         if action == "regenerate_scene" and not reasons:
             context = job.payload.planned_context
             try:
@@ -277,7 +287,34 @@ class TalkingRepairService:
         if reasons and action == "regenerate_scene":
             action = "stop"
         master = AudioAssetRepository(self.db).get(binding.master_audio_id)
+        # A rejected preview identifies a symptom, not which source, model or
+        # boundary caused it. Only the existing bounded repair classes are known.
+        responsible = "voice" if upstream_voice else "unknown" if kind == "quality" and not known else "talking"
+        required = []
+        if upstream_voice:
+            required.extend(("upstream_voice_qa_diagnosis", "consumed_voice_dependency_repair"))
+        elif kind == "quality" and not known:
+            capabilities = {"identity": "reference_vs_generated_identity_diagnosis",
+                "source_performance": "source_vs_generated_performance_diagnosis",
+                "continuity": "talking_scene_boundary_continuity_diagnosis",
+                "publishability": "exact_talking_publishability_diagnosis"}
+            required.extend(capabilities[dimension] for dimension in sorted(failed_dimensions) if dimension in capabilities)
+        if not known and not required:
+            required.append("talking_request_correction" if kind == "invalid_request" else "exact_talking_output_diagnosis")
+        draft = ProjectDraftRepository(self.db).get(project_id)
+        target = None if draft is None else next((scene for scene in draft.scenes if scene.id == scene_id), None)
+        scope = {"scene_id": str(scene_id) if target is None else target.scene_id,
+                 "start_ms": binding.master_start_ms, "end_ms": binding.master_end_ms}
+        preserves = {"master_audio_id": str(binding.master_audio_id), "master_audio_sha256": master.content_hash,
+            "render_job_id": None if run.render_job_id is None else str(run.render_job_id),
+            "talking_job_ids": [str(item.talking_job_id) for item in run.talking_source_bindings if item.talking_job_id],
+            "talking_output_asset_ids": [str(item.talking_output_asset_id) for item in run.talking_source_bindings if item.talking_output_asset_id],
+            "scene_plan_ids": [] if draft is None else [str(scene.id) for scene in draft.scenes],
+            "reused_scene_plan_ids": [str(item.scene_plan_id) for item in run.talking_source_bindings if item.scene_plan_id != scene_id],
+            "reuse_admission": "unchanged_dependencies_only"}
         values = dict(project_id=project_id, run_id=run_id, scene_plan_id=scene_id,
+                      responsible_stage=responsible, assessment_state="known" if known else "unknown", scope=scope,
+                      preserves=preserves, required_capability=tuple(required),
                       failure_kind=kind, action=action, stop_reasons=tuple(reasons), evidence=evidence,
                       findings=findings, master_audio_id=binding.master_audio_id,
                       master_start_ms=binding.master_start_ms, master_end_ms=binding.master_end_ms,
@@ -303,7 +340,7 @@ class TalkingRepairService:
             plan = self.plan(project_id, run_id, request.scene_plan_id)
             if plan.fingerprint != request.expected_fingerprint:
                 raise ProductionRunConflict("talking_repair_plan_stale")
-            if plan.action != "regenerate_scene":
+            if plan.action != "regenerate_scene" or plan.assessment_state != "known":
                 raise ProductionRunNotReady(plan.stop_reasons)
             run = self.production.get(project_id, run_id)
             binding = next(item for item in run.talking_source_bindings if item.scene_plan_id == request.scene_plan_id)

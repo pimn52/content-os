@@ -64,6 +64,13 @@ def test_completed_rejected_repair_is_idempotent_preserves_evidence_and_restarts
             jobs_before = len(JobRepository(db).list())
         plan, body = request(client, url, binding)
         assert plan["failure_kind"] == "quality" and plan["action"] == "regenerate_scene"
+        assert plan["responsible_stage"] == "talking" and plan["assessment_state"] == "known"
+        assert plan["required_capability"] == []
+        assert plan["scope"] == {"scene_id": "hook", "start_ms": binding["master_start_ms"], "end_ms": binding["master_end_ms"]}
+        assert plan["preserves"]["master_audio_id"] == binding["master_audio_id"]
+        assert plan["preserves"]["master_audio_sha256"] == old_master.content_hash
+        assert plan["preserves"]["talking_job_ids"] == [binding["talking_job_id"]]
+        assert plan["preserves"]["talking_output_asset_ids"] == [binding["talking_output_asset_id"]]
         assert plan["findings"][0]["start_ms"] == 100
         assert plan["max_provider_calls"] == 1 and plan["external_charge_ceiling"] == "0"
         assert plan["local_compute_cost"] is None
@@ -88,15 +95,34 @@ def test_completed_rejected_repair_is_idempotent_preserves_evidence_and_restarts
         assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
 
 
-@pytest.mark.parametrize("dimension", ["identity", "source_performance", "continuity", "publishability"])
-def test_unsupported_quality_stops_for_replan(tmp_path, monkeypatch, dimension):
+@pytest.mark.parametrize("dimension,capability", [
+    ("identity", "reference_vs_generated_identity_diagnosis"),
+    ("source_performance", "source_vs_generated_performance_diagnosis"),
+    ("continuity", "talking_scene_boundary_continuity_diagnosis"),
+    ("publishability", "exact_talking_publishability_diagnosis"),
+])
+def test_unsupported_quality_requires_scoped_diagnosis_without_changing_other_work(tmp_path, monkeypatch, dimension, capability):
     path = tmp_path / "unsupported.sqlite"
     with TestClient(create_app(path)) as client:
-        _, _, binding, _, url = setup(client, path, monkeypatch, dimension=dimension)
+        project, _, binding, _, url = setup(client, path, monkeypatch, dimension=dimension)
+        before_run = client.get(url).json()
+        with Database(path) as db:
+            before_master = AudioAssetRepository(db).get(UUID(binding["master_audio_id"]))
+            before_jobs = JobRepository(db).list()
         plan, body = request(client, url, binding)
-        assert plan["failure_kind"] == "quality" and plan["action"] == "replan"
+        assert plan["failure_kind"] == "quality" and plan["action"] == "scoped_fix_required"
+        assert plan["responsible_stage"] == "unknown" and plan["assessment_state"] == "unknown"
+        assert capability in plan["required_capability"]
+        assert plan["preserves"]["master_audio_id"] == binding["master_audio_id"]
+        assert plan["preserves"]["master_audio_sha256"] == before_master.content_hash
+        assert plan["preserves"]["talking_job_ids"] == [binding["talking_job_id"]]
         assert client.post(f"{url}/talking-repair", json=body).status_code == 409
         assert client.get(f"{url}/talking-repairs").json() == []
+        assert client.get(url).json() == before_run
+        with Database(path) as db:
+            assert AudioAssetRepository(db).get(before_master.id) == before_master
+            assert JobRepository(db).list() == before_jobs
+            assert ProviderCallRepository(db).list_for_project(UUID(project)) == []
 
 
 @pytest.mark.parametrize("approved", [None, True])
@@ -209,9 +235,14 @@ def test_unknown_or_upstream_qa_failure_never_regenerates_talking(tmp_path, monk
         _, run, binding, _, url = setup(client, path, monkeypatch, reject=False)
         binding, _, _ = _failed_independent_qa(path, run, binding, change=change)
         plan, body = request(client, url, binding)
-        assert plan["action"] == ("replan" if change == "voice" else "stop")
+        assert plan["action"] == ("scoped_fix_required" if change == "voice" else "stop")
+        assert plan["assessment_state"] == "unknown"
         if change == "voice":
             assert "talking_qa_narration_requires_voice_repair" in plan["stop_reasons"]
+            assert plan["responsible_stage"] == "voice"
+            assert "upstream_voice_qa_diagnosis" in plan["required_capability"]
+            assert "consumed_voice_dependency_repair" in plan["required_capability"]
+            assert plan["preserves"]["master_audio_id"] == binding["master_audio_id"]
         assert client.post(f"{url}/talking-repair", json=body).status_code == 409
         assert client.get(f"{url}/talking-repairs").json() == []
 

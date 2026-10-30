@@ -31,7 +31,7 @@ from app.domain.models import (
     VideoSpec,
     VideoVisual,
 )
-from .edit_plan import EditPlanPreflightError, resolve_edit_plan
+from .edit_plan import EditPlanPreflightError, resolve_edit_plan, review_edit_plan, review_video_spec
 from app.voice_qa import comparison_tokens, voice_human_review_status
 from app.talking.closeout import TalkingCloseoutPlanningError, plan_terminal_talking_delivery
 from app.talking.admission import talking_visual_blocker
@@ -145,6 +145,8 @@ class VideoSpecAssembler:
             accepted_edit_plan = resolve_edit_plan(
                 project, ordered, selections, clip_intervals=clip_intervals, supplied=edit_plan,
             )
+            accepted_edit_plan = review_edit_plan(accepted_edit_plan, ordered, selections,
+                clip_intervals=clip_intervals, assets=self.assets)
         except EditPlanPreflightError as exc:
             raise InvalidCandidateSelection(str(exc)) from exc
         edit_by_scene = {entry.scene_plan_id: entry for entry in accepted_edit_plan.scenes}
@@ -321,7 +323,7 @@ class VideoSpecAssembler:
             ))
             start_frame += duration_frames
             selected_sources.append(asset.source_kind)
-        return VideoSpec(
+        return self._review_whole_video(VideoSpec(
             project_id=project.id,
             format=project.format,
             width=project.resolution_width,
@@ -330,7 +332,7 @@ class VideoSpecAssembler:
             scenes=video_scenes,
             estimated_cost=_local_assembly_cost(selected_sources),
             edit_plan=accepted_edit_plan,
-        )
+        ))
 
     def _assemble_master_narration(
         self,
@@ -413,7 +415,7 @@ class VideoSpecAssembler:
             video_scenes.extend(fragments)
             selected_sources.extend(fragment.visual.source_kind for fragment in fragments)
 
-        return VideoSpec(
+        return self._review_whole_video(VideoSpec(
             project_id=project.id,
             format=project.format,
             width=project.resolution_width,
@@ -423,7 +425,20 @@ class VideoSpecAssembler:
             master_narration=master,
             estimated_cost=_local_assembly_cost(selected_sources),
             edit_plan=edit_plan,
-        )
+        ))
+
+    def _review_whole_video(self, spec: VideoSpec) -> VideoSpec:
+        from app.source_usage import SourceUsageService, SourceUsageConflict
+        try:
+            uses = SourceUsageService(self.assets.db).spec_uses(spec)
+        except SourceUsageConflict:
+            # Legacy previews may lack original lineage. Mark that limit;
+            # ordinary dispatch still requires the existing usage admission.
+            uses = None
+        reviewed = review_video_spec(spec, self.assets, source_uses=uses)
+        from app.media.semantic_rejections import require_spec_semantics
+        require_spec_semantics(self.assets.db, reviewed)
+        return reviewed
 
     def _master_visual_fragments(
         self,

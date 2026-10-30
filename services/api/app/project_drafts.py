@@ -178,7 +178,7 @@ def _scene_copy_matches_script(script: str | None, scenes: Sequence[ScenePlan]) 
 
 
 def _split_talking_master_clauses(db: Database, project: Project, script: str | None,
-                                 scenes: list[ScenePlan], *, master=None, max_segment_ms=None) -> list[ScenePlan]:
+                                 scenes: list[ScenePlan], *, master=None, max_segment_ms=None, merge_clauses=True) -> list[ScenePlan]:
     """Split editable Talking copy at admitted Master clauses, never at guessed times."""
     speaking_sources = {SourceKind.AI_VIDEO, SourceKind.TALKING_PROFILE}
     if not _scene_copy_matches_script(script, scenes) or not any(
@@ -225,7 +225,7 @@ def _split_talking_master_clauses(db: Database, project: Project, script: str | 
                 for index in range(first, last):
                     segment = segments[index]
                     end_ms = master.duration_ms if end_offset == len(target) and index == last - 1 else segment.end_ms
-                    if index > first and end_ms - group_start > clause_limit:
+                    if index > first and (not merge_clauses or end_ms - group_start > clause_limit):
                         previous_ms = segments[index - 1].end_ms
                         if previous_ms > group_start:
                             groups.append((count, previous_ms))

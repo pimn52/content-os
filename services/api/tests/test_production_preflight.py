@@ -272,6 +272,11 @@ def test_normal_preflight_retains_selected_style_and_invalidates_default_fingerp
         selected.raise_for_status()
         result = selected.json()
         assert result["preliminary_edit_plan"]["style_tokens"]["name"] == "content-os-subject-first"
+        whole = result["preliminary_edit_plan"]["whole_video"]
+        assert whole["timing_basis"] == "estimated_scene_duration"
+        assert whole["duration_ms"] == scene.duration_target_ms
+        assert whole["scenes"][0]["information_intent"] == scene.purpose
+        assert whole["talking_scene_ids"] == []
         assert result["fingerprint"] != default["fingerprint"]
         assert result["stop_reasons"] == default["stop_reasons"]
         stale = client.post(f"/projects/{project_id}/production-preflight", json={"style_tokens": {"name": "content-os-subject-first"}, "expected_fingerprint": default["fingerprint"]})

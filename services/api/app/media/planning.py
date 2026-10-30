@@ -15,6 +15,7 @@ from app.provider_execution import (ProviderExecutionService, ProviderExecutionR
 from app.providers.vision import VideoIntervalBatch, VisionTimeout
 from app.search import ClipTextSearchService
 from app.source_usage import SourceUsageService, SourceUsageConflict
+from app.assembly.edit_plan import source_overlap_ms, same_source_information_change, intentional_reuse
 from .local_paths import existing_local_media_file
 from .vision import planning_visual_evidence,source_output_presentation
 from .visual_facts import footage_geometry, full_interval_geometry, scene_visual_key, subtitle_keep_height, generated_footage_admitted, material_origin, matches_scene
@@ -335,6 +336,11 @@ class VisualMaterialResolver:
             facts=full_interval_geometry(asset,clip)
             if facts.get("coverage")!="video_interval_analysis" or not matches_scene(facts,scene):
                 return False
+            from app.media.semantic_rejections import rejected_window
+            from app.assembly.video_spec import milliseconds_to_frames
+            from app.assembly.edit_plan import source_frame_interval_ms
+            first,last=source_frame_interval_ms(clip.start_ms,milliseconds_to_frames(scene.duration_target_ms,project.fps),project.fps,clip.end_ms)
+            if rejected_window(self.db,scene_visual_key(scene),asset.id,first,last):return False
         return True
 
     def _require_bytes(self, assets):
@@ -468,6 +474,10 @@ class VisualMaterialResolver:
             if not _needs_footage(scene):
                 continue
             key = scene_visual_key(scene)
+            from app.media.semantic_rejections import negative_source_evidence,rejected_window
+            from app.assembly.edit_plan import source_frame_interval_ms
+            from app.assembly.video_spec import milliseconds_to_frames
+            negative = negative_source_evidence(self.db,key)
             requests[key] = {"scene_key":key, "voice_text":scene.voice_text, "purpose":scene.purpose,
                 "visual_intent":scene.visual_intent.model_dump(mode="json"), "visual_requirement":scene.visual_requirement,
                 "visual_requirement_reason":scene.visual_requirement_reason}
@@ -531,6 +541,8 @@ class VisualMaterialResolver:
             def add_hint(hint,limit=1):
                 added=0
                 for asset,clip in hint_windows(hint):
+                    first,last=source_frame_interval_ms(clip.start_ms,milliseconds_to_frames(scene.duration_target_ms,project.fps),project.fps,clip.end_ms)
+                    if rejected_window(self.db,key,asset.id,first,last,evidence=negative):continue
                     identity=str(clip.id)
                     if identity in scene_windows:continue
                     if len(scene_windows)>=3 or added>=limit:break
@@ -860,11 +872,14 @@ class VisualMaterialResolver:
         usage = SourceUsageService(self.db)
         occupied = usage.occupied(project.id, work_id=work_id)
         occupied.extend(reserved_source_uses)
-        pools, failures, rejected = {}, [], {}
+        pools, failures, rejected, negative_by_scene = {}, [], {}, {}
         for scene in scenes:
             key = scene_visual_key(scene)
             if not _needs_footage(scene):
                 continue
+            from app.media.semantic_rejections import negative_source_evidence,candidate_rejections
+            negative = negative_source_evidence(self.db,key)
+            negative_by_scene[scene.id] = negative
             options = []
             rejected[scene.scene_id] = {}
             for _, clip in windows.values():
@@ -889,6 +904,9 @@ class VisualMaterialResolver:
                     why=["真实视频区间与当前表达任务核验匹配"],estimated_cost=UsageCost(category={
                         SourceKind.USER_ASSET:CostCategory.USER_ASSET,SourceKind.HISTORICAL_ASSET:CostCategory.HISTORICAL_ASSET,
                         SourceKind.STOCK:CostCategory.STOCK,SourceKind.AI_BROLL:CostCategory.AI_VIDEO}[asset.source_kind],amount=None))
+                if candidate_rejections(self.db,scene,candidate,fps=project.fps,evidence=negative):
+                    rejected[scene.scene_id][str(clip.id)]=['source_semantic_use_rejected']
+                    continue
                 try:
                     from app.assembly.edit_plan import _default_edit_plan, presentation_for_style, EditPlanPreflightError
                     from app.domain.models import VisualStyleTokens, ProjectFormat
@@ -925,9 +943,8 @@ class VisualMaterialResolver:
         # 有界联合搜索取代逐段贪心。最多 8 候选，每步保留 64 个组合，不新增模型调用。
         # 画面重复和横屏次选过度使用先于来源偏好；不设三类来源比例。
         total=sum(scene.duration_target_ms for scene in scenes)
-        states=[({},[],{},(0,0,0,0,0,0))]
+        states=[({},[],{},(0,0,0,0,0,0,0))]
         from app.domain.models import ProjectFormat
-        from app.routing.asset_router import _comparison_intent
         from app.source_usage import conflicts
         for scene in scenes:
             if scene.id not in pools:continue
@@ -935,8 +952,7 @@ class VisualMaterialResolver:
             for selected,uses,landscape,rank in states:
                 for item in pools[scene.id]:
                     candidate,asset,degree,current,fit,quality=item
-                    intentional=(scene.reuse_intent=="reference" or _comparison_intent(scene)
-                        or asset.metadata.get("reuse_role") in {"meme","brand_marker"})
+                    intentional=intentional_reuse(scene,asset)
                     # 普通画面优先在已核验 Clip 内寻找未使用的区间。
                     if not intentional:
                         movable=candidate.model_copy(update={"playback_start_ms":None,"playback_end_ms":None})
@@ -945,6 +961,7 @@ class VisualMaterialResolver:
                                 uses,prefer_unused=True)
                             if available is not None:
                                 candidate=available
+                                if candidate_rejections(self.db,scene,candidate,fps=project.fps,evidence=negative_by_scene[scene.id]):continue
                                 current=usage.candidate_uses(candidate,scene.scene_id,scene.duration_target_ms)
                                 usage.require_available(project.id,current,work_id=work_id)
                                 if any(conflicts(reserved,use) for use in current for reserved in reserved_source_uses):continue
@@ -953,7 +970,7 @@ class VisualMaterialResolver:
                         item=(candidate,asset,degree,current,fit,quality)
                     # 各候选已查历史；组合展开只比较已解析来源，避免反复扫描整个数据库。
                     if any(conflicts(use,other) for use in current for other in uses):continue
-                    repeated=0 if intentional else _overlap_ms(current,uses)
+                    repeated=0 if intentional else source_overlap_ms(current,uses)
                     wide=dict(landscape)
                     if project.format is ProjectFormat.VERTICAL and asset.width>asset.height:
                         for use in current:
@@ -961,9 +978,14 @@ class VisualMaterialResolver:
                     excess=sum(max(0,duration-total/2) for duration in wide.values())
                     creator=material_origin(asset)=="creator_provided"
                     duration=scene.duration_target_ms
-                    next_rank=(rank[0]+repeated,excess,rank[2]+degree*duration,
-                        rank[3]+(0 if creator else duration),rank[4]+(1-(quality if quality is not None else .5))*duration,
-                        rank[5]+(1-candidate.match_score)*duration)
+                    previous_scene = next((value for value in scenes if value.order == scene.order - 1), None)
+                    previous_choice = selected.get(previous_scene.id) if previous_scene is not None else None
+                    stale_change = bool(previous_choice and same_source_information_change(scene,current,previous_scene,
+                        previous_choice[3],intentional=intentional,
+                        previous_intentional=intentional_reuse(previous_scene,previous_choice[1])))
+                    next_rank=(rank[0]+repeated,excess,rank[2]+(duration if stale_change else 0),rank[3]+degree*duration,
+                        rank[4]+(0 if creator else duration),rank[5]+(1-(quality if quality is not None else .5))*duration,
+                        rank[6]+(1-candidate.match_score)*duration)
                     extended.append(({**selected,scene.id:item},[*uses,*current],wide,next_rank))
             if not extended:raise MaterialResolutionError(f"material_combination_unresolved:{scene.scene_id}",candidate_rejections=rejected)
             states=sorted(extended,key=lambda value:(value[3],tuple(str(item[0].clip_id) for item in value[0].values())))[:64]
@@ -975,7 +997,7 @@ class VisualMaterialResolver:
                 if scene.id not in selected:
                     revised.append(scene);continue
                 candidate,asset,_,_,_,_=selected[scene.id]
-                reason="按表达作用筛选合格画面，再联合比较整片重复、横屏占比、历史占用与本人素材价值；未设来源配额。"
+                reason="按表达作用筛选合格画面，再联合比较整片重复、横屏占比、信息意图变化时连续同源、历史占用与本人素材价值；未设来源配额。"
                 current=self.assets.get(asset.id)
                 metadata=dict(current.metadata);facts=dict(metadata["visual_analysis"])
                 observed=dict(facts[str(candidate.clip_id)])
@@ -989,7 +1011,8 @@ class VisualMaterialResolver:
                     "match_reason":match.get("reason"),"fit":match.get("fit","unknown"),
                     "quality_adequate":match.get("quality_adequate"),
                     "whole_video_unintentional_repeat_ms":states[0][3][0],
-                    "whole_video_landscape_excess_ms":states[0][3][1]}
+                    "whole_video_landscape_excess_ms":states[0][3][1],
+                    "whole_video_same_source_on_information_change_ms":states[0][3][2]}
                 choices[f"{scene_visual_key(scene)}:{scene.id}"]=choice
                 choices[scene_visual_key(scene)]=choice
                 observed["editorial_selections"]=choices;facts[str(candidate.clip_id)]=observed;metadata["visual_analysis"]=facts
@@ -998,16 +1021,3 @@ class VisualMaterialResolver:
                 if asset.source_kind not in (*scene.preferred_sources,*fallback):fallback.append(asset.source_kind)
                 revised.append(scene.model_copy(update={"preferred_clip_id":candidate.clip_id,"fallback_sources":fallback,"material_request":None}))
         return tuple(revised)
-
-
-def _overlap_ms(current,previous):
-    """按来源实际内容的覆盖并集计算，重复登记不放大惩罚。"""
-    total=0
-    for use in current:
-        intervals=sorted((max(use["start_ms"],other["start_ms"]),min(use["end_ms"],other["end_ms"]))
-            for other in previous if use["source_hash"]==other["source_hash"]
-            and max(use["start_ms"],other["start_ms"])<min(use["end_ms"],other["end_ms"]))
-        end=-1
-        for start,stop in intervals:
-            total+=max(0,stop-max(start,end));end=max(end,stop)
-    return total

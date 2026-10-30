@@ -180,6 +180,13 @@ class AssetRouter:
             if candidate.clip_id not in seen_clips:
                 candidates.append((score, candidate))
                 relevance[candidate.clip_id] = 1.0  # Exact reviewed speech, independently checked above.
+        from app.media.semantic_rejections import negative_source_evidence,candidate_rejections
+        from app.media.visual_facts import scene_visual_key
+        project = ProjectRepository(self.assets.db).get(scene.project_id)
+        negative = negative_source_evidence(self.assets.db,scene_visual_key(scene))
+        if project is not None and negative:
+            candidates = [(score,candidate) for score,candidate in candidates
+                if not candidate_rejections(self.assets.db,scene,candidate,fps=project.fps,evidence=negative)]
         candidates.sort(key=lambda value: (
             -relevance.get(value[1].clip_id, 0),
             -value[0],
@@ -280,6 +287,9 @@ class AssetRouter:
                     available = usage.allocate_candidate(recommended,scene.scene_id,scene.duration_target_ms,visible_uses,
                         fixed=recommended.playback_start_ms is not None or _comparison_intent(scene),
                         prefer_unused=not _comparison_intent(scene))
+                    from app.media.semantic_rejections import candidate_rejections
+                    if available is not None and project is not None and candidate_rejections(self.assets.db,scene,available,fps=project.fps):
+                        available = None
                     if available is not None:
                         if available != recommended:
                             result = RoutingResult(scene_plan_id=scene.id,candidates=tuple(
@@ -378,6 +388,10 @@ class AssetRouter:
         facts = full_interval_geometry(asset, clip, interval)
         if facts and not matches_scene(facts, scene):
             raise RoutingInputError("explicit_footage_source_scene_mismatch")
+        from app.media.semantic_rejections import candidate_rejections
+        project = ProjectRepository(self.assets.db).get(scene.project_id)
+        if project is not None and candidate_rejections(self.assets.db,scene,choice,fps=project.fps):
+            raise RoutingInputError('source_semantic_use_rejected')
         return choice
 
     def _score_hits(self, scene: ScenePlan, hits: Sequence[ClipSearchHit]) -> list[tuple[float, CandidateAsset]]:
