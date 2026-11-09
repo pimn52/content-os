@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import create_app
 from app.db import (Database,JobRepository,ProjectRepository,ProjectDraftRepository,AudioAssetRepository,AssetRepository,
-    ClipRepository,ProviderCallRepository)
+    ClipRepository,ProviderCallRepository,ProviderMachineCapabilityProfileRepository)
 from app.domain.models import (AudioAsset,Asset,Clip,JobStatus,JobType,ScenePlan,VisualIntent,GraphicCardPlan,TranscriptSegment,RationalFps,ProjectFormat)
 from app.jobs import JobRunner,JobStore
 from app.jobs.handlers import TalkingQaJobHandler
@@ -21,6 +21,35 @@ from app.worker_cli import _run_product_queue
 from app.costs import UnknownProviderCostEstimator
 from app.media.ffprobe import ProbeMetadata
 from test_production_runs import _talking_source_fixture,_voice_dispatch_evidence
+
+
+def test_configured_worker_profiles_are_runtime_hints_not_gates(tmp_path):
+    class Voice:
+        provider_name = "local-voice"
+        model = "voice-model"
+        is_local = True
+        repair_execution = {"runtime": "voice-runtime", "machine_id": "creator-host"}
+
+    class Talking:
+        provider_name = "local-talking"
+        model = "talking-model"
+        is_local = True
+        runtime_label = "talking-runtime"
+        machine_id = "creator-host"
+
+    with Database(tmp_path / "runtime-profiles.sqlite") as db:
+        service = VideoProductionService(
+            db, tmp_path, voice_provider=Voice(), talking_provider=Talking(),
+        )
+        service._ensure_runtime_profiles()
+        profiles = ProviderMachineCapabilityProfileRepository(db).list()
+        assert {(item.capability, item.provider, item.model) for item in profiles} == {
+            ("voice", "local-voice", "voice-model"),
+            ("talking", "local-talking", "talking-model"),
+        }
+        assert all(item.readiness == "configured" for item in profiles)
+        assert all(item.evidence_reference is None for item in profiles)
+        assert all(item.commercial_status == "unknown" for item in profiles)
 
 
 @pytest.mark.parametrize("policy,initial,expected",[("auto","vertical","vertical"),("auto","horizontal","vertical"),("fixed","horizontal","horizontal")])
@@ -239,7 +268,8 @@ def test_one_input_preserves_person_and_never_downgrades_uncovered_speech_to_gra
                 footage_file.write_bytes(b'\x00\x00\x00\x18ftypisom fixture workflow source')
                 footage=AssetRepository(db).create(Asset(source_file=str(footage_file),content_hash=hashlib.sha256(footage_file.read_bytes()).hexdigest(),
                     duration_ms=10000,width=1080,height=1920,fps=project.fps,has_audio=False,
-                    authorization_reference='fixture intake rights',imported_at=datetime.now(timezone.utc)))
+                    authorization_reference='fixture intake rights',imported_at=datetime.now(timezone.utc),
+                    metadata={'ip_profile_id':str(project.ip_profile_id),'lifecycle_state':'active'}))
                 footage_clip=ClipRepository(db).create(Clip(asset_id=footage.id,
                     start_ms=0,end_ms=10000,asset_duration_ms=10000,visual_description='视频压缩流程图的已有录像'))
         binding.pop("authorization_reference",None)

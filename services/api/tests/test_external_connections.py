@@ -17,6 +17,7 @@ from app.providers.commons_media import ExternalMediaError
 from app.providers.coverr_media import CoverrMediaProvider
 from app.providers.pexels_media import PexelsMediaProvider
 from app.providers.pixabay_media import PixabayMediaProvider
+from app.runtime_settings import RuntimeSettings
 from test_coverr_media import row as coverr_row
 from test_external_media import _project
 from test_pixabay_media import Probe, Response, VIDEO, row as pixabay_row
@@ -57,6 +58,37 @@ def test_unconfigured_sources_are_listed_but_only_keyless_source_is_automatic(mo
         assert source["live_checks"] == ["authentication", "account_quota", "response_schema", "download_rendition", "network_access"]
     assert connections[-1]["connection_status"] == "keyless"
     assert configured_external_sources() == ["wikimedia_commons"]
+
+
+def test_saved_runtime_environment_is_authoritative_for_all_external_callers(tmp_path, monkeypatch):
+    clear_sources(monkeypatch)
+    key = tmp_path / "pexels.txt"
+    key.write_text("fixture-key", encoding="utf-8")
+    environment = {
+        "CONTENT_OS_PEXELS_API_KEY_FILE": str(key),
+        "CONTENT_OS_EXTERNAL_SOURCE_ORDER": "pexels,wikimedia_commons",
+    }
+
+    rows = external_source_connections(environment=environment)
+    assert next(row for row in rows if row["id"] == "pexels")["configured"] is True
+    assert configured_external_sources(environment=environment) == ["pexels", "wikimedia_commons"]
+    project = _project(tmp_path / "runtime-environment.sqlite")
+    provider = external_provider("pexels", project, environment=environment)
+    assert provider.provider_name == "pexels"
+
+
+def test_provider_status_endpoint_uses_saved_runtime_environment_after_restart(tmp_path):
+    path = tmp_path / "runtime-environment-api.sqlite"
+    project = _project(path)
+    key = tmp_path / "pexels.txt"
+    key.write_text("fixture-key", encoding="utf-8")
+    settings = RuntimeSettings(pexels_key_file=str(key))
+    with TestClient(create_app(path)) as client:
+        saved = client.put("/runtime/settings", json=settings.model_dump())
+        assert saved.status_code == 200
+    with TestClient(create_app(path)) as client:
+        rows = client.get(f"/projects/{project.id}/external-media/providers").json()
+        assert next(row for row in rows if row["id"] == "pexels")["configured"] is True
 
 
 def test_configured_sources_preserve_order_without_reading_credentials(tmp_path, monkeypatch):

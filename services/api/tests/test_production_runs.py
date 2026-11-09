@@ -24,7 +24,7 @@ from app.media.ffprobe import ProbeMetadata
 from app.jobs.runner import JobExecutionError
 from app.budget import ProviderCallLedger
 from app.providers.talking import TalkingSynthesisResult
-from app.production_runs import ProductionRunService
+from app.production_runs import ProductionRunService, choose_quality_reference_window
 from app.talking.planned_preview import TalkingRunPreviewJobHandler
 from app.media.ffprobe import FFProbeAdapter
 from app.runtime import resolve_local_executable
@@ -47,6 +47,37 @@ def test_retained_voice_uses_exact_assembly_review_without_changing_native_state
     assert has_approved_voice_quality(db, audio) is review_valid
     assert seen == [(audio, db)]
     assert audio.metadata["voice_generation"]["human_review_state"] == "pending"
+
+
+def test_reference_window_choice_uses_earliest_free_window_and_retains_unranked_evidence():
+    source = {"start_ms": 0, "end_ms": 12_000, "source_hash": "source"}
+    occupied = [{"start_ms": 0, "end_ms": 2_000, "source_hash": "source"}]
+    clip = type("Clip", (), {"start_ms": 0})()
+    seen = []
+
+    def quality(_clip, start_ms, end_ms):
+        seen.append((start_ms, end_ms))
+        return {
+            "state": "measured",
+            "reference_quality_score": 0.9 if start_ms == 5_400 else 0.2,
+        }
+
+    selected = choose_quality_reference_window(source, occupied, clip, 3_000, quality)
+
+    assert selected is not None
+    assert selected[1] == 2_000
+    assert selected[2]["reference_quality_score"] == 0.2
+    assert all(start >= 2_000 for start, _ in seen)
+
+
+def test_reference_window_choice_returns_none_when_all_candidates_are_occupied():
+    source = {"start_ms": 0, "end_ms": 6_000, "source_hash": "source"}
+    occupied = [{"start_ms": 0, "end_ms": 6_000, "source_hash": "source"}]
+    clip = type("Clip", (), {"start_ms": 0})()
+
+    assert choose_quality_reference_window(
+        source, occupied, clip, 3_000, lambda *_: {"state": "not_configured"},
+    ) is None
 
 
 @pytest.mark.parametrize("suitability,with_new,expected", [
@@ -356,6 +387,46 @@ def _talking_wait_fixture(client: TestClient, db_path: Path, *, with_master: boo
     return project_id, preflight.json(), source
 
 
+def test_same_work_candidate_has_own_preflight_and_run(tmp_path: Path) -> None:
+    from app.production_preflight import build_production_preflight
+    from app.domain.models import VisualStyleTokens
+    from app.production_runs import ProductionRunConflict
+
+    path = tmp_path / "candidate.sqlite"
+    with TestClient(create_app(path)) as client:
+        project_id, plan, _ = _talking_wait_fixture(client, path, with_master=False)
+        response = client.post(f"/projects/{project_id}/production-runs", json={
+            "idempotency_key": "original", "expected_fingerprint": plan["fingerprint"],
+        })
+        assert response.status_code == 201, response.text
+        parent = response.json()
+        with Database(path) as db:
+            project = ProjectRepository(db).get(UUID(project_id))
+            preview = build_production_preflight(db, project, ProjectDraftRepository(db).get(project.id),
+                style_tokens=VisualStyleTokens(), source_usage_work_id=UUID(parent["work_id"]))
+            assert preview.fingerprint != parent["preflight_fingerprint"]
+            service = ProductionRunService(db, path.parent)
+            kwargs = dict(idempotency_key="candidate", expected_fingerprint=preview.fingerprint,
+                style_tokens=VisualStyleTokens(), candidate_of_run_id=UUID(parent["id"]))
+            candidate = service.start(project.id, **kwargs)
+            assert str(candidate.id) != parent["id"]
+            assert str(candidate.work_id) == parent["work_id"]
+            assert service.start(project.id, **kwargs).id == candidate.id
+        _fixture_complete_run_voice(client, path, project_id, {"id": str(candidate.id)},
+                                    ["A fresh creator point.", "A clear takeaway."], resume=False)
+        with Database(path) as db:
+            service = ProductionRunService(db, path.parent)
+            assert service.start(UUID(project_id), **kwargs).id == candidate.id
+            with pytest.raises(ProductionRunConflict):
+                service.start(UUID(project_id), **{**kwargs, "expected_fingerprint": "different"})
+            with pytest.raises(ProductionRunConflict):
+                service.start(UUID(project_id), **{**kwargs, "style_tokens": VisualStyleTokens(name="other")})
+            with pytest.raises(ProductionRunConflict):
+                service.start(UUID(project_id), **{**kwargs, "repair_allowance": 0})
+            with pytest.raises(ProductionRunConflict):
+                service.start(UUID(project_id), **{**kwargs, "automatic": True})
+
+
 def test_new_voice_to_talking_transition_is_atomic_and_restart_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "voice-to-talking.sqlite"
     with TestClient(create_app(path)) as client:
@@ -386,7 +457,7 @@ def test_new_voice_to_talking_transition_is_atomic_and_restart_safe(tmp_path: Pa
         assert result["preflight_fingerprint"] == waiting["preflight_fingerprint"]
         assert len(result["talking_dependencies"]) == 1
         assert "talking_source_not_bound:hook" in result["waiting_stop_reasons"]
-        assert "talking_capability_not_verified" in result["waiting_stop_reasons"]
+        assert "talking_capability_not_verified" not in result["waiting_stop_reasons"]
         assert result["render_job_id"] is None and result["talking_source_bindings"] == []
         assert client.post(f"{root}/resume").status_code == 409  # No second transition or inference.
     with TestClient(create_app(path)) as client:
@@ -397,7 +468,7 @@ def test_new_voice_to_talking_transition_is_atomic_and_restart_safe(tmp_path: Pa
             assert ProviderCallRepository(db).list_for_project(UUID(project_id)) == []
 
 
-@pytest.mark.parametrize("failure", ["rejected", "qa_reopened", "wrong_master", "changed_bytes", "changed_draft", "cancelled", "voice_consent_revoked", "voice_license_changed"])
+@pytest.mark.parametrize("failure", ["rejected", "qa_reopened", "wrong_master", "changed_bytes", "changed_draft", "cancelled", "voice_consent_revoked"])
 def test_new_voice_talking_bridge_blocks_changed_or_missing_authority(tmp_path: Path, failure: str) -> None:
     path = tmp_path / f"voice-bridge-{failure}.sqlite"
     with TestClient(create_app(path)) as client:
@@ -410,18 +481,13 @@ def test_new_voice_talking_bridge_blocks_changed_or_missing_authority(tmp_path: 
                                              approved=failure != "rejected", resume=False)
         root = f"/projects/{project_id}/production-runs/{waiting['id']}"
         with Database(path) as db:
-            if failure in {"voice_consent_revoked", "voice_license_changed"}:
+            if failure == "voice_consent_revoked":
                 voice = JobRepository(db).get(UUID(approved["voice_job_id"]))
-                if failure == "voice_consent_revoked":
-                    profiles = VoiceProfileRepository(db)
-                    profile = profiles.get(voice.payload.voice_profile_id)
-                    revoked = profile.model_copy(update={"consent": profile.consent.model_copy(update={"confirmed": False})})
-                    db.connection.execute("UPDATE voice_profiles SET payload = ? WHERE id = ?",
-                                          (revoked.model_dump_json(), str(profile.id)))
-                else:
-                    capabilities = ProviderMachineCapabilityProfileRepository(db)
-                    capability = capabilities.get(voice.payload.execution_capability_profile_id)
-                    capabilities.save(capability.model_copy(update={"commercial_status": "unknown", "license_evidence_reference": None}))
+                profiles = VoiceProfileRepository(db)
+                profile = profiles.get(voice.payload.voice_profile_id)
+                revoked = profile.model_copy(update={"consent": profile.consent.model_copy(update={"confirmed": False})})
+                db.connection.execute("UPDATE voice_profiles SET payload = ? WHERE id = ?",
+                                      (revoked.model_dump_json(), str(profile.id)))
             if failure == "qa_reopened":
                 jobs = JobRepository(db)
                 qa = jobs.get(UUID(approved["voice_qa_job_id"]))
@@ -490,7 +556,7 @@ def test_new_talking_plan_waits_durably_without_selection_or_jobs(tmp_path: Path
             "visual_dependency_fingerprint": scene["visual_dependency_fingerprint"],
         }]
         assert "talking_source_not_bound:hook" in run["waiting_stop_reasons"]
-        assert "provider_license_scope_unverified" in run["waiting_stop_reasons"]
+        assert "provider_license_scope_unverified" not in run["waiting_stop_reasons"]
         assert client.post(f"/projects/{project_id}/production-runs", json=payload).json() == run
         duplicate = client.post(f"/projects/{project_id}/production-runs", json={
             **payload, "idempotency_key": "other-click",
@@ -599,12 +665,14 @@ def _talking_source_fixture(client: TestClient, path: Path, *, target_duration_m
     source.write_bytes(b"fixture reference bytes")
     now = datetime.now(timezone.utc)
     with Database(path) as db:
-        _default_voice_profile(db, ProjectRepository(db).get(UUID(project_id)))
+        project = ProjectRepository(db).get(UUID(project_id))
+        _default_voice_profile(db, project)
         asset = Asset(
             source_file=source.name, content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
             duration_ms=5_000, width=1080, height=1920,
             fps=RationalFps(numerator=25, denominator=1), has_audio=True,
             authorization_reference="fixture:source-rights", imported_at=now,
+            metadata={"ip_profile_id": str(project.ip_profile_id), "lifecycle_state": "active"},
         )
         AssetRepository(db).create(asset)
         clip = Clip(
@@ -616,6 +684,7 @@ def _talking_source_fixture(client: TestClient, path: Path, *, target_duration_m
         )
         ClipRepository(db).create(clip)
         profile = TalkingProfile(
+            ip_profile_id=project.ip_profile_id,
             name="Fixture talking", provider="fixture-talking", reference_clip_ids=[clip.id],
             consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True, confirmed_at=now),
             created_at=now,
@@ -677,7 +746,7 @@ def test_talking_reference_binding_is_durable_without_running_inference(tmp_path
         assert client.get(f"/projects/{project_id}/production-runs/{waiting['id']}").json() == bound
 
 
-def test_talking_source_bind_rejects_unverified_license_and_stale_draft(tmp_path: Path) -> None:
+def test_talking_source_bind_uses_runtime_profile_without_evidence_gate_and_still_rejects_stale_draft(tmp_path: Path) -> None:
     path = tmp_path / "bind-license.sqlite"
     with TestClient(create_app(path)) as client:
         project_id, waiting, payload, _ = _talking_source_fixture(client, path)
@@ -685,16 +754,14 @@ def test_talking_source_bind_rejects_unverified_license_and_stale_draft(tmp_path
         with Database(path) as db:
             capability = ProviderMachineCapabilityProfileRepository(db).get(UUID(payload["capability_profile_id"]))
             ProviderMachineCapabilityProfileRepository(db).save(capability.model_copy(update={
-                "commercial_status": "non_commercial_only", "license_evidence_reference": None,
+                "readiness": "configured", "provenance_source": "configured runtime",
+                "commercial_status": "unknown", "evidence_reference": None,
+                "license_evidence_reference": None, "verified_parameters": {},
+                "quality_status": "unknown",
             }))
-        rejected = client.post(url, json=payload)
-        assert rejected.status_code == 409
-        assert "talking_provider_license_scope_unverified" in rejected.json()["detail"]["reasons"]
-        with Database(path) as db:
-            capability = ProviderMachineCapabilityProfileRepository(db).get(UUID(payload["capability_profile_id"]))
-            ProviderMachineCapabilityProfileRepository(db).save(capability.model_copy(update={
-                "commercial_status": "commercial_safe", "license_evidence_reference": "fixture:license",
-            }))
+        accepted = client.post(url, json=payload)
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["talking_source_bindings"][0]["license_evidence_reference"] is None
         draft = client.get(f"/projects/{project_id}/draft").json()
         saved = client.put(f"/projects/{project_id}/draft", json={
             "script": draft["script"], "topic": "changed", "scenes": draft["scenes"],
@@ -842,7 +909,7 @@ def test_planned_talking_dispatch_is_exact_idempotent_and_stays_awaiting_run(tmp
             assert JobRepository(db).get(UUID(job_id)).status is JobStatus.CANCELLED
 
 
-def test_planned_talking_dispatch_and_worker_fail_closed_on_changed_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_planned_talking_uses_runtime_profile_and_still_fails_closed_on_budget_bytes_and_consent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "planned-talking-stale.sqlite"
     with TestClient(create_app(path)) as client:
         project_id, waiting, binding, evidence = _ready_talking_dispatch_fixture(client, path, monkeypatch)
@@ -865,7 +932,7 @@ def test_planned_talking_dispatch_and_worker_fail_closed_on_changed_gates(tmp_pa
             job = JobRepository(db).get(job_id).model_copy(update={"status": JobStatus.RUNNING})
             ProductionRunService(db, tmp_path).require_talking_job_admission(
                 job, provider="fixture-talking", model="fixture-model",
-                runtime="fixture", machine_id="fixture-host",
+                runtime="another-runtime", machine_id="another-host",
             )
 
             class Provider:
@@ -883,23 +950,11 @@ def test_planned_talking_dispatch_and_worker_fail_closed_on_changed_gates(tmp_pa
                 Importer(), Provider(), tmp_path / "generated", execution_runtime="fixture",
                 execution_machine_id="fixture-host",  # type: ignore[arg-type]
             )
-            handler_wrong_host = TalkingGenerationJobHandler(
-                TalkingProfileRepository(db), AudioAssetRepository(db), AssetRepository(db),
-                Importer(), Provider(), tmp_path / "generated", execution_runtime="fixture",
-                execution_machine_id="other-host",  # type: ignore[arg-type]
-            )
-            with pytest.raises(JobExecutionError) as wrong:
-                handler_wrong_host(job)
-            assert wrong.value.code == "talking_worker_identity_mismatch"
             assert ProviderCallRepository(db).list_for_project(UUID(project_id)) == []
             capability = ProviderMachineCapabilityProfileRepository(db).get(UUID(binding["capability_profile_id"]))
             ProviderMachineCapabilityProfileRepository(db).save(capability.model_copy(update={
                 "commercial_status": "non_commercial_only", "license_evidence_reference": None,
             }))
-            with pytest.raises(JobExecutionError) as license_block:
-                handler(job)
-            assert license_block.value.code == "talking_provider_license_scope_unverified"
-            ProviderMachineCapabilityProfileRepository(db).save(capability)
             assert ProviderCallRepository(db).list_for_project(UUID(project_id)) == []
         assert client.put(f"/projects/{project_id}/budget", json={
             "currency": "USD", "max_calls": 0, "allow_unknown_cost": True,
@@ -1806,7 +1861,7 @@ def test_waiting_run_survives_restart_and_resumes_only_after_master_admission(tm
     path = tmp_path / "await-master.sqlite"
     with TestClient(create_app(path)) as client:
         project_id, plan, _ = _ready_fixture(client, path, with_master=False)
-        assert plan["status"] == "blocked"
+        assert plan["status"] == "ready_for_authorized_dispatch"
         started = client.post(f"/projects/{project_id}/production-runs", json={
             "idempotency_key": "await-master", "expected_fingerprint": plan["fingerprint"],
         })
@@ -1925,33 +1980,31 @@ def test_guarded_voice_dispatch_is_durable_and_still_requires_exact_u_voice(tmp_
             assert ProviderCallRepository(db).list_for_project(UUID(project_id)) == []
 
 
-def test_voice_dispatch_rejects_unknown_license_without_creating_job(tmp_path: Path) -> None:
+def test_voice_dispatch_records_runtime_profile_without_license_or_evidence_gate(tmp_path: Path) -> None:
     path = tmp_path / "voice-license.sqlite"
     with TestClient(create_app(path)) as client:
         project_id, _, _ = _ready_fixture(client, path, with_master=False)
         profile_id, capability_id = _voice_dispatch_evidence(path, license_status="unknown")
+        with Database(path) as db:
+            repo = ProviderMachineCapabilityProfileRepository(db)
+            capability = repo.get(UUID(capability_id))
+            repo.save(capability.model_copy(update={
+                "readiness": "configured", "provenance_source": "configured runtime",
+                "evidence_reference": None,
+            }))
         plan = client.post(f"/projects/{project_id}/production-preflight", json={}).json()
         waiting = client.post(f"/projects/{project_id}/production-runs", json={
             "idempotency_key": "voice-run", "expected_fingerprint": plan["fingerprint"],
         }).json()
-        denied = client.post(f"/projects/{project_id}/production-runs/{waiting['id']}/voice-dispatch", json={
+        dispatched = client.post(f"/projects/{project_id}/production-runs/{waiting['id']}/voice-dispatch", json={
             "voice_profile_id": profile_id, "capability_profile_id": capability_id,
         })
-        assert denied.status_code == 409
-        assert "voice_provider_license_scope_unverified" in denied.json()["detail"]["reasons"]
+        assert dispatched.status_code == 200, dispatched.text
+        assert dispatched.json()["status"] == "voice_pending"
         with Database(path) as db:
-            repo = ProviderMachineCapabilityProfileRepository(db)
-            capability = repo.get(UUID(capability_id))
-            assert capability is not None
-            repo.save(capability.model_copy(update={"evidence_reference": None}))
-        capability_denied = client.post(f"/projects/{project_id}/production-runs/{waiting['id']}/voice-dispatch", json={
-            "voice_profile_id": profile_id, "capability_profile_id": capability_id,
-        })
-        assert capability_denied.status_code == 409
-        assert "requires an evidence reference" in capability_denied.text
-        with Database(path) as db:
-            assert JobRepository(db).list() == []
+            assert len(JobRepository(db).list()) == 1
             assert ProviderCallRepository(db).list_for_project(UUID(project_id)) == []
+        assert client.post(f"/projects/{project_id}/production-runs/{waiting['id']}/cancel").status_code == 200
 
 
 def test_voice_dispatch_rejects_stale_draft_and_pending_voice_can_cancel(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ import json
 import math
 
 MIN_SCENE_MATCH_SCORE = .65
+MIN_CONTEXT_MATCH_SCORE = .2
 
 
 def subtitle_keep_height(height, regions, *, machine=False):
@@ -147,9 +148,18 @@ def full_interval_geometry(asset, clip, playback_interval_ms=None):
 def matches_scene(facts, scene):
     if facts.get("coverage") != "video_interval_analysis":
         return True
-    match = facts.get("scene_matches", {}).get(scene_visual_key(scene), {})
-    return (match.get("analysis_valid") is not False
-        and match.get("supported") is True and match.get("score", 0) >= MIN_SCENE_MATCH_SCORE
-        and match.get("quality_adequate") is True
-        and (scene.visual_requirement!="action_evidence"
-            or match.get("fit")=="direct" and match.get("subject_verified") is True))
+    key = scene_visual_key(scene)
+    match = facts.get("scene_matches", {}).get(key) or facts.get("local_description_matches", {}).get(key, {})
+    if match.get("analysis_valid") is False or match.get("quality_adequate") is not True:
+        return False
+    if scene.visual_requirement == "action_evidence":
+        return (match.get("supported") is True
+            and match.get("score", 0) >= MIN_SCENE_MATCH_SCORE
+            and match.get("fit") == "direct"
+            and match.get("subject_verified") is True)
+    direct = (match.get("supported") is True
+        and match.get("score", 0) >= MIN_SCENE_MATCH_SCORE)
+    contextual = (scene.visual_requirement == "explanatory"
+        and match.get("fit") == "context"
+        and match.get("score", 0) >= MIN_CONTEXT_MATCH_SCORE)
+    return direct or contextual

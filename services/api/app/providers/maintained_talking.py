@@ -157,8 +157,8 @@ class MaintainedLatentSyncProvider:
                 temporary.cleanup()
 
 
-def configured_maintained_talking_provider(config, environment):
-    """读取已配置的本地路径；普通执行无需内部评估操作员凭据。"""
+def maintained_talking_runtime_options(environment) -> dict:
+    """Read only the validated ordinary runtime options, never credentials."""
     try:
         path = Path(environment.get("CONTENT_OS_MAINTAINED_TALKING_CONFIG", ""))
         if not path.is_file() or not 0 < path.stat().st_size <= 128000:
@@ -169,6 +169,11 @@ def configured_maintained_talking_provider(config, environment):
                 or not isinstance(document["runtime_options"], dict)
                 or "operator_key" in document["runtime_options"]):
             raise ValueError()
-        return MaintainedLatentSyncProvider(config.data_root, document["runtime_options"])
+        return dict(document["runtime_options"])
     except (OSError, ValueError, TypeError):
         raise TalkingConfigurationError("maintained_talking_configuration_invalid") from None
+
+
+def configured_maintained_talking_provider(config, environment):
+    """读取已配置的本地路径；普通执行无需内部评估操作员凭据。"""
+    return MaintainedLatentSyncProvider(config.data_root, maintained_talking_runtime_options(environment))

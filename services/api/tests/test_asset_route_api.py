@@ -25,6 +25,7 @@ def _seed(path: Path, root: Path):
     asset = Asset(
         source_file=str(source), content_hash="9" * 64, duration_ms=5_000, width=1080, height=1920,
         fps=project.fps, authorization_reference="rights", imported_at=datetime.now(timezone.utc),
+        metadata={"ip_profile_id": str(profile.id), "lifecycle_state": "active"},
     )
     AssetRepository(db).create(asset)
     clip = Clip(
@@ -188,7 +189,7 @@ def test_asset_route_api_explicit_lexical_mode_keeps_basis_traceable(tmp_path: P
     db = Database(path)
     asset = AssetRepository(db).get(clip.asset_id)
     assert asset is not None
-    AssetRepository(db).update(asset.model_copy(update={"metadata": {"r1_usage": "reference"}}))
+    AssetRepository(db).update(asset.model_copy(update={"metadata": {**asset.metadata, "r1_usage": "reference"}}))
     db.close()
     monkeypatch.setenv("CONTENT_OS_RETRIEVAL_MODE", "lexical")
 

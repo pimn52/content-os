@@ -36,6 +36,21 @@ def test_existing_file_connections_share_capability_contract_without_live_call(t
     assert "fixture-file-secret" not in json.dumps(values)
 
 
+def test_saved_runtime_environment_is_authoritative_for_web_connections(tmp_path, monkeypatch):
+    key = tmp_path / "web.txt"
+    key.write_text("fixture-secret", encoding="utf-8")
+    environment = {
+        "CONTENT_OS_KIMI_WEB_API_KEY_FILE": str(key),
+        "CONTENT_OS_WEB_PROVIDER_ORDER": "moonshot",
+    }
+
+    values = connections.web_provider_connections(environment=environment)
+    assert next(value for value in values if value["id"] == "moonshot")["configured"] is True
+    assert connections.configured_web_providers(environment=environment) == ["moonshot"]
+    provider = connections.web_provider("moonshot", environment=environment)
+    assert provider.provider_name == "moonshot" and provider._api_key == "fixture-secret"
+
+
 def test_connection_order_is_shared_configurable_and_does_not_promote_chat_keys(tmp_path, monkeypatch):
     key = tmp_path / "credential.txt"
     key.write_text("fixture-secret", encoding="utf-8")

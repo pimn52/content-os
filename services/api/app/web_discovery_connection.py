@@ -2,6 +2,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import os
+from collections.abc import Mapping
 from pathlib import Path
 import re
 from typing import Protocol
@@ -60,24 +61,25 @@ def _adapter(name: str) -> _Adapter:
         raise WebConnectionError("web_provider_unsupported", "此连接尚未注册网页搜索/抓取能力") from None
 
 
-def _credential_file(adapter: _Adapter) -> str:
-    path = os.environ.get(adapter.credential_setting, "").strip()
+def _credential_file(adapter: _Adapter, environment: Mapping[str, str] | None = None) -> str:
+    values = os.environ if environment is None else environment
+    path = values.get(adapter.credential_setting, "").strip()
     if path:
         return path
     if adapter.fallback_prefix:
         try:
-            if urlsplit(os.environ.get(adapter.fallback_prefix + "_BASE_URL", "")).hostname == adapter.fallback_host:
-                return os.environ.get(adapter.fallback_prefix + "_API_KEY_FILE", "").strip()
+            if urlsplit(values.get(adapter.fallback_prefix + "_BASE_URL", "")).hostname == adapter.fallback_host:
+                return values.get(adapter.fallback_prefix + "_API_KEY_FILE", "").strip()
         except ValueError:
             pass
     return ""
 
 
-def web_provider_connections() -> list[dict]:
+def web_provider_connections(*, environment: Mapping[str, str] | None = None) -> list[dict]:
     """供普通 UI 和自动制作读取；configured 只指文件存在，不代判鉴权成功。"""
     values = []
     for name, adapter in _ADAPTERS.items():
-        path = _credential_file(adapter)
+        path = _credential_file(adapter, environment)
         try:
             configured = bool(path and Path(path).is_file() and 0 < Path(path).stat().st_size <= 8192)
         except (OSError, ValueError):
@@ -88,21 +90,23 @@ def web_provider_connections() -> list[dict]:
     return values
 
 
-def configured_web_providers() -> list[str]:
+def configured_web_providers(*, environment: Mapping[str, str] | None = None) -> list[str]:
     """返回配置顺序中的可搜索连接；不构造提供商，也不读取或输出 Key 内容。"""
     default = ",".join(_ADAPTERS)
-    order = [name.strip() for name in os.environ.get("CONTENT_OS_WEB_PROVIDER_ORDER", default).split(",") if name.strip()]
+    values = os.environ if environment is None else environment
+    order = [name.strip() for name in values.get("CONTENT_OS_WEB_PROVIDER_ORDER", default).split(",") if name.strip()]
     if not order or len(order) != len(set(order)) or set(order) - _ADAPTERS.keys():
         raise WebConnectionError("web_provider_order_invalid", "网页搜索连接顺序配置无效")
-    available = {row["id"] for row in web_provider_connections() if row["configured"] and row["search"]}
+    available = {row["id"] for row in web_provider_connections(environment=values) if row["configured"] and row["search"]}
     return [name for name in order if name in available]
 
 
-def web_provider(name: str, *, capability: str = "search") -> WebDiscoveryProvider:
+def web_provider(name: str, *, capability: str = "search",
+                 environment: Mapping[str, str] | None = None) -> WebDiscoveryProvider:
     adapter = _adapter(name)
     if capability not in {"search", "fetch"} or not getattr(adapter, capability, False):
         raise WebConnectionError("web_capability_unavailable", "此连接未提供所需网页工具能力")
-    path = _credential_file(adapter)
+    path = _credential_file(adapter, environment)
     try:
         if not path or not 0 < Path(path).stat().st_size <= 8192:
             raise ValueError

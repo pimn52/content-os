@@ -7,12 +7,24 @@ export type ScenePresentation = {
   fallback_sources?: string[];
   evidence_refs: string[];
   graphic_plan?: {kind: "none" | "text_card" | "diagram" | "unsupported"; treatment: "headline" | "key_point" | "contrast" | "diagram_flow" | "diagram_loss" | "diagram_factors" | null; points: string[]; reason: string | null} | null;
+  creator_fit?: {
+    fit_state: "matched" | "partial" | "generic";
+    content_pillar: string | null;
+    topic_fit_reason: string | null;
+    audience_value: string | null;
+    knowledge_refs: string[];
+    opinion_refs: string[];
+    evidence_gaps: string[];
+    deviation_risks: string[];
+  } | null;
 };
 
 export function ScenePresentationEditor({scene, disabled, onChange}: {
   scene: ScenePresentation; disabled: boolean; onChange: (patch: Partial<ScenePresentation>) => void;
 }) {
   const graphic = scene.graphic_plan;
+  const fit = scene.creator_fit;
+  const fitLabel = fit?.fit_state === "matched" ? "完整匹配" : fit?.fit_state === "partial" ? "部分匹配" : "泛化建议";
   function chooseGraphic(kind: string) {
     onChange({graphic_plan: kind === "legacy" ? null : kind === "text_card"
       ? {kind, treatment: "key_point", points: [], reason: null}
@@ -22,7 +34,19 @@ export function ScenePresentationEditor({scene, disabled, onChange}: {
   function updateIntent(field: "subject" | "action" | "framing" | "description", value: string) {
     onChange({visual_intent: {...(scene.visual_intent ?? {}), [field]: value || null}});
   }
-  return <details className="scene-presentation"><summary>画面需求与图文计划</summary>
+  return <><div className="asset-row">
+    <div>
+      <strong>IP 适配：{fit ? fitLabel : "未返回依据"}</strong>
+      {fit?.content_pillar && <small>内容支柱：{fit.content_pillar}</small>}
+      {fit?.topic_fit_reason && <small>为什么适合：{fit.topic_fit_reason}</small>}
+      {fit?.audience_value && <small>受众价值：{fit.audience_value}</small>}
+      {!!fit?.knowledge_refs.length && <small>采用知识：{fit.knowledge_refs.join("；")}</small>}
+      {!!fit?.opinion_refs.length && <small>采用观点：{fit.opinion_refs.join("；")}</small>}
+      {!!fit?.evidence_gaps.length && <small className="error">事实缺口：{fit.evidence_gaps.join("；")}</small>}
+      {!!fit?.deviation_risks.length && <small className="muted">偏离风险：{fit.deviation_risks.join("；")}</small>}
+    </div>
+    <span className="badge">IP</span>
+  </div><details className="scene-presentation"><summary>画面需求与图文计划</summary>
     <p className="muted">决定本段需要展示什么；不自动判断哪种更好，也不替代素材与成片审核。修改后先保存草稿，再重新预检。</p>
     <label>场景目的<input disabled={disabled} maxLength={100} value={scene.purpose ?? ""} onChange={event => onChange({purpose: event.target.value})} /></label>
     <label>画面主体<input disabled={disabled} maxLength={500} value={scene.visual_intent?.subject ?? ""} onChange={event => updateIntent("subject", event.target.value)} /></label>
@@ -47,5 +71,5 @@ export function ScenePresentationEditor({scene, disabled, onChange}: {
       <small>{graphic.kind === "diagram" ? "用2至4项标签表达流程、信息损失或多因素关系；信息损失对照限2项。" : "标题1项、对比2项、要点最多4项；字卡只用于标题或结论，解释关系请选择信息图解。"}每项最多24字、总计72字，不自动叠在人物画面上。</small>
     </> : graphic ? <label>{graphic.kind === "none" ? "不加图文的理由" : "所需图形与不支持原因"}<textarea disabled={disabled} rows={2} maxLength={1000} value={graphic.reason ?? ""} onChange={event => onChange({graphic_plan: {...graphic, reason: event.target.value}})} /></label> : null}
     <small>没有所需人物、动作或足够长的主画面时，不能用字卡悄悄填补；不支持的需求会在预检中明确阻塞。</small>
-  </details>;
+  </details></>;
 }

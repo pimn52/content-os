@@ -3,18 +3,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.db import (
     AssetRepository, AudioAssetRepository, ClipRepository, Database, ProviderCallRepository,
-    ProviderMachineSettingRepository,
+    ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository,
 )
 from app.domain.models import (
-    Asset, AudioAsset, Clip, ProviderMachineSetting, RationalFps, ScenePlan, SourceKind, TranscriptSegment,
-    VisualIntent,
+    Asset, AudioAsset, Clip, GraphicCardPlan, MaterialRequest, ProviderMachineCapabilityProfile,
+    ProviderMachineSetting, RationalFps, ScenePlan, SourceKind, TranscriptSegment, VisualIntent,
 )
 from app.main import create_app
 from app.assembly.edit_plan import presentation_for_style
@@ -181,7 +181,8 @@ def test_preserved_full_frame_checks_actual_bytes_without_claiming_visual_qualit
             created_at=datetime.now(timezone.utc),fps=RationalFps(numerator=30,denominator=1)))
         scene=_scene(project.id)
         asset=AssetRepository(db).create(Asset(source_file=str(source),content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
-            duration_ms=10000,width=1080,height=1920,fps=project.fps,authorization_reference='registered',imported_at=project.created_at))
+            duration_ms=10000,width=1080,height=1920,fps=project.fps,authorization_reference='registered',imported_at=project.created_at,
+            metadata={'ip_profile_id':str(ip.id),'lifecycle_state':'active'}))
         ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=0,end_ms=10000,asset_duration_ms=10000,
             visual_description='creator showing a workflow',quality_score=.9))
         draft=save_project_draft(db,project,script=scene.voice_text,topic=project.topic,scenes=[scene],routes=[],confirmed=[],video_spec=None)
@@ -359,6 +360,32 @@ def _create_draft(client: TestClient, *, talking: bool = False, text: str = "A f
     return project_id, scene
 
 
+def test_optional_stock_request_does_not_block_an_executable_graphic(tmp_path: Path) -> None:
+    path = tmp_path / "optional-material.sqlite"
+    with TestClient(create_app(path)) as client:
+        project_id, scene = _create_draft(client)
+        graphic = scene.model_copy(update={
+            "preferred_sources": [SourceKind.TYPOGRAPHY],
+            "fallback_sources": [SourceKind.STOCK],
+            "visual_requirement": "explanatory",
+            "visual_requirement_reason": "流程图解独立表达三步的因果关系。",
+            "graphic_plan": GraphicCardPlan(kind="diagram", treatment="diagram_flow",
+                points=["先给结论", "细节支撑", "说明边界"]),
+            "material_request": MaterialRequest(source_kind="stock", query="interview dialogue",
+                reason="可选背景画面尚未取得。"),
+        })
+        client.put(f"/projects/{project_id}/draft", json={
+            "script": graphic.voice_text, "topic": "New topic",
+            "scenes": [graphic.model_dump(mode="json")],
+        }).raise_for_status()
+        response = client.post(f"/projects/{project_id}/production-preflight", json={})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert f"material_source_unavailable:{scene.scene_id}:stock" not in body["stop_reasons"]
+    assert body["scenes"][0]["planned_source_kind"] == "typography"
+
+
 def test_unaligned_approved_master_is_blocked_before_render(tmp_path: Path, monkeypatch) -> None:
     from types import SimpleNamespace
     from app.assembly.video_spec import NarrationTimelineError
@@ -391,11 +418,14 @@ def test_weak_text_match_does_not_prove_capture_or_waive_other_gates(tmp_path):
     with TestClient(create_app(path)) as client:
         project_id, scene = _create_draft(client)
         with Database(path) as db:
+            from app.db import ProjectRepository
+            project = ProjectRepository(db).get(UUID(project_id))
             asset = AssetRepository(db).create(Asset(
                 source_file=str(tmp_path / "source.mp4"), content_hash="c" * 64,
                 duration_ms=5_000, width=1920, height=1080,
                 fps=RationalFps(numerator=30, denominator=1), authorization_reference="rights",
                 imported_at=datetime.now(timezone.utc),
+                metadata={"ip_profile_id": str(project.ip_profile_id), "lifecycle_state": "active"},
             ))
             ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=5_000,
                 asset_duration_ms=5_000, transcript="creator"))
@@ -416,7 +446,7 @@ def test_weak_text_match_does_not_prove_capture_or_waive_other_gates(tmp_path):
         assert second["scenes"][0]["production_need"] == "none"
         assert second["preliminary_edit_plan"] is not None
         assert second["status"] == "blocked" and second["dispatch_performed"] is False
-        assert "voice_capability_not_verified" in second["stop_reasons"]
+        assert "voice_capability_not_verified" not in second["stop_reasons"]
         talking = graphic.model_copy(update={"preferred_sources": [SourceKind.AI_VIDEO, SourceKind.TYPOGRAPHY]})
         client.put(f"/projects/{project_id}/draft", json={"script": scene.voice_text, "topic": "New topic",
             "scenes": [talking.model_dump(mode="json")]}).raise_for_status()
@@ -426,7 +456,7 @@ def test_weak_text_match_does_not_prove_capture_or_waive_other_gates(tmp_path):
         assert client.get(f"/projects/{project_id}/provider-calls").json() == []
 
 
-def test_normal_draft_persists_explanatory_requirement_without_clearing_voice_gates(tmp_path):
+def test_normal_draft_persists_explanatory_requirement_without_capability_evidence_gates(tmp_path):
     with TestClient(create_app(tmp_path / "intent.sqlite")) as client:
         project_id, scene = _create_draft(client)
         assert client.get(f"/projects/{project_id}/draft").json()["scenes"][0]["visual_requirement"] == "unknown"
@@ -440,7 +470,8 @@ def test_normal_draft_persists_explanatory_requirement_without_clearing_voice_ga
         assert body["scenes"][0]["planned_source_kind"] != "typography"
         assert body["scenes"][0]["selected_candidate"] is None
         assert "visual_route_unresolved:hook" in body["stop_reasons"]
-        assert body["status"] == "blocked" and "voice_capability_not_verified" in body["stop_reasons"]
+        assert body["status"] == "blocked"
+        assert "voice_capability_not_verified" not in body["stop_reasons"]
         payload.update(visual_requirement="creator_speaking", visual_requirement_reason="The creator must visibly deliver the words.")
         client.put(f"/projects/{project_id}/draft", json={"script": scene.voice_text,
             "topic": "New topic", "scenes": [payload]}).raise_for_status()
@@ -504,13 +535,14 @@ def test_normal_preflight_uses_declared_talking_alternatives_without_waiving_dis
         decision = body["scenes"][0]
         assert decision["production_need"] == need and decision["selected_candidate"] is None
         assert body["status"] == "blocked" and body["dispatch_performed"] is False
-        assert "voice_capability_not_verified" in body["stop_reasons"]
+        assert "voice_capability_not_verified" not in body["stop_reasons"]
+        assert "provider_license_scope_unverified" not in body["stop_reasons"]
         assert "unknown_cost_requires_budget_authorization" in body["stop_reasons"]
         if need == "new_talking":
             assert decision["planned_source_kind"] == "ai_video" and decision["visual_role"] == "talking"
             assert "capture_required:hook" not in body["stop_reasons"]
             assert "talking_source_not_bound:hook" in body["stop_reasons"]
-            assert "talking_capability_not_verified" in body["stop_reasons"]
+            assert "talking_capability_not_verified" not in body["stop_reasons"]
             assert any(action["kind"] == "talking" and action["required"] for action in body["actions"])
         else:
             assert "capture_required:hook" in body["stop_reasons"]
@@ -525,12 +557,15 @@ def test_preflight_exposes_horizontal_subtitle_and_transform_unknowns(tmp_path: 
     with TestClient(create_app(path)) as client:
         project_id, scene = _create_draft(client)
         with Database(path) as db:
+            from app.db import ProjectRepository
+            project = ProjectRepository(db).get(UUID(project_id))
             asset = Asset(
                 source_kind=SourceKind.USER_ASSET, source_file=str(tmp_path / "horizontal.mp4"),
                 content_hash="a" * 64, duration_ms=5_000, width=1920, height=1080,
                 fps=RationalFps(numerator=30, denominator=1),
                 authorization_reference="source-rights", imported_at=datetime.now(timezone.utc),
-                metadata={"burned_in_subtitles": "present", "subtitle_evidence_reference": "inspection:known-bottom"},
+                metadata={"burned_in_subtitles": "present", "subtitle_evidence_reference": "inspection:known-bottom",
+                          "ip_profile_id": str(project.ip_profile_id), "lifecycle_state": "active"},
             )
             AssetRepository(db).create(asset)
             clip = ClipRepository(db).create(Clip(
@@ -599,12 +634,15 @@ def test_preflight_keeps_claimed_subtitle_absence_unknown_and_checks_budget_gate
     with TestClient(create_app(path)) as client:
         project_id, scene = _create_draft(client)
         with Database(path) as db:
+            from app.db import ProjectRepository
+            project = ProjectRepository(db).get(UUID(project_id))
             asset = Asset(
                 source_kind=SourceKind.USER_ASSET, source_file=str(tmp_path / "claimed-clear.mp4"),
                 content_hash="e" * 64, duration_ms=5_000, width=1080, height=1920,
                 fps=RationalFps(numerator=30, denominator=1),
                 authorization_reference="rights", imported_at=datetime.now(timezone.utc),
-                metadata={"burned_in_subtitles": "absent", "subtitle_evidence_reference": "caller-claim"},
+                metadata={"burned_in_subtitles": "absent", "subtitle_evidence_reference": "caller-claim",
+                          "ip_profile_id": str(project.ip_profile_id), "lifecycle_state": "active"},
             )
             AssetRepository(db).create(asset)
             ClipRepository(db).create(Clip(
@@ -622,7 +660,7 @@ def test_preflight_keeps_claimed_subtitle_absence_unknown_and_checks_budget_gate
         assert body["scenes"][0]["suitability"] == "unknown"
         assert "transform" not in {action["kind"] for action in body["actions"]}
         assert "budget_call_limit" in body["stop_reasons"]
-        assert "provider_license_scope_unverified" in body["stop_reasons"]
+        assert "provider_license_scope_unverified" not in body["stop_reasons"]
         assert "unknown_cost_requires_budget_authorization" not in body["stop_reasons"]
         assert client.get(f"/projects/{project_id}/provider-calls").json() == []
 
@@ -662,16 +700,53 @@ def test_preflight_rejects_stale_copy_style_source_and_capability_snapshot(tmp_p
         assert no_plan.json()["detail"] == "stale_production_preflight"
 
 
+def test_runtime_profile_creation_and_evidence_labels_do_not_stale_an_unchanged_plan(tmp_path: Path) -> None:
+    path = tmp_path / "capability-metadata.sqlite"
+    with TestClient(create_app(path)) as client:
+        project_id, _ = _create_draft(client)
+        first = client.post(f"/projects/{project_id}/production-preflight", json={}).json()
+        with Database(path) as db:
+            repo = ProviderMachineCapabilityProfileRepository(db)
+            capability = ProviderMachineCapabilityProfile(
+                capability="voice", mode="local", provider="fixture", model="fixture-model",
+                runtime="fixture-runtime", machine_id="fixture-host", readiness="configured",
+                provenance_source="configured runtime",
+                updated_at=datetime.now(timezone.utc),
+            )
+            repo.save(capability)
+        same = client.post(f"/projects/{project_id}/production-preflight", json={
+            "expected_fingerprint": first["fingerprint"],
+        })
+        assert same.status_code == 200, same.text
+        assert same.json()["fingerprint"] == first["fingerprint"]
+        with Database(path) as db:
+            repo = ProviderMachineCapabilityProfileRepository(db)
+            current = repo.get(capability.id)
+            repo.save(current.model_copy(update={
+                "readiness": "verified", "evidence_reference": "fixture:capability",
+                "commercial_status": "commercial_safe", "license_evidence_reference": "fixture:license",
+                "updated_at": datetime.now(timezone.utc),
+            }))
+        same = client.post(f"/projects/{project_id}/production-preflight", json={
+            "expected_fingerprint": first["fingerprint"],
+        })
+        assert same.status_code == 200, same.text
+        assert same.json()["fingerprint"] == first["fingerprint"]
+
+
 def test_preflight_source_change_invalidates_plan_but_not_unrelated_media(tmp_path: Path) -> None:
     path = tmp_path / "source.sqlite"
     with TestClient(create_app(path)) as client:
         project_id, scene = _create_draft(client)
         with Database(path) as db:
+            from app.db import ProjectRepository
+            project = ProjectRepository(db).get(UUID(project_id))
             asset = Asset(
                 source_kind=SourceKind.USER_ASSET, source_file=str(tmp_path / "source.mp4"),
                 content_hash="b" * 64, duration_ms=5_000, width=1080, height=1920,
                 fps=RationalFps(numerator=30, denominator=1),
                 authorization_reference="rights", imported_at=datetime.now(timezone.utc),
+                metadata={"ip_profile_id": str(project.ip_profile_id), "lifecycle_state": "active"},
             )
             AssetRepository(db).create(asset)
             ClipRepository(db).create(Clip(

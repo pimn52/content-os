@@ -11,7 +11,8 @@ import pytest
 from app.db import (AssetRepository,ClipRepository,Database,TalkingProfileRepository,
     ProviderMachineCapabilityProfileRepository)
 from app.domain.models import TalkingProfile,TalkingReferenceAssessment,Asset,Clip
-from app.talking.pool import TalkingPool,build_talking_pool,allocate_talking_windows,TalkingPoolCapacityError
+from app.talking.pool import (TalkingPool,build_talking_pool,allocate_talking_windows,
+    configured_talking_choices,TalkingPoolCapacityError)
 from test_planning_feasibility import _creator_project,_reference,_consent
 from app.domain.models import ProviderMachineCapabilityProfile
 
@@ -68,6 +69,33 @@ def test_occupancy_splits_only_known_available_intervals_and_identity_is_enforce
         other=AssetRepository(db).get(clips[1].asset_id)
         AssetRepository(db).update(other.model_copy(update={'metadata':{'ip_profile_id':str(uuid4())}}))
         assert build_talking_pool(db,project.id,occupied=[]).usable_total_ms==30000
+
+
+def test_repeatable_original_use_does_not_shrink_talking_motion_capacity(tmp_path):
+    with Database(tmp_path/'repeatable-reference.sqlite') as db:
+        project,clips,_,_=pool_fixture(db)
+        source=AssetRepository(db).get(clips[0].asset_id)
+        original=[{
+            'source_hash':source.content_hash,'start_ms':0,'end_ms':30000,
+            'repeatable':True,'content_changed':False,
+        }]
+        assert build_talking_pool(db,project.id,occupied=original).usable_total_ms==42000
+        changed=[{**original[0], 'repeatable':False, 'content_changed':True}]
+        pool=build_talking_pool(db,project.id,occupied=changed)
+        assert pool.usable_total_ms==12000 and pool.longest_continuous_ms==12000
+
+
+def test_ip_bound_profile_accepts_legacy_asset_without_identity_metadata(tmp_path):
+    with Database(tmp_path/'legacy-binding.sqlite') as db:
+        project,clips,profile,_=pool_fixture(db)
+        TalkingProfileRepository(db).update(profile.model_copy(update={'ip_profile_id':project.ip_profile_id}))
+        asset=AssetRepository(db).get(clips[0].asset_id)
+        AssetRepository(db).update(asset.model_copy(update={'metadata':{
+            key:value for key,value in asset.metadata.items() if key!='ip_profile_id'}}))
+
+        choices=configured_talking_choices(db,project.id)
+        assert any(clip.id==clips[0].id for _,clip,_ in choices)
+        assert any(entry.clip.id==clips[0].id for entry in build_talking_pool(db,project.id,occupied=[]).entries)
 
 
 def test_model_segment_ceiling_does_not_shrink_source_pool_or_copy(tmp_path):

@@ -74,6 +74,12 @@ export function preflightReasonLabel(reason: string): string {
   if (reason === "multiple_quality_findings_require_joint_scoped_plan") return "同一成片有多个独立问题，尚需合并为局部修正方案；保留全部成果，不只修最后一个问题。";
   if (reason.startsWith("quality_scoped_fix_required:")) return "质量问题已交回对应工序；局部修正能力或诊断尚不完整，已有成果保留。";
   const sourceReasons: Record<string,string> = {
+    scene_planner_not_configured: "内容规划服务尚未配置，请检查运行配置。",
+    qa_repair_dependency_missing: "自动修复所需的记录已不存在，原结果和质检记录已保留。",
+    qa_repair_state_conflict: "自动修复时作品状态发生变化，原结果已保留。",
+    voice_repair_original_worker_execution_unavailable: "原声音生成环境的记录不完整，无法安全自动修复，原声音已保留。",
+    master_narration_file_missing: "原旁白文件已找不到，无法继续自动修复。",
+    master_narration_bytes_changed: "原旁白文件已变化，无法沿用原有核验结果。",
     source_semantic_use_rejected: "该来源区间已确认不适合相同表达任务，需要重新选材；其它用途和合格成果保留。",
     semantic_video_provider_unavailable: "支持视频对照的核验器尚未就绪，未发起复验；已有成果保留。",
     material_semantic_recheck_not_configured: "后台尚未配置实际画面复验，未开始新渲染；已有成果保留。",
@@ -157,7 +163,7 @@ export function canDispatchVoice(
   profile: { provider: string; consent: { confirmed: boolean } } | undefined,
   capability: { provider: string } | undefined,
 ): boolean {
-  // Capability quality, license and budget remain backend admission decisions.
+  // Consent and provider identity are checked here; budget and media QA run at the backend boundary.
   return Boolean(profile?.consent.confirmed && capability && profile.provider === capability.provider);
 }
 export function voiceCandidateMatches(

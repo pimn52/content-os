@@ -97,7 +97,18 @@ def register_motion_source(db, asset, *, identity, ip_profile_id=None, talking_p
     elif metadata.get("talking_motion_source") and metadata.get("ip_profile_id") != asset.metadata.get("ip_profile_id"):
         _remove_machine_references(db, asset)
         metadata.pop("talking_motion_source", None)
-    return AssetRepository(db).update(asset.model_copy(update={"metadata": metadata}))
+    updated = AssetRepository(db).update(asset.model_copy(update={"metadata": metadata}))
+    if metadata != asset.metadata:
+        from app.asset_management import record_asset_governance_event
+        tracked = ("ip_profile_id", "r1_identity", "reuse_role", "talking_motion_source", "lifecycle_state")
+        record_asset_governance_event(
+            db, updated, "classification_changed", "normal_ui",
+            details={
+                "before": {key: asset.metadata.get(key) for key in tracked},
+                "after": {key: metadata.get(key) for key in tracked},
+            },
+        )
+    return updated
 
 
 def admit_observed_motion_intervals(db, asset, analysed_clip, intervals, *, evidence_reference, video_sha256,

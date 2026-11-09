@@ -3,21 +3,25 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository, ClipRepository, Database
+from app.db import AssetRepository, ClipRepository, Database, ProjectRepository
 from app.domain.models import Asset, Clip, RationalFps, ScenePlan, SourceCropWindow, SourceKind, VisualIntent
 from app.main import create_app
 from app.media.crop_assessment import CropAssessment, CropAssessmentRepository, CropProposal, FaceBoxObservation
 
 
-def _source(db: Database, *, content_hash: str = "a" * 64) -> tuple[Asset, Clip]:
+def _source(
+    db: Database, *, content_hash: str = "a" * 64, ip_profile_id=None,
+) -> tuple[Asset, Clip]:
     asset = Asset(
         source_kind=SourceKind.USER_ASSET, source_file="fixture-horizontal.mp4",
         content_hash=content_hash, duration_ms=5_000, width=1080, height=640,
         fps=RationalFps(numerator=25, denominator=1),
         authorization_reference="authorized-fixture", imported_at=datetime.now(timezone.utc),
+        metadata={} if ip_profile_id is None else {"ip_profile_id": str(ip_profile_id)},
     )
     clip = Clip(
         asset_id=asset.id, start_ms=0, end_ms=5_000, asset_duration_ms=5_000,
@@ -119,7 +123,8 @@ def test_preflight_and_router_exclude_only_the_proposed_bad_crop(tmp_path: Path,
         })
         assert saved.status_code == 200, saved.text
         with Database(path) as db:
-            asset, clip = _source(db)
+            project = ProjectRepository(db).get(UUID(project_id))
+            asset, clip = _source(db, ip_profile_id=project.ip_profile_id)
         proposal = _proposal(asset, clip, scene_id=scene.id)
         no_evidence = client.post(f"/projects/{project_id}/production-preflight", json={
             "crop_proposals": [proposal.model_dump(mode="json")],
@@ -163,7 +168,9 @@ def test_preflight_and_router_exclude_only_the_proposed_bad_crop(tmp_path: Path,
         assert capture["scenes"][0]["production_need"] == "capture"
         assert "capture_required:hook" in capture["stop_reasons"]
         with Database(path) as db:
-            _, alternative = _source(db, content_hash="b" * 64)
+            _, alternative = _source(
+                db, content_hash="b" * 64, ip_profile_id=project.ip_profile_id,
+            )
         fallback = client.post(f"/projects/{project_id}/production-preflight", json={
             "crop_proposals": [proposal.model_dump(mode="json")],
         }).json()

@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from app.costs import UnknownProviderCostEstimator
 from app.db import AssetRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ProjectDraftRepository, ProviderCallRepository
-from app.domain.models import BudgetPolicy, Clip, CostCategory, ProjectDraft, SourceKind
+from app.domain.models import BudgetPolicy, Clip, CostCategory, ProjectDraft, ProviderCallRecord, SourceKind, UsageCost
 from app.external_acquisition import reserve_production_tail
 from app.media.planning import VisualMaterialResolver
 from app.media.visual_facts import scene_visual_key
@@ -15,7 +15,24 @@ from app.provider_execution import ProviderExecutionService, RuntimeProviderIden
 from app.video_production import VideoProductionService
 from test_external_acquisition_gaps import measured_fixture, state_file
 from test_external_media import Provider
-from test_material_resolution import FixtureVideoExtractor, FixtureVideoProbe, FixtureVideoVision
+from test_material_resolution import FixtureVideoExtractor, FixtureVideoProbe, FixtureVideoVision, material_library
+
+
+def test_call_ledger_preserves_execution_order_when_timestamps_match(tmp_path):
+    db, project, _, _, _, _, _ = material_library(tmp_path)
+    with db:
+        repo = ProviderCallRepository(db)
+        project_id, now = project.id, datetime.now(timezone.utc)
+        common = dict(project_id=project_id, mode='runtime', provider='fixture', model='fixture',
+                      input_source='fixture', estimated_cost=UsageCost(category=CostCategory.STOCK, amount=None),
+                      created_at=now)
+        first = ProviderCallRecord(id=UUID('ffffffff-ffff-ffff-ffff-ffffffffffff'),
+            idempotency_key='search', operation='stock_search', **common)
+        second = ProviderCallRecord(id=UUID('00000000-0000-0000-0000-000000000001'),
+            idempotency_key='import', operation='stock_import', **common)
+        repo.create(first)
+        repo.create(second)
+        assert [record.id for record in repo.list_for_project(project_id)] == [first.id, second.id]
 
 
 def test_measured_supplement_handoff_uses_one_ledger_and_preserves_master(tmp_path, monkeypatch):

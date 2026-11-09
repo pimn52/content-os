@@ -8,6 +8,7 @@ import { ScenePresentationEditor, type ScenePresentation } from "./ScenePresenta
 import { requestError } from "./production";
 import { AudioAudition } from "./AudioAudition";
 import { ExternalMediaPanel } from "./ExternalMediaPanel";
+import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
 type UUID = string;
 type RuntimeCapability = { key: string; status: string; provider: string | null; model: string | null; detail: string; estimated_cost?: { amount: string | null; currency: string | null; note: string | null } | null; constraints?: string[] };
@@ -19,18 +20,34 @@ type CostReductionSuggestion = { scene_plan_id: UUID; current: Candidate; sugges
 type CostReductionResponse = { project_id: UUID; suggestions: CostReductionSuggestion[]; proposed_selections: Candidate[]; changed_scene_count: number };
 type IPProfile = {
   default_voice_profile_id?: UUID;
-  id: UUID; creator_name: string; domains: string[]; audience: string | null; topics: string[];
+  id: UUID; creator_name: string; positioning: string | null; content_pillars: string[];
+  platform_categories: string[]; public_account_links: string[]; evidence_refs: string[];
+  domains: string[]; audience: string | null; topics: string[];
   knowledge: string[]; opinions: string[]; vocabulary: string[]; style_notes: string[];
   avoided_expressions: string[]; boundaries: string[]; common_hooks: string[]; metadata: Record<string, unknown>;
 };
+type CreatorFit = {
+  fit_state: "matched" | "partial" | "generic";
+  content_pillar: string | null;
+  topic_fit_reason: string | null;
+  audience_value: string | null;
+  knowledge_refs: string[];
+  opinion_refs: string[];
+  evidence_gaps: string[];
+  deviation_risks: string[];
+};
 type Project = { id: UUID; ip_profile_id: UUID; title: string; topic: string; presentation_style: "auto" | "creator_led"; delivery_intent: "publish" | "draft"; format_policy: "auto" | "fixed"; format: string; resolution_width: number; resolution_height: number; fps: { numerator: number; denominator: number } };
 type Asset = { id: UUID; source_file: string; content_hash: string; source_kind: string; duration_ms: number; width: number; height: number; has_audio: boolean; metadata: Record<string, unknown> };
+type NearDuplicateResponse = { asset_id: UUID; algorithm: string; max_distance: number; matches: Array<{ asset_id: UUID; distance: number; score: number; lifecycle_state: string }> };
+type AssetReferences = { asset_id: UUID; reference_count: number; delete_safe: boolean; references: Array<{ kind: string; id: UUID; project_id: UUID | null }> };
+type AssetGovernance = { asset: Asset; ownership: Record<string, unknown>; lifecycle: Record<string, unknown>; near_duplicate_scan: { state: string; match_count?: number } | null; events: Array<{ id: UUID; event_type: string; actor: string; occurred_at: string }>; references: AssetReferences };
 type AssetStage = { status: "not_started" | "pending" | "running" | "completed" | "failed" | "cancelled"; job_id: UUID | null; error_code: string | null };
-type AssetReadiness = { asset_id: UUID; stages: Record<string, AssetStage> };
+type AssetVisualCoverage = { total_clips: number; described_clips: number; missing_clip_ids: UUID[]; creator_owned: boolean };
+type AssetReadiness = { asset_id: UUID; stages: Record<string, AssetStage>; visual_coverage: AssetVisualCoverage };
 type JobResponse = { id: UUID; type: string; status: AssetStage["status"]; attempt: number; error_code: string | null; error_message: string | null };
 type AudioAsset = { id: UUID; source_file: string; duration_ms: number; sample_rate: number; channels: number; language: string | null; authorization_reference: string; transcript_source: string | null; transcript_segments: Array<{ start_ms: number; end_ms: number; text: string }>; metadata: Record<string, unknown> };
 type ShootTask = { id: UUID; project_id: UUID; scene_plan_id: UUID; scene_id: string; what_to_shoot: string; framing: string; duration_ms: number; requires_speaking: boolean; status: "confirmed" | "fulfilled" | "dismissed"; asset_id: UUID | null; created_at: string; updated_at: string };
-type ScenePlan = ScenePresentation & { id: UUID; project_id: UUID; scene_id: string; order: number; purpose: string; voice_text: string; duration_target_ms: number; preferred_sources: string[]; fallback_sources: string[]; evidence_refs: string[]; visual_requirement?: "unknown" | "creator_speaking" | "action_evidence" | "explanatory"; visual_requirement_reason?: string | null };
+type ScenePlan = ScenePresentation & { id: UUID; project_id: UUID; scene_id: string; order: number; purpose: string; voice_text: string; duration_target_ms: number; preferred_sources: string[]; fallback_sources: string[]; evidence_refs: string[]; visual_requirement?: "unknown" | "creator_speaking" | "action_evidence" | "explanatory"; visual_requirement_reason?: string | null; creator_fit?: CreatorFit | null };
 type Candidate = { scene_plan_id: UUID; source_kind: string; asset_id: UUID | null; clip_id: UUID | null; match_score: number; why: string[]; recommended: boolean; requires_capture: boolean; estimated_cost: { category: string; amount: string | null; currency: string | null } };
 type ShootListInstruction = { scene_plan_id: UUID; scene_id: string; what_to_shoot: string; framing: string; duration_ms: number; requires_speaking: boolean; speaking_note: string; fallback: string };
 type Route = { scene_plan_id: UUID; candidates: Candidate[]; shoot_list?: ShootListInstruction[] };
@@ -42,19 +59,22 @@ type NarrationPerformanceSuggestions = { copy_fingerprint: string; suggested_pla
 type Draft = { project_id: UUID; version: number; script_revision: number; script: string | null; topic: string | null; scenes: ScenePlan[]; routes: Route[]; confirmed: Candidate[]; video_spec: VideoSpec | null; narration_performance_plan: NarrationPerformancePlan | null; ip_profile_version: number | null; evidence_refs: string[]; invalidation_reasons: string[] };
 type ScenePlanResponse = { project_id: UUID; scenes: ScenePlan[]; script: string; generated_script: boolean; draft: Draft | null };
 type Opportunity = { id: UUID; source_type: string; source_ref: string; title: string; observed_at: string; fit_reason: string; angle: string; uncertainty: string | null; evidence_refs: string[]; status: string };
-type AccountConnection = { id: UUID; provider: string; account_external_id: string; display_name: string | null; read_only: boolean; connected_at: string; last_synced_at: string | null };
-type HistoricalContent = { id: UUID; account_connection_id: UUID; external_id: string; title: string; published_at: string | null; description: string | null; transcript: string | null; metrics: Record<string, number> };
+type AccountConnection = { id: UUID; ip_profile_id: UUID | null; provider: string; account_external_id: string; display_name: string | null; profile_url: string | null; read_only: boolean; connected_at: string; last_synced_at: string | null };
+type HistoricalContent = { id: UUID; account_connection_id: UUID; external_id: string; title: string; published_at: string | null; description: string | null; transcript: string | null; metrics: Record<string, number>; asset_id: UUID | null; content_url: string | null; availability: "available" | "removed" | "mirror_only" | "unknown"; evidence_refs: string[] };
 type Clip = { id: UUID; asset_id: UUID; start_ms: number; end_ms: number; visual_description: string | null; transcript: string | null; talking_candidate?: boolean; talking_reference_assessment?: Record<string, unknown> | null };
 type ConsentRecord = { subject_name: string; basis: "self" | "explicit_authorization"; confirmed: boolean; confirmed_at: string; authorization_reference?: string | null };
 type VoiceProfile = { id: UUID; ip_profile_id?: UUID; name: string; provider: string; provider_profile_id: string; reference_clip_ids: UUID[]; consent: ConsentRecord; language: string | null; created_at: string };
 type TalkingProfile = { id: UUID; ip_profile_id?: UUID | null; name: string; provider: string; provider_profile_id: string | null; reference_clip_ids: UUID[]; consent: ConsentRecord; created_at: string };
-type Publication = { id: UUID; output_version: string; platform: string; published_at: string; content_url: string | null; metrics: Record<string, unknown>; metric_source: string | null };
+type PublishableOutput = { project_id: UUID; output_version: string; render_id: UUID; render_job_id: UUID; run_id: UUID | null; completed_at: string; width: number; height: number; duration_ms: number; available: boolean; published: boolean; feedback_recorded: boolean };
+type Publication = { id: UUID; output_version: string; platform: string; published_at: string; title: string | null; description: string | null; cover_frame_ms: number; account_connection_id: UUID | null; content_url: string | null; metrics: Record<string, unknown>; metric_source: string | null };
+type MetricObservation = { id: UUID; publication_id: UUID; event_key: string; observed_at: string; window_hours: number; metric_source: string; metrics: Record<string, unknown>; evidence_ref: string | null };
 type Feedback = { id: UUID; output_version: string; accepted: boolean; changed_fields: string[]; rejection_reason: string | null; notes: string | null; created_at: string };
 type NextSuggestion = { reason: string; suggestion: string; evidence_refs: string[] };
 type StoredRender = { render_id: UUID; spec_fingerprint: string };
-type ExecutionParameterSchema = { key: string; label: string; value_type: "number" | "text"; default: string | number | boolean | null; minimum: number | null; maximum: number | null; help_text: string };
+type ExecutionParameterSchema = { key: string; label: string; value_type: "number" | "integer" | "text"; default: string | number | boolean | null; minimum: number | null; maximum: number | null; help_text: string };
 type ExecutionFeatureSchema = { feature: string; support: string; implementation_owner: "content_os_adapter" | "provider_native"; help_text: string; parameter_keys: string[] };
 type ProviderSettingsSchema = { capability: string; mode: string; provider: string; model: string; runtime: string; commercial_status: string; parameters: ExecutionParameterSchema[]; features: ExecutionFeatureSchema[] };
+type ActiveExecutionScope = { capability: string; provider: string; model: string; runtime: string; machine_id: string; source: string };
 type ExecutionSettingsView = { schema: ProviderSettingsSchema; machine_id: string; saved_override: { values: Record<string, string | number | boolean> } | null; capability_profile: { provenance_source: string; evidence_reference: string | null; last_verified_at: string | null } | null; features: Array<{ feature: string; support: string; reason: string }>; resolution: { routing_reason: string; parameters: Array<{ key: string; value: string | number | boolean | null; source: string; reason: string }> } };
 
 const labels: Record<string, string> = { ready: "可用", provider_not_configured: "Provider 未配置", not_developed: "尚未开发", unavailable: "本机不可用" };
@@ -173,6 +193,8 @@ function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetLimit, setAssetLimit] = useState(8);
   const [assetReadiness, setAssetReadiness] = useState<Record<UUID, AssetReadiness>>({});
+  const [nearDuplicates, setNearDuplicates] = useState<Record<UUID, NearDuplicateResponse>>({});
+  const [assetGovernance, setAssetGovernance] = useState<Record<UUID, AssetGovernance>>({});
   const [audioAssets, setAudioAssets] = useState<AudioAsset[]>([]);
   const [shootTasks, setShootTasks] = useState<ShootTask[]>([]);
   const [clips, setClips] = useState<Clip[]>([]);
@@ -192,6 +214,9 @@ function App() {
   const [videoSpec, setVideoSpec] = useState<VideoSpec | null>(null);
   const [renderUrl, setRenderUrl] = useState<string | null>(null);
   const [publications, setPublications] = useState<Publication[]>([]);
+  const [publishableOutputs, setPublishableOutputs] = useState<PublishableOutput[]>([]);
+  const [selectedOutputVersion, setSelectedOutputVersion] = useState("");
+  const [metricObservations, setMetricObservations] = useState<MetricObservation[]>([]);
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [suggestions, setSuggestions] = useState<NextSuggestion[]>([]);
   const [narrationPerformanceSuggestions, setNarrationPerformanceSuggestions] = useState<NarrationPerformanceSuggestions | null>(null);
@@ -199,6 +224,7 @@ function App() {
   const [message, setMessage] = useState<{ text: string; error?: boolean }>({ text: "正在加载本地工作区…" });
   const [busy, setBusy] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
+  const [budgetCurrency, setBudgetCurrency] = useState("USD");
   const [budgetAmount, setBudgetAmount] = useState("");
   const [budgetCalls, setBudgetCalls] = useState("");
   const [allowUnknownCost, setAllowUnknownCost] = useState(false);
@@ -213,7 +239,8 @@ function App() {
 
   const [settingsSchemas, setSettingsSchemas] = useState<ProviderSettingsSchema[]>([]);
   const [settingsSchemaIndex, setSettingsSchemaIndex] = useState(0);
-  const [settingsMachineId, setSettingsMachineId] = useState("asus-rtx3060-laptop-6gb");
+  const [settingsActiveScopes, setSettingsActiveScopes] = useState<ActiveExecutionScope[]>([]);
+  const [settingsMachineId, setSettingsMachineId] = useState("");
   const [settingsView, setSettingsView] = useState<ExecutionSettingsView | null>(null);
   const [settingsValues, setSettingsValues] = useState<Record<string, string>>({});
   const latestProjectId = useRef<UUID | null>(null);
@@ -221,6 +248,11 @@ function App() {
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? null, [projects, selectedProjectId]);
   const shootList = useMemo(() => routes.flatMap((route) => route.shoot_list ?? []), [routes]);
   const activeSettingsSchema = settingsSchemas[settingsSchemaIndex] ?? null;
+  const activeSettingsScope = useMemo(() => activeSettingsSchema ? settingsActiveScopes.find((scope) =>
+    scope.capability === activeSettingsSchema.capability && scope.provider === activeSettingsSchema.provider
+    && scope.model === activeSettingsSchema.model && scope.runtime === activeSettingsSchema.runtime
+    && (!settingsMachineId || scope.machine_id === settingsMachineId)
+  ) ?? null : null, [activeSettingsSchema, settingsActiveScopes, settingsMachineId]);
 
   function narrationForDraft(value: Draft): Record<UUID, UUID> {
     const sceneIds = new Map(value.scenes.map((scene) => [scene.scene_id, scene.id]));
@@ -247,12 +279,22 @@ function App() {
       const currentShootTasks = (await Promise.all(currentProjects.map((project) => api<ShootTask[]>(`/projects/${project.id}/shoot-tasks`)))).flat();
       const currentClips = (await Promise.all(currentAssets.map((asset) => api<Clip[]>(`/assets/${asset.id}/clips`)))).flat();
       const currentReadiness = await Promise.all(currentAssets.map((asset) => api<AssetReadiness>(`/assets/${asset.id}/readiness`)));
-      setReadiness(runtime); setBudget(currentBudget); setBudgetAmount(currentBudget.policy?.max_amount ?? ""); setBudgetCalls(currentBudget.policy?.max_calls == null ? "" : String(currentBudget.policy.max_calls)); setAllowUnknownCost(currentBudget.policy?.allow_unknown_cost ?? false);
+      setReadiness(runtime); setBudget(currentBudget); setBudgetCurrency(currentBudget.policy?.currency ?? "USD"); setBudgetAmount(currentBudget.policy?.max_amount ?? ""); setBudgetCalls(currentBudget.policy?.max_calls == null ? "" : String(currentBudget.policy.max_calls)); setAllowUnknownCost(currentBudget.policy?.allow_unknown_cost ?? false);
       setProfile(currentProfile); setProjects(currentProjects); setAssets(currentAssets); setAssetReadiness(Object.fromEntries(currentReadiness.map((value) => [value.asset_id, value]))); setAudioAssets(currentAudios); setShootTasks(currentShootTasks); setClips(currentClips); setOpportunities(currentOpportunities);
       setAccounts(currentAccounts); setHistoricalContent(currentHistorical); setVoiceProfiles(currentVoice); setTalkingProfiles(currentTalking);
       setIpProfiles(currentIPs);
-      const executionSchemas = await api<{ schemas: ProviderSettingsSchema[] }>("/execution-settings/schemas");
+      const executionSchemas = await api<{ schemas: ProviderSettingsSchema[]; active_scopes?: ActiveExecutionScope[] }>("/execution-settings/schemas");
       setSettingsSchemas(executionSchemas.schemas);
+      const currentScopes = executionSchemas.active_scopes ?? [];
+      setSettingsActiveScopes(currentScopes);
+      const preferredScope = currentScopes.find((scope) => scope.capability === "talking" && scope.provider === "latentsync");
+      const preferredIndex = preferredScope ? executionSchemas.schemas.findIndex((schema) =>
+        schema.capability === preferredScope.capability && schema.provider === preferredScope.provider
+        && schema.model === preferredScope.model && schema.runtime === preferredScope.runtime) : -1;
+      if (preferredScope && preferredIndex >= 0) {
+        setSettingsSchemaIndex(preferredIndex);
+        setSettingsMachineId(preferredScope.machine_id);
+      }
       const saved = localStorage.getItem("content-os-active-project");
       const next = saved && currentProjects.some((project) => project.id === saved) ? saved : currentProjects[0]?.id ?? null;
       setSelectedProjectId(next);
@@ -261,9 +303,11 @@ function App() {
   }
 
   async function refreshProject(projectId: UUID) {
-    const [value, currentPublications, currentFeedback, currentSuggestions, currentCostEstimate] = await Promise.all([
+    const [value, currentPublications, currentOutputs, currentMetrics, currentFeedback, currentSuggestions, currentCostEstimate] = await Promise.all([
       api<Draft>(`/projects/${projectId}/draft`),
       api<Publication[]>(`/projects/${projectId}/publications`),
+      api<PublishableOutput[]>(`/projects/${projectId}/publishable-outputs`),
+      api<MetricObservation[]>(`/projects/${projectId}/publication-metric-observations`),
       api<Feedback[]>(`/projects/${projectId}/feedback`),
       api<NextSuggestion[]>(`/projects/${projectId}/next-suggestions`),
       api<CostEstimate>(`/projects/${projectId}/cost-estimate`),
@@ -272,7 +316,12 @@ function App() {
     setDraft(value); setDraftDirty(false); setRoutes(value.routes); setSelections(Object.fromEntries(value.confirmed.map((candidate) => [candidate.scene_plan_id, candidate]))); setNarrationAssetIds(narrationForDraft(value)); setMasterNarrationAssetId(masterNarrationForDraft(value)); setVideoSpec(usableSpec);
     if (!usableSpec || value.invalidation_reasons.length > 0) invalidateProjectRender(projectId);
     setCostEstimate(currentCostEstimate);
-    setPublications(currentPublications); setFeedback(currentFeedback); setSuggestions(currentSuggestions);
+    const availableOutputs = currentOutputs.filter((output) => output.available);
+    setPublications(currentPublications); setPublishableOutputs(currentOutputs);
+    setSelectedOutputVersion((current) => availableOutputs.some((output) => output.output_version === current)
+      ? current : availableOutputs[0]?.output_version ?? "");
+    setMetricObservations(currentMetrics);
+    setFeedback(currentFeedback); setSuggestions(currentSuggestions);
     void restoreProjectRender(projectId, usableSpec);
     if (value.video_spec && !usableSpec) setMessage({ text: "该草稿只有没有真实时间轴的历史 source-only 输出；旧渲染保留，但正式流程需要绑定旁白或先导入真实 ASR/SRT/VTT", error: true });
   }
@@ -357,11 +406,64 @@ function App() {
     void loadAll();
   }
 
+  async function chooseIpProfile(id: string) {
+    if (!id) return;
+    setBusy(true);
+    try {
+      setProfile(await api<IPProfile>(`/ip-profile?ip_profile_id=${encodeURIComponent(id)}`));
+      setMessage({ text: "已切换创作者档案；项目创建时仍会要求明确选择所属 IP" });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "切换 IP 失败", error: true });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createIpProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const creatorName = String(form.get("creator_name") ?? "").trim();
+    if (!creatorName) return;
+    setBusy(true);
+    try {
+      const created = await api<IPProfile>("/ip-profiles", {
+        method: "POST",
+        body: JSON.stringify({ creator_name: creatorName }),
+      });
+      await loadAll();
+      setProfile(created);
+      setMessage({ text: "创作者档案已创建；请先补全定位、内容支柱、受众、赛道和边界再用于规划" });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "创建创作者失败", error: true });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!profile) return; setBusy(true);
     const form = new FormData(event.currentTarget);
     try {
-      const value = await api<IPProfile>("/ip-profile", { method: "PUT", body: JSON.stringify({ creator_name: String(form.get("creator_name") ?? ""), audience: String(form.get("audience") ?? "") || null, domains: split(String(form.get("domains") ?? "")), topics: split(String(form.get("topics") ?? "")), knowledge: split(String(form.get("knowledge") ?? "")), opinions: split(String(form.get("opinions") ?? "")), style_notes: split(String(form.get("style_notes") ?? "")), boundaries: split(String(form.get("boundaries") ?? "")), vocabulary: profile.vocabulary, avoided_expressions: profile.avoided_expressions, common_hooks: profile.common_hooks, metadata: profile.metadata }) });
+      const value = await api<IPProfile>(`/ip-profile?ip_profile_id=${encodeURIComponent(profile.id)}`, { method: "PUT", body: JSON.stringify({
+        creator_name: String(form.get("creator_name") ?? ""),
+        positioning: String(form.get("positioning") ?? "").trim() || null,
+        platform_categories: split(String(form.get("platform_categories") ?? "")),
+        public_account_links: split(String(form.get("public_account_links") ?? "")),
+        evidence_refs: profile.evidence_refs,
+        audience: String(form.get("audience") ?? "").trim() || null,
+        domains: split(String(form.get("domains") ?? "")),
+        content_pillars: split(String(form.get("content_pillars") ?? "")),
+        topics: split(String(form.get("topics") ?? "")),
+        knowledge: split(String(form.get("knowledge") ?? "")),
+        opinions: split(String(form.get("opinions") ?? "")),
+        vocabulary: split(String(form.get("vocabulary") ?? "")),
+        style_notes: split(String(form.get("style_notes") ?? "")),
+        avoided_expressions: split(String(form.get("avoided_expressions") ?? "")),
+        boundaries: split(String(form.get("boundaries") ?? "")),
+        common_hooks: split(String(form.get("common_hooks") ?? "")),
+        metadata: profile.metadata,
+      }) });
+      await loadAll();
       setProfile(value);
       if (selectedProjectId) await refreshProject(selectedProjectId);
       setMessage({ text: selectedProjectId ? "IP 资料已保存并生成新版本；当前项目的后续成果已按新 IP 重新检查" : "IP 资料已保存并生成新版本" });
@@ -371,13 +473,25 @@ function App() {
   async function saveBudget(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
     try {
-      const value = await api<BudgetResponse>("/budget", { method: "PUT", body: JSON.stringify({ currency: "USD", max_amount: budgetAmount.trim() || null, max_calls: budgetCalls.trim() ? Number(budgetCalls) : null, allow_unknown_cost: allowUnknownCost }) });
-      setBudget(value); setMessage({ text: "运行预算策略已保存；未知价格只有显式允许后才会执行" });
+      const value = await api<BudgetResponse>("/budget", { method: "PUT", body: JSON.stringify({ currency: budgetCurrency, max_amount: budgetAmount.trim() || null, max_calls: budgetCalls.trim() ? Number(budgetCalls) : null, allow_unknown_cost: allowUnknownCost }) });
+      setBudget(value);
+      await Promise.allSettled(assets.filter(asset => assetReadiness[asset.id]?.stages.visual?.error_code === "provider_budget_blocked").map(asset => refreshAssetReadiness(asset.id)));
+      setMessage({ text: "运行预算已保存；此前未发起调用的入库分析会在预算允许时继续" });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "预算策略保存失败", error: true }); } finally { setBusy(false); }
   }
 
   function executionSettingsPath(schema: ProviderSettingsSchema, machineId = settingsMachineId): string {
     return `/execution-settings/${[schema.capability, schema.provider, schema.model, schema.runtime, machineId].map(encodeURIComponent).join("/")}`;
+  }
+
+  function chooseExecutionSchema(index: number) {
+    const schema = settingsSchemas[index];
+    setSettingsSchemaIndex(index);
+    setSettingsView(null);
+    const scope = schema ? settingsActiveScopes.find((item) =>
+      item.capability === schema.capability && item.provider === schema.provider
+      && item.model === schema.model && item.runtime === schema.runtime) : null;
+    setSettingsMachineId(scope?.machine_id ?? "");
   }
 
   async function loadExecutionSettings(schema = activeSettingsSchema, machineId = settingsMachineId): Promise<void> {
@@ -396,10 +510,11 @@ function App() {
         if (!raw) continue;
         const value = Number(raw);
         if (!Number.isFinite(value)) throw new Error(`${parameter.label} 必须是数字`);
+        if (parameter.value_type === "integer" && !Number.isInteger(value)) throw new Error(`${parameter.label} 必须是整数`);
         values[parameter.key] = value;
       }
       const view = await api<ExecutionSettingsView>(executionSettingsPath(activeSettingsSchema), { method: "PUT", body: JSON.stringify({ values }) });
-      setSettingsView(view); setMessage({ text: "已保存此 Provider + 本机配置；实际执行仍经过授权、预算、许可证与完整性检查" });
+      setSettingsView(view); setMessage({ text: "已保存此 Provider + 本机配置；参数不会冒充已验证，后续执行仍检查素材授权、预算、溯源与运行时完整性" });
     } catch (error) { setMessage({ text: error instanceof Error ? error.message : "高级设置保存失败", error: true }); } finally { setBusy(false); }
   }
 
@@ -412,9 +527,9 @@ function App() {
   }
 
   async function importMedia(event: FormEvent<HTMLFormElement>, inbox = false) {
-    event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); const source_path = String(form.get("source_path") ?? ""); const authorization_reference = String(form.get("authorization_reference") ?? "");
+    event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); const source_path = String(form.get("source_path") ?? ""); const authorization_reference = String(form.get("authorization_reference") ?? ""); const ip_profile_id = String(form.get("ip_profile_id") ?? "") || null;
     try {
-      const result = await api<{ imported?: number; existing?: number; discovered?: number; analysis_jobs?: JobResponse[]; errors?: unknown[] } | Asset[]>(inbox ? "/inbox/scan" : "/imports", { method: "POST", body: JSON.stringify({ source_path, authorization_reference, recursive: true, ...(inbox ? { enqueue_analysis: form.get("enqueue_analysis") === "on" } : {}) }) });
+      const result = await api<{ imported?: number; existing?: number; discovered?: number; analysis_jobs?: JobResponse[]; errors?: unknown[] } | Asset[]>(inbox ? "/inbox/scan" : "/imports", { method: "POST", body: JSON.stringify({ source_path, authorization_reference, ip_profile_id, recursive: true, ...(inbox ? { enqueue_analysis: form.get("enqueue_analysis") === "on" } : {}) }) });
       await loadAll();
       if (inbox) {
         const scan = result as { discovered: number; imported: number; analysis_jobs?: JobResponse[] };
@@ -545,6 +660,8 @@ function App() {
     const body = new FormData();
     body.append("file", file);
     body.append("authorization_reference", String(form.get("authorization_reference") ?? ""));
+    const ipProfileId = String(form.get("ip_profile_id") ?? "");
+    if (ipProfileId) body.append("ip_profile_id", ipProfileId);
     const shootTaskId = String(form.get("shoot_task_id") ?? "");
     if (shootTaskId) body.append("shoot_task_id", shootTaskId);
     try { await api<Asset>("/uploads", { method: "POST", body }); await loadAll(); formElement.reset(); setMessage({ text: `浏览器上传完成：${file.name}` }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "上传失败", error: true }); } finally { setBusy(false); }
@@ -597,6 +714,47 @@ function App() {
     finally { setBusy(false); }
   }
 
+  async function checkNearDuplicates(assetId: UUID) {
+    try {
+      await api<Asset>(`/assets/${assetId}/fingerprint`, { method: "POST" });
+      const result = await api<NearDuplicateResponse>(`/assets/${assetId}/near-duplicates`);
+      setNearDuplicates((current) => ({ ...current, [assetId]: result }));
+      setMessage({ text: result.matches.length ? `发现 ${result.matches.length} 个近似重复素材` : "未发现同创作者范围内的近似重复" });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "近似重复检测失败", error: true });
+    }
+  }
+
+  async function setAssetLifecycle(asset: Asset, state: "active" | "archived") {
+    setBusy(true);
+    try {
+      const result = await api<{ asset: Asset; references: AssetReferences }>(`/assets/${asset.id}/lifecycle`, {
+        method: "PATCH",
+        body: JSON.stringify({ state, reason: state === "archived" ? "creator archived in normal UI" : undefined }),
+      });
+      setAssets((current) => current.map((item) => item.id === result.asset.id ? result.asset : item));
+      setMessage({
+        text: state === "archived"
+          ? `素材已归档，不再进入新选材；历史引用 ${result.references.reference_count} 个仍保留`
+          : "素材已恢复，可重新进入选材",
+      });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "素材状态更新失败", error: true });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadAssetGovernance(assetId: UUID) {
+    try {
+      const governance = await api<AssetGovernance>(`/assets/${assetId}/governance`);
+      setAssetGovernance((current) => ({ ...current, [assetId]: governance }));
+      setMessage({ text: `治理记录已加载：${governance.events.length} 个不可变事件；历史引用 ${governance.references.reference_count} 个` });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "治理记录加载失败", error: true });
+    }
+  }
+
   async function refreshAssetReadiness(assetId: UUID) {
     const value = await api<AssetReadiness>(`/assets/${assetId}/readiness`);
     setAssetReadiness((current) => ({ ...current, [assetId]: value }));
@@ -621,6 +779,31 @@ function App() {
     } finally { setBusy(false); }
   }
 
+  async function enqueueVisualEvidence(asset: Asset) {
+    const coverage = assetReadiness[asset.id]?.visual_coverage;
+    const missing = coverage?.missing_clip_ids.slice(0, 4) ?? [];
+    if (!missing.length) {
+      setMessage({ text: "该素材已没有待补的 Clip 视觉描述" });
+      return;
+    }
+    const current = assetReadiness[asset.id]?.stages.visual;
+    const retry = current?.status === "failed" || current?.status === "cancelled" || current?.status === "completed";
+    const idempotencyKey = `web-visual-evidence:${asset.id}:${missing.join(",")}:${retry ? Date.now() : "current"}`;
+    setBusy(true);
+    try {
+      const job = await api<JobResponse>(`/assets/${asset.id}/jobs/index_clips`, {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: idempotencyKey, clip_ids: missing, index_embeddings: false }),
+      });
+      await refreshAssetReadiness(asset.id);
+      setMessage({ text: `已为真实素材补 ${missing.length} 段视觉证据；${job.status === "completed" ? "该批次已完成" : "本地 Worker 完成后会更新覆盖数"}` });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : "视觉证据任务提交失败", error: true });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function transcriptStage(assetId: UUID): AssetStage {
     return assetReadiness[assetId]?.stages.transcript ?? { status: "not_started", job_id: null, error_code: null };
   }
@@ -639,6 +822,29 @@ function App() {
     return `媒体分析：${labelsByStatus[stage.status]}${stage.error_code ? `（${stage.error_code}）` : ""}`;
   }
 
+  function visualStageLabel(stage: AssetStage): string {
+    const labels: Record<AssetStage["status"], string> = { not_started: "未开始", pending: "排队中", running: "分析中", completed: "抽样已完成", failed: "未完成", cancelled: "已取消" };
+    const vision = readiness?.capabilities.find((capability) => capability.key === "vision");
+    if (stage.status === "pending" && vision?.status === "provider_not_configured") {
+      return "画面理解：等待配置；当前进程未检测到视觉服务，请检查运行配置";
+    }
+    const reason = stage.error_code === "provider_budget_blocked" ? "，工作区预算不足或不允许未知费用" : stage.error_code ? `（${stage.error_code}）` : "";
+    return `画面理解：${labels[stage.status]}${reason}`;
+  }
+
+  function creatorSourceAsset(asset: Asset): boolean {
+    return ["user_asset", "historical_asset", "ai_video", "ai_broll", "capture"].includes(asset.source_kind)
+      && typeof asset.metadata.ip_profile_id === "string" && asset.metadata.ip_profile_id.length > 0;
+  }
+
+  function assetDisplayPriority(asset: Asset): number {
+    if (asset.metadata.lifecycle_state === "archived") return 4;
+    if (creatorSourceAsset(asset) && asset.metadata.ip_profile_id === profile?.id) return 0;
+    if (creatorSourceAsset(asset)) return 1;
+    if (asset.source_kind === "stock") return 2;
+    return 3;
+  }
+
   function analysisProvenance(asset: Asset): string | null {
     const value = asset.metadata.r1_analysis;
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -655,12 +861,37 @@ function App() {
 
   async function createAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
-    try { await api<AccountConnection>("/account-connections", { method: "POST", body: JSON.stringify({ provider: String(form.get("provider")), account_external_id: String(form.get("account_external_id")), display_name: String(form.get("display_name") ?? "") || null, connected_at: dateValue(form.get("connected_at")) }) }); await loadAll(); formElement.reset(); setMessage({ text: "只读账号记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "账号保存失败", error: true }); } finally { setBusy(false); }
+    try { await api<AccountConnection>("/account-connections", { method: "POST", body: JSON.stringify({
+      ip_profile_id: String(form.get("ip_profile_id") ?? "") || null,
+      provider: String(form.get("provider")),
+      account_external_id: String(form.get("account_external_id")),
+      display_name: String(form.get("display_name") ?? "") || null,
+      profile_url: String(form.get("profile_url") ?? "").trim() || null,
+      connected_at: dateValue(form.get("connected_at")),
+    }) }); await loadAll(); formElement.reset(); setMessage({ text: "只读账号记录已保存；关联历史作品会进入当前 IP 的规划证据" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "账号保存失败", error: true }); } finally { setBusy(false); }
   }
 
   async function createHistorical(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
-    try { await api<HistoricalContent>("/historical-content", { method: "POST", body: JSON.stringify({ account_connection_id: String(form.get("account_connection_id")), external_id: String(form.get("external_id")), title: String(form.get("title")), published_at: dateValue(form.get("published_at")), description: String(form.get("description") ?? "") || null, transcript: String(form.get("transcript") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")) }) }); await loadAll(); formElement.reset(); setMessage({ text: "历史内容记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "历史内容保存失败", error: true }); } finally { setBusy(false); }
+    try {
+      await api<HistoricalContent>("/historical-content", {
+        method: "POST",
+        body: JSON.stringify({
+          account_connection_id: String(form.get("account_connection_id")),
+          external_id: String(form.get("external_id")),
+          title: String(form.get("title")),
+          published_at: dateValue(form.get("published_at")),
+          description: String(form.get("description") ?? "") || null,
+          transcript: String(form.get("transcript") ?? "") || null,
+          metrics: jsonObject(String(form.get("metrics") ?? "")),
+          asset_id: String(form.get("asset_id") ?? "") || null,
+          content_url: String(form.get("content_url") ?? "").trim() || null,
+          availability: String(form.get("availability") ?? "unknown"),
+          evidence_refs: split(String(form.get("evidence_refs") ?? "")),
+        }),
+      });
+      await loadAll(); formElement.reset(); setMessage({ text: "历史发布记录已保存，并可绑定本地素材" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "历史内容保存失败", error: true }); } finally { setBusy(false); }
   }
 
   function consentFrom(form: FormData): ConsentRecord { const basis = String(form.get("basis")) as ConsentRecord["basis"]; return { subject_name: String(form.get("subject_name")), basis, confirmed: true, confirmed_at: new Date().toISOString(), authorization_reference: String(form.get("authorization_reference") ?? "") || null }; }
@@ -793,13 +1024,76 @@ function App() {
   }
 
   async function recordPublication(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedProject || !selectedOutputVersion) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try {
+      await api<Publication>(`/projects/${selectedProject.id}/publications`, {
+        method: "POST",
+        body: JSON.stringify({
+          output_version: selectedOutputVersion,
+          platform: String(form.get("platform")),
+          published_at: dateValue(form.get("published_at")),
+          title: String(form.get("title")),
+          description: String(form.get("description") ?? "") || null,
+          cover_frame_ms: Number(form.get("cover_frame_ms") ?? 0),
+          account_connection_id: String(form.get("account_connection_id") ?? "") || null,
+          content_url: String(form.get("content_url") ?? "") || null,
+          content_external_id: String(form.get("content_external_id") ?? "") || null,
+          metrics: jsonObject(String(form.get("metrics") ?? "")),
+          metric_source: String(form.get("metric_source") ?? "") || null,
+          observation_window_days: String(form.get("observation_window_days") ?? "")
+            ? Number(form.get("observation_window_days")) : null,
+        }),
+      });
+      await refreshProject(selectedProject.id);
+      formElement.reset();
+      setMessage({ text: "发布包装与人工发布回执已绑定到确切成片版本" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "发布记录保存失败", error: true }); }
+    finally { setBusy(false); }
+  }
+
+  async function recordMetricObservation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selectedProject) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
-    try { await api<Publication>(`/projects/${selectedProject.id}/publications`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), platform: String(form.get("platform")), published_at: dateValue(form.get("published_at")), content_url: String(form.get("content_url") ?? "") || null, content_external_id: String(form.get("content_external_id") ?? "") || null, metrics: jsonObject(String(form.get("metrics") ?? "")), metric_source: String(form.get("metric_source") ?? "") || null, observation_window_days: String(form.get("observation_window_days") ?? "") ? Number(form.get("observation_window_days")) : null }) }); await refreshProject(selectedProject.id); formElement.reset(); setMessage({ text: "人工发布记录已保存" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "发布记录保存失败", error: true }); } finally { setBusy(false); }
+    const publicationId = String(form.get("publication_id"));
+    const observedAt = dateValue(form.get("observed_at"));
+    const windowHours = Number(form.get("window_hours"));
+    const source = String(form.get("metric_source"));
+    try {
+      await api<MetricObservation>(`/projects/${selectedProject.id}/publications/${publicationId}/metric-observations`, {
+        method: "POST",
+        body: JSON.stringify({
+          event_key: `web-metrics:${publicationId}:${observedAt}:${windowHours}:${source}`,
+          observed_at: observedAt,
+          window_hours: windowHours,
+          metric_source: source,
+          metrics: jsonObject(String(form.get("metrics") ?? "")),
+          evidence_ref: String(form.get("evidence_ref") ?? "").trim() || null,
+        }),
+      });
+      await refreshProject(selectedProject.id);
+      formElement.reset();
+      setMessage({ text: "指标快照已追加；同一观察窗口不会被覆盖，下一轮建议会使用可用基线" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "指标快照保存失败", error: true }); }
+    finally { setBusy(false); }
   }
 
   async function recordFeedback(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!selectedProject) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
-    try { await api<Feedback>(`/projects/${selectedProject.id}/feedback`, { method: "POST", body: JSON.stringify({ output_version: String(form.get("output_version")), accepted: String(form.get("accepted")) === "true", changed_fields: split(String(form.get("changed_fields") ?? "")), rejection_reason: String(form.get("rejection_reason") ?? "") || null, notes: String(form.get("notes") ?? "") || null }) }); await refreshProject(selectedProject.id); formElement.reset(); setMessage({ text: "反馈已保存，下一轮建议已刷新" }); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "反馈保存失败", error: true }); } finally { setBusy(false); }
+    event.preventDefault(); if (!selectedProject || !selectedOutputVersion) return; setBusy(true); const formElement = event.currentTarget; const form = new FormData(formElement);
+    try {
+      await api<Feedback>(`/projects/${selectedProject.id}/feedback`, {
+        method: "POST",
+        body: JSON.stringify({
+          output_version: selectedOutputVersion,
+          accepted: String(form.get("accepted")) === "true",
+          changed_fields: split(String(form.get("changed_fields") ?? "")),
+          rejection_reason: String(form.get("rejection_reason") ?? "") || null,
+          notes: String(form.get("notes") ?? "") || null,
+        }),
+      });
+      await refreshProject(selectedProject.id);
+      formElement.reset();
+      setMessage({ text: "反馈已绑定到确切成片版本，下一轮建议已刷新" });
+    } catch (error) { setMessage({ text: error instanceof Error ? error.message : "反馈保存失败", error: true }); }
+    finally { setBusy(false); }
   }
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -961,18 +1255,59 @@ function App() {
     try { await persistDraft(draft.scenes, Object.values(nextSelections), null, routes, draft.script, draft.topic); setCostEstimate(await api<CostEstimate>(`/projects/${selectedProject.id}/cost-estimate`)); } catch (error) { setMessage({ text: error instanceof Error ? error.message : "候选保存失败", error: true }); }
   }
 
+  const prioritizedAssets = [...assets].sort((left, right) => assetDisplayPriority(left) - assetDisplayPriority(right));
+  const creatorVisualCoverage = assets.filter((asset) =>
+    creatorSourceAsset(asset) && asset.metadata.ip_profile_id === profile?.id,
+  ).reduce((total, asset) => {
+    const coverage = assetReadiness[asset.id]?.visual_coverage;
+    total.total += coverage?.total_clips ?? 0;
+    total.described += coverage?.described_clips ?? 0;
+    total.missing += coverage?.missing_clip_ids.length ?? 0;
+    return total;
+  }, { total: 0, described: 0, missing: 0 });
+
   return <div className="app-shell">
     <header className="topbar"><div><span className="eyebrow">LOCAL-FIRST / BYOK</span><h1>Content OS</h1><p>理解创作者、复用真实素材、形成可审核的短视频草稿。</p></div><div className="topbar-actions"><form className="access-form" onSubmit={saveAccessToken}><input type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="私网 token（可选）" aria-label="私网 token" /><button className="button" type="submit">连接</button></form><div className="status-pill"><span className={readiness?.runtime_ready ? "dot ready" : "dot"}></span>{readiness?.runtime_ready ? "Runtime 已就绪" : "Runtime 仍需配置"}</div></div></header>
     <main>
       <section className="notice"><strong>{message.error ? "需要处理" : "工作区状态"}</strong><span className={message.error ? "error" : ""}>{message.text}</span></section>
       <div className="columns">
         <section className="card"><div className="section-heading"><div><span className="kicker">01 / IDENTITY</span><h2>我的 IP</h2></div><span className="badge">版本化</span></div>
-          {profile ? <form onSubmit={saveProfile}><Field label="创作者" name="creator_name" defaultValue={profile.creator_name} /><Field label="受众" name="audience" defaultValue={profile.audience ?? ""} /><Field label="专业领域" name="domains" defaultValue={join(profile.domains)} /><Field label="知识" name="knowledge" as="textarea" defaultValue={join(profile.knowledge)} /><Field label="观点" name="opinions" as="textarea" defaultValue={join(profile.opinions)} /><Field label="表达风格" name="style_notes" as="textarea" defaultValue={join(profile.style_notes)} /><Field label="边界" name="boundaries" as="textarea" defaultValue={join(profile.boundaries)} /><button disabled={busy} className="button primary">保存资料版本</button></form> : <p className="muted">尚未初始化 IP 资料。</p>}
+          <div className="columns compact">
+            <label>编辑创作者档案<select value={profile?.id ?? ""} disabled={busy || !ipProfiles.length} onChange={(event) => void chooseIpProfile(event.target.value)}><option value="">选择创作者</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label>
+            <form onSubmit={(event) => void createIpProfile(event)} className="subform"><Field label="新增创作者名称" name="creator_name" placeholder="例如 TIM" /><button disabled={busy} className="button">新建档案</button></form>
+          </div>
+          {profile ? <form onSubmit={saveProfile} className="ip-profile-form">
+            <div className="columns compact">
+              <Field label="创作者" name="creator_name" defaultValue={profile.creator_name} />
+              <Field label="受众" name="audience" defaultValue={profile.audience ?? ""} />
+            </div>
+            <Field label="IP 定位" name="positioning" as="textarea" defaultValue={profile.positioning ?? ""} placeholder="例如：面向独立创作者，解释视频生产与平台机制，强调可验证的方法。" />
+            <div className="columns compact">
+              <Field label="专业领域（逗号或换行分隔）" name="domains" defaultValue={join(profile.domains)} />
+              <Field label="常用表达 / 词汇（逗号或换行分隔）" name="vocabulary" defaultValue={join(profile.vocabulary)} />
+            </div>
+            <Field label="内容支柱（每行一项）" name="content_pillars" as="textarea" defaultValue={join(profile.content_pillars)} />
+            <div className="columns compact">
+              <Field label="平台分区 / 赛道（每行一项）" name="platform_categories" as="textarea" defaultValue={join(profile.platform_categories)} />
+              <Field label="公开账号主页链接（每行一项）" name="public_account_links" as="textarea" defaultValue={join(profile.public_account_links)} placeholder="保存后可关联历史作品；链接本身不等于已完成分析" />
+            </div>
+            <Field label="常讲主题（每行一项）" name="topics" as="textarea" defaultValue={join(profile.topics)} />
+            <Field label="可用于规划的知识事实（每行一项）" name="knowledge" as="textarea" defaultValue={join(profile.knowledge)} />
+            <Field label="可用于规划的观点（每行一项）" name="opinions" as="textarea" defaultValue={join(profile.opinions)} />
+            <Field label="表达风格" name="style_notes" as="textarea" defaultValue={join(profile.style_notes)} />
+            <Field label="常用钩子 / 开场方式（每行一项）" name="common_hooks" as="textarea" defaultValue={join(profile.common_hooks)} />
+            <div className="columns compact">
+              <Field label="适用边界" name="boundaries" as="textarea" defaultValue={join(profile.boundaries)} />
+              <Field label="避免表达" name="avoided_expressions" as="textarea" defaultValue={join(profile.avoided_expressions)} />
+            </div>
+            <small className="muted">这里填写允许用于创作规划的表达性资料，不要填写密钥、联系方式或不应发送给模型的私密事实。保存后会生成新的 IP 版本，并使旧场景计划失效。</small>
+            <button disabled={busy} className="button primary">保存资料版本</button>
+          </form> : <p className="muted">尚未初始化 IP 资料。</p>}
         </section>
         <section className="card"><div className="section-heading"><div><span className="kicker">02 / CAPTURE</span><h2>素材进入</h2></div><span className="badge">本地</span></div>
           <p className="muted">导入即确认这些素材可用于你的内容创作。</p>
-          <form onSubmit={(event) => void importMedia(event)}><h3>导入视频/目录</h3><Field label="本地路径" name="source_path" placeholder="C:\\Videos" /><input type="hidden" name="authorization_reference" value="creator-intake" /><button disabled={busy} className="button primary">导入素材</button></form>
-          <form onSubmit={(event) => void uploadMedia(event)} className="subform"><h3>浏览器 / 手机上传</h3><label>视频文件<input name="file" type="file" accept="video/*" required /></label><input type="hidden" name="authorization_reference" value="creator-intake" /><label>绑定补拍任务（可选）<select name="shoot_task_id" defaultValue=""><option value="">不绑定任务</option>{shootTasks.filter((task) => task.project_id === selectedProjectId && task.status === "confirmed").map((task) => <option key={task.id} value={task.id}>场景 {task.scene_id} · 至少 {Math.ceil(task.duration_ms / 1000)} 秒</option>)}</select></label><button disabled={busy} className="button primary">上传并导入</button><small className="muted">文件会进入本机数据根并自动 hash 去重，不上传到第三方；可绑定已确认的补拍任务。</small></form>
+          <form onSubmit={(event) => void importMedia(event)}><h3>导入视频/目录</h3><Field label="本地路径" name="source_path" placeholder="C:\\Videos" /><input type="hidden" name="authorization_reference" value="creator-intake" /><input type="hidden" name="ip_profile_id" value={profile?.id ?? ""} /><button disabled={busy} className="button primary">导入到当前创作者</button><small className="muted">新素材默认绑定当前创作者，普通复用；重复内容按原记录返回。</small></form>
+          <form onSubmit={(event) => void uploadMedia(event)} className="subform"><h3>浏览器 / 手机上传</h3><label>视频文件<input name="file" type="file" accept="video/*" required /></label><input type="hidden" name="authorization_reference" value="creator-intake" /><input type="hidden" name="ip_profile_id" value={profile?.id ?? ""} /><label>绑定补拍任务（可选）<select name="shoot_task_id" defaultValue=""><option value="">不绑定任务</option>{shootTasks.filter((task) => task.project_id === selectedProjectId && task.status === "confirmed").map((task) => <option key={task.id} value={task.id}>场景 {task.scene_id} · 至少 {Math.ceil(task.duration_ms / 1000)} 秒</option>)}</select></label><button disabled={busy} className="button primary">上传到当前创作者</button><small className="muted">原文件保存在本机并按内容去重；新素材默认归入当前创作者，配置外部画面理解时会发送抽样画面。</small></form>
            <form onSubmit={(event) => void importAudio(event)} className="subform"><h3>导入旁白 / 本人录音</h3><Field label="本地音频路径" name="source_path" placeholder="C:\\Audio\\full-narration.wav" /><input type="hidden" name="authorization_reference" value="creator-intake" /><Field label="语言（可选）" name="language" placeholder="zh-CN" /><button disabled={busy} className="button primary">导入旁白</button><small className="muted">系统按 ffprobe 的真实时长组装；新稿件使用一条完整、已授权的主旁白，并以真实时间轴分配镜头和字幕。</small></form>
            <form onSubmit={(event) => void uploadAudio(event)} className="subform"><h3>浏览器 / 手机上传本人录音</h3><label>音频文件<input name="file" type="file" accept="audio/*" required /></label><input type="hidden" name="authorization_reference" value="creator-intake" /><Field label="语言（可选）" name="language" placeholder="zh-CN" /><button disabled={busy} className="button primary">上传并导入录音</button><small className="muted">文件留在本机数据根并按 hash 去重；已有授权原声可直接从视频素材提取。</small></form>
            <form onSubmit={(event) => void deriveSourceAudio(event)} className="subform"><h3>从已授权视频提取原声</h3>
@@ -983,13 +1318,62 @@ function App() {
            <form onSubmit={(event) => void importImage(event)} className="subform"><h3>导入图片 / 截图 / 图表</h3><Field label="本地图片路径" name="source_path" placeholder="C:\\Images\\chart.png" /><label>视觉用途<select name="source_kind" defaultValue="screenshot"><option value="screenshot">截图 / 静态画面</option><option value="chart">图表</option></select></label><input type="hidden" name="authorization_reference" value="creator-intake" /><button disabled={busy} className="button primary">导入静态视觉</button><small className="muted">支持 PNG/JPEG/WebP；授权在入库时登记并随素材继承；选择时检查来源、适配和重复度。</small></form>
            <form onSubmit={(event) => void importTranscript(event)} className="subform"><h3>导入真实时间轴字幕</h3><label>目标素材<select name="asset_id" required disabled={!assets.length}><option value="">选择已有素材</option>{assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.source_file.split(/[\\/]/).pop()} · {Math.round(asset.duration_ms / 1000)}s</option>)}</select></label><Field label="本地 SRT / VTT 路径" name="source_path" placeholder="C:\\Captions\\take-01.srt" /><Field label="字幕来源引用" name="source_reference" placeholder="creator-captions-2026-09-09" /><button disabled={busy || !assets.length} className="button">导入时间轴</button><small className="muted">只接受你提供的 UTF-8 SRT/VTT；保留原始时间段与来源引用，不把固定字幕冒充 ASR。</small></form>
           <form onSubmit={(event) => void importAudioTranscript(event)} className="subform"><h3>为旁白绑定真实字幕</h3><label>目标旁白<select name="audio_id" required disabled={!audioAssets.length}><option value="">选择已导入录音</option>{audioAssets.map((audio) => <option key={audio.id} value={audio.id}>{audio.source_file.split(/[\\/]/).pop()} · {Math.round(audio.duration_ms / 1000)}s</option>)}</select></label><Field label="本地 SRT / VTT 路径" name="source_path" placeholder="C:\\Captions\\narration.srt" /><Field label="字幕来源引用" name="source_reference" placeholder="creator-narration-captions-2026-09-09" /><button disabled={busy || !audioAssets.length} className="button">绑定旁白字幕</button><small className="muted">仅绑定你提供的真实时间轴；没有时间轴时不会伪造口型或语义同步。</small></form>
-           <form onSubmit={(event) => void importMedia(event, true)} className="subform"><h3>Inbox 按需扫描</h3><Field label="Inbox 路径" name="source_path" placeholder="C:\\Videos\\Inbox" /><input type="hidden" name="authorization_reference" value="creator-intake" /><label className="checkbox-line"><input name="enqueue_analysis" type="checkbox" defaultChecked /> 新导入素材自动排入本地媒体分析</label><small className="muted">只自动执行本地预处理/连续 Clip 提取；ASR、视觉分析和索引仍按独立阶段显示，不会因入队被标为完成。</small><button disabled={busy} className="button">扫描 Inbox</button></form>
+           <form onSubmit={(event) => void importMedia(event, true)} className="subform"><h3>Inbox 按需扫描</h3><Field label="Inbox 路径" name="source_path" placeholder="C:\\Videos\\Inbox" /><input type="hidden" name="authorization_reference" value="creator-intake" /><input type="hidden" name="ip_profile_id" value={profile?.id ?? ""} /><label className="checkbox-line"><input name="enqueue_analysis" type="checkbox" defaultChecked /> 新导入素材自动排入本地媒体分析</label><small className="muted">只自动执行本地预处理/连续 Clip 提取；ASR、视觉分析和索引仍按独立阶段显示，不会因入队被标为完成。新素材默认归入当前创作者。</small><button disabled={busy} className="button">扫描 Inbox</button></form>
           {selectedProjectId && <ExternalMediaPanel key={selectedProjectId} projectId={selectedProjectId} request={api}
             library={assets.flatMap(asset => { const sources = asset.metadata.external_sources; return Array.isArray(sources) ? sources.flatMap(source => {
               const record = source as { candidate?: { id?: string } } | null; return record?.candidate?.id ? [{ candidate_id: record.candidate.id, asset_id: asset.id, analysis_status: analysisStage(asset.id).status }] : [];
             }) : []; })}
             onImported={async () => { const values = await api<Asset[]>("/assets"); setAssets(values); await Promise.all(values.map(asset => refreshAssetReadiness(asset.id))); }} />}
-          <div className="asset-list">{assets.slice(0, assetLimit).map((asset) => { const analysis = analysisStage(asset.id); const stage = transcriptStage(asset.id); const active = stage.status === "pending" || stage.status === "running"; const provenance = analysisProvenance(asset); return <div className="asset-row" key={asset.id}><div><strong>{asset.source_file.split(/[\\/]/).pop()}</strong><small>{asset.width}×{asset.height} · {Math.round(asset.duration_ms / 1000)}s · {asset.source_kind}</small><small className={analysis.status === "failed" ? "error" : analysis.status === "completed" ? "ok" : "muted"}>{analysisStageLabel(analysis)}</small><small className={stage.status === "failed" ? "error" : stage.status === "completed" ? "ok" : "muted"}>{transcriptStageLabel(stage)}</small>{provenance && <small className="muted">{provenance}</small>}</div><form className="asset-classification" onSubmit={(event) => void saveAssetClassification(asset.id, event)}><label>身份<select name="identity" defaultValue={String(asset.metadata.r1_identity ?? "unknown")}><option value="unknown">未知</option><option value="creator">本人形象</option><option value="other">其他人物</option><option value="none">无人/辅助画面</option></select></label><label>复用用途<select name="reuse_role" defaultValue={String(asset.metadata.reuse_role ?? "ordinary")}><option value="ordinary">普通素材，避免重复</option><option value="meme">梗图 / meme，可重复</option><option value="signature">固定栏目素材，可重复</option></select></label><label>所属创作者<select name="ip_profile_id" defaultValue={String(asset.metadata.ip_profile_id ?? "")}><option value="">未关联</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label><label>本人动作档案<select name="talking_profile_id" defaultValue={String((asset.metadata.talking_motion_source as { talking_profile_id?: string } | undefined)?.talking_profile_id ?? "")}><option value="">不作为动作参考</option>{talkingProfiles.filter(profile => profile.consent.confirmed).map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="checkbox-line"><input name="motion_reference" type="checkbox" defaultChecked={Boolean(asset.metadata.talking_motion_source)} /> 本人动作参考（静音、不流利均可；按完整区间分析后入池）</label><button disabled={busy} className="button">保存素材用途</button><button type="button" disabled={busy || active} className="button" onClick={() => void enqueueTranscription(asset)}>{active ? "ASR 处理中" : stage.status === "completed" ? "重新转写" : stage.status === "failed" || stage.status === "cancelled" ? "重试 ASR" : "提交 ASR"}</button></form></div>; })}{assets.length === 0 && <p className="muted">还没有本地素材。</p>}</div>
+          <div className="asset-list">
+            {creatorVisualCoverage.total > 0 && <small className={creatorVisualCoverage.missing ? "muted" : "ok"}>
+              当前创作者素材视觉证据：{creatorVisualCoverage.described}/{creatorVisualCoverage.total}；
+              {creatorVisualCoverage.missing ? ` ${creatorVisualCoverage.missing} 段待补，优先使用真实创作素材，旧库未绑定素材不占前列。` : " 已覆盖全部 Clip。"}
+            </small>}
+            {prioritizedAssets.slice(0, assetLimit).map((asset) => {
+              const analysis = analysisStage(asset.id);
+              const transcript = transcriptStage(asset.id);
+              const visual = assetReadiness[asset.id]?.stages.visual ?? { status: "not_started", job_id: null, error_code: null };
+              const coverage = assetReadiness[asset.id]?.visual_coverage;
+              const transcriptActive = transcript.status === "pending" || transcript.status === "running";
+              const visualActive = visual.status === "pending" || visual.status === "running";
+              const provenance = analysisProvenance(asset);
+              const archived = asset.metadata.lifecycle_state === "archived";
+              const creatorSource = ["user_asset", "historical_asset", "ai_video", "ai_broll", "capture"].includes(asset.source_kind);
+              const unownedCreator = creatorSource && !creatorSourceAsset(asset);
+              const duplicateResult = nearDuplicates[asset.id];
+              const governance = assetGovernance[asset.id];
+              const latestGovernanceEvent = governance?.events[governance.events.length - 1]?.event_type ?? "none";
+              return <div className="asset-row" key={asset.id}>
+                <div>
+                  <strong>{asset.source_file.split(/[\\/]/).pop()}</strong>
+                  <small>{asset.width}×{asset.height} · {Math.round(asset.duration_ms / 1000)}s · {asset.source_kind}</small>
+                  <small className={archived || unownedCreator ? "error" : "ok"}>{archived ? "已归档：仅保留历史引用" : unownedCreator ? "未绑定创作者：不进入新选材" : "可进入新选材"}</small>
+                  <small className={analysis.status === "failed" ? "error" : analysis.status === "completed" ? "ok" : "muted"}>{analysisStageLabel(analysis)}</small>
+                  <small className={visual.status === "failed" ? "error" : "muted"}>{visualStageLabel(visual)}</small>
+                  {visual.error_code === "provider_budget_blocked" && <a href="#workspace-budget">查看工作区预算</a>}
+                  {coverage && <small className={coverage.missing_clip_ids.length ? "muted" : "ok"}>视觉证据：{coverage.described_clips}/{coverage.total_clips}{coverage.missing_clip_ids.length ? ` · ${coverage.missing_clip_ids.length} 段待补` : " · 已覆盖"}</small>}
+                  <small className={transcript.status === "failed" ? "error" : transcript.status === "completed" ? "ok" : "muted"}>{transcriptStageLabel(transcript)}</small>
+                  {provenance && <small className="muted">{provenance}</small>}
+                  {duplicateResult && <small className={duplicateResult.matches.length ? "error" : "muted"}>{duplicateResult.matches.length ? `近似重复 ${duplicateResult.matches.length} 个` : "无近似重复"}</small>}
+                  {governance && <small className="muted">治理事件 {governance.events.length} · 引用 {governance.references.reference_count} · 最近 {latestGovernanceEvent}</small>}
+                </div>
+                <form className="asset-classification" onSubmit={(event) => void saveAssetClassification(asset.id, event)}>
+                  <label>身份<select name="identity" defaultValue={String(asset.metadata.r1_identity ?? "unknown")}><option value="unknown">未知</option><option value="creator">本人形象</option><option value="other">其他人物</option><option value="none">无人/辅助画面</option></select></label>
+                  <label>复用用途<select name="reuse_role" defaultValue={String(asset.metadata.reuse_role ?? "ordinary")}><option value="ordinary">普通素材，避免重复</option><option value="meme">梗图 / meme，可重复</option><option value="signature">固定栏目素材，可重复</option></select></label>
+                  <label>所属创作者<select name="ip_profile_id" defaultValue={String(asset.metadata.ip_profile_id ?? "")}><option value="">未关联</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label>
+                  <label>本人动作档案<select name="talking_profile_id" defaultValue={String((asset.metadata.talking_motion_source as { talking_profile_id?: string } | undefined)?.talking_profile_id ?? "")}><option value="">不作为动作参考</option>{talkingProfiles.filter(profile => profile.consent.confirmed).map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
+                  <label className="checkbox-line"><input name="motion_reference" type="checkbox" defaultChecked={Boolean(asset.metadata.talking_motion_source)} /> 本人动作参考（静音、不流利均可；按完整区间分析后入池）</label>
+                  <button disabled={busy} className="button">保存素材用途</button>
+                  <button type="button" disabled={busy || transcriptActive} className="button" onClick={() => void enqueueTranscription(asset)}>{transcriptActive ? "ASR 处理中" : transcript.status === "completed" ? "重新转写" : transcript.status === "failed" || transcript.status === "cancelled" ? "重试 ASR" : "提交 ASR"}</button>
+                  {!!coverage?.missing_clip_ids.length && <button type="button" disabled={busy || visualActive} className="button" onClick={() => void enqueueVisualEvidence(asset)}>{visualActive ? "视觉证据处理中" : `补 ${Math.min(4, coverage.missing_clip_ids.length)} 段视觉证据`}</button>}
+                  <button type="button" disabled={busy} className="button" onClick={() => void checkNearDuplicates(asset.id)}>检查近似重复</button>
+                  <button type="button" disabled={busy} className="button" onClick={() => void loadAssetGovernance(asset.id)}>治理记录</button>
+                  <button type="button" disabled={busy} className="button" onClick={() => void setAssetLifecycle(asset, archived ? "active" : "archived")}>{archived ? "恢复素材" : "归档素材"}</button>
+                </form>
+              </div>;
+            })}
+            {assets.length === 0 && <p className="muted">还没有本地素材。</p>}
+          </div>
           {assetLimit < assets.length && <button type="button" className="button" onClick={() => setAssetLimit((count) => count + 8)}>加载更多素材</button>}
           <div className="asset-list"><h3>已导入配音 / 本人录音</h3>{audioAssets.map((audio) => {
             const generation = voiceGenerationFor(audio);
@@ -1036,11 +1420,12 @@ function App() {
         <div className="section-heading"><div><span className="kicker">05 / ADVANCED SETTINGS</span><h2>Provider 与本机高级设置</h2></div><span className="badge">不执行模型</span></div>
         <div className="columns compact">
           <form onSubmit={(event) => void saveExecutionSettings(event)}>
-            <label>能力与 Provider<select value={String(settingsSchemaIndex)} onChange={(event) => { setSettingsSchemaIndex(Number(event.target.value)); setSettingsView(null); }} disabled={!settingsSchemas.length}>{settingsSchemas.map((schema, index) => <option key={`${schema.capability}-${schema.provider}`} value={index}>{schema.capability} · {schema.provider} · {schema.model}</option>)}</select></label>
-            <label>本机配置标识<input value={settingsMachineId} onChange={(event) => { setSettingsMachineId(event.target.value); setSettingsView(null); }} placeholder="例如 rtx3060-laptop" required /></label>
-            {activeSettingsSchema?.parameters.map((parameter) => <label key={parameter.key}>{parameter.label}<input type="number" min={parameter.minimum ?? undefined} max={parameter.maximum ?? undefined} step="any" value={settingsValues[parameter.key] ?? String(parameter.default ?? "")} onChange={(event) => setSettingsValues((current) => ({ ...current, [parameter.key]: event.target.value }))} required={parameter.default !== null} /><small className="muted">{parameter.help_text}</small></label>)}
+            <label>能力与 Provider<select value={String(settingsSchemaIndex)} onChange={(event) => chooseExecutionSchema(Number(event.target.value))} disabled={!settingsSchemas.length}>{settingsSchemas.map((schema, index) => <option key={`${schema.capability}-${schema.provider}-${schema.model}-${schema.runtime}`} value={index}>{schema.capability} · {schema.provider} · {schema.model} · {schema.runtime}</option>)}</select></label>
+            <label>本机配置标识<input value={settingsMachineId} onChange={(event) => { setSettingsMachineId(event.target.value); setSettingsView(null); }} placeholder="例如 LAPTOP-UO337HJH" required /></label>
+            <small className="muted">{activeSettingsScope ? `已从当前运行配置带入 ${activeSettingsScope.machine_id}；保存范围仅限这个精确 Provider / model / runtime / machine。` : "当前运行配置未能解析出完整 Provider / model / runtime / machine。仍可查看默认初始值；请填写目标本机标识后再保存，并在该机器上做有界质量验证。"}</small>
+            {activeSettingsSchema?.parameters.map((parameter) => <label key={parameter.key}>{parameter.label}<input type="number" min={parameter.minimum ?? undefined} max={parameter.maximum ?? undefined} step={parameter.value_type === "integer" ? 1 : "any"} value={settingsValues[parameter.key] ?? String(parameter.default ?? "")} onChange={(event) => setSettingsValues((current) => ({ ...current, [parameter.key]: event.target.value }))} required={parameter.default !== null} /><small className="muted">{parameter.help_text}</small></label>)}
             <div className="settings-actions"><button type="button" disabled={busy || !activeSettingsSchema} className="button" onClick={() => void loadExecutionSettings()}>加载有效值</button><button disabled={busy || !activeSettingsSchema} className="button primary">保存本机覆盖</button><button type="button" disabled={busy || !settingsView?.saved_override} className="button" onClick={() => void resetExecutionSettings()}>恢复自动</button></div>
-            <small className="muted">保存范围仅限 Provider + 模型 + 运行时 + 本机。它不会绕过授权、预算、许可证、溯源或运行时完整性检查。</small>
+            <small className="muted">保存范围仅限 Provider + 模型 + 运行时 + 本机。默认值只是可调整起点，不会自动成为已验证质量；执行仍检查素材授权、预算、溯源和运行时身份。</small>
           </form>
           <div className="settings-preview"><h3>有效值与来源</h3>{settingsView ? <>
             <small className="muted">{settingsView.resolution.routing_reason}</small>
@@ -1051,11 +1436,36 @@ function App() {
           </> : <p className="muted">选择配置后点击“加载有效值”，查看 Provider 默认值、已保存覆盖或 unknown。</p>}</div>
         </div>
       </section>
-      <section className="card"><div className="section-heading"><div><span className="kicker">06 / READINESS</span><h2>运行能力与预算</h2></div><span className="badge">不探测外部服务</span></div><div className="columns compact"><div className="capability-grid">{(readiness?.capabilities ?? []).map((capability) => <div className="capability" key={capability.key}><div className="row-between"><strong>{capability.key}</strong><span className={capability.status === "ready" ? "ok" : capability.status === "not_developed" ? "muted" : "error"}>{prettyStatus(capability.status)}</span></div><small>{capability.detail}{capability.model ? ` · ${capability.model}` : ""}</small>{capability.estimated_cost?.amount !== null && capability.estimated_cost?.amount !== undefined ? <small className="muted">成本：{capability.estimated_cost.amount} {capability.estimated_cost.currency ?? ""}{capability.estimated_cost.note ? ` · ${capability.estimated_cost.note}` : ""}</small> : null}{capability.constraints?.length ? <small className="muted">约束：{capability.constraints.join(" · ")}</small> : null}</div>)}</div><form onSubmit={(event) => void saveBudget(event)}><h3>一次设置运行预算</h3><label>金额上限（USD，可留空）<input value={budgetAmount} onChange={(event) => setBudgetAmount(event.target.value)} inputMode="decimal" placeholder="例如 5.00" /></label><label>调用次数上限（可留空）<input value={budgetCalls} onChange={(event) => setBudgetCalls(event.target.value)} inputMode="numeric" placeholder="例如 20" /></label><label className="checkbox-line"><input type="checkbox" checked={allowUnknownCost} onChange={(event) => setAllowUnknownCost(event.target.checked)} /> 允许 Provider 未返回账单金额</label><button disabled={busy} className="button primary">保存预算策略</button><small className="muted">当前：{budget?.snapshot.calls ?? 0} 次调用 · 已知金额 {budget?.snapshot.known_amount ?? "0"} {budget?.snapshot.currency ?? "USD"} · 未知金额 {budget?.snapshot.unknown_cost_calls ?? 0} 次。Provider 调用仍会记录成功/失败和未知成本。</small></form></div></section>
+      <RuntimeSettingsPanel request={api} />
+      <section id="workspace-budget" className="card"><div className="section-heading"><div><span className="kicker">06 / READINESS</span><h2>运行能力与预算</h2></div><span className="badge">不探测外部服务</span></div><div className="columns compact"><div className="capability-grid">{(readiness?.capabilities ?? []).map((capability) => <div className="capability" key={capability.key}><div className="row-between"><strong>{capability.key}</strong><span className={capability.status === "ready" ? "ok" : capability.status === "not_developed" ? "muted" : "error"}>{prettyStatus(capability.status)}</span></div><small>{capability.detail}{capability.model ? ` · ${capability.model}` : ""}</small>{capability.estimated_cost?.amount !== null && capability.estimated_cost?.amount !== undefined ? <small className="muted">成本：{capability.estimated_cost.amount} {capability.estimated_cost.currency ?? ""}{capability.estimated_cost.note ? ` · ${capability.estimated_cost.note}` : ""}</small> : null}{capability.constraints?.length ? <small className="muted">约束：{capability.constraints.join(" · ")}</small> : null}</div>)}</div><form onSubmit={(event) => void saveBudget(event)}><h3>一次设置运行预算</h3><label>预算币种<select value={budgetCurrency} onChange={(event) => setBudgetCurrency(event.target.value)}><option value="USD">美元 (USD)</option><option value="CNY">人民币 (CNY)</option></select></label><label>金额上限（可留空）<input value={budgetAmount} onChange={(event) => setBudgetAmount(event.target.value)} inputMode="decimal" placeholder="例如 5.00" /></label><label>调用次数上限（可留空）<input value={budgetCalls} onChange={(event) => setBudgetCalls(event.target.value)} inputMode="numeric" placeholder="例如 20" /></label><label className="checkbox-line"><input type="checkbox" checked={allowUnknownCost} onChange={(event) => setAllowUnknownCost(event.target.checked)} /> 允许 Provider 未返回账单金额</label><button disabled={busy} className="button primary">保存预算策略</button><small className="muted">当前：{budget?.snapshot.calls ?? 0} 次调用 · 已知金额 {budget?.snapshot.known_amount ?? "0"} {budget?.snapshot.currency ?? "USD"} · 未知金额 {budget?.snapshot.unknown_cost_calls ?? 0} 次。Provider 调用仍会记录成功/失败和未知成本。</small></form></div></section>
       <section className="card"><div className="section-heading"><div><span className="kicker">06 / INTELLIGENCE</span><h2>账号、历史与声音</h2></div><span className="badge">只读 / consent-gated</span></div>
         <div className="columns compact">
-          <div><form onSubmit={(event) => void createAccount(event)}><h3>只读账号记录</h3><Field label="Provider" name="provider" placeholder="youtube" /><Field label="账号外部 ID" name="account_external_id" placeholder="channel-id" /><Field label="显示名称" name="display_name" placeholder="我的频道" /><label>记录时间<input name="connected_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} required /></label><button disabled={busy} className="button primary">保存账号</button></form><div className="asset-list">{accounts.map((account) => <div className="asset-row" key={account.id}><div><strong>{account.display_name || account.account_external_id}</strong><small>{account.provider} · {account.read_only ? "只读" : "请检查权限"}</small></div><span className="badge">历史 {historicalContent.filter((item) => item.account_connection_id === account.id).length}</span></div>)}{accounts.length === 0 && <p className="muted">尚无账号连接；不会在此保存令牌。</p>}</div></div>
-          <div><form onSubmit={(event) => void createHistorical(event)}><h3>历史内容导入记录</h3><label>所属账号<select name="account_connection_id" required disabled={!accounts.length}><option value="">选择只读账号</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name || account.account_external_id}</option>)}</select></label><Field label="外部内容 ID" name="external_id" placeholder="video-id" /><Field label="标题" name="title" placeholder="历史内容标题" /><Field label="字幕 / 转录" name="transcript" as="textarea" /><Field label="指标 JSON（可选）" name="metrics" placeholder='{"views": 100}' /><button disabled={busy || !accounts.length} className="button primary">保存历史内容</button></form><div className="asset-list">{historicalContent.slice(0, 6).map((item) => <div className="asset-row" key={item.id}><div><strong>{item.title}</strong><small>{item.external_id} · {Object.keys(item.metrics).join(", ") || "无指标"}</small></div></div>)}{historicalContent.length === 0 && <p className="muted">导入字幕和元数据后才能形成可追溯证据。</p>}</div></div>
+          <div><form onSubmit={(event) => void createAccount(event)}><h3>只读账号记录</h3><label>所属 IP<select name="ip_profile_id" required defaultValue=""><option value="">选择创作者</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label><Field label="Provider" name="provider" placeholder="youtube" /><Field label="公开主页链接" name="profile_url" placeholder="https://..." /><Field label="账号外部 ID" name="account_external_id" placeholder="channel-id" /><Field label="显示名称" name="display_name" placeholder="我的频道" /><label>记录时间<input name="connected_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} required /></label><button disabled={busy} className="button primary">保存账号</button><small className="muted">保存链接不会自动宣称已分析；导入的历史标题、说明和指标会作为当前 IP 的规划证据。</small></form><div className="asset-list">{accounts.map((account) => <div className="asset-row" key={account.id}><div><strong>{account.display_name || account.account_external_id}</strong><small>{account.provider} · {account.read_only ? "只读" : "请检查权限"}{account.profile_url ? ` · ${account.profile_url}` : ""}</small></div><span className="badge">历史 {historicalContent.filter((item) => item.account_connection_id === account.id).length}</span></div>)}{accounts.length === 0 && <p className="muted">尚无账号连接；不会在此保存令牌。</p>}</div></div>
+          <div>
+            <form onSubmit={(event) => void createHistorical(event)}>
+              <h3>历史发布记录</h3>
+              <label>所属账号<select name="account_connection_id" required disabled={!accounts.length}><option value="">选择只读账号</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name || account.account_external_id}</option>)}</select></label>
+              <Field label="平台内容 ID" name="external_id" placeholder="BV... / YouTube ID / removed:..." />
+              <Field label="标题" name="title" placeholder="历史内容标题" />
+              <label>发布时间（可选）<input name="published_at" type="datetime-local" /></label>
+              <label>绑定本地素材（可选）<select name="asset_id" defaultValue=""><option value="">不绑定素材</option>{assets.filter((asset) => ["user_asset", "historical_asset"].includes(asset.source_kind)).map((asset) => <option key={asset.id} value={asset.id}>{asset.source_file.split(/[\\/]/).pop()} · {Math.round(asset.duration_ms / 1000)}s</option>)}</select></label>
+              <label>当前可用性<select name="availability" defaultValue="available"><option value="available">官方原帖可用</option><option value="removed">官方原帖已下架</option><option value="mirror_only">仅公开补档可用</option><option value="unknown">未知</option></select></label>
+              <Field label="官方内容 URL（可选）" name="content_url" placeholder="https://..." />
+              <Field label="证据引用（每行一项）" name="evidence_refs" as="textarea" placeholder="补档 URL、平台声明或复核记录" />
+              <Field label="描述 / 发布文案（可选）" name="description" as="textarea" />
+              <Field label="字幕 / 转录" name="transcript" as="textarea" />
+              <Field label="指标 JSON（可选；仅官方来源）" name="metrics" placeholder='{"views": 100}' />
+              <button disabled={busy || !accounts.length} className="button primary">保存历史发布记录</button>
+              <small className="muted">补档可用于证明视频内容与原始发布事实，但不能把补档播放量冒充官方原帖指标。</small>
+            </form>
+            <div className="asset-list">{historicalContent.slice(0, 8).map((item) => <div className="asset-row" key={item.id}>
+              <div>
+                <strong>{item.title}</strong>
+                <small>{item.external_id} · {item.availability} · {item.asset_id ? `本地素材 ${item.asset_id}` : "未绑定本地素材"} · {Object.keys(item.metrics).join(", ") || "无官方指标"}</small>
+                {item.content_url && <small className="muted">{item.content_url}</small>}
+              </div>
+            </div>)}{historicalContent.length === 0 && <p className="muted">导入标题、发布状态和来源后才能形成可追溯证据。</p>}</div>
+          </div>
         </div>
         <div className="columns compact">
           <form onSubmit={(event) => void createVoice(event)}><h3>Voice Profile 登记</h3><label>声音所属 IP<select name="ip_profile_id" required defaultValue=""><option value="">明确选择声音主体 IP</option>{ipProfiles.map(ip => <option key={ip.id} value={ip.id}>{ip.creator_name}</option>)}</select></label><label><input name="default_voice" type="checkbox" /> 将此授权声线指定为该 IP 的默认声音</label><Field label="名称" name="name" placeholder="本人声音候选" /><Field label="Provider" name="provider" placeholder="provider-name" /><Field label="Provider Profile ID" name="provider_profile_id" placeholder="profile-id" /><Field label="参考 Clip IDs" name="reference_clip_ids" placeholder="uuid, uuid" /><Field label="同意主体" name="subject_name" placeholder="本人" /><label>同意依据<select name="basis" defaultValue="self"><option value="self">本人</option><option value="explicit_authorization">明确授权</option></select></label><Field label="授权记录引用（如适用）" name="authorization_reference" /><label><input name="confirmed" type="checkbox" defaultChecked required /> 我确认这些参考 Clip 可用于此 Profile 登记</label><button disabled={busy} className="button">登记 Voice Profile</button></form>
@@ -1065,7 +1475,95 @@ function App() {
         <div className="columns compact"><div className="asset-list">{voiceProfiles.map((item) => <div className="asset-row" key={item.id}><div><strong>{item.name}</strong><small>Voice · {item.provider} · refs {item.reference_clip_ids.length}</small></div><span className="badge">已同意</span></div>)}{voiceProfiles.length === 0 && <p className="muted">尚无 Voice Profile 登记。</p>}</div><div className="asset-list">{talkingProfiles.map((item) => <div className="asset-row" key={item.id}><div><strong>{item.name}</strong><small>Talking · {item.provider} · refs {item.reference_clip_ids.length}</small></div><span className="badge">已同意</span></div>)}{talkingProfiles.length === 0 && <p className="muted">尚无 Talking Profile 登记。</p>}</div></div>
       </section>
       <section className="card"><div className="section-heading"><div><span className="kicker">07 / LOOP</span><h2>发布反馈与下一轮</h2></div><span className="badge">人工发布</span></div>
-        {selectedProject ? <><div className="columns compact"><form onSubmit={(event) => void recordPublication(event)}><h3>记录发布</h3><Field label="输出版本" name="output_version" defaultValue={`draft-${draft?.version ?? 0}`} /><Field label="平台" name="platform" placeholder="YouTube" /><label>发布时间<input name="published_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} required /></label><Field label="内容 URL（可选）" name="content_url" /><Field label="平台内容 ID（可选）" name="content_external_id" /><Field label="指标 JSON（可选）" name="metrics" placeholder='{"views": 100}' /><Field label="指标来源（有指标时必填）" name="metric_source" placeholder="platform-export-2026-09-09" /><Field label="观察窗口天数" name="observation_window_days" placeholder="7" /><button disabled={busy} className="button primary">保存发布记录</button></form><form onSubmit={(event) => void recordFeedback(event)}><h3>记录审核反馈</h3><Field label="输出版本" name="output_version" defaultValue={`draft-${draft?.version ?? 0}`} /><label>结果<select name="accepted" defaultValue="false"><option value="false">拒绝 / 需要修改</option><option value="true">接受</option></select></label><Field label="修改字段" name="changed_fields" placeholder="hook,caption,visual" /><Field label="拒绝原因" name="rejection_reason" as="textarea" /><Field label="备注" name="notes" as="textarea" /><button disabled={busy} className="button primary">保存反馈</button></form></div><div className="columns compact"><div className="asset-list"><h3>最近发布</h3>{publications.map((item) => <div className="asset-row" key={item.id}><div><strong>{item.platform} · {item.output_version}</strong><small>{item.content_url || "未填写 URL"} · {Object.keys(item.metrics).join(", ") || "无指标"}</small></div></div>)}{publications.length === 0 && <p className="muted">还没有人工发布记录。</p>}</div><div className="asset-list"><h3>下一轮建议</h3>{suggestions.map((item, index) => <div className="asset-row" key={`${item.reason}-${index}`}><div><strong>{item.suggestion}</strong><small>{item.reason} · {item.evidence_refs.join(", ")}</small></div></div>)}{suggestions.length === 0 && <p className="muted">提交反馈后生成带证据引用的规则建议。</p>}</div></div><div className="asset-list"><h3>最近反馈</h3>{feedback.slice(-4).reverse().map((item) => <div className="asset-row" key={item.id}><div><strong>{item.output_version} · {item.accepted ? "已接受" : "需修改"}</strong><small>{item.changed_fields.join(", ") || "未指定修改字段"} · {item.rejection_reason || item.notes || "无备注"}</small></div></div>)}</div></> : <p className="muted">先创建或选择项目，才能记录发布和反馈。</p>}
+        {selectedProject ? <>
+          <div className="asset-list">
+            <h3>可发布成片</h3>
+            {publishableOutputs.map((output) => <div className="asset-row" key={output.output_version}>
+              <div>
+                <strong>{output.output_version}</strong>
+                <small>{output.width}×{output.height} · {(output.duration_ms / 1000).toFixed(3)}s · {output.available ? "文件可用" : "文件缺失"}{output.published ? " · 已有发布记录" : ""}{output.feedback_recorded ? " · 已有反馈" : ""}</small>
+              </div>
+            </div>)}
+            {publishableOutputs.length === 0 && <p className="muted">尚无已完成且可追溯的 Render。发布和成片反馈不能提前挂到草稿版本。</p>}
+          </div>
+          <div className="columns compact">
+            <form onSubmit={(event) => void recordPublication(event)}>
+              <h3>发布包装与回执</h3>
+              <label>确切成片版本<select value={selectedOutputVersion} onChange={(event) => setSelectedOutputVersion(event.target.value)} required disabled={!publishableOutputs.some((output) => output.available)}><option value="">选择已完成 Render</option>{publishableOutputs.filter((output) => output.available).map((output) => <option key={output.output_version} value={output.output_version}>{output.output_version}</option>)}</select></label>
+              <Field label="标题" name="title" defaultValue={selectedProject.title} />
+              <Field label="描述 / 发布文案" name="description" defaultValue={draft?.topic ?? selectedProject.topic} as="textarea" />
+              <label>封面取帧（毫秒）<input name="cover_frame_ms" type="number" min="0" defaultValue="0" required /></label>
+              <label>平台账号（可选）<select name="account_connection_id" defaultValue=""><option value="">不关联账号</option>{accounts.filter((account) => account.ip_profile_id === selectedProject.ip_profile_id).map((account) => <option key={account.id} value={account.id}>{account.provider} · {account.display_name || account.account_external_id}</option>)}</select></label>
+              <Field label="平台" name="platform" placeholder="YouTube" />
+              <label>发布时间<input name="published_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} required /></label>
+              <Field label="内容 URL（可选）" name="content_url" />
+              <Field label="平台内容 ID（可选）" name="content_external_id" />
+              <Field label="指标 JSON（可选）" name="metrics" placeholder='{"views": 100}' />
+              <Field label="指标来源（有指标时必填）" name="metric_source" placeholder="platform-export-2026-09-09" />
+              <Field label="观察窗口天数" name="observation_window_days" placeholder="7" />
+              <button disabled={busy || !selectedOutputVersion} className="button primary">保存发布包装与回执</button>
+              <small className="muted">只记录人工发布事实；保存回执不会自动把视频发布到平台。</small>
+            </form>
+            <form onSubmit={(event) => void recordFeedback(event)}>
+              <h3>记录成片审核反馈</h3>
+              <label>确切成片版本<select value={selectedOutputVersion} onChange={(event) => setSelectedOutputVersion(event.target.value)} required disabled={!publishableOutputs.some((output) => output.available)}><option value="">选择已完成 Render</option>{publishableOutputs.filter((output) => output.available).map((output) => <option key={output.output_version} value={output.output_version}>{output.output_version}</option>)}</select></label>
+              <label>结果<select name="accepted" defaultValue="false"><option value="false">拒绝 / 需要修改</option><option value="true">接受</option></select></label>
+              <Field label="修改字段" name="changed_fields" placeholder="hook,caption,visual" />
+              <Field label="拒绝原因" name="rejection_reason" as="textarea" />
+              <Field label="备注" name="notes" as="textarea" />
+              <button disabled={busy || !selectedOutputVersion} className="button primary">保存反馈</button>
+              <small className="muted">反馈只约束这个确切成片版本，并成为下一轮建议的证据。</small>
+            </form>
+          </div>
+          <div className="columns compact">
+            <div className="asset-list">
+              <h3>最近发布</h3>
+              {publications.map((item) => <div className="asset-row" key={item.id}>
+                <div>
+                  <strong>{item.title || item.platform} · {item.output_version}</strong>
+                  <small>{item.platform} · 封面 {item.cover_frame_ms}ms · {item.content_url || "未填写 URL"} · {Object.keys(item.metrics).join(", ") || "无指标"}</small>
+                </div>
+              </div>)}
+              {publications.length === 0 && <p className="muted">还没有绑定完成成片的人工发布记录。</p>}
+            </div>
+            <div className="asset-list">
+              <h3>下一轮建议</h3>
+              {suggestions.map((item, index) => <div className="asset-row" key={`${item.reason}-${index}`}>
+                <div><strong>{item.suggestion}</strong><small>{item.reason} · {item.evidence_refs.join(", ")}</small></div>
+              </div>)}
+              {suggestions.length === 0 && <p className="muted">提交成片反馈或发布指标后生成带证据引用的建议；单条指标只作为线索。</p>}
+            </div>
+          </div>
+          {publications.length > 0 && <div className="columns compact">
+            <form onSubmit={(event) => void recordMetricObservation(event)}>
+              <h3>追加指标快照</h3>
+              <label>发布记录<select name="publication_id" required>{publications.map((item) => <option key={item.id} value={item.id}>{item.platform} · {item.title || item.output_version}</option>)}</select></label>
+              <label>观测时间<input name="observed_at" type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} required /></label>
+              <label>发布后窗口（小时）<input name="window_hours" type="number" min="0" max="8760" defaultValue="24" required /></label>
+              <Field label="指标来源" name="metric_source" placeholder="YouTube Studio / B站数据 / 手工导出" />
+              <Field label="指标 JSON" name="metrics" placeholder='{"views": 100, "completion_rate": 0.42}' />
+              <Field label="证据引用（可选）" name="evidence_ref" placeholder="导出文件或截图引用" />
+              <button disabled={busy} className="button primary">追加不可覆盖快照</button>
+              <small className="muted">同一快照不会覆盖；比较只使用同创作者、同平台、同窗口的数值指标。</small>
+            </form>
+            <div className="asset-list">
+              <h3>已记录指标窗口</h3>
+              {metricObservations.slice(-8).reverse().map((item) => <div className="asset-row" key={item.id}>
+                <div>
+                  <strong>{item.window_hours} 小时 · {item.metric_source}</strong>
+                  <small>{new Date(item.observed_at).toLocaleString()} · {Object.entries(item.metrics).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}</small>
+                </div>
+              </div>)}
+              {metricObservations.length === 0 && <p className="muted">尚未追加指标快照。</p>}
+            </div>
+          </div>}
+          <div className="asset-list">
+            <h3>最近反馈</h3>
+            {feedback.slice(-4).reverse().map((item) => <div className="asset-row" key={item.id}>
+              <div><strong>{item.output_version} · {item.accepted ? "已接受" : "需修改"}</strong><small>{item.changed_fields.join(", ") || "未指定修改字段"} · {item.rejection_reason || item.notes || "无备注"}</small></div>
+            </div>)}
+          </div>
+        </> : <p className="muted">先创建或选择项目，才能记录发布和反馈。</p>}
       </section>
       <section className="card"><SourceViewportPanel assets={assets} clips={clips} request={api} onCreated={loadAll} /></section>
       {selectedProject && <PlanningPreferencesPanel key={selectedProject.id} projectId={selectedProject.id} request={api} />}

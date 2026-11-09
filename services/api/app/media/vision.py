@@ -147,6 +147,8 @@ def planning_visual_evidence(db, asset, clip, *, project=None):
     for candidate in (reviewed,stored):
         scope=candidate.get("clip_interval",{}) if isinstance(candidate,dict) else {}
         scope=(scope.get("start_ms"),scope.get("end_ms")) if isinstance(scope,dict) else None
+        if isinstance(candidate, dict) and type(candidate.get("covered_start_ms")) is int and type(candidate.get("covered_end_ms")) is int:
+            scope = (candidate["covered_start_ms"], candidate["covered_end_ms"])
         observed=full_interval_geometry(asset,clip,scope) if scope is not None else {}
         if observed:
             checked=observed;facts=observed;bound=True;break
@@ -163,7 +165,17 @@ def planning_visual_evidence(db, asset, clip, *, project=None):
             and item.start_ms == clip.start_ms and item.end_ms == clip.end_ms), None) if bundle else None
         if result is not None:
             facts = imported_visual_facts(asset, result)
-    observations = facts.get("observations", [])
+    observations = list(facts.get("observations", []))
+    # Verified interval evidence and a newer intake frame may coexist. Expose
+    # the frame only as a retrieval hint, never as interval or use clearance.
+    intake = facts.get("intake_keyframe") if bound else None
+    if (isinstance(intake, dict) and intake.get("coverage") == "sampled_keyframe"
+        and intake.get("source_content_hash") == asset.content_hash
+        and intake.get("clip_interval") == {"start_ms": clip.start_ms, "end_ms": clip.end_ms}
+        and isinstance(intake.get("observations"), list)):
+        observations.extend(item for item in intake["observations"] if isinstance(item, dict)
+            and type(item.get("timestamp_ms")) in (int, float)
+            and clip.start_ms <= item["timestamp_ms"] < clip.end_ms)
     if not facts:
         return {"coverage": "unverified_summary"}
     hints = []
@@ -242,17 +254,39 @@ class ClipVisualMetadataPersistence:
                 if result.keyframe_timestamp_ms is not None and not clip.start_ms <= result.keyframe_timestamp_ms < clip.end_ms:
                     raise VisualMetadataMismatch("visual keyframe timestamp is outside its Clip")
             mapped = [map_visual_metadata(clip, result) for clip, result in zip(clips, normalized)]
+            # A later intake keyframe is a retrieval observation, not a reason
+            # to discard an already verified video interval and its uses.
+            from .visual_facts import full_interval_geometry
+            asset_without_reviews = asset.model_copy(update={"metadata": {
+                key: value for key, value in asset.metadata.items() if key != "source_presentation_reviews"}})
+            checked = {}
+            for clip in clips:
+                facts = asset_without_reviews.metadata.get("visual_analysis", {}).get(str(clip.id), {})
+                start = facts.get("covered_start_ms") if isinstance(facts, dict) else None
+                end = facts.get("covered_end_ms") if isinstance(facts, dict) else None
+                checked[clip.id] = full_interval_geometry(asset_without_reviews, clip, (start, end))
+            mapped = [item.model_copy(update={field: getattr(original, field) for field in _VISUAL_FIELDS})
+                if checked[original.id] else item
+                for original, item in zip(clips, mapped)]
             for clip in mapped:
                 self.clips.update(clip)
             if asset is not None:
                 geometry = dict(asset.metadata.get("visual_analysis",{}))
                 for clip,result,path in zip(clips,normalized,paths):
                     frame_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-                    geometry[str(clip.id)] = dict(source_content_hash=asset.content_hash,clip_interval=dict(start_ms=clip.start_ms,end_ms=clip.end_ms),
+                    sample = dict(source_content_hash=asset.content_hash,clip_interval=dict(start_ms=clip.start_ms,end_ms=clip.end_ms),
                         comparison_layout=result.comparison_layout,subtitle_regions=None if result.subtitle_regions is None else [list(box) for box in result.subtitle_regions],
+                        visual_description=result.visual_description,people=list(result.people),objects=list(result.objects),
+                        location=result.location,action=result.action,shot_type=result.shot_type,
+                        quality_score=result.quality_score,face_visibility=result.face_visibility,
+                        mouth_visibility=result.mouth_visibility,talking_candidate=result.talking_candidate,
                         evidence_reference=f"vision-keyframe:{clip.id}:{frame_hash}",coverage="sampled_keyframe",
                         observations=[dict(timestamp_ms=result.keyframe_timestamp_ms, frame_sha256=frame_hash,
                             reference=str(path), description=result.visual_description)])
+                    if checked[clip.id]:
+                        geometry[str(clip.id)] = {**geometry[str(clip.id)], "intake_keyframe": sample}
+                    else:
+                        geometry[str(clip.id)] = sample
                 assets.update(asset.model_copy(update={"metadata":{**asset.metadata,"visual_analysis":geometry}}))
             self.db.connection.commit()
             return mapped

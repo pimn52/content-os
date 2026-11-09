@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -22,7 +23,7 @@ from app.voice_observation import VoiceObservationError, _resolve_source_path, o
 from app.media.audio_importer import AudioImportError, AudioImporter
 from app.media.importer import MediaImportError, MediaImporter
 from app.providers.talking import TalkingExecutionOptions
-from app.providers.local_generation import local_generation_ready, local_generation_licensed, local_generation_usage
+from app.providers.local_generation import local_generation_usage
 from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError, RenderProcessError, RenderTimeout, UnauthorizedVisualError, render_output_path
 from app.media.extraction import (
     AudioExtraction,
@@ -81,6 +82,8 @@ from app.providers.embedding import (
     EmbeddingTimeout,
 )
 from app.providers.vision import (
+    ClipVisualAnalysis,
+    OpenAICompatibleVisionProvider,
     VisionAuthenticationError,
     VisionConfigurationError,
     VisionConnectionError,
@@ -364,6 +367,11 @@ class VoiceGenerationJobHandler:
             profile = resolve_project_voice_profile(self._profiles.db,job.project_id,job.payload.voice_profile_id,job.payload.cross_ip_voice_authorization_reference)
         except UseAdmissionError as exc:
             raise JobExecutionError(str(exc),str(exc),retryable=False) from None
+        try:
+            from app.voice_recipe import VoiceRecipeError, parse_generation_recipe
+            recipe = parse_generation_recipe(profile)
+        except VoiceRecipeError as exc:
+            raise JobExecutionError(str(exc), "Voice generation recipe is invalid", retryable=False) from None
         provider_name = getattr(self._provider, "provider_name", None)
         model = getattr(self._provider, "model", None)
         if not isinstance(provider_name, str) or not provider_name.strip() or not isinstance(model, str) or not model.strip():
@@ -378,30 +386,32 @@ class VoiceGenerationJobHandler:
         admitted = None
         if job.payload.execution_capability_profile_id is not None:
             admitted = ProviderMachineCapabilityProfileRepository(self._profiles.db).get(job.payload.execution_capability_profile_id)
-            if (
-                admitted is None or admitted.capability != "voice" or admitted.provider != provider_name.strip()
-                or admitted.model != model.strip() or not local_generation_ready(admitted)
-                or not local_generation_licensed(admitted)
-            ):
-                raise JobExecutionError("voice_execution_admission_revoked", "Voice capability or license admission is no longer valid", retryable=False)
+            if (admitted is not None and (
+                admitted.capability != "voice" or admitted.provider != provider_name.strip()
+                or admitted.model != model.strip()
+            )):
+                admitted = None  # Actual Worker identity is authoritative.
         delivery_text = job.payload.delivery_text
         if delivery_text is not None:
             try:
                 validate_voice_delivery_text(job.payload.text, delivery_text)
             except VoiceDeliveryTextError:
                 raise JobExecutionError("voice_delivery_text_invalid", "Voice delivery text changes or fails to delimit the editorial copy", retryable=False) from None
+        performance_plan = job.payload.narration_performance_plan
+        from app.voice_emphasis import emphasis_only
+        core_emphasis_plan = emphasis_only(performance_plan)
         if delivery_text is not None and job.payload.narration_performance_plan is not None:
             raise JobExecutionError("voice_delivery_performance_combination_unavailable", "delivery text and performance plan cannot yet be applied together", retryable=False)
         selected_reference = job.payload.reference_window
         synthesize_with_reference = getattr(self._provider, "synthesize_with_reference", None)
-        if selected_reference is not None and job.payload.narration_performance_plan is not None:
+        if (selected_reference is not None and job.payload.narration_performance_plan is not None
+                and not core_emphasis_plan):
             raise JobExecutionError("voice_reference_performance_combination_unavailable", "selected reference and performance plan cannot yet be applied together", retryable=False)
         if selected_reference is not None and not callable(synthesize_with_reference):
             raise JobExecutionError("voice_reference_selection_unavailable", "the selected Voice provider cannot apply the requested reference window", retryable=False)
-        performance_plan = job.payload.narration_performance_plan
         performance_support = FeatureSupport.UNKNOWN
         synthesize_with_performance = None
-        if performance_plan is not None:
+        if performance_plan is not None and not core_emphasis_plan:
             declared_support = getattr(self._provider, "performance_intent_support", FeatureSupport.UNKNOWN)
             try:
                 performance_support = declared_support if isinstance(declared_support, FeatureSupport) else FeatureSupport(declared_support)
@@ -450,16 +460,75 @@ class VoiceGenerationJobHandler:
                         f" (reason codes: {reason_codes})",
                         retryable=False,
                     )
-        from app.voice_repair import voice_segment_repair_context, recompose_voice_segment_result
+        from app.voice_repair import (voice_segment_repair_context, recompose_voice_segment_result,
+            segment_repair_preserves_delivery, apply_segment_pronunciation,
+            voice_whole_take_pronunciation_corrections)
         from app.production_runs import ProductionRunNotReady
         try:
             segment_repair = voice_segment_repair_context(self._profiles.db, job, getattr(self._importer, "data_root", None))
+            whole_take_pronunciation = voice_whole_take_pronunciation_corrections(
+                self._profiles.db, job, getattr(self._importer, "data_root", None),
+            )
         except ProductionRunNotReady:
             raise JobExecutionError("voice_repair_segment_sources_changed", "Voice repair source segments changed", retryable=False) from None
+        if (segment_repair is not None and performance_plan is not None
+                and not segment_repair_preserves_delivery(job.payload, segment_repair["segment"])):
+            raise JobExecutionError(
+                "voice_repair_performance_combination_unavailable",
+                "a Voice segment repair overlaps a whole-copy performance cue",
+                retryable=False,
+            )
         synthesis_text = delivery_text or job.payload.text
         if segment_repair is not None:
             span = segment_repair["segment"]
             synthesis_text = job.payload.text[span["start_char"]:span["end_char"]]
+        delivery_application = None
+        if recipe is not None and recipe.delivery_adjustments.configured:
+            from app.voice_recipe import apply_recipe_delivery_adjustments
+            try:
+                delivery_application = apply_recipe_delivery_adjustments(synthesis_text, recipe)
+            except VoiceRecipeError as exc:
+                raise JobExecutionError(str(exc), "Voice delivery adjustments do not bind to the current copy", retryable=False) from None
+            if performance_plan is not None and delivery_application.evidence["state"] == "applied":
+                if not core_emphasis_plan:
+                    raise JobExecutionError(
+                        "voice_delivery_adjustment_performance_combination_unavailable",
+                        "recipe delivery adjustments and narration performance plans cannot yet be applied together",
+                        retryable=False,
+                    )
+            synthesis_text = delivery_application.provider_text
+        focus_text_application = None
+        focus_target_breaks = (
+            delivery_application.target_break_positions
+            if delivery_application is not None else ()
+        )
+        if core_emphasis_plan and segment_repair is None:
+            from app.voice_emphasis import VoiceEmphasisError, apply_focus_text_boundaries
+            try:
+                focus_text_application = apply_focus_text_boundaries(
+                    job.payload.text,
+                    synthesis_text,
+                    performance_plan,
+                    target_break_positions=focus_target_breaks,
+                )
+            except VoiceEmphasisError:
+                raise JobExecutionError(
+                    "voice_focus_text_invalid",
+                    "Voice focus intent does not bind to the current synthesized copy",
+                    retryable=False,
+                ) from None
+            synthesis_text = focus_text_application.provider_text
+            focus_target_breaks = focus_text_application.target_break_positions
+        if segment_repair is not None:
+            synthesis_text = apply_segment_pronunciation(
+                synthesis_text,
+                job.payload.text[segment_repair["segment"]["start_char"]:segment_repair["segment"]["end_char"]],
+                segment_repair["segment"].get("pronunciation_corrections", []),
+            )
+        elif whole_take_pronunciation:
+            synthesis_text = apply_segment_pronunciation(
+                synthesis_text, job.payload.text, whole_take_pronunciation,
+            )
         call = _reserve_job_provider_call(
             self._ledger, job, operation="tts", category=CostCategory.VOICE,
             provider=provider_name.strip(), model=model.strip(), input_source=f"voice-profile:{profile.id}" + (
@@ -471,7 +540,17 @@ class VoiceGenerationJobHandler:
         )
         output = self._output_root / "voice" / f"{job.id}-attempt-{job.attempt}.wav"
         try:
-            if performance_plan is None and selected_reference is not None:
+            if core_emphasis_plan and selected_reference is not None:
+                result = synthesize_with_reference(
+                    profile, synthesis_text, output,
+                    language=job.payload.language or profile.language, reference_window=selected_reference,
+                )
+            elif core_emphasis_plan:
+                result = self._provider.synthesize(
+                    profile, synthesis_text, output,
+                    language=job.payload.language or profile.language,
+                )
+            elif performance_plan is None and selected_reference is not None:
                 result = synthesize_with_reference(
                     profile, synthesis_text, output,
                     language=job.payload.language or profile.language, reference_window=selected_reference,
@@ -501,7 +580,8 @@ class VoiceGenerationJobHandler:
             # provider text, then let the local Job retry policy decide.
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_provider_failed")
             raise JobExecutionError("voice_provider_failed", "voice provider failed unexpectedly", retryable=True) from None
-        if performance_plan is not None and not result.performance_intent_applied:
+        if (performance_plan is not None and not core_emphasis_plan and segment_repair is None
+                and not result.performance_intent_applied):
             _finish_job_provider_call(self._ledger, job, call, status="failed", error_code="voice_performance_intent_not_applied")
             raise JobExecutionError(
                 "voice_performance_intent_not_applied",
@@ -511,18 +591,151 @@ class VoiceGenerationJobHandler:
         try:
             if segment_repair is not None:
                 result = recompose_voice_segment_result(segment_repair, result, data_root=self._importer.data_root)
+            if segment_repair is None and getattr(result, "generation_segments", ()):
+                from app.providers.voice import VoiceSynthesisResult
+                from app.voice_recipe import map_generation_segments_to_copy
+                try:
+                    mapped_segments = map_generation_segments_to_copy(
+                        target_text=job.payload.text,
+                        generated_text=synthesis_text,
+                        generation_segments=result.generation_segments,
+                        target_break_positions=focus_target_breaks,
+                    )
+                except VoiceRecipeError:
+                    _finish_job_provider_call(
+                        self._ledger, job, call, status="failed", error_code="voice_output_invalid",
+                    )
+                    raise JobExecutionError(
+                        "voice_output_invalid",
+                        "Voice generated paragraph spans do not map to the editorial copy",
+                        retryable=False,
+                    ) from None
+                result = VoiceSynthesisResult(
+                    result.audio_path, provider_version=result.provider_version,
+                    performance_intent_applied=result.performance_intent_applied,
+                    generation_segments=mapped_segments,
+                )
+            focus_audio_application = None
+            if core_emphasis_plan and segment_repair is None:
+                if not getattr(result, "generation_segments", ()):
+                    _finish_job_provider_call(
+                        self._ledger, job, call, status="failed", error_code="voice_focus_segments_unavailable",
+                    )
+                    raise JobExecutionError(
+                        "voice_focus_segments_unavailable",
+                        "Voice focus execution requires exact Provider generation segments",
+                        retryable=False,
+                    )
+                from app.voice_emphasis import VoiceEmphasisError, apply_focus_audio_emphasis
+                focus_output = result.audio_path.with_name(result.audio_path.stem + ".focus-emphasis.wav")
+                try:
+                    focus_audio_application = apply_focus_audio_emphasis(
+                        result.audio_path,
+                        focus_output,
+                        copy=job.payload.text,
+                        plan=performance_plan,
+                        generation_segments=result.generation_segments,
+                        sample_rate=24_000,
+                        data_root=getattr(self._importer, "data_root", None),
+                    )
+                except VoiceEmphasisError:
+                    _finish_job_provider_call(
+                        self._ledger, job, call, status="failed", error_code="voice_focus_audio_invalid",
+                    )
+                    raise JobExecutionError(
+                        "voice_focus_audio_invalid",
+                        "Voice focus execution could not bind exact emphasis segments to PCM audio",
+                        retryable=False,
+                    ) from None
+                if not focus_audio_application.focus_segment_indexes:
+                    _finish_job_provider_call(
+                        self._ledger, job, call, status="failed", error_code="voice_focus_not_applied",
+                    )
+                    raise JobExecutionError(
+                        "voice_focus_not_applied",
+                        "Voice focus intent produced no exact emphasis segment",
+                        retryable=False,
+                    )
+                result = VoiceSynthesisResult(
+                    focus_audio_application.output_path,
+                    provider_version=result.provider_version,
+                    performance_intent_applied=True,
+                    generation_segments=focus_audio_application.generation_segments,
+                )
+            predecessor_generation = (
+                segment_repair["audio"].metadata.get("voice_generation", {})
+                if segment_repair is not None else {}
+            )
+            predecessor_focus = (
+                predecessor_generation.get("focus_emphasis", {})
+                if isinstance(predecessor_generation, dict) else {}
+            )
+            pause_policy = None
+            if recipe is not None and getattr(result, "generation_segments", ()):
+                from app.providers.voice import VoiceSynthesisResult
+                from app.voice_seam import VoiceSeamCompactionError, apply_voice_pause_policy
+                policy_output = result.audio_path.with_name(result.audio_path.stem + ".pause-policy.wav")
+                preserved_focus_indexes = ()
+                if isinstance(predecessor_focus, dict):
+                    preserved_focus_indexes = tuple(
+                        index for index in predecessor_focus.get("focus_segment_indexes", [])
+                        if type(index) is int
+                    )
+                try:
+                    applied = apply_voice_pause_policy(
+                        result.audio_path, policy_output, recipe=recipe, text=job.payload.text,
+                        generation_segments=result.generation_segments, sample_rate=24_000,
+                        preserve_seam_indexes=(
+                            preserved_focus_indexes if segment_repair is not None else
+                            () if focus_audio_application is None
+                            else focus_audio_application.focus_segment_indexes
+                        ),
+                    )
+                except VoiceSeamCompactionError:
+                    _finish_job_provider_call(
+                        self._ledger, job, call, status="failed", error_code="voice_pause_policy_invalid",
+                    )
+                    raise JobExecutionError(
+                        "voice_output_invalid",
+                        "Voice paragraph pause policy could not be applied to the generated audio",
+                        retryable=False,
+                    ) from None
+                result = VoiceSynthesisResult(
+                    applied.output_path, provider_version=result.provider_version,
+                    performance_intent_applied=result.performance_intent_applied,
+                    generation_segments=applied.generation_segments,
+                )
+                pause_policy = applied.evidence
             audio = self._importer.import_path(result.audio_path, job.payload.authorization_reference, language=job.payload.language or profile.language)
-            if "voice_generation" in audio.metadata:
-                raise ValueError("identical generated audio already has provenance")
             metadata = dict(audio.metadata)
             voice_generation: dict[str, object] = {
                 "provider": provider_name.strip(), "model": model.strip(), "provider_version": result.provider_version,
                 "voice_profile_id": str(profile.id), "job_id": str(job.id), "attempt": job.attempt,
                 "project_id": str(job.project_id), "target_text": job.payload.text, "qa_state": "pending",
             }
+            from app.voice_recipe import public_recipe_metadata
+            recipe_metadata = public_recipe_metadata(profile)
+            if recipe_metadata is not None:
+                voice_generation["generation_recipe"] = recipe_metadata
             if getattr(result,'generation_segments',()):
                 voice_generation['generation_segments']=list(result.generation_segments)
+            if pause_policy is not None:
+                voice_generation["pause_policy"] = pause_policy
+            if delivery_application is not None:
+                voice_generation["recipe_delivery"] = dict(delivery_application.evidence)
+                if delivery_application.evidence["state"] == "applied":
+                    voice_generation["recipe_provider_text"] = delivery_application.provider_text
+            if focus_text_application is not None:
+                voice_generation["focus_delivery"] = focus_text_application.evidence
+                voice_generation["focus_provider_text"] = focus_text_application.provider_text
+            if focus_audio_application is not None:
+                voice_generation["focus_emphasis"] = focus_audio_application.evidence
             if segment_repair is not None:
+                if isinstance(predecessor_focus, dict) and predecessor_focus:
+                    voice_generation["focus_emphasis"] = {
+                        **predecessor_focus,
+                        "reuse": "retained_predecessor_focus_parts",
+                    }
                 voice_generation["segment_repair"] = {"repair_id": segment_repair["repair_id"],
                     "predecessor_audio_id": str(segment_repair["audio"].id),
                     "predecessor_sha256": segment_repair["audio"].content_hash,
@@ -530,14 +743,69 @@ class VoiceGenerationJobHandler:
             if performance_plan is not None:
                 voice_generation["narration_performance"] = {
                     "plan": performance_plan.model_dump(mode="json"),
-                    "application_state": "adapter_applied_pending_quality_review",
-                    "adapter_support": performance_support.value,
+                    "application_state": (
+                        "retained_predecessor_emphasis_with_segment_repair"
+                        if segment_repair is not None and core_emphasis_plan else
+                        "core_emphasis_applied_pending_quality_review"
+                        if core_emphasis_plan else "adapter_applied_pending_quality_review"
+                    ),
+                    "adapter_support": (
+                        "content-os-pcm-focus-v1"
+                        if core_emphasis_plan else performance_support.value
+                    ),
                 }
             if selected_reference is not None:
                 voice_generation["reference_window"] = selected_reference.model_dump(mode="json")
             if delivery_text is not None:
                 voice_generation["provider_delivery_text"] = delivery_text
                 voice_generation["delivery_text_rule"] = "existing_punctuation_whitespace_deletion_only"
+            existing_generation = audio.metadata.get("voice_generation")
+            if existing_generation is not None:
+                recorded_reference = (
+                    existing_generation.get("reference_window")
+                    if isinstance(existing_generation, dict) else None
+                )
+                expected_reference = (
+                    None if selected_reference is None
+                    else selected_reference.model_dump(mode="json")
+                )
+                if (
+                    not isinstance(existing_generation, dict)
+                    or existing_generation.get("provider") != provider_name.strip()
+                    or existing_generation.get("model") != model.strip()
+                    or existing_generation.get("voice_profile_id") != str(profile.id)
+                    or existing_generation.get("project_id") != str(job.project_id)
+                    or existing_generation.get("target_text") != job.payload.text
+                    or audio.authorization_reference != job.payload.authorization_reference
+                    or recorded_reference != expected_reference
+                ):
+                    raise ValueError("identical generated audio has incompatible provenance")
+                reexecutions = list(existing_generation.get("byte_identical_reexecutions", []))
+                reexecutions.append({
+                    "job_id": str(job.id), "attempt": job.attempt,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "generation": voice_generation,
+                })
+                preserved = dict(existing_generation)
+                if (core_emphasis_plan
+                        and preserved.get("qa_state") != "verified"
+                        and preserved.get("human_review_state") not in {"approved", "rejected"}):
+                    for name in (
+                        "generation_recipe", "generation_segments", "pause_policy",
+                        "recipe_delivery", "recipe_provider_text", "focus_delivery",
+                        "focus_provider_text", "focus_emphasis", "narration_performance",
+                        "reference_window",
+                    ):
+                        if name in voice_generation:
+                            preserved[name] = voice_generation[name]
+                    preserved["qa_state"] = "pending"
+                    preserved.pop("qa", None)
+                preserved["byte_identical_reexecutions"] = reexecutions[-20:]
+                metadata["voice_generation"] = preserved
+                with self._audios.db.transaction():
+                    self._audios.update(audio.model_copy(update={"metadata": metadata}))
+                _finish_job_provider_call(self._ledger, job, call, status="completed")
+                return
             metadata["voice_generation"] = voice_generation
             if admitted is not None:
                 metadata["model_usage"] = [local_generation_usage(admitted)]
@@ -654,6 +922,8 @@ class VoiceQaJobHandler:
                 updated.metadata["voice_generation"]["qa"]["generation_part_reports"] = generation_part_qa(
                     observed_audio, parts, part_results, provider=self._provider_name, model=self._provider_model,
                     max_silence_ms=self._max_silence_ms, max_leading_silence_ms=self._max_leading_silence_ms)
+            if self._repair_execution is not None:
+                updated.metadata["voice_generation"]["qa"]["worker_execution"] = dict(self._repair_execution)
             if self._data_root is not None:
                 updated = updated.model_copy(update={"source_file": audio.source_file})
             with self._audios.db.transaction():
@@ -742,10 +1012,18 @@ class VoiceBoundaryAlignmentJobHandler:
 class TalkingQaJobHandler:
     """Independent local media QA for one planned Talking Job output."""
 
-    def __init__(self, assets: AssetRepository, *, data_root: str | Path, probe: object) -> None:
+    def __init__(
+        self,
+        assets: AssetRepository,
+        *,
+        data_root: str | Path,
+        probe: object,
+        motion_probe: object | None = None,
+    ) -> None:
         self._assets = assets
         self._data_root = Path(data_root).resolve()
         self._probe = probe
+        self._motion_probe = motion_probe
 
     def __call__(self, job: Job) -> None:
         if job.status is not JobStatus.RUNNING or job.type is not JobType.VERIFY_TALKING or not isinstance(job.payload, TalkingQaJobPayload):
@@ -790,6 +1068,24 @@ class TalkingQaJobHandler:
         updated_generation = dict(metadata["talking_generation"])
         qa = dict(updated_generation["qa"])
         qa["job_id"] = str(job.id)
+        if self._motion_probe is None:
+            qa["motion_sync"] = {
+                "state": "not_configured",
+                "claim": "visible_lip_sync_remains_unverified",
+            }
+        else:
+            try:
+                from app.talking.sync_probe import talking_output_word_timings
+                qa["motion_sync"] = self._motion_probe.measure_talking(
+                    path,
+                    word_timings=talking_output_word_timings(master, generation),
+                )
+            except (ValueError, OSError):
+                qa["motion_sync"] = {
+                    "state": "unavailable",
+                    "reason": "motion_probe_failed",
+                    "claim": "visible_lip_sync_remains_unverified",
+                }
         updated_generation["qa"] = qa
         metadata["talking_generation"] = updated_generation
         with self._assets.db.transaction(immediate=True):
@@ -854,7 +1150,7 @@ class TalkingGenerationJobHandler:
             production_run_id=None if job.payload.planned_context is None else job.payload.planned_context.run_id):
             raise JobExecutionError(
                 "talking_narration_u_voice_pending",
-                "Talking generation requires an approved U-Voice likeness, naturalness and delivery review",
+                "Talking generation requires QA-verified narration for the current production run",
                 retryable=False,
             )
         if job.payload.reference_clip_id not in profile.reference_clip_ids:
@@ -889,8 +1185,7 @@ class TalkingGenerationJobHandler:
             reference = TalkingReference(
                 clip_id=reference_clip.id, source_path=reference_path,
                 start_ms=reference_start_ms, end_ms=reference_end_ms,
-                subtitle_crop_bottom_ratio=(0.18 if job.payload.planned_context is None
-                                            and reference_clip.talking_reference_assessment is not None
+                subtitle_crop_bottom_ratio=(0.18 if reference_clip.talking_reference_assessment is not None
                                             and reference_clip.talking_reference_assessment.burned_in_subtitles is True else 0),
             )
         except TalkingInputError:
@@ -1049,6 +1344,10 @@ class TalkingGenerationJobHandler:
                     "reference_window_end_ms": reference.end_ms,
                     "reference_window_delivery_end_ms": slice_plan.end_ms if slice_plan is not None else None,
                 })
+            if job.payload.reference_selection_quality is not None:
+                metadata["talking_generation"]["reference_selection_quality"] = (
+                    dict(job.payload.reference_selection_quality)
+                )
             if job.payload.slice_series_id is not None:
                 metadata["talking_generation"].update({
                     "slice_series_id": str(job.payload.slice_series_id),
@@ -1091,8 +1390,21 @@ class AssetAnalysisJobHandler:
 
     def __call__(self, job: Job) -> None:
         asset = _resolve_asset_job(job, JobType.ANALYZE_ASSET, self._target_store, self._assets)
+        # Re-imported external footage can already have locally analyzed Clips
+        # or precise production evidence. Re-cutting it would destroy those
+        # reusable results, and a second paid frame pass is not needed.
+        has_clips = getattr(self._target_store, "has_clips", None)
+        if job.idempotency_key == f"external-analysis:{asset.id}" and callable(has_clips) and has_clips(asset.id):
+            return
         try:
-            self._pipeline.process(asset)
+            automatic = (job.idempotency_key.startswith("intake:analyze:")
+                or job.idempotency_key == f"external-analysis:{asset.id}")
+            result = (self._pipeline.process(asset, preserve_existing=True)
+                if automatic and isinstance(self._pipeline, MediaAnalysisPipeline)
+                else self._pipeline.process(asset))
+            enqueue_sample = getattr(self._target_store, "enqueue_intake_visual_sample", None)
+            if callable(enqueue_sample) and result is not None and job.idempotency_key.startswith("intake:analyze:"):
+                enqueue_sample(job, list(result.clips))
         except (ExtractionTimeout, FFmpegTimeout):
             raise JobExecutionError("media_analysis_timeout", "media analysis timed out", retryable=True) from None
         except (ExtractionProcessError, FFmpegProcessError):
@@ -1298,7 +1610,8 @@ class AssetVisionJobHandler:
             sample_resolver = getattr(self._keyframes, "resolve_samples", None)
             frames = sample_resolver(asset, clips) if callable(sample_resolver) else None
             paths = tuple(str(frame.path) for frame in frames) if frames is not None else self._keyframes.resolve(asset, clips)
-            sample_options = {"keyframe_timestamps_ms": [float(frame.timestamp_ms) for frame in frames]} if frames is not None else {}
+            if len(paths) != len(clips):
+                raise ValueError("keyframe count does not match clips")
         except ExtractionTimeout:
             raise JobExecutionError("keyframe_extraction_timeout", "keyframe extraction timed out", retryable=True) from None
         except ExtractionProcessError:
@@ -1307,11 +1620,10 @@ class AssetVisionJobHandler:
             raise JobExecutionError("keyframes_invalid", "keyframes cannot be extracted for visual analysis", retryable=False) from None
         except (FileNotFoundError, TypeError, ValueError):
             raise JobExecutionError("keyframes_missing", "keyframes are unavailable for visual analysis", retryable=False) from None
+        started_vision = False
         try:
-            if self._ledger is None:
-                result = (self._pipeline.process(asset, clips, paths, **sample_options) if scope is None else
-                    self._pipeline.process(asset, clips, paths, selected_clip_ids=[clip.id for clip in clips], **sample_options))
-            else:
+            vision_provider = None
+            if self._ledger is not None:
                 vision_provider = _MeteredVisionProvider(
                     self._pipeline.provider,
                     self._ledger,
@@ -1319,15 +1631,27 @@ class AssetVisionJobHandler:
                     asset.id,
                     self._provider_name,
                     self._vision_model,
+                    asset.content_hash,
                 )
-                result = self._pipeline.process(asset, clips, paths, provider=vision_provider,
-                    **sample_options, **({} if scope is None else {"selected_clip_ids": [clip.id for clip in clips]}))
+            updated_clips = []
+            for index, (clip, path) in enumerate(zip(clips, paths)):
+                options = {"selected_clip_ids": [clip.id]}
+                if frames is not None:
+                    options["keyframe_timestamps_ms"] = [float(frames[index].timestamp_ms)]
+                if vision_provider is not None:
+                    options["provider"] = vision_provider
+                # Persist each successful observation before the next call.
+                started_vision = True
+                result = self._pipeline.process(asset, [clip], [path], **options)
+                if index_embeddings:
+                    updated_clips.extend(result.clips)
         except (VisionRateLimitError, VisionTimeout, VisionConnectionError):
-            raise JobExecutionError("vision_temporarily_unavailable", "vision provider is temporarily unavailable", retryable=True) from None
+            raise JobExecutionError("vision_temporarily_unavailable", "vision provider is temporarily unavailable", retryable=False) from None
         except VisionHTTPError as error:
-            retryable = error.status_code >= 500 or error.status_code in {408, 409, 425}
-            code = "vision_temporarily_unavailable" if retryable else "vision_request_rejected"
-            message = "vision provider is temporarily unavailable" if retryable else "vision provider rejected the request"
+            temporary = error.status_code >= 500 or error.status_code in {408, 409, 425}
+            retryable = False
+            code = "vision_temporarily_unavailable" if temporary else "vision_request_rejected"
+            message = "vision provider is temporarily unavailable" if temporary else "vision provider rejected the request"
             raise JobExecutionError(code, message, retryable=retryable) from None
         except (
             VisionAuthenticationError,
@@ -1342,27 +1666,42 @@ class AssetVisionJobHandler:
             VisualMetadataError,
         ):
             raise JobExecutionError("vision_invalid", "visual analysis input is not processable", retryable=False) from None
+        except JobExecutionError as error:
+            if not started_vision:
+                raise
+            raise JobExecutionError(error.code, error.message, retryable=False) from None
+        except Exception:
+            raise JobExecutionError("vision_unexpected_failure", "visual analysis failed; inspect existing evidence", retryable=False) from None
         if not index_embeddings:
             return
-        embedding_call = _reserve_job_provider_call(
-            self._ledger,
-            job,
-            operation="embedding",
-            category=CostCategory.LLM,
-            provider=self._provider_name,
-            model=self._embedding_model,
-            input_source=f"asset:{asset.id}:clips:{len(result.clips)}",
-        )
         try:
-            self._indexer.index_clips(result.clips)
+            embedding_call = _reserve_job_provider_call(
+                self._ledger,
+                job,
+                operation="embedding",
+                category=CostCategory.LLM,
+                provider=self._provider_name,
+                model=self._embedding_model,
+                input_source=f"asset:{asset.id}:clips:{len(updated_clips)}",
+            )
+        except JobExecutionError as error:
+            raise JobExecutionError(error.code, error.message, retryable=False) from None
+        def finish_embedding(*, status, error_code=None):
+            try:
+                _finish_job_provider_call(self._ledger, job, embedding_call, status=status, error_code=error_code)
+            except JobExecutionError as error:
+                raise JobExecutionError(error.code, error.message, retryable=False) from None
+        try:
+            self._indexer.index_clips(updated_clips)
         except (EmbeddingRateLimitError, EmbeddingTimeout, EmbeddingConnectionError):
-            _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code="embedding_temporarily_unavailable")
-            raise JobExecutionError("embedding_temporarily_unavailable", "embedding provider is temporarily unavailable", retryable=True) from None
+            finish_embedding(status="failed", error_code="embedding_temporarily_unavailable")
+            raise JobExecutionError("embedding_temporarily_unavailable", "embedding provider is temporarily unavailable", retryable=False) from None
         except EmbeddingHTTPError as error:
-            retryable = error.status_code >= 500 or error.status_code in {408, 409, 425}
-            code = "embedding_temporarily_unavailable" if retryable else "embedding_request_rejected"
-            message = "embedding provider is temporarily unavailable" if retryable else "embedding provider rejected the request"
-            _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code=code)
+            temporary = error.status_code >= 500 or error.status_code in {408, 409, 425}
+            retryable = False
+            code = "embedding_temporarily_unavailable" if temporary else "embedding_request_rejected"
+            message = "embedding provider is temporarily unavailable" if temporary else "embedding provider rejected the request"
+            finish_embedding(status="failed", error_code=code)
             raise JobExecutionError(code, message, retryable=retryable) from None
         except (
             EmbeddingAuthenticationError,
@@ -1373,9 +1712,13 @@ class AssetVisionJobHandler:
             EmbeddingIndexError,
             IndexError,
         ):
-            _finish_job_provider_call(self._ledger, job, embedding_call, status="failed", error_code="embedding_invalid")
+            finish_embedding(status="failed", error_code="embedding_invalid")
             raise JobExecutionError("embedding_invalid", "Clip embeddings cannot be produced or persisted", retryable=False) from None
-        _finish_job_provider_call(self._ledger, job, embedding_call, status="completed")
+        except JobExecutionError as error:
+            raise JobExecutionError(error.code, error.message, retryable=False) from None
+        except Exception:
+            raise JobExecutionError("embedding_unexpected_failure", "embedding failed; inspect existing evidence", retryable=False) from None
+        finish_embedding(status="completed")
 
 
 def _reserve_job_provider_call(
@@ -1393,10 +1736,12 @@ def _reserve_job_provider_call(
     repair_data_root: Path | None = None,
     repair_local_verified: bool | None = None,
     repair_worker_execution: dict | None = None,
+    replay_completed_vision: bool = False,
+    replay_only: bool = False,
 ) -> ProviderCallRecord | None:
     if ledger is None:
         return None
-    if job.project_id is None:
+    if job.project_id is None and job.type is not JobType.INDEX_CLIPS:
         raise JobExecutionError(
             "provider_project_required",
             "provider-backed asset jobs require a project for budget accounting",
@@ -1438,13 +1783,18 @@ def _reserve_job_provider_call(
                             SourceUsageService(ledger.db).require_run(job.project_id, UUID(run["id"]))
                         except SourceUsageConflict as exc:
                             raise JobExecutionError(exc.reason, "生成前发现画面来源占用已变化", retryable=False) from exc
+                if operation in {"tts", "asr"} and repair_worker_execution is not None:
+                    receipt = ledger.db.connection.execute("SELECT payload FROM voice_execution_receipts WHERE job_id = ?", (str(job.id),)).fetchone()
+                    if receipt is not None and json.loads(receipt["payload"]) != repair_worker_execution:
+                        ledger.db.connection.execute("UPDATE voice_execution_receipts SET payload = ? WHERE job_id = ?", (json.dumps({"ambiguous": True}), str(job.id)))
+                        raise JobExecutionError(
+                            "provider_execution_identity_changed",
+                            "worker execution identity changed for the same Job",
+                            retryable=False,
+                        )
+                    ledger.db.connection.execute("INSERT OR IGNORE INTO voice_execution_receipts(job_id,payload) VALUES (?,?)", (str(job.id), json.dumps(repair_worker_execution, sort_keys=True)))
                 repair = ledger.db.connection.execute("SELECT id FROM voice_repairs WHERE replacement_job_id = ? OR qa_job_id = ?", (str(job.id), str(job.id))).fetchone()
                 if repair is None:
-                    if operation == "tts" and repair_worker_execution is not None:
-                        receipt = ledger.db.connection.execute("SELECT payload FROM voice_execution_receipts WHERE job_id = ?", (str(job.id),)).fetchone()
-                        if receipt is not None and json.loads(receipt["payload"]) != repair_worker_execution:
-                            ledger.db.connection.execute("UPDATE voice_execution_receipts SET payload = ? WHERE job_id = ?", (json.dumps({"ambiguous": True}), str(job.id)))
-                        ledger.db.connection.execute("INSERT OR IGNORE INTO voice_execution_receipts(job_id,payload) VALUES (?,?)", (str(job.id), json.dumps(repair_worker_execution, sort_keys=True)))
                     return
                 if repair_data_root is None:
                     raise JobExecutionError("voice_repair_data_root_required", "Repair requires a configured data root", retryable=False)
@@ -1469,12 +1819,18 @@ def _reserve_job_provider_call(
                     raise JobExecutionError("planned_talking_admission_conflict", "Talking admission is no longer valid", retryable=False) from exc
 
         def current_scope_guard() -> None:
+            if replay_only:
+                raise JobExecutionError("provider_execution_recovery_required",
+                    "a saved provider result is required for this recovery", retryable=False)
             if guard is not None:
                 guard()
 
         reservation = ledger.reserve_execution(
             project_id=job.project_id,
-            idempotency_key=f"job:{job.id}:{operation}:{job.attempt}:{call_key}",
+            # A recovered visual-index job must not resend a completed or
+            # uncertain provider call merely because its lease attempt changed.
+            idempotency_key=(f"job:{job.id}:{operation}:{call_key}" if job.type is JobType.INDEX_CLIPS
+                else f"job:{job.id}:{operation}:{job.attempt}:{call_key}"),
             operation=operation,
             mode="runtime",
             provider=provider,
@@ -1494,6 +1850,9 @@ def _reserve_job_provider_call(
             reservation_guard=current_scope_guard,
         )
         if not reservation.owner:
+            if (replay_completed_vision and job.type is JobType.INDEX_CLIPS and operation == "vision"
+                and reservation.record.status == "completed" and reservation.record.result_payload is not None):
+                return reservation.record
             raise JobExecutionError(
                 "provider_execution_recovery_required",
                 "a matching provider operation already exists; inspect its job and provider-call state before retrying",
@@ -1513,16 +1872,19 @@ def _finish_job_provider_call(
     *,
     status: Literal["completed", "failed"],
     error_code: str | None = None,
+    result_payload: dict | None = None,
+    usage_values: dict | None = None,
 ) -> None:
-    if ledger is None or call is None or job.project_id is None:
+    if ledger is None or call is None:
         return
     try:
         ledger.finish(
             project_id=job.project_id,
             call_id=call.id,
             status=status,
-            usage_observable=False,
+            **(usage_values if usage_values is not None else {"usage_observable": False}),
             error_code=error_code,
+            result_payload=result_payload,
         )
     except ProviderCallError:
         raise JobExecutionError("provider_call_accounting_failed", "provider call result could not be reconciled", retryable=True) from None
@@ -1531,13 +1893,14 @@ def _finish_job_provider_call(
 class _MeteredVisionProvider:
     """Count each keyframe request while preserving the provider contract."""
 
-    def __init__(self, provider: object, ledger: ProviderCallLedger, job: Job, asset_id: UUID, provider_name: str, model: str) -> None:
+    def __init__(self, provider: object, ledger: ProviderCallLedger, job: Job, asset_id: UUID, provider_name: str, model: str, source_hash: str) -> None:
         self._provider = provider
         self._ledger = ledger
         self._job = job
         self._asset_id = asset_id
         self._provider_name = provider_name
         self._model = model
+        self._source_hash = source_hash
         self._index = 0
 
     def analyze(self, keyframe_path: str | Path) -> object:
@@ -1550,16 +1913,52 @@ class _MeteredVisionProvider:
             category=CostCategory.LLM,
             provider=self._provider_name,
             model=self._model,
-            input_source=f"asset:{self._asset_id}:keyframe:{index}",
+            input_source=f"asset:{self._asset_id}:{self._source_hash}:keyframe:{index}:{hashlib.sha256(Path(keyframe_path).read_bytes()).hexdigest()}",
             call_key=f"keyframe-{index}",
+            replay_completed_vision=True,
+            replay_only=(self._job.idempotency_key.startswith("intake:vision:") and self._job.attempt > 1),
         )
+        if call.status == "completed":
+            payload = call.result_payload
+            try:
+                if not isinstance(payload, dict) or payload.get("kind") != "clip_visual_analysis_v1":
+                    raise ValueError("missing visual result")
+                value = dict(payload["value"])
+                if not isinstance(value.get("people"), list) or not isinstance(value.get("objects"), list):
+                    raise ValueError("invalid saved visual fields")
+                value["people"] = tuple(value["people"])
+                value["objects"] = tuple(value["objects"])
+                if value["subtitle_regions"] is not None:
+                    if not isinstance(value["subtitle_regions"], list) or any(not isinstance(box, list) for box in value["subtitle_regions"]):
+                        raise ValueError("invalid saved subtitle regions")
+                    value["subtitle_regions"] = tuple(tuple(box) for box in value["subtitle_regions"])
+                return ClipVisualAnalysis(**value)
+            except (KeyError, TypeError, ValueError):
+                raise JobExecutionError("vision_recovery_invalid", "saved visual result cannot be reused", retryable=False) from None
         try:
             result = self._provider.analyze(keyframe_path)  # type: ignore[attr-defined]
-        except Exception:
-            _finish_job_provider_call(self._ledger, self._job, call, status="failed", error_code="vision_provider_failed")
+        except Exception as error:
+            _finish_job_provider_call(self._ledger, self._job, call, status="failed", error_code="vision_provider_failed",
+                usage_values=self._usage(error))
             raise
-        _finish_job_provider_call(self._ledger, self._job, call, status="completed")
+        payload = ({"kind": "clip_visual_analysis_v1", "value": json.loads(json.dumps(asdict(result)))}
+            if isinstance(result, ClipVisualAnalysis) else None)
+        _finish_job_provider_call(self._ledger, self._job, call, status="completed", result_payload=payload,
+            usage_values=self._usage())
         return result
+
+    def _usage(self, error: Exception | None = None) -> dict:
+        # Only the built-in adapter provides response-bound, thread-local usage.
+        # Unknown adapters and parsing failures must not turn unknown cost into zero.
+        from app.costs import ProviderUsage
+        if type(self._provider) is OpenAICompatibleVisionProvider:
+            try:
+                observed = self._provider.usage_accounting(error)
+                if isinstance(observed, ProviderUsage):
+                    return observed.ledger_values()
+            except Exception:
+                pass
+        return {"usage_observable": False}
 
 
 def _resolve_asset_job(

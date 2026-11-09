@@ -11,6 +11,7 @@ from app.db import AssetRepository, ClipRepository, Database
 from app.domain.models import Asset, Clip
 
 from .extraction import AudioExtraction, KeyframeExtraction
+from .fingerprint import FingerprintError
 
 
 class MediaPipelineError(RuntimeError):
@@ -39,6 +40,10 @@ class _Extractor(Protocol):
     def extract_keyframe(self, asset: Asset, clip: Clip) -> KeyframeExtraction: ...
 
 
+class _FrameFingerprinter(Protocol):
+    def fingerprint(self, frames: Sequence[tuple[Path, float]]) -> dict[str, object]: ...
+
+
 _CLIP_NAMESPACE = UUID("c7f8f225-d0c3-5e1f-9c3e-b1a3a0343d63")
 
 
@@ -54,14 +59,21 @@ class MediaAnalysisResult:
 class MediaAnalysisPipeline:
     """Run expensive local media analysis before atomically replacing Clip rows."""
 
-    def __init__(self, db: Database, segmenter: _Segmenter, extractor: _Extractor) -> None:
+    def __init__(
+        self,
+        db: Database,
+        segmenter: _Segmenter,
+        extractor: _Extractor,
+        frame_fingerprinter: _FrameFingerprinter | None = None,
+    ) -> None:
         self.db = db
         self.segmenter = segmenter
         self.extractor = extractor
+        self.frame_fingerprinter = frame_fingerprinter
         self.assets = AssetRepository(db)
         self.clips = ClipRepository(db)
 
-    def process(self, asset: Asset) -> MediaAnalysisResult:
+    def process(self, asset: Asset, *, preserve_existing: bool = False) -> MediaAnalysisResult | None:
         stored = self._stored_identity(asset)
         # Segmentation and FFmpeg-derived files deliberately happen before the
         # short write transaction. A failure here leaves rows untouched; usable
@@ -70,8 +82,47 @@ class MediaAnalysisPipeline:
         audio_path = self.extractor.extract_audio(stored).path if stored.has_audio else None
         frames = tuple(self.extractor.extract_keyframe(stored, clip) for clip in normalized)
         keyframe_paths = tuple(frame.path for frame in frames)
-        self._replace_clip_set(stored, normalized)
-        return MediaAnalysisResult(stored, tuple(normalized), audio_path, keyframe_paths,
+        fingerprint = None
+        fingerprint_error = None
+        if self.frame_fingerprinter is not None:
+            try:
+                fingerprint = self.frame_fingerprinter.fingerprint(
+                    tuple((frame.path, float(frame.timestamp_ms)) for frame in frames)
+                )
+            except FingerprintError:
+                fingerprint_error = "frame_fingerprint_failed"
+        updated = self._replace_clip_set(
+            stored, normalized, preserve_existing=preserve_existing,
+            fingerprint=fingerprint, fingerprint_error=fingerprint_error,
+        )
+        if updated is None:
+            return None
+        from app.asset_management import AssetManagementError, record_asset_governance_event, refresh_near_duplicate_snapshot
+        if fingerprint is not None:
+            with self.db.transaction():
+                record_asset_governance_event(
+                    self.db, updated, "fingerprint_created", "worker_analysis",
+                    details={
+                        "algorithm": fingerprint["algorithm"],
+                        "sample_count": fingerprint["sample_count"],
+                        "source_keyframe_count": fingerprint["source_keyframe_count"],
+                    },
+                )
+            try:
+                updated = refresh_near_duplicate_snapshot(
+                    self.db, updated.id, actor="worker_analysis",
+                )
+            except AssetManagementError:
+                current = self.assets.get(updated.id)
+                if current is not None:
+                    updated = current
+        elif fingerprint_error is not None:
+            with self.db.transaction():
+                record_asset_governance_event(
+                    self.db, updated, "fingerprint_failed", "worker_analysis",
+                    details={"error_code": fingerprint_error},
+                )
+        return MediaAnalysisResult(updated, tuple(normalized), audio_path, keyframe_paths,
             tuple(float(frame.timestamp_ms) for frame in frames))
 
     def analyze(self, asset: Asset) -> MediaAnalysisResult:
@@ -108,21 +159,46 @@ class MediaAnalysisPipeline:
             raise MediaPipelineError("segmenter clips must be continuous and non-overlapping")
         return ordered
 
-    def _replace_clip_set(self, asset: Asset, desired: Sequence[Clip]) -> None:
+    def _replace_clip_set(
+        self,
+        asset: Asset,
+        desired: Sequence[Clip],
+        *,
+        preserve_existing: bool = False,
+        fingerprint: dict[str, object] | None = None,
+        fingerprint_error: str | None = None,
+    ) -> Asset | None:
         desired_ids = {clip.id for clip in desired}
         with self._write_transaction():
             # Re-check inside the write transaction so an out-of-band Asset
             # edit cannot cause stale expensive work to overwrite a new row.
             self._stored_identity(asset)
             existing = self.clips.list_by_asset(asset.id)
+            # An automatic intake analysis may have been queued before another
+            # analysis or production step saved Clips. Check under the writer
+            # lock so its older output cannot erase those facts.
+            if preserve_existing and existing:
+                return None
             try:
                 for clip in desired:
                     self.clips.upsert(clip)
                 for clip in existing:
                     if clip.id not in desired_ids:
                         self.clips.delete(clip.id)
+                current = self.assets.get(asset.id)
+                if current is None:
+                    raise AssetNotPersisted(f"asset {asset.id} is no longer persisted")
+                metadata = dict(current.metadata)
+                if fingerprint is not None:
+                    metadata["perceptual_fingerprint"] = fingerprint
+                    metadata.pop("perceptual_fingerprint_error", None)
+                elif fingerprint_error is not None:
+                    metadata["perceptual_fingerprint_error"] = fingerprint_error
+                updated = current.model_copy(update={"metadata": metadata})
+                self.assets.update(updated)
             except Exception as exc:
                 raise ClipSetPersistenceError("could not atomically replace the clip set") from exc
+        return updated
 
     @contextmanager
     def _write_transaction(self) -> Iterator[None]:

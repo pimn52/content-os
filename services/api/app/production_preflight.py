@@ -17,11 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.assembly.edit_plan import (EditPlanPreflightError, resolve_edit_plan, _default_edit_plan,
     presentation_for_style, review_edit_plan, dominant_landscape_fallback)
 from app.media.visual_facts import full_interval_geometry, footage_geometry, matches_scene
+from app.asset_management import asset_is_active
 from app.budget import snapshot
 from app.costs import estimate_whole_production
 from app.db import (
     AssetRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, Database, JobRepository,
-    ImageAssetRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository,
+    ImageAssetRepository, ProviderCallRepository,
     ProviderMachineSettingRepository,
 )
 from app.domain.models import (
@@ -36,7 +37,6 @@ from app.search import ClipTextSearchService
 from app.source_use_constraints import SourceUseConstraintService, UseConstraintDecision, presentation
 from app.source_usage import SourceUsageService, SourceUsageConflict
 from app.planning_input import presentation_plan_gaps
-from app.providers.local_generation import local_generation_ready, local_generation_licensed
 
 
 class PreflightInputError(ValueError):
@@ -154,19 +154,21 @@ def build_production_preflight(
     use_service = SourceUseConstraintService(db)
     use_records = use_service.records(project.id)
     use_context = use_service.context_from_records(use_records)
-    profiles = tuple(sorted(
-        (value for value in ProviderMachineCapabilityProfileRepository(db).list()
-         if value.capability in {"voice", "talking", "vision", "render"}),
-        key=lambda value: value.scope_key,
-    ))
     settings = tuple(sorted(
         (value for value in ProviderMachineSettingRepository(db).list()
          if value.capability in {"voice", "talking", "vision", "render"}),
         key=lambda value: value.scope_key,
     ))
+    # Evidence/verification labels are provenance, not production inputs.
+    # Only the provider/model identity and effective numeric settings may stale
+    # a saved plan; otherwise an advisory metadata update creates a new gate.
+    setting_identity = [
+        {"capability": value.capability, "mode": value.mode,
+         "provider": value.provider, "model": value.model, "values": value.values}
+        for value in settings
+    ]
     capability_identity = _digest({
-        "profiles": [value.model_dump(mode="json") for value in profiles],
-        "settings": [value.model_dump(mode="json") for value in settings],
+        "settings": setting_identity,
     })
     voice_identity = _digest({
         "script": voice_copy,
@@ -176,7 +178,10 @@ def build_production_preflight(
         },
         "performance": None if draft.narration_performance_plan is None else draft.narration_performance_plan.model_dump(mode="json"),
         "ip_profile_version": draft.ip_profile_version,
-        "voice_configuration": [value.model_dump(mode="json") for value in (*profiles, *settings) if value.capability == "voice"],
+        "voice_configuration": [
+            value for value in setting_identity
+            if value["capability"] == "voice"
+        ],
     })
     decisions: list[PreflightScene] = []
     actions: list[PreflightAction] = []
@@ -203,7 +208,11 @@ def build_production_preflight(
     checked_source_bytes = {}
 
     for scene in scenes:
-        if scene.material_request is not None:
+        sources = (*scene.preferred_sources, *scene.fallback_sources)
+        executable_graphic = (scene.graphic_plan is not None
+            and scene.graphic_plan.kind in {"diagram", "text_card"}
+            and SourceKind.TYPOGRAPHY in sources)
+        if scene.material_request is not None and not executable_graphic:
             stop.append(f"material_source_unavailable:{scene.scene_id}:{scene.material_request.source_kind}")
         explicit = router.explicit_footage(
             scene, draft.confirmed,
@@ -421,7 +430,7 @@ def build_production_preflight(
         no_graphics = scene.graphic_plan is not None and scene.graphic_plan.kind == "none"
         if no_graphics:
             reasons.append(f"no additional graphics requested: {scene.graphic_plan.reason}")
-            if kind is SourceKind.TYPOGRAPHY:
+            if candidate is None or kind is SourceKind.TYPOGRAPHY:
                 stop.append(f"no_graphics_requires_media:{scene.scene_id}")
         if unsupported_graphic:
             stop.append(f"graphic_realization_unsupported:{scene.scene_id}")
@@ -549,17 +558,6 @@ def build_production_preflight(
             stop.append("budget_call_limit")
         if policy.max_amount is not None and cost.known_amount > 0 and spent.known_amount + cost.known_amount > policy.max_amount:
             stop.append("budget_amount_limit")
-    for capability in ("voice", "talking"):
-        if capability == "voice" and reusable_master is not None:
-            continue
-        if capability == "talking" and not any(action.kind == "talking" for action in actions):
-            continue
-        configured_profiles = [profile for profile in profiles
-                               if profile.capability == capability and local_generation_ready(profile)]
-        if not configured_profiles:
-            stop.append(f"{capability}_capability_not_verified")
-        if not any(local_generation_licensed(profile) for profile in configured_profiles):
-            stop.append("provider_license_scope_unverified")
     identity = _digest({
         "project_id": str(project.id), "script_revision": draft.script_revision,
         "presentation_style": project.presentation_style,
@@ -575,6 +573,7 @@ def build_production_preflight(
         "capability": capability_identity,
         "crop_proposals": [proposal.model_dump(mode="json") for proposal in crop_proposals],
         "crop_outcomes": crop_outcomes,
+        **({"source_usage_work_id": str(source_usage_work_id)} if source_usage_work_id is not None else {}),
     })
     if expected_fingerprint is not None and expected_fingerprint != identity:
         raise StaleProductionPreflight("stale_production_preflight")
@@ -661,7 +660,7 @@ def _choose_candidate(scene: ScenePlan, candidates: tuple[CandidateAsset, ...], 
             for asset in assets.list():
                 meta = asset.metadata.get("source_derivation",{})
                 interval = meta.get("source_interval",{})
-                if (asset.source_kind is not source.source_kind or asset.width>asset.height or meta.get("source_asset_id")!=str(source.id)
+                if (not asset_is_active(asset) or asset.source_kind is not source.source_kind or asset.width>asset.height or meta.get("source_asset_id")!=str(source.id)
                     or meta.get("source_content_hash")!=source.content_hash
                     or interval.get("start_ms")!=original.start_ms
                     or interval.get("end_ms")!=original.end_ms):

@@ -61,6 +61,7 @@ def material(prepared,monkeypatch):
 def add_footage(c,*,name='replacement',width=1080,height=1920,start=0,end=4000,source_bytes=None):
     path=c.root/(name+'.mp4');path.write_bytes(source_bytes or ('fixture full interval '+name).encode())
     clip=Clip(asset_id=uuid4(),start_ms=start,end_ms=end,asset_duration_ms=6000,quality_score=.9)
+    ip_profile_id=ProjectRepository(c.db).get(c.scene.project_id).ip_profile_id
     facts={'source_content_hash':hashlib.sha256(path.read_bytes()).hexdigest(),'clip_interval':{'start_ms':start,'end_ms':end},
         'method':'provider_video_interval_analysis','coverage':'video_interval_analysis','content_consistent':True,
         'analysis_video_sha256':'a'*64,'covered_start_ms':start,'covered_end_ms':end,'analysis_duration_ms':end-start,
@@ -69,7 +70,8 @@ def add_footage(c,*,name='replacement',width=1080,height=1920,start=0,end=4000,s
         'scene_matches':{scene_visual_key(c.scene):{'supported':True,'score':.9,'quality_adequate':True,'fit':'illustrative','subject_verified':True}}}
     asset=Asset(id=clip.asset_id,source_file=path.name,content_hash=facts['source_content_hash'],duration_ms=6000,
         width=width,height=height,fps=c.asset.fps,has_audio=False,authorization_reference='registered source rights',
-        imported_at=c.asset.imported_at,metadata={'visual_analysis':{str(clip.id):facts}})
+        imported_at=c.asset.imported_at,metadata={'ip_profile_id':str(ip_profile_id),'reuse_role':'ordinary',
+            'lifecycle_state':'active','visual_analysis':{str(clip.id):facts}})
     AssetRepository(c.db).create(asset);ClipRepository(c.db).create(clip)
     return asset,clip,path
 

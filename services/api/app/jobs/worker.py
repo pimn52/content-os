@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from threading import Event
+from typing import Callable
 
 from .runner import JobRunner
 
@@ -15,13 +16,15 @@ from .runner import JobRunner
 class JobWorker:
     """Poll one runner until a caller-controlled stop event is set."""
 
-    def __init__(self, runner: JobRunner, *, idle_interval: timedelta = timedelta(seconds=1)) -> None:
+    def __init__(self, runner: JobRunner, *, idle_interval: timedelta = timedelta(seconds=1),
+                 on_idle: Callable[[], object] | None = None) -> None:
         if not isinstance(runner, JobRunner):
             raise TypeError("runner must be a JobRunner")
         if not isinstance(idle_interval, timedelta) or idle_interval <= timedelta(0):
             raise ValueError("idle_interval must be a positive timedelta")
         self._runner = runner
         self._idle_seconds = idle_interval.total_seconds()
+        self._on_idle = on_idle
 
     def run_forever(self, stop: Event) -> None:
         """Recover leases, process compatible work, and wait interruptibly idle.
@@ -36,4 +39,6 @@ class JobWorker:
         while not stop.is_set():
             result = self._runner.run_once(allowed_types=self._runner.handler_types)
             if result is None:
+                if self._on_idle is not None:
+                    self._on_idle()
                 stop.wait(self._idle_seconds)

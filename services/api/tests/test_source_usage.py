@@ -57,7 +57,7 @@ def test_same_bytes_different_clip_ids_and_crop_are_one_motion_source(library):
     service.require_available(projects[0].id,service.resolve(asset.id,0,4000,"甲")+service.resolve(crop.id,0,4000,"乙"))
 
 
-def test_generated_output_does_not_hide_repeated_source_motion(library):
+def test_generated_talking_outputs_are_distinct_visible_assets(library):
     db,projects,asset,clip,now=library
     outputs=[]
     for i in range(2):
@@ -66,8 +66,10 @@ def test_generated_output_does_not_hide_repeated_source_motion(library):
             "metadata":{"talking_generation":{"reference_clip_id":str(clip.id),"reference_window_start_ms":1000}}})))
     service=SourceUsageService(db)
     uses=[use for i,output in enumerate(outputs) for use in service.resolve(output.id,0,2000,str(i))]
+    assert len({use["source_hash"] for use in uses}) == 2
+    service.require_available(projects[0].id,uses)
     with pytest.raises(SourceUsageConflict,match="visual_source_repeated_in_video"):
-        service.require_available(projects[0].id,uses)
+        service.require_available(projects[0].id,service.resolve(outputs[0].id,0,2000,"a")*2)
 
 
 def test_selected_playback_never_slides_to_other_picture_or_truncates_duration(library):
@@ -132,10 +134,10 @@ def test_render_worker_cannot_bypass_cross_video_claim(library):
     from app.jobs.runner import JobExecutionError
     db,projects,asset,clip,now=library
     service=SourceUsageService(db)
-    run(db,projects[0],now,uses=service.resolve(asset.id,1000,3000,"a"))
     altered=AssetRepository(db).create(asset.model_copy(update={"id":uuid4(),"content_hash":"b"*64,
         "source_kind":SourceKind.AI_VIDEO,"metadata":{"talking_generation":{"reference_clip_id":str(clip.id),"reference_window_start_ms":0}}}))
     altered_clip=ClipRepository(db).create(clip.model_copy(update={"id":uuid4(),"asset_id":altered.id}))
+    run(db,projects[0],now,uses=service.resolve(altered.id,1000,3000,"a"))
     job=Job(project_id=projects[1].id,type=JobType.RENDER,status=JobStatus.RUNNING,
         idempotency_key=str(uuid4()),created_at=now,updated_at=now,
         payload=RenderVideoJobPayload(project_id=projects[1].id,render_id=uuid4(),video_spec=video(projects[1],altered,altered_clip,1000,3000)))
@@ -207,7 +209,8 @@ def test_normal_preflight_keeps_original_reference_and_reports_actual_occupancy(
             project=ProjectRepository(db).get(project_id)
             other=ProjectRepository(db).create(project.model_copy(update={"id":uuid4()}))
             asset=AssetRepository(db).create(Asset(source_file="fixture.mp4",content_hash="a"*64,duration_ms=12000,
-                width=1080,height=1920,fps=project.fps,authorization_reference="入库授权",imported_at=now))
+                width=1080,height=1920,fps=project.fps,authorization_reference="入库授权",imported_at=now,
+                metadata={"ip_profile_id":str(project.ip_profile_id),"reuse_role":"ordinary","lifecycle_state":"active"}))
             ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=0,end_ms=12000,asset_duration_ms=12000,
                 transcript=scene.voice_text,visual_description="creator showing a workflow",quality_score=.9))
             run(db,other,now,uses=SourceUsageService(db).resolve(asset.id,0,4000,"other"))
@@ -291,8 +294,7 @@ def test_original_meme_can_repeat_for_any_person_but_new_lip_performance_cannot(
     service.require_available(projects[1].id,uses)
     output=AssetRepository(db).create(asset.model_copy(update={"id":uuid4(),"content_hash":"b"*64,"duration_ms":2000,
         "metadata":{"reuse_role":role,"talking_generation":{"reference_clip_id":str(clip.id),"reference_window_start_ms":0}}}))
-    with pytest.raises(SourceUsageConflict,match="already_published"):
-        service.require_available(projects[1].id,service.resolve(output.id,0,2000,"talking"))
+    service.require_available(projects[1].id,service.resolve(output.id,0,2000,"talking"))
     AssetRepository(db).update(asset.model_copy(update={"metadata":{"reuse_role":role,"r1_identity":"creator"}}))
     service.require_available(projects[1].id,service.resolve(asset.id,0,2000,"a")+service.resolve(asset.id,0,2000,"b"))
 

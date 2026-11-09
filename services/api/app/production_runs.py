@@ -5,6 +5,7 @@ claiming that technical QA substitutes for human product review.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from contextlib import nullcontext
 import hashlib
@@ -28,7 +29,7 @@ from app.talking.admission import _matches_interval_copy
 from app.voice_qa import comparison_tokens, voice_human_review_status
 from app.domain.models import PlannedTalkingRunOriginV2
 from app.talking.review_policy import TalkingReviewPolicyError, TalkingReviewPolicyService, require_child_judgment
-from app.providers.local_generation import local_generation_ready, local_generation_licensed
+from app.providers.local_generation import ensure_runtime_capability_profile
 from app.source_usage import SourceUsageService, SourceUsageConflict, overlap
 
 
@@ -76,6 +77,52 @@ def _select_bound_talking_reference(db: Database, data_root: Path, asset, clip, 
     return select_talking_reference([clip], brief, adopted_full_interval_clip_ids=frozenset({clip.id}))
 
 
+def choose_quality_reference_window(
+    source: dict[str, object],
+    occupied: list[dict[str, object]],
+    clip,
+    duration: int,
+    quality_for_window,
+    *,
+    candidate_count: int = 6,
+):
+    """Choose the earliest free bounded window and retain motion observations.
+
+    The face-motion score is diagnostic, not a product-quality ranking.  A
+    higher correlation must not silently displace a human-approved baseline.
+    """
+    if type(candidate_count) is not int or candidate_count < 2:
+        raise ValueError("reference-window candidate count must be at least two")
+    source_start = int(source["start_ms"])
+    source_end = int(source["end_ms"])
+    latest = source_end - duration
+    if latest < source_start:
+        return None
+    proposed = {
+        source_start + round((latest - source_start) * index / (candidate_count - 1))
+        for index in range(candidate_count)
+    }
+    free_starts = set()
+    for candidate in sorted(proposed):
+        cursor = candidate
+        while cursor + duration <= source_end:
+            use = {**source, "start_ms": cursor, "end_ms": cursor + duration}
+            hits = [other for other in occupied if overlap(use, other)]
+            if not hits:
+                free_starts.add(cursor)
+                break
+            cursor = max(int(other["end_ms"]) for other in hits)
+    observed = []
+    for candidate in sorted(free_starts):
+        window_start = clip.start_ms + candidate - source_start
+        quality = quality_for_window(clip, window_start, window_start + duration)
+        observed.append((candidate, quality))
+    if not observed:
+        return None
+    candidate, quality = observed[0]
+    return candidate, candidate, quality
+
+
 def is_planned_talking_collection(db: Database, series) -> bool:
     """Detect planned provenance even if a collection marker was stripped."""
     if series.planned_origin is not None:
@@ -115,8 +162,8 @@ class TalkingSourceBinding(BaseModel):
     reference_assessment_reference: str
     performance_brief: TalkingPerformanceBrief
     capability_profile_id: UUID
-    capability_evidence_reference: str
-    license_evidence_reference: str
+    capability_evidence_reference: str | None = None
+    license_evidence_reference: str | None = None
     master_audio_id: UUID
     master_start_ms: int
     master_end_ms: int
@@ -399,10 +446,16 @@ def _run_from_row(db: Database, row) -> ProductionRun:
 
 
 class ProductionRunService:
-    def __init__(self, db: Database, data_root: str | Path, *, talking_provider=None):
+    def __init__(self, db: Database, data_root: str | Path, *, voice_provider=None, talking_provider=None):
         self.db = db
         self.data_root = Path(data_root).resolve()
+        self.voice_provider = voice_provider
         self.talking_provider = talking_provider
+
+    def _runtime_capability(self, capability: str):
+        provider = self.voice_provider if capability == "voice" else self.talking_provider
+        profiles = ProviderMachineCapabilityProfileRepository(self.db)
+        return ensure_runtime_capability_profile(profiles, provider, capability)
 
     def list_references(self, project_id: UUID, draft_version: int | None = None,
                         script_revision: int | None = None) -> list[ProductionRunReference]:
@@ -491,7 +544,7 @@ class ProductionRunService:
             raise ProductionRunConflict("talking_review_policy_unknown")
         with self.db.transaction(immediate=True):
             prior = self.db.connection.execute("SELECT * FROM production_runs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
-            if prior is None:
+            if prior is None and candidate_of_run_id is None:
                 prior = self.db.connection.execute("SELECT * FROM production_runs WHERE project_id=? AND preflight_fingerprint=?",
                     (str(project_id),expected_fingerprint)).fetchone()
             project = ProjectRepository(self.db).get(project_id)
@@ -501,6 +554,17 @@ class ProductionRunService:
                 (str(candidate_of_run_id), str(project_id))).fetchone() if candidate_of_run_id else None
             if candidate_of_run_id and parent is None:
                 raise ProductionRunConflict("candidate_parent_run_not_found")
+            if prior is not None and prior["idempotency_key"] == idempotency_key and prior["review_request_fingerprint"] is not None:
+                request_fingerprint = _snapshot_sha256({"plan": expected_fingerprint,
+                    "talking_review_policy_version": talking_review_policy_version,
+                    "candidate_of_run_id": None if candidate_of_run_id is None else str(candidate_of_run_id)})
+                if (prior["project_id"] != str(project_id) or prior["review_request_fingerprint"] != request_fingerprint
+                    or VisualStyleTokens.model_validate_json(prior["style_tokens"]) != style_tokens
+                    or prior["repair_allowance"] != repair_allowance
+                    or bool(prior["automatic"]) != automatic
+                    or prior["start_job_id"] != (str(start_job_id) if start_job_id is not None else None)):
+                    raise ProductionRunConflict("idempotency key belongs to a different production plan")
+                return _run_from_row(self.db, prior)
             draft = ProjectDraftRepository(self.db).get(project_id)
             preflight = build_production_preflight(
                 self.db, project, draft, style_tokens=style_tokens,
@@ -649,11 +713,11 @@ class ProductionRunService:
                 raise ProductionRunNotReady(("talking_reference_fit_not_verified",))
             self._require_source_bytes(asset.source_file, asset.content_hash)
             capability = ProviderMachineCapabilityProfileRepository(self.db).get(capability_profile_id)
-            if (capability is None or capability.capability != "talking" or capability.provider != profile.provider
-                or not local_generation_ready(capability)):
-                raise ProductionRunNotReady(("exact_talking_capability_not_verified",))
-            if not local_generation_licensed(capability):
-                raise ProductionRunNotReady(("talking_provider_license_scope_unverified",))
+            if capability is None:
+                capability = self._runtime_capability("talking")
+            if (capability is None or capability.capability != "talking"
+                or capability.provider != profile.provider):
+                raise ProductionRunNotReady(("talking_runtime_provider_mismatch",))
             binding = TalkingSourceBinding(
                 scene_plan_id=scene_plan_id, talking_profile_id=talking_profile_id,
                 reference_clip_id=clip.id, reference_asset_id=asset.id,
@@ -661,7 +725,7 @@ class ProductionRunService:
                 reference_end_ms=clip.end_ms, source_authorization_reference=asset.authorization_reference,
                 reference_assessment_reference=clip.talking_reference_assessment.evidence_reference,
                 performance_brief=requested_brief,
-                capability_profile_id=capability_profile_id, master_audio_id=master.id,
+                capability_profile_id=capability.id, master_audio_id=master.id,
                 capability_evidence_reference=capability.evidence_reference,
                 license_evidence_reference=capability.license_evidence_reference,
                 master_start_ms=master_start_ms, master_end_ms=master_end_ms,
@@ -688,15 +752,47 @@ class ProductionRunService:
             )
             return self.get(project_id, run_id)
 
+    def _talking_duration_policy(
+        self, capability, reference_duration_ms: int | None = None,
+    ) -> tuple[int | None, str]:
+        """Resolve the exact machine/runtime attempt ceiling and its provenance."""
+        verified = capability.verified_parameters.get("fresh_voice_talking_duration_ms")
+        setting = None
+        if type(verified) is int and verified > 0:
+            limit = verified
+            source = f"verified-capability:{capability.id}"
+        else:
+            setting = ProviderMachineSettingRepository(self.db).get_by_scope_key(capability.scope_key)
+            configured = None if setting is None else setting.values.get("max_talking_duration_ms")
+            if type(configured) is int and configured > 0:
+                limit = configured
+                source = f"machine-setting:max_talking_duration_ms:{setting.id}"
+            else:
+                from app.routing.settings_schema import find_provider_settings_schema
+                schema = find_provider_settings_schema(
+                    getattr(capability, "capability", "talking"),
+                    capability.provider, capability.model, capability.runtime,
+                )
+                parameter = None if schema is None else next(
+                    (item for item in schema.parameters if item.key == "max_talking_duration_ms"), None,
+                )
+                initial = None if parameter is None else parameter.default
+                if type(initial) is int and initial > 0:
+                    limit = initial
+                    source = "default:max_talking_duration_ms"
+                else:
+                    limit = None
+                    source = f"reference-duration:{capability.id}"
+        if limit is None:
+            return reference_duration_ms, source
+        return (
+            min(limit, reference_duration_ms)
+            if reference_duration_ms is not None else limit
+        ), source
+
     def _talking_duration_limit(self, capability, reference_duration_ms: int | None = None) -> int | None:
         """A configured attempt ceiling does not assert verified quality."""
-        limit = capability.verified_parameters.get("fresh_voice_talking_duration_ms")
-        if limit is None:
-            setting = ProviderMachineSettingRepository(self.db).get_by_scope_key(capability.scope_key)
-            limit = None if setting is None else setting.values.get("max_talking_duration_ms")
-        if type(limit) is not int or limit <= 0:
-            return reference_duration_ms
-        return min(limit, reference_duration_ms) if reference_duration_ms is not None else limit
+        return self._talking_duration_policy(capability, reference_duration_ms)[0]
 
     def _talking_reference_windows(self, run, master, *, extra_binding=None):
         """Allocate source-forward motion, including model alignment context."""
@@ -766,14 +862,14 @@ class ProductionRunService:
                           and value[0]["source_hash"] == source["source_hash"]
                           and next(peer.master_start_ms for peer in peers if peer.scene_plan_id == peer_id) > item.master_start_ms]
                 end = min([source["end_ms"], *(value["start_ms"] for value in future)])
-                while start+duration <= end:
-                    use = {**source,"start_ms":start,"end_ms":start+duration}
-                    hits = [other for other in occupied if overlap(use,other)]
-                    if not hits:
-                        break
-                    start = max(other["end_ms"] for other in hits)
-                if start+duration > end:
+                bounded = {**source, "start_ms": start, "end_ms": end}
+                choice = choose_quality_reference_window(
+                    bounded, occupied, clip, duration,
+                    self._reference_motion_evidence,
+                )
+                if choice is None:
                     raise SourceUsageConflict("talking_source_coverage_insufficient_replan")
+                _, start, _ = choice
                 window_start = clip.start_ms + start-source["start_ms"]
                 windows[item.scene_plan_id] = (window_start,
                     window_start+duration if self.talking_provider is not None else clip.end_ms)
@@ -781,6 +877,23 @@ class ProductionRunService:
             return windows
         except SourceUsageConflict as exc:
             raise ProductionRunNotReady((exc.reason,)) from exc
+
+    def _reference_motion_evidence(self, clip, start_ms: int, end_ms: int) -> dict[str, object]:
+        probe = getattr(self.talking_provider, "talking_motion_probe", None)
+        if probe is None:
+            return {
+                "state": "not_configured",
+                "claim": "reference_motion_quality_unknown",
+            }
+        asset = AssetRepository(self.db).get(clip.asset_id)
+        if asset is None:
+            return {"state": "unavailable", "reason": "reference_asset_missing"}
+        try:
+            from app.media.local_paths import existing_local_media_file
+            source = existing_local_media_file(asset.source_file, self.data_root)
+            return probe.measure_reference(source, start_ms, end_ms)
+        except (OSError, ValueError):
+            return {"state": "unavailable", "reason": "reference_motion_probe_failed"}
 
     def _talking_reference_window(self, run, binding, master) -> tuple[int, int]:
         """Keep dispatched windows immutable; fresh windows include alignment."""
@@ -812,17 +925,18 @@ class ProductionRunService:
 
     def _validated_talking_dispatch(
         self, project_id: UUID, run_id: UUID, binding: TalkingSourceBinding,
-        *, new_inference: bool = True,
+        *, new_inference: bool = True, binding_validated: bool = False,
     ) -> tuple[TalkingSourceBinding, object, object, object, object]:
         """Reopen every mutable candidate gate within the caller's transaction."""
-        self.bind_talking_source(
-            project_id, run_id, scene_plan_id=binding.scene_plan_id,
-            talking_profile_id=binding.talking_profile_id, reference_clip_id=binding.reference_clip_id,
-            capability_profile_id=binding.capability_profile_id,
-            master_start_ms=binding.master_start_ms, master_end_ms=binding.master_end_ms,
-            brief=binding.performance_brief,
-            _new_inference=new_inference,
-        )
+        if not binding_validated:
+            self.bind_talking_source(
+                project_id, run_id, scene_plan_id=binding.scene_plan_id,
+                talking_profile_id=binding.talking_profile_id, reference_clip_id=binding.reference_clip_id,
+                capability_profile_id=binding.capability_profile_id,
+                master_start_ms=binding.master_start_ms, master_end_ms=binding.master_end_ms,
+                brief=binding.performance_brief,
+                _new_inference=new_inference,
+            )
         run = self.get(project_id, run_id)
         if run is None or run.status != "awaiting_talking_dependencies":
             raise ProductionRunConflict("planned Talking run is no longer waiting")
@@ -830,18 +944,17 @@ class ProductionRunService:
         if current != binding:
             raise ProductionRunConflict("Talking source binding changed")
         clip = ClipRepository(self.db).get(current.reference_clip_id)
-        if (clip is None or clip.talking_reference_assessment is None
-            or clip.talking_reference_assessment.burned_in_subtitles is not False):
-            raise ProductionRunNotReady(("talking_native_source_subtitles_not_cleared",))
+        if clip is None or clip.talking_reference_assessment is None:
+            raise ProductionRunNotReady(("talking_reference_fit_not_verified",))
         profile = TalkingProfileRepository(self.db).get(current.talking_profile_id)
         master = AudioAssetRepository(self.db).get(current.master_audio_id)
         capability = ProviderMachineCapabilityProfileRepository(self.db).get(current.capability_profile_id)
+        if capability is None:
+            capability = self._runtime_capability("talking")
         if profile is None or master is None or capability is None:
             raise ProductionRunNotReady(("talking_execution_dependency_missing",))
-        if capability.mode != "local":
-            raise ProductionRunNotReady(("talking_remote_dispatch_not_implemented",))
         source_start, source_end = self._talking_reference_window(run, current, master)
-        limit = self._talking_duration_limit(capability, source_end - source_start)
+        limit, _ = self._talking_duration_policy(capability, source_end - source_start)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ProductionRunNotReady(("talking_provider_duration_bound_unverified",))
         indices = [index for index, segment in enumerate(master.transcript_segments)
@@ -869,6 +982,7 @@ class ProductionRunService:
 
     def dispatch_talking(
         self, project_id: UUID, run_id: UUID, *, scene_plan_id: UUID,
+        binding_validated: bool = False,
     ) -> ProductionRun | None:
         """Atomically enqueue one bounded planned Talking Job, never a ProviderCall."""
         with (nullcontext() if self.db.connection.in_transaction else self.db.transaction(immediate=True)):
@@ -881,9 +995,16 @@ class ProductionRunService:
             if binding is None:
                 raise ProductionRunNotReady(("talking_reference_candidate_not_bound",))
             current, profile, master, capability, slice_plan = self._validated_talking_dispatch(
-                project_id, run_id, binding,
+                project_id, run_id, binding, binding_validated=binding_validated,
             )
             source_start, source_end = self._talking_reference_window(run, current, master)
+            duration_limit, duration_limit_source = self._talking_duration_policy(
+                capability, source_end - source_start,
+            )
+            clip = ClipRepository(self.db).get(current.reference_clip_id)
+            if clip is None:
+                raise ProductionRunNotReady(("talking_reference_clip_missing",))
+            motion_quality = self._reference_motion_evidence(clip, source_start, source_end)
             context = PlannedTalkingContext(
                 run_id=run_id, scene_plan_id=scene_plan_id,
                 capability_profile_id=capability.id, expected_provider=capability.provider,
@@ -898,13 +1019,24 @@ class ProductionRunService:
                 authorization_reference=current.authorization_reference, planned_context=context,
                 slice_start_segment_index=slice_plan.start_segment_index,
                 slice_end_segment_index=slice_plan.end_segment_index,
-                slice_max_duration_ms=self._talking_duration_limit(capability, source_end - source_start),
-                slice_limit_source=f"{'verified-capability' if capability.verified_parameters.get('fresh_voice_talking_duration_ms') else 'reference-duration-attempt-limit'}:{capability.id}",
+                slice_max_duration_ms=duration_limit,
+                slice_limit_source=duration_limit_source,
                 reference_window_start_ms=source_start,
                 reference_window_end_ms=source_end,
+                reference_selection_quality={
+                    "selection_method": "earliest_available_bounded_forward_window",
+                    "selection_policy": "observable_motion_diagnostics_only",
+                    "ranking_policy": "reference_quality_v2_user_rejected_20261108",
+                    "window_start_ms": source_start,
+                    "window_end_ms": source_end,
+                    "motion": motion_quality,
+                },
             )
             if current.talking_job_id is not None:
                 prior = JobRepository(self.db).get(current.talking_job_id)
+                if (prior is not None and isinstance(prior.payload, TalkingGenerationJobPayload)
+                        and prior.payload.reference_selection_quality is None):
+                    payload = payload.model_copy(update={"reference_selection_quality": None})
                 if prior is None or prior.payload != payload or prior.project_id != project_id:
                     raise ProductionRunConflict("planned Talking Job differs from the persisted dependency")
                 return run
@@ -946,6 +1078,7 @@ class ProductionRunService:
                 return None
             if run.status != "awaiting_talking_dependencies":
                 raise ProductionRunConflict("production run is not awaiting Talking dependencies")
+            self._runtime_capability("talking")
             bindings = {item.scene_plan_id: item for item in run.talking_source_bindings}
             started = {item.scene_plan_id for item in run.talking_qa_dependencies}
             pending = [item for item in run.talking_dependencies if item.scene_plan_id not in started
@@ -1015,7 +1148,10 @@ class ProductionRunService:
                 item = next(value for value in bound_run.talking_source_bindings if value.scene_plan_id == dependency.scene_plan_id)
                 self._talking_reference_window(bound_run, item, master)
             for dependency in pending:
-                self.dispatch_talking(project_id, run_id, scene_plan_id=dependency.scene_plan_id)
+                self.dispatch_talking(
+                    project_id, run_id, scene_plan_id=dependency.scene_plan_id,
+                    binding_validated=True,
+                )
             return self.get(project_id, run_id)
 
     def _require_talking_batch_budget(self, project_id: UUID, calls: int) -> None:
@@ -1068,9 +1204,8 @@ class ProductionRunService:
         if not isinstance(job.payload, TalkingGenerationJobPayload) or job.payload.planned_context is None:
             raise ProductionRunNotReady(("planned_talking_context_missing",))
         context = job.payload.planned_context
-        if (provider != context.expected_provider or model != context.expected_model
-            or runtime != context.expected_runtime or machine_id != context.expected_machine_id):
-            raise ProductionRunNotReady(("talking_worker_identity_mismatch",))
+        if provider != context.expected_provider or model != context.expected_model:
+            raise ProductionRunNotReady(("talking_worker_provider_mismatch",))
         with (nullcontext() if self.db.connection.in_transaction else self.db.transaction(immediate=True)):
             run = self.get(job.project_id, context.run_id)
             if run is None or run.status != "awaiting_talking_dependencies":
@@ -1087,8 +1222,6 @@ class ProductionRunService:
             if (context.capability_profile_id != capability.id
                 or context.expected_provider != capability.provider
                 or context.expected_model != capability.model
-                or context.expected_runtime != capability.runtime
-                or context.expected_machine_id != capability.machine_id
                 or context.binding_sha256 != _talking_binding_sha256(current)
                 or context.consent_sha256 != _snapshot_sha256(profile.consent.model_dump(mode="json"))
                 or job.payload.talking_profile_id != profile.id
@@ -1097,8 +1230,8 @@ class ProductionRunService:
                 or job.payload.authorization_reference != current.authorization_reference
                 or job.payload.slice_start_segment_index != slice_plan.start_segment_index
                 or job.payload.slice_end_segment_index != slice_plan.end_segment_index
-                or job.payload.slice_max_duration_ms != self._talking_duration_limit(
-                    capability, source_end - source_start)
+                or job.payload.slice_max_duration_ms != self._talking_duration_policy(
+                    capability, source_end - source_start)[0]
                 or job.payload.reference_window_start_ms != source_start
                 or job.payload.reference_window_end_ms != source_end):
                 raise ProductionRunNotReady(("planned_talking_execution_snapshot_changed",))
@@ -1213,8 +1346,10 @@ class ProductionRunService:
                 "talking_master_missing", "master_narration_file_missing", "master_narration_bytes_changed",
             }
             reasons = tuple(reason for reason in run.waiting_stop_reasons if reason not in transient_qa_reasons)
-            review_reason = ("talking_exact_preview_review_required" if run.talking_review_policy_version == 2 else "talking_u_review_run_not_implemented")
-            reasons = tuple(dict.fromkeys((*reasons, f"{review_reason}:{scene_plan_id}")))
+            if not run.automatic:
+                review_reason = ("talking_exact_preview_review_required"
+                    if run.talking_review_policy_version == 2 else "talking_u_review_run_not_implemented")
+                reasons = tuple(dict.fromkeys((*reasons, f"{review_reason}:{scene_plan_id}")))
             self.db.connection.execute(
                 "UPDATE production_runs SET talking_source_bindings = ?, waiting_stop_reasons = ? WHERE id = ? AND stage = 'awaiting_talking'",
                 (json.dumps([item.model_dump(mode="json") for item in bindings]), json.dumps(reasons), str(run_id)),
@@ -1423,10 +1558,8 @@ class ProductionRunService:
             if (source is None or clip is None or profile is None or capability is None
                 or clip.asset_id != source.id or source.content_hash != binding.reference_asset_hash
                 or clip.start_ms != binding.reference_start_ms or clip.end_ms != binding.reference_end_ms
-                or not profile.consent.confirmed
-                or not local_generation_licensed(capability)
-                or capability.license_evidence_reference != binding.license_evidence_reference):
-                raise ProductionRunNotReady(("planned_talking_source_or_license_changed",))
+                or not profile.consent.confirmed):
+                raise ProductionRunNotReady(("planned_talking_source_changed",))
             self._require_source_bytes(source.source_file, source.content_hash)
             origin_type = PlannedTalkingRunOriginV2 if run.talking_review_policy_version == 2 else PlannedTalkingRunOrigin
             policy_fields = {"execution_sha256": _snapshot_sha256({
@@ -1483,12 +1616,7 @@ class ProductionRunService:
             or context.consent_sha256 != _snapshot_sha256(profile.consent.model_dump(mode="json"))
             or binding.reference_clip_id not in profile.reference_clip_ids
             or capability is None or capability.provider != context.expected_provider
-            or capability.model != context.expected_model or capability.runtime != context.expected_runtime
-            or capability.machine_id != context.expected_machine_id
-            or not local_generation_ready(capability)
-            or capability.evidence_reference != binding.capability_evidence_reference
-            or not local_generation_licensed(capability)
-            or capability.license_evidence_reference != binding.license_evidence_reference):
+            or capability.model != context.expected_model):
             raise ProductionRunNotReady(("planned_talking_execution_authority_changed",))
         clip = ClipRepository(self.db).get(binding.reference_clip_id)
         source = AssetRepository(self.db).get(binding.reference_asset_id)
@@ -1511,7 +1639,6 @@ class ProductionRunService:
                 interval_valid = interval_valid or (segments[0].start_ms, segments[-1].end_ms) == (
                     binding.master_start_ms, binding.master_end_ms)
         if (clip is None or clip.talking_reference_assessment is None
-            or clip.talking_reference_assessment.burned_in_subtitles is not False
             or source is None
             or not has_approved_voice_quality(self.db, master, production_run_id=run_id)
             or not segments or not interval_valid
@@ -1715,7 +1842,7 @@ class ProductionRunService:
 
     def resume(self, project_id: UUID, run_id: UUID) -> ProductionRun | None:
         """After U-Voice admission, recheck the saved draft and dispatch once."""
-        with self.db.transaction(immediate=True):
+        with nullcontext() if self.db.connection.in_transaction else self.db.transaction(immediate=True):
             row = self.db.connection.execute(
                 "SELECT * FROM production_runs WHERE id = ? AND project_id = ? AND stage IN ('awaiting_master', 'awaiting_talking', 'voice', 'render', 'cancelled')",
                 (str(run_id), str(project_id)),
@@ -1780,7 +1907,6 @@ class ProductionRunService:
         audio = AudioAssetRepository(self.db).get(master_id) if master_id else None
         generation = None if audio is None else audio.metadata.get("voice_generation")
         profile = VoiceProfileRepository(self.db).get(job.payload.voice_profile_id) if job is not None and isinstance(job.payload, VoiceGenerationJobPayload) else None
-        capability = ProviderMachineCapabilityProfileRepository(self.db).get(job.payload.execution_capability_profile_id) if job is not None and isinstance(job.payload, VoiceGenerationJobPayload) and job.payload.execution_capability_profile_id else None
         if (job is None or job.type is not JobType.GENERATE_VOICE or job.status is not JobStatus.COMPLETED
             or not isinstance(job.payload, VoiceGenerationJobPayload)
             or job.project_id != UUID(row["project_id"])
@@ -1794,9 +1920,6 @@ class ProductionRunService:
             or generation.get("provider") != job.payload.expected_provider or generation.get("model") != job.payload.expected_model
             or audio.authorization_reference != job.payload.authorization_reference
             or profile is None or not profile.consent.confirmed
-            or capability is None or capability.capability != "voice"
-            or capability.provider != job.payload.expected_provider or capability.model != job.payload.expected_model
-            or not local_generation_ready(capability) or not local_generation_licensed(capability)
             or not has_approved_voice_quality(self.db, audio, production_run_id=UUID(row["id"]))):
             raise ProductionRunNotReady(("bound_voice_master_not_approved_or_qa_complete",))
         self._require_master_bytes(master_id)
@@ -2038,10 +2161,29 @@ class ProductionRunService:
     ) -> ProductionRun | None:
         """Link one authorized existing Voice Job; never invoke a provider here."""
         from app.voice_plan import resolve_project_voice_profile
+        from app.voice_performance import authorized_voice_reference_choices
         profile = resolve_project_voice_profile(self.db,project_id,voice_profile_id,cross_ip_voice_authorization_reference)
         voice_profile_id = profile.id
+        from app.voice_recipe import VoiceRecipeError, parse_generation_recipe, require_recipe_quality_anchor
+        try:
+            recipe = parse_generation_recipe(profile)
+            if recipe is not None:
+                require_recipe_quality_anchor(self.db, recipe, voice_profile_id=profile.id)
+        except VoiceRecipeError as exc:
+            raise ProductionRunNotReady((str(exc),)) from exc
         authorization_reference = (profile.consent.authorization_reference
             or cross_ip_voice_authorization_reference or f"voice-profile-consent:{profile.id}")
+        profile_clips = [clip for clip_id in profile.reference_clip_ids
+            if (clip := ClipRepository(self.db).get(clip_id)) is not None]
+        profile_assets = {clip.asset_id: asset for clip in profile_clips
+            if (asset := AssetRepository(self.db).get(clip.asset_id)) is not None}
+        reference_choices = authorized_voice_reference_choices(
+            profile, profile_clips, profile_assets, data_root=self.data_root,
+            allow_auto_windows=True,
+        )
+        selected_reference = reference_choices[0][0] if reference_choices else None
+        if recipe is not None and selected_reference != recipe.reference_window:
+            raise ProductionRunNotReady(("voice_generation_recipe_reference_unavailable",))
         with self.db.transaction(immediate=True):
             self._require_source_usage(project_id, run_id)
             row = self.db.connection.execute(
@@ -2053,10 +2195,20 @@ class ProductionRunService:
                 job = JobRepository(self.db).get(UUID(row["voice_job_id"]))
                 if job is None or not isinstance(job.payload, VoiceGenerationJobPayload):
                     raise ProductionRunConflict("production run Voice Job is missing")
+                draft = ProjectDraftRepository(self.db).get(project_id)
+                if draft is None or draft.version != row["draft_version"] or draft.script_revision != row["script_revision"]:
+                    raise ProductionRunConflict("production plan draft changed; replan before Voice dispatch")
+                script = draft.script or "\n\n".join(
+                    scene.voice_text for scene in sorted(draft.scenes, key=lambda scene: scene.order)
+                )
+                from app.voice_emphasis import automatic_emphasis_plan
+                expected_performance_plan = draft.narration_performance_plan or automatic_emphasis_plan(script)
                 selected = ProviderMachineCapabilityProfileRepository(self.db).get(capability_profile_id)
                 if (job.payload.voice_profile_id != voice_profile_id
                     or job.payload.cross_ip_voice_authorization_reference != cross_ip_voice_authorization_reference
                     or job.payload.authorization_reference != authorization_reference
+                    or job.payload.reference_window != selected_reference
+                    or job.payload.narration_performance_plan != expected_performance_plan
                     or job.payload.execution_capability_profile_id != capability_profile_id
                     or selected is None or selected.provider != job.payload.expected_provider
                     or selected.model != job.payload.expected_model):
@@ -2079,24 +2231,29 @@ class ProductionRunService:
                 "budget_call_limit", "budget_amount_limit", "unknown_cost_requires_budget_authorization",
             )):
                 raise ProductionRunNotReady(("voice_budget_not_authorized",))
-            if draft.narration_performance_plan is not None:
-                raise ProductionRunNotReady(("voice_performance_plan_dispatch_not_implemented",))
             capability = ProviderMachineCapabilityProfileRepository(self.db).get(capability_profile_id)
+            if capability is None:
+                capability = self._runtime_capability("voice")
             if any(ClipRepository(self.db).get(clip_id) is None for clip_id in profile.reference_clip_ids):
                 raise ProductionRunNotReady(("voice_reference_clip_missing",))
-            if (capability is None or capability.capability != "voice" or capability.provider != profile.provider
-                or not local_generation_ready(capability)):
-                raise ProductionRunNotReady(("exact_voice_capability_not_verified",))
-            if not local_generation_licensed(capability):
-                raise ProductionRunNotReady(("voice_provider_license_scope_unverified",))
+            if (capability is None or capability.capability != "voice"
+                or capability.provider != profile.provider):
+                raise ProductionRunNotReady(("voice_runtime_provider_mismatch",))
             job_id, now = uuid4(), datetime.now(timezone.utc)
+            script = draft.script or "\n\n".join(
+                scene.voice_text for scene in sorted(draft.scenes, key=lambda scene: scene.order)
+            )
+            from app.voice_emphasis import automatic_emphasis_plan
+            performance_plan = draft.narration_performance_plan or automatic_emphasis_plan(script)
             payload = VoiceGenerationJobPayload(
                 project_id=project_id, voice_profile_id=voice_profile_id,
                 cross_ip_voice_authorization_reference=cross_ip_voice_authorization_reference,
-                text=draft.script or "\n\n".join(scene.voice_text for scene in sorted(draft.scenes, key=lambda scene: scene.order)),
+                text=script,
                 authorization_reference=authorization_reference,
                 expected_provider=capability.provider, expected_model=capability.model,
                 execution_capability_profile_id=capability.id,
+                reference_window=selected_reference,
+                narration_performance_plan=performance_plan,
             )
             job = Job(
                 id=job_id, project_id=project_id, type=JobType.GENERATE_VOICE,
@@ -2118,18 +2275,16 @@ class ProductionRunService:
         if preflight.status == "ready_for_authorized_dispatch" and preflight.reusable_master_audio_id is not None:
             ProductionRunService._require_ready_lane(preflight)
             return "render"
-        voice_only_stops = {"provider_license_scope_unverified", "voice_capability_not_verified"}
         if (
             preflight.reusable_master_audio_id is None
             and preflight.preliminary_edit_plan is not None
-            and set(preflight.stop_reasons).issubset(voice_only_stops)
+            and not preflight.stop_reasons
             and all(ProductionRunService._ready_existing_visual(item) for item in preflight.scenes)
             and {action.kind for action in preflight.actions if action.required} == {"voice", "render"}
         ):
             return "awaiting_master"
         talking = tuple(item for item in preflight.scenes if item.production_need == "new_talking")
         allowed_stops = {
-            "provider_license_scope_unverified", "talking_capability_not_verified",
             "unknown_cost_requires_budget_authorization", "budget_call_limit", "budget_amount_limit",
             *(f"talking_source_not_bound:{item.scene_id}" for item in talking),
         }
@@ -2140,7 +2295,7 @@ class ProductionRunService:
             and all(item.production_need == "new_talking" or
                     (item.production_need == "none" and ProductionRunService._ready_existing_visual(item))
                     for item in preflight.scenes)
-            and set(preflight.stop_reasons).issubset(allowed_stops | {"voice_capability_not_verified"})
+            and set(preflight.stop_reasons).issubset(allowed_stops)
             and all(f"talking_source_not_bound:{item.scene_id}" in preflight.stop_reasons for item in talking)
             and {action.kind for action in preflight.actions if action.required} == (
                 {"talking", "render"} if preflight.reusable_master_audio_id is not None else {"voice", "talking", "render"}

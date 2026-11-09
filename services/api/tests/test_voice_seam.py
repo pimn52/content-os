@@ -1,10 +1,16 @@
+from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 import wave
 
 import pytest
 
-from app.voice_seam import VoiceSeamCompactionError, compact_measured_seam_quiet
+from app.domain.models import ConsentRecord, VoiceProfile
+from app.voice_recipe import parse_generation_recipe
+from app.voice_seam import (
+    VoiceSeamCompactionError, apply_voice_pause_policy, compact_measured_seam_quiet,
+)
 
 
 def _wav(path: Path, samples: list[int]) -> None:
@@ -125,3 +131,164 @@ def test_forward_binding_and_unclassified_joins_do_not_guess_acoustic_pauses(tmp
         take_boundary_kinds([' ', 'test'])
     with pytest.raises(VoiceSeamCompactionError,match='roles must match'):
         compact_measured_seam_quiet(raw,tmp_path/'invalid.wav',[1000],boundary_kinds=['unknown'])
+
+
+def _reviewed_recipe():
+    clip_id, asset_id = uuid4(), uuid4()
+    recipe = {
+        "schema_version": "0.5", "recipe_id": "v60-human-approved", "version": 6,
+        "quality_anchor_audio_id": str(uuid4()), "quality_anchor_sha256": "a" * 64,
+        "quality_anchor_evidence_reference": "audio:human-approved-v60",
+        "human_review": {"approved": True, "likeness": "pass", "naturalness": "pass",
+            "emphasis": "pass", "pace": "pass", "pauses": "pass", "rhythm": "pass"},
+        "reference_window": {
+            "clip_id": str(clip_id), "asset_id": str(asset_id),
+            "source_content_hash": "b" * 64, "start_ms": 0, "end_ms": 6000,
+            "transcript_sha256": "c" * 64,
+        },
+        "runtime_label": "omnivoice-existing-maintained-personal-w13",
+        "runtime_parameters_sha256": "d" * 64, "composition_policy": "paragraph_spans",
+        "pause_hierarchy": {
+            "schema_version": "1.0",
+            "levels": {
+                "phrase_internal": "continuous_no_cut",
+                "comma": "short_continuing_boundary",
+                "sentence": "natural_close_longer_than_comma",
+                "paragraph": "allow_one_beat",
+                "key_point": "allow_one_thinking_beat",
+                "ending": "natural_landing",
+            },
+            "invariants": {
+                "sentence_outranks_comma": True,
+                "global_speed_is_not_pause_control": True,
+                "insert_unmeasured_silence": False,
+            },
+            "evidence_refs": ["v19b-u-voice-punctuation-hierarchy-review"],
+        },
+        "seam_policy": {
+            "scope": "paragraph_spans",
+            "method": "pcm16_mono_24khz_10ms_rms_below_minus45dbfs",
+            "eligible_boundary_kinds": ["terminal", "continuing"],
+            "margin_ms_each_side": 60, "max_cut_ms": 300,
+            "preserve_spoken_frames": True, "insert_silence": False,
+            "evidence_reference": "content-os-data/evaluation-evidence/v60-length-completion/manifest.json",
+        },
+        "delivery_adjustments": {
+            "schema_version": "1.4", "review_state": "pending_user_review",
+            "syntax_rule_set_version": "zh-clause-binding-v1",
+            "punctuation_overrides": [], "pronunciation_overrides": [], "generation_breaks": [],
+            "copula_complement_break": {
+                "enabled": False, "max_complement_chars": 12,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "contextual_pronunciation": {
+                "enabled": False, "rule_set_version": "zh-common-polyphones-v1",
+                "evidence_reference": "fixture",
+            },
+            "contrastive_correction_break": {
+                "enabled": False, "max_negated_chars": 48,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "predicate_completion_break": {
+                "enabled": False, "max_clause_chars": 60,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+        },
+    }
+    profile = VoiceProfile(
+        name="Creator", provider="omnivoice", provider_profile_id="creator",
+        reference_clip_ids=[clip_id],
+        consent=ConsentRecord(subject_name="Creator", basis="self", confirmed=True,
+            confirmed_at=datetime.now(timezone.utc)),
+        generation_recipe=recipe, created_at=datetime.now(timezone.utc),
+    )
+    parsed = parse_generation_recipe(profile)
+    assert parsed is not None
+    return parsed
+
+
+def test_reviewed_pause_policy_compacts_paragraph_quiet_without_touching_speech(tmp_path):
+    rate = 24_000
+    first = [10_000] * (rate * 8 // 10) + [0] * (rate * 14 // 100)
+    second = [0] * (rate * 14 // 100) + [12_000] * (rate * 8 // 10)
+    raw, final = tmp_path / "raw.wav", tmp_path / "final.wav"
+    _wav(raw, first + second)
+    text = "先说明白。\n\n再讲重点。"
+    segments = [
+        {"start_char": 0, "end_char": 5, "start_sample": 0, "end_sample": len(first)},
+        {"start_char": 7, "end_char": len(text), "start_sample": len(first),
+         "end_sample": len(first) + len(second)},
+    ]
+
+    applied = apply_voice_pause_policy(
+        raw, final, recipe=_reviewed_recipe(), text=text,
+        generation_segments=segments, sample_rate=rate,
+    )
+
+    assert applied.evidence["state"] == "applied"
+    assert applied.evidence["cuts"][0]["boundary_kind"] == "terminal"
+    assert applied.evidence["cuts"][0]["start_ms"] == 860
+    assert applied.evidence["cuts"][0]["end_ms"] == 1020
+    assert applied.evidence["global_speed_changed"] is False
+    assert applied.evidence["inserted_silence_ms"] == 0
+    assert applied.generation_segments[1]["final_start_sample"] == len(first) - rate * 8 // 100
+    assert applied.generation_segments[1]["final_end_sample"] == (
+        len(first) + len(second) - rate * 16 // 100
+    )
+    with wave.open(str(raw), "rb") as source, wave.open(str(final), "rb") as compacted:
+        source_pcm = source.readframes(source.getnframes())
+        final_pcm = compacted.readframes(compacted.getnframes())
+    assert final_pcm == source_pcm[:860 * 24 * 2] + source_pcm[1020 * 24 * 2:]
+
+
+def test_reviewed_pause_policy_preserves_a_focus_emphasis_seam(tmp_path):
+    rate = 24_000
+    first = [10_000] * (rate * 8 // 10) + [0] * (rate * 14 // 100)
+    second = [0] * (rate * 14 // 100) + [12_000] * (rate * 8 // 10)
+    raw, final = tmp_path / "raw.wav", tmp_path / "final.wav"
+    _wav(raw, first + second)
+    text = "最后，\n\n镜头按真实时长拆。"
+    segments = [
+        {"start_char": 0, "end_char": 3, "start_sample": 0, "end_sample": len(first)},
+        {"start_char": 5, "end_char": len(text), "start_sample": len(first),
+         "end_sample": len(first) + len(second)},
+    ]
+
+    applied = apply_voice_pause_policy(
+        raw, final, recipe=_reviewed_recipe(), text=text,
+        generation_segments=segments, sample_rate=rate,
+        preserve_seam_indexes=(0,),
+    )
+
+    assert applied.evidence["state"] == "no_cut"
+    assert applied.evidence["preserved_seam_indexes"] == [0]
+    assert applied.evidence["skipped"] == [
+        {"seam_index": 0, "reason": "focus_emphasis_boundary"}
+    ]
+    with wave.open(str(raw), "rb") as source, wave.open(str(final), "rb") as preserved:
+        assert source.readframes(source.getnframes()) == preserved.readframes(preserved.getnframes())
+
+
+def test_reviewed_pause_policy_does_not_cut_unpunctuated_or_forward_boundaries(tmp_path):
+    rate = 24_000
+    first = [10_000] * (rate * 8 // 10) + [0] * (rate * 14 // 100)
+    second = [0] * (rate * 14 // 100) + [10_000] * (rate * 8 // 10)
+    raw, final = tmp_path / "raw.wav", tmp_path / "final.wav"
+    _wav(raw, first + second)
+    text = "没有边界\n\n但是，继续说明。"
+    segments = [
+        {"start_char": 0, "end_char": 4, "start_sample": 0, "end_sample": len(first)},
+        {"start_char": 6, "end_char": len(text), "start_sample": len(first),
+         "end_sample": len(first) + len(second)},
+    ]
+
+    applied = apply_voice_pause_policy(
+        raw, final, recipe=_reviewed_recipe(), text=text,
+        generation_segments=segments, sample_rate=rate,
+    )
+
+    assert applied.evidence["state"] == "no_cut"
+    assert applied.evidence["boundary_kinds"] == ["no_break"]
+    assert applied.evidence["skipped"] == [
+        {"seam_index": 0, "reason": "boundary_no_break_kept"},
+    ]

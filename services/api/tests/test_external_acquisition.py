@@ -438,7 +438,13 @@ def test_shared_candidate_rejected_only_for_second_query_gets_new_material_and_r
         assert [call[0] for call in calls].count("search")==2
         assert [call[0] for call in calls].count("import")==2
         assert len(resolver.provider.calls)==2
-        assert all(video["source_asset_id"]==str(replacement.id) for video in resolver.provider.calls[1][0])
+        # 某段画面不支持第二用途，不等于整份素材的所有区间都不支持。
+        # 换源后允许核验同一素材的新区间，但不能重复核验此前已判断的区间和用途。
+        first_batch = {(v["source_asset_id"], v["start_ms"], v["end_ms"]) for v in resolver.provider.calls[0][0]}
+        second_batch = {(v["source_asset_id"], v["start_ms"], v["end_ms"]) for v in resolver.provider.calls[1][0]}
+        assert not first_batch & second_batch
+        assert any(video["source_asset_id"] == str(replacement.id) for video in resolver.provider.calls[1][0])
+        assert {request["scene_key"] for request in resolver.provider.calls[1][1]} == {scene_visual_key(second)}
         state=json.loads((tmp_path/"render-diagnostics"/str(job.id)/"external-materials.json").read_text(encoding="utf-8"))
         assert state["supplement"]["queries"]==["stir drink"]
         assert state["supplement"]["rejected_assets"]=={"stir drink":[str(shared.id)]}
@@ -688,6 +694,51 @@ def test_failed_child_accepts_only_completed_manual_replacement_without_auto_ret
         analyze_exact_job(db, good, replacement.id)
         analyze_exact_job(db, runner, failed.id)
         assert attempted == [failed.id]
+    finally:
+        db.close()
+
+
+def test_external_failed_analysis_reuses_existing_clips_without_retry(tmp_path):
+    from app.db import ClipRepository
+    from app.jobs.targets import AssetJobTargetStore
+    db, _, asset, _, _, _, _ = fixture(tmp_path)
+    try:
+        now = datetime.now(timezone.utc)
+        job = AssetJobTargetStore(db).enqueue(Job(type=JobType.ANALYZE_ASSET,
+            idempotency_key=f"external-analysis:{asset.id}", created_at=now, updated_at=now), asset.id)
+        original = ClipRepository(db).list_by_asset(asset.id)
+        attempted = []
+        def fail(value):
+            attempted.append(value.id)
+            raise ValueError("analysis unavailable")
+        runner = JobRunner(JobStore(db), {JobType.ANALYZE_ASSET: fail},
+            worker_id="external-failure", lease_duration=timedelta(seconds=60), max_attempts=1)
+        assert runner.run_once(job_id=job.id).status is JobStatus.FAILED
+        analyze_exact_job(db, runner, job.id)
+        assert attempted == [job.id]
+        assert ClipRepository(db).list_by_asset(asset.id) == original
+        assert JobRepository(db).get(job.id).status is JobStatus.FAILED
+    finally:
+        db.close()
+
+
+def test_completed_external_analysis_without_clips_is_not_reused(tmp_path):
+    from app.db import ClipRepository
+    from app.jobs.targets import AssetJobTargetStore
+    db, _, asset, _, _, _, _ = fixture(tmp_path)
+    try:
+        now = datetime.now(timezone.utc)
+        job = AssetJobTargetStore(db).enqueue(Job(type=JobType.ANALYZE_ASSET,
+            idempotency_key=f"external-analysis:{asset.id}", created_at=now, updated_at=now), asset.id)
+        runner = JobRunner(JobStore(db), {JobType.ANALYZE_ASSET: lambda value: None},
+            worker_id="external-complete", lease_duration=timedelta(seconds=60), max_attempts=1)
+        assert runner.run_once(job_id=job.id).status is JobStatus.COMPLETED
+        for clip in ClipRepository(db).list_by_asset(asset.id):
+            ClipRepository(db).delete(clip.id)
+        with pytest.raises(ExternalAcquisitionError) as error:
+            analyze_exact_job(db, runner, job.id)
+        assert error.value.code == "external_analysis_clips_missing"
+        assert JobRepository(db).get(job.id).status is JobStatus.COMPLETED
     finally:
         db.close()
 

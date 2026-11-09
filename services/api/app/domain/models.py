@@ -149,6 +149,9 @@ class IPProfile(ContractModel):
     default_voice_profile_id: UUID | None = None
     creator_name: str = Field(min_length=1, max_length=200)
     domains: list[str] = Field(default_factory=list, max_length=30)
+    positioning: str | None = Field(default=None, max_length=2_000)
+    content_pillars: list[str] = Field(default_factory=list, max_length=20)
+    platform_categories: list[str] = Field(default_factory=list, max_length=20)
     audience: str | None = Field(default=None, max_length=1_000)
     topics: list[str] = Field(default_factory=list, max_length=100)
     knowledge: list[str] = Field(default_factory=list, max_length=200)
@@ -158,6 +161,8 @@ class IPProfile(ContractModel):
     avoided_expressions: list[str] = Field(default_factory=list, max_length=200)
     boundaries: list[str] = Field(default_factory=list, max_length=100)
     common_hooks: list[str] = Field(default_factory=list, max_length=100)
+    public_account_links: list[str] = Field(default_factory=list, max_length=20)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=200)
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -214,9 +219,11 @@ class AnalysisResultBundle(ContractModel):
 
 class AccountConnection(ContractModel):
     id: UUID = Field(default_factory=uuid4)
+    ip_profile_id: UUID | None = None
     provider: str = Field(min_length=1, max_length=100, description="Provider name only; never credentials.")
     account_external_id: str = Field(min_length=1, max_length=500)
     display_name: str | None = Field(default=None, max_length=200)
+    profile_url: str | None = Field(default=None, max_length=2_000)
     read_only: bool = True
     connected_at: AwareDatetime
     last_synced_at: AwareDatetime | None = None
@@ -231,6 +238,10 @@ class HistoricalContent(ContractModel):
     description: str | None = Field(default=None, max_length=10_000)
     transcript: str | None = Field(default=None, max_length=100_000)
     metrics: dict[str, int | float] = Field(default_factory=dict)
+    asset_id: UUID | None = None
+    content_url: str | None = Field(default=None, max_length=2_000)
+    availability: Literal["available", "removed", "mirror_only", "unknown"] = "unknown"
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("metrics")
     @classmethod
@@ -271,6 +282,28 @@ class Asset(ContractModel):
     authorization_reference: str = Field(min_length=1, max_length=500, description="Rights or authorization record reference; never credentials.")
     imported_at: AwareDatetime
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class AssetGovernanceEvent(ContractModel):
+    """Immutable, product-owned audit event for one media Asset."""
+
+    id: UUID = Field(default_factory=uuid4)
+    asset_id: UUID
+    asset_content_hash: str = Field(min_length=16, max_length=128)
+    event_type: Literal[
+        "snapshot_initialized",
+        "imported",
+        "classification_changed",
+        "lifecycle_changed",
+        "fingerprint_created",
+        "fingerprint_failed",
+        "near_duplicate_scan",
+        "near_duplicate_scan_failed",
+    ]
+    actor: Literal["migration", "product_import", "worker_analysis", "normal_ui"]
+    occurred_at: AwareDatetime
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=200)
 
 
 class SourceCropWindow(ContractModel):
@@ -501,6 +534,7 @@ class VoiceProfile(ContractModel):
     reference_clip_ids: list[UUID] = Field(min_length=1, max_length=100)
     consent: ConsentRecord
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
+    generation_recipe: dict[str, JsonValue] | None = None
     created_at: AwareDatetime
 
 
@@ -509,6 +543,8 @@ class VoiceProfile(ContractModel):
         data = handler(self)
         if self.ip_profile_id is None:
             data.pop("ip_profile_id",None)
+        if self.generation_recipe is None:
+            data.pop("generation_recipe",None)
         return data
 
 
@@ -645,6 +681,19 @@ class MaterialRequest(ContractModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class CreatorFit(ContractModel):
+    """Traceable relationship between one scene and the supplied creator brief."""
+
+    fit_state: Literal["matched", "partial", "generic"] = "generic"
+    content_pillar: str | None = Field(default=None, min_length=1, max_length=300)
+    topic_fit_reason: str | None = Field(default=None, min_length=1, max_length=1_000)
+    audience_value: str | None = Field(default=None, min_length=1, max_length=1_000)
+    knowledge_refs: list[str] = Field(default_factory=list, max_length=8)
+    opinion_refs: list[str] = Field(default_factory=list, max_length=8)
+    evidence_gaps: list[str] = Field(default_factory=list, max_length=8)
+    deviation_risks: list[str] = Field(default_factory=list, max_length=8)
+
+
 class ScenePlan(ContractModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
@@ -667,6 +716,7 @@ class ScenePlan(ContractModel):
     viewer_takeaway: str | None = Field(default=None, min_length=1, max_length=1000)
     material_request: MaterialRequest | None = None
     reuse_intent: Literal["auto", "reference"] = "auto"
+    creator_fit: CreatorFit | None = None
 
     @field_validator("voice_text")
     @classmethod
@@ -1515,7 +1565,7 @@ class ProviderCallRecord(ContractModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    project_id: UUID
+    project_id: UUID | None
     idempotency_key: str = Field(min_length=1, max_length=500)
     operation: Literal["scene_planning", "asr", "vision", "embedding", "tts", "talking", "render", "stock_search", "stock_import", "web_search", "web_fetch"]
     mode: Literal["assisted_test", "runtime"]
@@ -2286,6 +2336,10 @@ class PublicationRecord(ContractModel):
     output_version: str = Field(min_length=1, max_length=200)
     platform: str = Field(min_length=1, max_length=100)
     published_at: AwareDatetime
+    title: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=50_000)
+    cover_frame_ms: NonNegativeMs = 0
+    account_connection_id: UUID | None = None
     content_url: str | None = Field(default=None, max_length=2_000)
     content_external_id: str | None = Field(default=None, max_length=500)
     metrics: dict[str, JsonValue] = Field(default_factory=dict)
@@ -2308,6 +2362,18 @@ class ContentFeedback(ContractModel):
     rejection_reason: str | None = Field(default=None, max_length=2_000)
     notes: str | None = Field(default=None, max_length=10_000)
     created_at: AwareDatetime
+
+
+class PublicationMetricObservation(ContractModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    publication_id: UUID
+    event_key: str = Field(min_length=16, max_length=500)
+    observed_at: AwareDatetime
+    window_hours: int = Field(ge=0, le=8_760)
+    metric_source: str = Field(min_length=1, max_length=200)
+    metrics: dict[str, JsonValue] = Field(min_length=1, max_length=100)
+    evidence_ref: str | None = Field(default=None, max_length=2_000)
 
 
 class RenderVideoJobPayload(ContractModel):
@@ -2466,6 +2532,7 @@ class TalkingGenerationJobPayload(ContractModel):
     slice_limit_source: str | None = Field(default=None, min_length=1, max_length=100)
     reference_window_start_ms: int | None = Field(default=None, ge=0)
     reference_window_end_ms: int | None = Field(default=None, ge=1)
+    reference_selection_quality: dict[str, JsonValue] | None = Field(default=None, max_length=100)
     slice_series_id: UUID | None = None
     slice_series_index: int | None = Field(default=None, ge=0)
     slice_series_size: int | None = Field(default=None, ge=1)
@@ -2503,6 +2570,8 @@ class TalkingGenerationJobPayload(ContractModel):
         reference_window = (self.reference_window_start_ms, self.reference_window_end_ms)
         if any(value is not None for value in reference_window) and any(value is None for value in reference_window):
             raise ValueError("Talking reference window requires both start and end timestamps")
+        if self.reference_selection_quality is not None and self.reference_window_start_ms is None:
+            raise ValueError("Talking reference quality requires a selected reference window")
         if self.reference_window_start_ms is not None and self.reference_window_end_ms is not None and self.reference_window_end_ms <= self.reference_window_start_ms:
             raise ValueError("Talking reference window end must follow start")
         series_values = (self.slice_series_id, self.slice_series_index, self.slice_series_size)
@@ -2558,7 +2627,7 @@ class PlannedTalkingRunOrigin(ContractModel):
     source_admission_id: UUID | None = None
     consent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     authorization_reference: str = Field(min_length=1)
-    license_evidence_reference: str = Field(min_length=1)
+    license_evidence_reference: str | None = Field(default=None, min_length=1)
     child_review_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")

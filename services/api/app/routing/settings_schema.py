@@ -5,7 +5,7 @@ live here rather than leaking into universal domain contracts or ScenePlans.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping
 
 from .execution import CapabilityFeature, CapabilityType, ExecutionMode, ExecutionProfileKey, FeatureImplementationOwner, FeatureSupport, ParameterValue
@@ -97,15 +97,24 @@ LOCAL_BENCHMARK_SCHEMAS: tuple[ProviderSettingsSchema, ...] = (
         runtime="local-compatibility",
         commercial_status="non_commercial_only",
         parameters=(
+            ParameterSchema(
+                "max_talking_duration_ms",
+                "单次口型任务时长上限（毫秒）",
+                "integer",
+                4460,
+                1,
+                None,
+                "按单次完整旁白输入计，不是参考素材或整片时长。4460ms 是当前 6 GiB 本机的保守初始值，不是跨电脑通用质量结论；请按目标机器的有界样本调整。保存后仍应在画面中人工复核口型；长旁白由系统按完整 ASR 语句拆分，不会在词中截断。",
+            ),
             ParameterSchema("inference_steps", "推理步数", "number", 20, 1, 100, "更多步数可能提高质量，也会增加本机运行时间。"),
             ParameterSchema("guidance_scale", "引导强度", "number", 1.5, 0, 20, "Provider 的本地兼容参数；需通过质量审核后才可提升为本机证据。"),
-            ParameterSchema("trailing_silence_lookahead_ms", "结束静音前瞻（毫秒）", "number", 600, 1, 2000, "解决“声音已经说完、嘴巴却还在继续说”：让 LatentSync 在模型输入中提前看到说完后的静音，再把成片精确裁到口播结束。静音不会进入成片。600ms 是 Content OS 为当前 LatentSync 1.5 适配器提供的保守基线，不是所有 Provider 的通用参数，也不等于已在每台电脑上通过人审。"),
+            ParameterSchema("trailing_silence_lookahead_ms", "结束静音前瞻（毫秒）", "number", 600, 1, 2000, "解决“声音已经说完、嘴巴却还在继续说”：让 LatentSync 在模型输入中提前看到说完后的静音，再把成片精确裁到口播结束。静音不会进入成片。它不等于最后一个音节的字内口型对齐。600ms 是 Content OS 为当前 LatentSync 1.5 适配器提供的保守基线，不是所有 Provider 的通用参数，也不等于已在每台电脑上通过人审。"),
         ),
         features=(FeatureSchema(
             CapabilityFeature.TERMINAL_FACE_CLOSEOUT,
             FeatureSupport.AVAILABLE,
             FeatureImplementationOwner.CONTENT_OS_ADAPTER,
-            "这是 Content OS 对“声音已结束、嘴巴仍像在说话”问题的收口保护。当前 LatentSync 适配器通过模型输入静音上下文实现；上游 Provider 无需知道或声明该问题。是否自然收口仍需本机质量证据与人工审核。",
+            "这是 Content OS 对“声音已结束、嘴巴仍像在说话”问题的收口保护。当前 LatentSync 适配器通过模型输入静音上下文实现，再裁回精确口播结束；它不修复末字内部的音节/viseme 时序。上游 Provider 无需知道或声明该问题，本机是否自然仍以确切输出人审为准。",
             ("trailing_silence_lookahead_ms",),
         ),),
         reference_frame_alignment_context_ms=640,
@@ -136,7 +145,23 @@ def list_provider_settings_schemas() -> tuple[ProviderSettingsSchema, ...]:
 
 
 def find_provider_settings_schema(capability: str, provider: str, model: str, runtime: str) -> ProviderSettingsSchema | None:
-    return next((schema for schema in LOCAL_BENCHMARK_SCHEMAS if (schema.capability.value, schema.provider, schema.model, schema.runtime) == (capability, provider, model, runtime)), None)
+    """Resolve an exact runtime, or reuse one provider/model template.
+
+    Runtime labels vary by machine and installed stack, but advanced defaults
+    belong to the provider/model contract.  A single matching template may be
+    projected onto the requested runtime; ambiguous provider/model families
+    still require an explicit product choice.
+    """
+
+    exact = next((schema for schema in LOCAL_BENCHMARK_SCHEMAS
+                  if (schema.capability.value, schema.provider, schema.model, schema.runtime)
+                  == (capability, provider, model, runtime)), None)
+    if exact is not None:
+        return exact
+    templates = tuple(schema for schema in LOCAL_BENCHMARK_SCHEMAS
+                      if (schema.capability.value, schema.provider, schema.model)
+                      == (capability, provider, model))
+    return replace(templates[0], runtime=runtime) if len(templates) == 1 else None
 
 
 def find_unique_provider_settings_schema(capability: str, provider: str) -> ProviderSettingsSchema | None:
@@ -162,12 +187,16 @@ def validate_schema_values(schema: ProviderSettingsSchema, values: Mapping[str, 
         if key not in allowed:
             raise ValueError(f"unknown setting {key!r} for {schema.provider}")
         parameter = allowed[key]
-        if parameter.value_type == "number":
+        if parameter.value_type in {"number", "integer"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} must be a number")
             numeric = float(value)
             if parameter.minimum is not None and numeric < parameter.minimum or parameter.maximum is not None and numeric > parameter.maximum:
                 raise ValueError(f"{key} is outside the supported range")
+            if parameter.value_type == "integer" and not numeric.is_integer():
+                raise ValueError(f"{key} must be an integer")
+            if parameter.value_type == "integer":
+                value = int(numeric)
         normalized[key] = value
     if not normalized:
         raise ValueError("at least one setting value is required")

@@ -10,7 +10,8 @@ import pytest
 from app.costs import UnknownProviderCostEstimator
 from app.db import (AssetRepository, ClipRepository, Database, IPProfileRepository, ProjectRepository,
     BudgetPolicyRepository, ProviderCallRepository, ProjectDraftRepository)
-from app.domain.models import Asset, Clip, IPProfile, Project, RationalFps, ScenePlan, VisualIntent, BudgetPolicy
+from app.domain.models import (Asset, Clip, GraphicCardPlan, IPProfile, Project, RationalFps, ScenePlan,
+    SourceKind, VisualIntent, BudgetPolicy)
 from app.media.planning import VisualMaterialResolver, MaterialResolutionError, split_footage_clauses, subtitle_clearance
 from app.media.visual_facts import full_interval_geometry, scene_visual_key, matches_scene
 from app.providers.vision import VideoIntervalBatch, VideoIntervalAnalysis, SceneVisualMatch
@@ -54,13 +55,14 @@ def material_library(tmp_path, *, metered=False):
         created_at=now,fps=RationalFps(numerator=30,denominator=1)))
     source=tmp_path/'source.mp4';source.write_bytes(b'immutable fixture source')
     asset=AssetRepository(db).create(Asset(source_file=str(source),content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
-        duration_ms=30000,width=1080,height=1920,fps=project.fps,authorization_reference='入库授权',imported_at=now))
+        duration_ms=30000,width=1080,height=1920,fps=project.fps,authorization_reference='入库授权',imported_at=now,
+        metadata={'ip_profile_id':str(profile.id),'reuse_role':'ordinary','lifecycle_state':'active'}))
     coarse=ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=0,end_ms=30000,asset_duration_ms=30000,
         visual_description='狗接飞盘码率对比'))
     ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=10000,end_ms=20000,asset_duration_ms=30000))
     ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=20000,end_ms=30000,asset_duration_ms=30000,
         visual_description='狗接飞盘码率对比实拍'))
-    asset=AssetRepository(db).update(asset.model_copy(update={'metadata':{'visual_analysis':{str(coarse.id):dict(
+    asset=AssetRepository(db).update(asset.model_copy(update={'metadata':{**asset.metadata,'visual_analysis':{str(coarse.id):dict(
         source_content_hash=asset.content_hash,clip_interval=dict(start_ms=0,end_ms=30000),coverage='sampled_keyframe',
         observations=[dict(timestamp_ms=19500,description='采样画面描述')])}}}))
     scene=ScenePlan(project_id=project.id,scene_id='demo',order=0,purpose='解释画质',voice_text='狗接飞盘时的画面细节。',
@@ -90,6 +92,48 @@ def test_video_timeout_keeps_failed_call_without_saving_qa_or_retry(tmp_path):
         assert all(fact.get('coverage')!='video_interval_analysis'
             for fact in AssetRepository(db).get(asset.id).metadata['visual_analysis'].values())
     finally:db.close()
+
+
+def test_unconfigured_visual_analysis_fails_before_extracting_proxies(tmp_path):
+    db, project, asset, coarse, scene, provider, resolver = material_library(tmp_path)
+    resolver.provider = None
+    try:
+        with pytest.raises(MaterialResolutionError) as failure:
+            resolver.resolve(project, [scene], uuid4())
+        assert 'material_analysis_not_configured' in failure.value.reasons
+        assert resolver.extractor.calls == []
+    finally:
+        db.close()
+
+
+def test_explicit_diagram_falls_back_locally_when_optional_footage_does_not_fit(tmp_path):
+    db, project, _, _, scene, _, resolver = material_library(tmp_path)
+    try:
+        graphic = scene.model_copy(update={
+            "id": uuid4(),
+            "scene_id": "diagram",
+            "duration_target_ms": 14000,
+            "preferred_sources": [SourceKind.STOCK],
+            "fallback_sources": [SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET],
+            "preferred_clip_id": None,
+            "graphic_plan": GraphicCardPlan(
+                kind="diagram",
+                treatment="diagram_flow",
+                points=["先给结论", "补一个细节", "说明边界"],
+            ),
+        })
+        resolver.provider = None
+
+        selected = resolver.resolve(project, [graphic], uuid4())
+
+        assert selected == (graphic.model_copy(update={
+            "preferred_sources": [SourceKind.TYPOGRAPHY],
+            "fallback_sources": [SourceKind.STOCK, SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET],
+            "preferred_clip_id": None,
+            "material_request": None,
+        }),)
+    finally:
+        db.close()
 
 
 def test_broll_cannot_consume_motion_reserved_by_the_same_measured_plan(tmp_path):

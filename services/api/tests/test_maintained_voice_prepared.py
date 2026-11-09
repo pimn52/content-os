@@ -230,7 +230,7 @@ def test_generation_receipt_keeps_normal_dispatch_closed_and_reuses_frozen_ledge
             return
         request = dict(purpose="internal_evaluation", use_admission_ids=[str(receipt)])
         preview = client.post(f"/projects/{project}/production-preflight", json=request)
-        assert preview.status_code == 200 and "provider_license_scope_unverified" in preview.json()["stop_reasons"]
+        assert preview.status_code == 200 and "provider_license_scope_unverified" not in preview.json()["stop_reasons"]
         response = client.post(f"/projects/{project}/production-runs", json=dict(request,
             idempotency_key="schema5-still-closed", expected_fingerprint=preview.json()["fingerprint"]))
         assert response.status_code == 409

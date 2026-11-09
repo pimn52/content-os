@@ -3,8 +3,8 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository
-from app.domain.models import Asset, AudioAsset, RationalFps, ScenePlan, SourceKind, VisualIntent
+from app.db import AssetRepository, Database, IPProfileRepository
+from app.domain.models import Asset, AudioAsset, IPProfile, RationalFps, ScenePlan, SourceKind, VisualIntent
 from app.main import create_app
 
 
@@ -12,15 +12,20 @@ def test_browser_upload_imports_one_video_without_source_path(tmp_path: Path) ->
     calls: list[tuple[bytes, str, str, str]] = []
 
     class FakeImporter:
+        def __init__(self, db):
+            self.db = db
+
         def import_stream(self, stream, filename, authorization_reference, *, source_kind):
             calls.append((stream.read(), filename, authorization_reference, source_kind.value))
-            return Asset(
+            asset = Asset(
                 id=uuid4(), source_file=str(tmp_path / "stored.media"), content_hash="b" * 64,
                 duration_ms=1_000, width=320, height=180, fps=RationalFps(numerator=25, denominator=1),
                 authorization_reference=authorization_reference, imported_at="2026-09-09T00:00:00Z",
             )
+            AssetRepository(self.db).create(asset)
+            return asset
 
-    with TestClient(create_app(tmp_path / "upload.sqlite", media_importer_factory=lambda db, root: FakeImporter())) as client:
+    with TestClient(create_app(tmp_path / "upload.sqlite", media_importer_factory=lambda db, root: FakeImporter(db))) as client:
         response = client.post(
             "/uploads",
             files={"file": ("phone-clip.mp4", b"video bytes", "video/mp4")},
@@ -31,11 +36,58 @@ def test_browser_upload_imports_one_video_without_source_path(tmp_path: Path) ->
             files={"file": ("notes.txt", b"not a video", "text/plain")},
             data={"authorization_reference": "creator-owned"},
         )
+        readiness = client.get(f"/assets/{response.json()['id']}/readiness")
 
     assert response.status_code == 201
     assert response.json()["authorization_reference"] == "creator-owned"
     assert calls == [(b"video bytes", "phone-clip.mp4", "creator-owned", "user_asset")]
     assert rejected.status_code == 422
+    assert readiness.json()['stages']['preprocessed']['status'] == 'pending'
+    assert readiness.json()['stages']['visual']['status'] == 'not_started'
+
+
+def test_browser_upload_assigns_current_creator_and_default_reuse(tmp_path: Path) -> None:
+    path = tmp_path / "owned-upload.sqlite"
+    db = Database(path)
+    profile = IPProfile(creator_name="Creator")
+    IPProfileRepository(db).create(profile)
+    db.close()
+    received = {}
+
+    class FakeImporter:
+        def __init__(self, db):
+            self.db = db
+
+        def import_stream(self, stream, filename, authorization_reference, *, source_kind, extra_metadata=None):
+            received.update(extra_metadata or {})
+            asset = Asset(
+                id=uuid4(), source_file=str(tmp_path / "owned.media"), content_hash="e" * 64,
+                duration_ms=1_000, width=320, height=180,
+                fps=RationalFps(numerator=25, denominator=1),
+                authorization_reference=authorization_reference, imported_at="2026-09-09T00:00:00Z",
+                metadata=extra_metadata or {},
+            )
+            AssetRepository(self.db).create(asset)
+            return asset
+
+    with TestClient(create_app(path, media_importer_factory=lambda db, root: FakeImporter(db))) as client:
+        response = client.post(
+            "/uploads",
+            files={"file": ("owned.mp4", b"video bytes", "video/mp4")},
+            data={
+                "authorization_reference": "creator-owned",
+                "source_kind": "user_asset",
+                "ip_profile_id": str(profile.id),
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    assert received == {
+        "ip_profile_id": str(profile.id),
+        "reuse_role": "ordinary",
+        "lifecycle_state": "active",
+    }
+    assert response.json()["metadata"]["ip_profile_id"] == str(profile.id)
 
 
 def test_browser_upload_imports_authorized_audio_without_source_path(tmp_path: Path) -> None:

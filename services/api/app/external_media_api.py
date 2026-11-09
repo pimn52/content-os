@@ -53,7 +53,10 @@ def _service(request: Request, project_id: UUID, provider_name: str = "wikimedia
     provider = getattr(state, "external_media_provider", None)
     if provider is None:
         try:
-            provider = external_provider(provider_name, project, for_import=for_import)
+            provider = external_provider(
+                provider_name, project, for_import=for_import,
+                environment=getattr(state, "runtime_environment", None),
+            )
         except ExternalMediaError as exc:
             raise HTTPException(409, str(exc)) from exc
     return ExternalMediaService(db, Path(state.data_root), provider, importer)
@@ -74,7 +77,7 @@ async def _blocking(request: Request, action):
 async def providers(project_id: UUID, request: Request):
     if ProjectRepository(request.app.state.database).get(project_id) is None:
         raise HTTPException(404, "项目不存在")
-    return external_source_connections()
+    return external_source_connections(environment=getattr(request.app.state, "runtime_environment", None))
 
 
 @router.get("/searches", response_model=list[ExternalSearchResult])

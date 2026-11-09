@@ -1,0 +1,280 @@
+# 当前进度
+
+## 2026-11-08
+
+- 项目 R 的 DeepSeek 完整 6 场方案仅有一处图解契约错误：`diagram_loss` 给了 3 个节点。该结构本质可执行因果流程，已通用归一为 `diagram_flow`，保留全部节点和文案；真实响应离线解析为 6 场。项目 R 不恢复。
+- 项目 Q 的 DeepSeek 规划返回完整 7 场，唯一契约错误是把 `supporting_visual_intent` 误放到已有 stock 和 talking_profile fallback 的 explanatory 场景。产品现按场次类型清理该非承载注解；真实响应离线解析为 7 场。项目 Q 不恢复。
+- 项目 P 在 Kimi 规划持续 429 后改用本机已配置的 DeepSeek `deepseek-chat`：18.6 秒返回完整 6 场，但把两个已知 Creator Fit 字段误放进视觉意图。解析层现只清理该已知错位注解，未知有值字段仍拒绝；真实响应离线回放为 6 场。项目 P 不恢复。
+- 项目 M 已自主完成规划并执行首次 Voice/QA；自动返工准备阶段 33 ms 报 `unexpected_handler_error`，未调用模型。根因是同音别名 `斯多葛→斯多格` 已替换目标字后，旧 QA 修复清单仍尝试再次对“葛”施加拼音控制。现仅在字符数差证明已由别名覆盖时跳过重复控制；其它无法定位字符仍失败。Voice 配方/修复/生成 102 项通过，项目 M 保留为失败证据。
+- 项目 K 的普通 UI 运行在 Voice 入口因词条歧义停止：读音别名“斯多葛”在稿中重复时被旧“全稿唯一短语”规则误判。已改为读音词条作用于全稿所有出现位置，标点边界仍保持唯一上下文；回归通过。项目 K 不恢复。
+- 项目 L 的 Provider 响应是完整 6 场方案，仅单处 JSON 键为 `"deviation_risks:[`（ASCII 冒号前漏闭合引号），已纳入同一窄协议修复；既有真实响应离线解析为 6 场。项目 L 不恢复。
+- 项目 J 的第二次 QA 证明术语级数字拼音序列在 W13 上仍不稳定：`SI1 DUO1 GE2` 被识别为“斯多吉”。已增加 Provider 私有同音别名能力：允许逐字同音、同声调的中文别名进入 Provider 文本，例如“斯多葛 → 斯多格”，可见文案不改。该别名作为 Voice Profile 词条保存和审计，不按整句改稿；Voice 配方/修复/生成 100 项回归通过。项目 J 不恢复。
+- 项目 I 的自动返工真实执行并完成第二次 Voice，但第二次 QA 仍把重复术语“斯多葛”识别为“斯多噶”。证据显示单字 `GE2` 控制的音节边界不足；已把通用修复增强为：纠音字符若位于全稿重复、至少三字的 CJK 术语中，则对该术语位置生成完整拼音序列 `SI1 DUO1 GE2`。不写死整句，可见文案不变；Voice 修复/生成 88 项通过。
+- 普通 UI 项目 H `fdc36701-68ac-47a1-8d8b-ec90a167bc21` 单次启动材料召回归修复后：Planning 160.9 秒完成，Voice 44.0 秒完成，Voice QA 66.7 秒后停止。真实 ASR 暴露 3 段可定位问题（`葛→噶`、可定位缺字“只”、`是→吃`），其中一段还同时带同音等价记录；旧批量返工只允许纯替换，导致仍停人工诊断。现允许“缺字+未解析替换+已解决同音记录”混合段，要求修复数与未解析问题数完全一致，同音异形字不再产生无关拼音控制。原有失败 Audio 的只读重算计划已从 `stop` 变为 `regenerate_take/whole_take`，Voice 修复/生成 87 项通过。项目 H 不恢复。
+- 普通 UI 干净项目 G `b0ff7544-5406-4f52-b2d8-533bd49f1a12` 单次启动 Job `ed4f3823...`：规划 218.3 秒完成 5 场，含本人出镜与图解，但素材阶段因 `s4-tonight-method-part-1` 未解析停止。复核发现现有素材库已有“台灯下手写日记”和“古罗马石柱”等合格素材，召回却把整段旁白与短画面意图混搜，导致视觉关键词被稀释、精确素材未进入候选。已改为先按 `visual_intent.subject + action` 召回，零命中才用完整旁白宽召回；素材选择/分辨率/批次 84 项回归通过。项目 G 保留为失败证据，不恢复。
+- 普通 UI 干净项目 F `197e6c26-63bb-4836-b8d4-1a289a9429af` 单次启动 Job `d53e5540...`，规划 59.5 秒后因 Provider JSON 的 `"deviation_risks：[]`（中文冒号且缺闭合引号）报 `scene_planner_response_invalid`。其余 6 场完整响应含 2 场本人 A-roll、3 场真实 stock 需求、1 场真实分叉图解；已增加仅修复未转义 ASCII JSON 键分隔符的协议归一，完整 schema 与内容规则不放宽。失败响应离线回放已解析为 6 场；场景规划/API 231 项通过。项目 F 保留为失败证据，不恢复。
+- 普通 UI 干净项目 E `ffbb7fb0-15e8-40ad-9fd5-375d90079a8f` 单次启动：Planning 198.6 秒完成，7 场方案含 2 场本人 A-roll、2 场罗马/沉思相关 stock、唯一关系图解；Voice Job `b488454a...` 46.2 秒后失败为 `voice_output_invalid`。根因是通用系词规则把“区分它们的，是三个因素。”的句末控制落在已有段落端点，映射器重复切分导致伪失败。已让映射忽略已是段落端点的重复 break，新增通用回归；既有失败输出离线回放映射为 10 段成功，未放宽可见文案、声音或 QA。项目 E 保留为失败证据，不恢复。
+- 回归修复：`test_crop_assessment` 的素材夹具未绑定项目自动创建的 IP，新启用素材隔离后被正确排除。保留“有 IP 时必须精确归属”的规则；无 IP 的通用项目只允许未归属本人/历史/AI 素材，禁止使用已归属别的 IP 的素材。补齐夹具和 scope 正反例，裁剪评估与素材治理 9 项通过。
+- 用户判上一片 `render:49561326...` 产品不通过：无 A-roll、全流程卡/PPT 式 B-roll、未用应景斯多葛外部影片、Voice “痛苦→痛哭”，且对普通 UI 总调试耗时不满。
+- 复核确认 A-roll 缺失根因是 Talking 派生结果错误占用参考原片区间；修复后同项目 Talking pool 从 566ms 恢复为 7 条、usable/longest 均 12000ms。`test_source_usage.py`、`test_talking_pool.py`、`test_talking_scheduling.py`、`test_automatic_talking_sequence.py` 共 46 项通过。
+- Voice QA 已把任何未解析语义替换设为失败，旧“长稿小比例替换容差”不再放行；新增 `痛苦→痛哭` 严格失败测试。分段修复增加目标字符级拼音修正，`苦` 生成 `KU3`，支持多次出现时只改对应字符，不改完整句子或可见文案。
+- 新增 Voice 字级修复单元测试；Voice/QA/语法/多音字/修复相关回归共 114 项通过。
+- 普通短视频规划加入真实画面主导策略：实拍约 40% 以上、最多连续两场文字/图解、具象主题主动请求应景 stock；身份能力可用时保留 A-roll。为避免普通规划请求超限，将长策略移到自动制作上下文并压缩固定提示；场景 API 20KB 回归通过。
+- `SCENE_PLANNING.md` 已写明普通视觉策略和 A-roll 条件；`TALKING.md` 已写明身份参考不计可见占用、派生输出独立记账。
+- 当前服务仍是修改前实例；待完成联合回归、文档检查、预算核对和服务重启后，再通过普通 UI 只启动一次干净毕英杰项目。
+- P6 普通 UI 技术主链已完成：项目 `356a2d38-b495-47b3-9062-5c224d13f8cf` 单次启动 Job `838cdcfe-920b-493e-9da5-3a3e5f9018c4`，Run `413e0e7d-6cce-4926-a77b-fe9e71b74611` 的 Planning、Voice、Voice QA、Render 四个 Job 均为 `attempt=1/completed`。
+- 最终 Render `49561326-c355-4fe2-8fbc-15886604bfef` 为 18.100 秒、1080×1920、30 fps、543 帧、681,444 bytes；SHA-256 `359f9f4c8b58feac92471c498303d27949c07334c4f3810a545cec87dfd45186`。HTTP Range 可用，FFmpeg 未检出长黑帧或长断音。
+- 全片 4 场为本地 headline/文字卡、流程图、信息损失图和因素图，0 外部素材搜索、0 导入、0 stock、0 AI 画面；4/4 Creator Fit matched。Voice Audio `5bce0e4d...` 为 recipe v6/W13，独立 QA verified、missing/duplicate 0。
+- 已生成证据 manifest 和 4 帧联系表。技术闭环完成，但整片质量仍 pending，当前停在用户对 `render:49561326...` 的最终判断；未进入第二主题。
+- P6 普通 UI 新项目 `b2f97997-a05d-49a2-9cd4-881e83c74e89` 单次启动 Job `ca7f85ab-cec1-420d-9467-b29a577874dc`；规划 4 场全本地图解，Run `5f7a44dc-21ce-4df6-bb9f-0b24bf9f82c2` 完成规划、Voice（Audio `f64acc18...`，32.090 秒）后在 Voice QA 停止，未恢复或重试。
+- 原始 QA 根因：ASR 数字书写差异被误判缺词；同音字形识别沿用过窄的“唯一字典读音”规则；Voice 修复还把自动 performance plan 的 Draft `null`、本地 ASR 的商业/许可/质量标签和 ASR 合法分段接缝误当成阻断。
+- 已完成通用修复：spoken quantity 语境归一（`两千年前`/`2000年前`、`三步`/`3步`）；pypinyin 上下文默认读音等价；QA 持久化实际 ASR execution receipt；修复不把商业档/许可标签当门禁；分段修复核对有序 token 而非逐段对象同形；执行身份变化明确失败。
+- 原失败 Audio 的零付费离线重判现为 verified：missing/duplicate 0，3 个同音字形记录，1 个有界替换保留；未修改原库 Audio 的失败 QA 记录。
+- Voice 完整回归 101 项、Python 编译、`git diff --check`、文档治理与能力索引 `--check` 通过。下一步需重启 API/Worker，在普通 UI 新建干净项目继续主链，不复用失败 Run。
+- 后续普通 UI Run `a4c52439...` 生成 Audio `9c710ce3...`，QA 精确定位仅第 5 段漏词；已修复逐段/整片 ASR 合法接缝比较，以及故障段与整稿重音 cue 不重叠时复用前序已执行重点。当前旧 Run 只读修复计划为 `regenerate_take`，但按约定不恢复。
+- 新项目 `1840d90b...` Planning 失败 `graphic_realization_unsupported:s0-hook`：模型正确声明开场只有标题、没有虚构图关系。普通全本地约束现将 `unsupported` 开场归一为受支持的 `text_card/headline`，对比与要点分别使用 `contrast/key_point`；普通自动制作默认仍禁止用文字卡绕过缺素材。规划、预检与自动制作相关 106 项回归通过。
+- 用户提供 TIM 与毕英杰的 B站、YouTube 主页；公开核查另确认两人抖音官方号。共关联 6 个只读账号、导入 30 条真实历史记录。小红书两账号均停在登录墙，未确认、未猜测。
+- 毕英杰 Profile 升级 v4：西方哲学经典、思想史/宗教学、学者访谈、哲学与 AI/创业、遗址行走；TIM v2：数码科技、影像设备、视频制作与平台分发。历史预算改为最多 8 条并按账号轮转，避免 B站挤掉 YouTube/抖音。
+- 两条新的普通 scene-plan 真实完成：毕英杰 `2e74295e...` 5 场/46 秒，TIM `45036960...` 5 场/60 秒，均 5/5 `creator_fit=matched`，引用 3 账号和 8 条跨平台历史。内容事实和最佳支柱粒度仍待人工复核。
+- 规划兼容修复：模型返回未知或过短的 `preferred_clip_id` 时清空槽位提示并继续正常调度；已知阻断素材仍拒绝。Creator Fit 同义字段/无害附加字段、整数形式时长和非正时长估计在契约前归一化。相关规划测试通过。
+- P4 开始：普通视频导入默认绑定当前 IP；本人、历史、AI B-roll 必须显式属于当前 IP，stock 可共享。素材分析保存最多 8 帧 dHash，新增近似重复、active/archived、引用影响查询；归档退出新选材但保留历史关系。
+- Schema 62 新增 `asset_governance_events`，schema 63 用数据库触发器禁止事件 UPDATE/DELETE。导入、归属/分类、生命周期、指纹和近似重复扫描由 Content OS 自动写事件；普通 UI/API 可读完整事件链与引用影响。旧 72 Asset 只回填 72 条 `snapshot_initialized`，不伪造历史。
+- 真实库 72 Asset、253 Clip；3 个主素材已回填 3/8/8 帧指纹，距离阈值 12 内无近似重复，引用数 23/21/157，均 `delete_safe=false`。视觉描述仍 80/253，图片/音频统一生命周期未完成。
+- P4 视觉证据覆盖收口：Asset readiness 现在返回 Clip 总数、已描述数、缺失 Clip 和创作者归属；普通 UI 优先当前创作者素材，再排其它绑定素材、共享 stock、旧库未绑定素材和归档项。真实缺口可直接通过既有 `INDEX_CLIPS` Worker 每次有界补最多 4 个 Clip，缺描述不成为入库或出片硬门。真实库仍为 80/253；3 份创作者主素材为 50/198，其中 TIM `b98...` 缺 134 个、毕英杰 `b534...` 缺 11 个、`e665...` 缺 3 个。证据见 `content-os-data/evaluation-evidence/p4-visual-coverage-20261108/validation.json`。
+- P5 第一阶段开工：新增 `publishing_learning` 能力权威；完成 Render 输出目录返回确切 `render:<render_id>`、Run、分辨率、时长和文件可用性。发布与成片反馈接口拒绝草稿/失败/未知版本；发布包装保存标题、描述、封面取帧、平台账号、URL/ID、指标来源和观察窗口。普通 UI 改为选择实际成片，下一轮建议读取最近 4 条反馈与最近发布指标，不把单作品表现直接归因。
+- P5 历史节目绑定：HistoricalContent 现可绑定同 IP 本地 Asset，并保存官方原帖 URL、可用性、发布时间与独立证据引用。毕英杰 B站官方 `BV1QFgMzDEMh` 已绑定 `e665...`，保留 35.9 万播放和 967 弹幕；TIM《清晰度不如4年前！视频变糊是你的错觉吗？》的 B站与 YouTube 官方原帖已各建一条 `removed` 记录并绑定 `b98...`，官方指标保持 unknown，B站 `BV1ewTg6TEWt` 与 YouTube 补档只作内容对应证据。写库前备份 `.tmp/p6-production/before-p5-source-publication-links-20261108.sqlite3`。
+- P5 最小运营闭环：schema 64 新增不可覆盖 `publication_metric_observations` 与禁止 UPDATE/DELETE 的触发器；普通 UI 可为发布记录追加时间窗口指标。基线只比较同创作者、同平台、同观察窗口作品的中位数值，0/1/2+ 对照分别标为不足/初步/可比较，并进入现有下一轮建议。真实库当前无发布记录，基线实机返回 `no_publication`；自动发布、自动指标同步、评论挖掘、实验管理和多平台包装生成明确暂缓。
+- P4 回归：素材/指纹/导入/规划/路由/预检相关后端测试通过；前端 112 项通过；TypeScript 与生产构建通过；Python compile 和 `git diff --check` 通过。
+- 用户要求继续 P3；已恢复任务计划、调查记录和进度文件。P3 进入实现阶段，先补普通 IP 资料表单、按主题筛选的 Creator Brief、规划适配依据和稀疏资料降级。
+- P3 普通 UI 已补齐 IP 定位、内容支柱、常讲主题、知识、观点、词汇、钩子、风格、边界和避免表达；保存请求不再丢失 `topics`、`vocabulary`、`common_hooks` 等已有字段。
+- `creator_planning_brief` 改为按当前主题选择有界条目，排除身份/同意/metadata，对 URL、邮箱和长号码脱敏，并返回 `structured`/`topical_only`/`empty` 状态；同一 Creator Brief 的两个合成主题已验证会选取不同知识与观点，身份和边界保持稳定。
+- `ScenePlan` 新增 `creator_fit`（内容支柱、主题适配理由、受众价值、知识与观点引用、事实缺口、偏离风险）；引用不存在于本次 Brief 的字段会被清洗并明确降级，缺失适配依据时为泛化建议，不增加出片硬门。普通前端在每场草稿中显示该依据。
+- 用户指出旧 Profile 实际克隆的是毕英杰，且本机另有一份 TIM 长素材；已停止从 33 个测试项目推断内容支柱，改为读取授权源素材。
+- 已通过产品 API 将毕英杰 Profile `65ed92be...` 更新到 v3：西方历史、古典文明与思想研究；内容支柱为古希腊罗马历史与古典文本、西方思想史与文明比较、海外遗址与实地讲解、语言学习与跨文化理解。源素材 `e665...`、`b534...` 及对应 Voice/Talking Profile 已写入证据引用。
+- 已通过新增的普通 `POST /ip-profiles` 接口创建 TIM Profile `09f4099c...` v1：数码科技、视频技术与影像；内容支柱为视频画质/编码/平台压缩、摄影摄像设备、消费电子与技术原理、平台技术与分发机制。视频技术长片 `b98...` 已绑定为 TIM 来源。
+- 将 `b98...` 绑定 TIM；`e665...`、`b534...` 绑定毕英杰。厨房/儿童演示素材 `7c7c...` 未绑定任何创作者。数据库修改前备份为 `.tmp/p6-production/before-p3-creator-profiles-20261108.sqlite3`。
+- 普通 UI 新增创作者档案切换/新建、平台分区/赛道、公开账号链接字段；只读账号与历史内容可归属 IP。规划上下文仅使用实际导入的历史标题/说明/指标，链接本身不冒充已分析。
+- `f22e0bac...` 明确降级为技术链基线，不再作为毕英杰内容/赛道样片；后续整片需按对应 Profile 选择主题。
+- P3 真实双主题规划通过同一普通 scene-plan 路径执行：毕英杰项目 `828efdd8...` 生成 4 场、约 42.5 秒，`creator_fit` 全部 matched，使用古典文本/文明比较/遗址讲解/语言学习支柱；TIM 项目 `2eb0b8aa...` 生成 6 场、约 33 秒，全部 matched，使用视频画质/编码/平台压缩支柱。两次 K3 调用均 completed，费用未知；全局账目 383/400。
+- 两个真实 plan 的文案事实性仍需人审：毕英杰稿选用了《伊利亚特》开篇词细节，TIM 稿使用了若干平台压缩/编码概括；这是内容事实复核，不是赛道漂移。公开账号链接尚未提供，历史导入与分析仍待账号 URL。
+- 基于 33 个项目主题整理了一份未保存的 Creator Brief 提议 `proposed-creator-brief.json`；测试提示词和产品实施要求未被自动当作创作者本人观点，待用户确认后再写入真实 Profile。
+- P3 回归：规划输入/场景规划/场景计划 API/M1 API/草稿修订相关后端测试通过；前端 112 项通过；TypeScript 与生产构建通过；文档治理、能力索引、JSON 和 `git diff --check` 通过。未产生真实模型调用。
+- 用户直接比较后判定参考质量 v2 候选 `47fc4760-b810-4d63-9c9f-8ee6afa5296e` 的口型同步比已通过基线 `3be87b3f-eab8-48ea-82f9-992afb5722f2` 更差；`3be87b3f...` 保持唯一通过基线，v2 自动排序撤回，指标只保留诊断。
+- 完成 LatentSync 单次任务时长基础收口：本机历史 `4460ms` 旁白输入通过、`5120ms` 技术通过但人审质量下降；当前记录明确 6 GiB VRAM 低于官方 `6.5GB`。W52 精确 scope 保存 `max_talking_duration_ms=4460`，状态为同机历史保守上限、当前 runtime 尚未重新质量验证，来源 manifest 为 `content-os-data/latentsync-duration-boundary-20260915/manifest.json`。
+- 修正普通调度 provenance：Talking Job 的时长上限会记录 `machine-setting:max_talking_duration_ms:<setting_id>` 来源；长旁白仍按完整 ASR 语句拆分，每个 Job 不超过当前机器/runtime 上限。普通参考窗口改为最早的未占用有界窗口，v2 分数不再自动排序。
+- 已将 `47fc...` 的 `rejected` 人审写入确切 Asset，保留 `3be87b3f...` 的 `approved`；新增人审证据文件。修改数据库前通过 SQLite backup API 备份到 `.tmp/p6-production/before-talking-review-and-reference-policy-20261108.sqlite3`。
+- 验证通过：Talking 核心 95 项、关联调度/池/自动序列/运行设置/能力文档 59 项；`check_docs.py`、能力文档同步 check、3 个 JSON 解析和 `git diff --check` 均通过。未调用模型，未跑全片。
+- 将 `max_talking_duration_ms` 接入现有“Provider 与本机高级设置”：后端 schema 提供 `4460ms` 整数默认，普通 UI 自动渲染输入、帮助和来源；当前运行配置提供可解析 scope 时自动选中 W52 runtime + machine，无法解析时保留默认并要求用户填写本机标识。
+- 调度层增加 `4460ms` 默认兜底，未保存本机覆盖时也会按该初值拆分任务，而不是只显示不生效；保存覆盖的 provenance 仍为精确 machine setting，默认值来源明确为 `default:max_talking_duration_ms`。
+- 首次定向回归出现 3 个失败：两个旧夹具缺少 `capability` 属性，一个断言误把新增参数后的数组第 0 项当推理步数。修正为 Talking 能力兜底和按 key 查找；相关后端 98 项通过。
+- 当前真实运行库只读验证：高级设置接口返回 W52 runtime + `LAPTOP-UO337HJH` active scope，动态 schema 含 `max_talking_duration_ms`，当前值 `4460`、来源 `user_override`；额外状态与 manifest 引用仍保留。
+- 补充执行设置路由/Provider 执行 14 项通过，后端相关合计 112 项；前端全量 112 项通过；生产构建通过。首次全量测试曾有一个既有 SourceViewport 时序用例失败，单独与随后全量复跑均通过，未修改该模块。
+- 创建并执行 W52 边界校准 Job `6a130a5a...`：使用完整 ASR 语句组 19000–23170ms（4170ms，低于 4460ms 上限）和参考 5000–9500ms（4500ms，覆盖 4480ms 模型窗口）。Job attempt=1 完成，Asset `8da57bd1...` 为 4200ms、105/105 帧、技术 QA verified、时长差 30ms。
+- 生成普通播放、2x 慢放和联系表；本地 motion observation 为 correlation `0.2737`、motion lag `280ms`，只用于诊断。当前人审状态 pending，不能据此宣布 W52 或 4460ms 质量通过。
+- 用户指出末字听感/口型问题。实际末词是“来拆”，不是“来猜”；词级时间定位为“来”3330–3570ms、“拆”3570–4170ms，音频峰值约3600ms、嘴部峰值约3800ms，显示约200ms局部滞后。嘴在4160ms已闭合，最后30ms无再张嘴，分类为末字 viseme 时序而非尾音收口。
+- 核对历史尾音收口：D6g 的 600ms lookahead 视频、末六帧、Voice QA、Job 结果和代码测试存在，但没有独立不可变人审记录；当前 W52 未复验且本次候选 `terminal_face_closeout=false`。已新增权威说明和 D6g 证据 manifest，明确它只解决说话结束后嘴巴继续动，不解决末字内部口型。
+- 将词级末字诊断接入普通 Talking QA probe：使用持久化 `voice_word_timing` 的最后 3 个完整词，输出每词音频峰值、嘴部峰值和局部差值；验证规则、文档和真实 W52 输出均通过。
+- 完成 W52 收口匹配 A/B。首次收口 Job `628e8758...` 因派生音频未继承 Voice 人审元数据而在推理前失败，未调用模型；复制原确切人审后另建 Job `fe32771e...`，旧失败保留。匹配无收口 Job `f2517261...` 与收口 Job 使用同一 4170ms 音频和 5000–10500ms 参考。
+- 匹配 A/B 结果：无收口 Asset `673e2593...` 的“来/拆”嘴部峰值偏移 `-200/+200ms`；收口 Asset `f5d08673...` 均为 `0ms`。两者 technical QA verified、4170ms 后无张嘴；整体 correlation 几乎相同。当前等待用户看并排慢放，不自动提升默认。
+- 用户人审确认收口候选的提前回头更符合尾句收束，整体优于无收口对照；但“拆”的嘴形仍不像，可能叠加模型保留的皱眉/表情。将该候选保留为“相对更优但未通过”，新增全脸和尾部近景并排慢放，不针对单字硬修。
+- 将词级观察扩展为嘴部开口与嘴宽：收口候选“拆”的嘴宽峰值从无收口对照 3880ms 提前到 3680ms，更接近音频主体；但峰值/嘴宽仍无法证明音素级 viseme 形状，剩余问题继续保留人审，不以指标代判通过。
+- 追加同输入、同 reference 的 W52 750ms lookahead 候选 Job `0202face...`，Asset `a50b3c2b...` 技术 QA verified；“拆”的嘴宽峰值从 600ms 的 3680ms 再提前到 3640ms，3800ms 二次开口略降但未消失。生成 600ms/750ms 尾部近景 4x A/B，停止继续递增参数。
+- 沿 W43 crop proof 找到原始源 Asset `e665fa62...`：原片有 48kHz 双声道 AAC 和转写。参考 O 型约 8709–8742ms；small/medium 本地词级时间都落在原句“反而对中华文明有的新认知”的“反”。当前 5–10.5s 窗口把它映射到输出 3709–3742ms，正好在目标“拆”内。证据见 `source-reference-original-audio-identity.json`。
+- 同 Voice、同 600ms 收口追加 reference `4.500–10.000s` 候选 Job `0e13c413...`，Asset `62429a11...` 一次完成。源末词区间嘴部开口上限降低，但生成“拆”嘴部峰值从基线 `0ms` 退化到 `+480ms`，整段 level correlation 升高没有带来局部改善，已拒绝。证据见 `reference-shift-4500-10000.json`。
+- 语音学检查确认“拆” `chai` 应有非圆撮宽开口；候选在 3600ms 的 O 型最大开口违背该形状，3800ms 二次开口/宽度维持仍在。600ms/750ms 收口均未修复；参考窗口平移也验证不能只按“源嘴更安静”排序，保留原成果并停止参数硬调。
+- 产品端把 `f22e0bac...` 收口为“整体可用基线、Talking 未技术满分”：不再用局部嘴形/皱眉阻塞整片，当前 provider 参数搜索停止。该取舍写入 TALKING、D068 和计划，不新增形式门禁。
+- 核对成片 B-roll：4 场全部为 `local-typography` Remotion 图解，AI 图片/视频和外部 stock 均为 0，渲染 provider 成本 0。项目调用只有 K3 规划 1 次（费用未知）以及本地 OmniVoice、Whisper、LatentSync 各 1 次；没有图像生成。当前全局预算 400 次/449 CNY，已用 381 次，剩 19 次，已知金额 `50.2332 CNY`、54 条未知费用记录。审计写入 `broll-source-cost-audit.json`。
+
+## 2026-11-07
+
+- P2 继续优化：保留用户已通过的稳定短 Talking `3be87b3f...` 为基线，不进入 P3；下一步细扫参考窗口、修正运动指标歧义，并对有限 Talking 参数候选做 A/B。
+- P1 用户听审通过：Audio `9d68deed...` 的“最后/记住三步”重音候选获认可。用户明确该判断只作为确切版本的人审证据，不把两句变成单例规则；后续继续验证通用规则和可替代实现。P1 标记完成，进入 P2 Talking 同步。
+- P2 新增本地面部运动探针与参考窗口观察：普通调度比较最多 6 个前向无占用窗口；QA 保存脸部可见率、头部稳定性、嘴部活动和音频包络相关性，明确其不是 SyncNet/音素级口型通过。后续已撤回用 v2 分数自动排序。
+- 用 P1 已批准 Master 生成同 4 秒开场新参考候选 `963ef90a...`（参考 `5.000–9.500s`）和 2.04 秒稳定短语候选 `3be87b3f...`（Master `31.050–33.090s`、参考 `5.000–8.000s`）；两者技术 QA 均 verified，分别 100/100 与 51/51 帧，时长差 20/0 ms。
+- 本地运动包络观察：旧 Talking 相关性约 0.211；同 4 秒新参考约 0.196（运动峰值偏移约 40ms）；稳定短候选约 0.301（运动峰值偏移约 -80ms）。这不是口型质量通过，只作为候选解释证据。
+- P2 首个 4 秒生成尝试 `add27adf...` 因参考窗口 4000ms 小于 LatentSync 对 3980ms 旁白所需的 4480ms 帧对齐要求而失败，保留证据后改用 4500ms 参考；未重试旧 Job。
+- P2 Talking/调度/生产 Run/Handler/参考池联合回归 196 项全部通过；证据视频、参考/输出联系表和完整 manifest 位于 `content-os-data/evaluation-evidence/talking-sync-p2-20261107/`。当时等待用户视觉判断，未启动 Render；后续只通过 `3be87b3f...`。
+- P2 用户视觉判断通过：确认第三条 `candidate-stable-short-5-8s.mp4` / Asset `3be87b3f...` 可用；Human Review 已写入确切资产，结论不外推到其他参考窗口或其他 Talking 输出。P2 完成，下一步为 P3 IP/赛道理解。
+- 按用户要求继续 P2 优化：对授权参考 `0–12s` 做 500ms 步长、3 秒窗口细扫，当前公式最高仍是 `5–8s=0.7872`；`6.5–9.5s` 的头部稳定性和脸型稳定性更高，但综合分 `0.7742`，说明现有评分公式可能偏向嘴部活动。
+- 固定已批准旁白和 `5–8s` 参考，直接调用现有 Content OS LatentSync adapter 比较参数：默认 20 steps `0.301`；seed 0 `0.293`；28 steps `0.329`；36 steps `0.280`；28 steps + guidance 1.7 `0.294`。运动峰值均约 `-80ms`。
+- 选择 `28 steps` 作为唯一值得视觉 A/B 的实验候选，生成正常与 2x 慢放、以及与已通过 20-step 基线的并排慢放；未改变产品默认，未导入为产品 Job 资产。该候选当时待视觉判断，未获后续产品采用。
+- 继续交叉验证参考与参数：参考 `6.500–9.500s + 20 steps` 的 level correlation `0.4663`、motion correlation `0.399`，明显高于已通过 `5–8s` 基线的 `0.2619 / 0.3012`；同参考 `28 steps` 反而降到 `0.4548 / 0.3618`。
+- 参考质量评分升级为 v2，加入脸型朝向稳定性；通过普通 Talking Job 生成候选 Asset `47fc4760-b810-4d63-9c9f-8ee6afa5296e`，2.040 秒、51/51 帧、时长差 0、QA verified，motion correlation `0.3611`、level correlation `0.4604`。该候选后来于 2026-11-08 被用户视觉判断为比 `3be87b3f...` 更差并否决。
+- P1 开始：先定义通用语义焦点规则与正反例，再把焦点 cue 接入普通 Voice 的 provider-neutral 计划；执行方案必须保留 V60 身份，并停在用户听审，不进入 Talking/全片。
+- 新增 `voice_emphasis.py` 与 `test_voice_emphasis.py`：规则集 `zh-focus-emphasis-v1` 覆盖序列收束、数量框架、短断言和对照肯定项，并排除普通时间/数量用法；普通 Voice 自动生成 emphasis-only plan。
+- 普通 Voice Handler 现在可消费 emphasis-only plan：为精确焦点建立独立生成段、只提升对应 PCM 段、保存新 part/哈希，并把焦点后接缝排除在静音压缩之外；原有 pause、读音和其他 performance cue 路径保持分离。
+- 新增重音单模块项目 `d8de1ff5-635d-41b5-afda-a9bbf7515562`，与基线同稿；Voice Job `a824a0a0...` 完成，Audio `9d68deed...` 为 37.850 秒、SHA-256 `bb2b898b...`。`最后，` 与 `记住三步：` 均精确应用 +1.58 dB，焦点段分别独立生成。
+- 首次 Voice QA `81cc0aad...` 暴露真实缺口：焦点 PCM 已改，但 part 哈希仍指向未加重音频，QA 正确拒绝为 `voice_qa_segment_provenance_invalid`。失败保留，不重试同一 Job。
+- 修复为焦点 part 单独落盘并更新哈希；Voice Job `63ac3f28...` 重执行并复用同一最终音频字节，Voice QA `c4828053...` verified，coverage 1.0、missing/duplicate 0、7 个分段独立核验。
+- 真实 ASR 将“最後”和“記住三步”分别识别为独立焦点段；证据 manifest、基线/新音频重点片段和 SHA-256 位于 `content-os-data/evaluation-evidence/voice-focus-emphasis-p1-20261107/`。当前等待用户对确切 Audio `9d68deed...` 的自然度与重音听审，未启动 Talking/Render。
+- P1 定向回归 193 项全部通过，覆盖重音规则、音频 part provenance、Voice QA、Voice 配方、语法/异读、Handler、ProductionRun 与静音接缝；文档治理、能力索引、Python 编译和 `git diff --check` 通过。
+- 使用 `planning-with-files-zh` 恢复并重写本轮计划；只读核对 `START_HERE.md`、`STATUS.md`、现有运行证据、关键代码和真实 SQLite 数据，没有修改产品运行数据或生产逻辑。
+- 确认这次的问题不是完整片编排断链：`cf7a9b01...` 仍由普通 UI 的六个首次尝试 Job 完成；新的失败点是 Voice 焦点表现没有执行能力，以及 Talking QA 只验证容器/时长/帧数，没有验证真实口型同步。
+- 确认普通自动 Voice 不消费 `NarrationPerformancePlan`，当前 OmniVoice 对逐词重音能力为 `UNKNOWN` 且运行时 `instruct=None`；“最后”仅被识别为前向绑定，“三步”没有 emphasis cue。
+- 确认 Talking 使用 QA 后的 Master `dac14f3d...` 的 `0–3980 ms` 和授权参考窗口生成 `5867b5c1...`；问题不是配音顺序，而是模型/参考/装配责任未诊断，当前 QA 无 sync 指标。
+- 确认普通规划只传入部分 IP 字段；真实默认 IP 仅有 1 个领域和 1 个主题，不能证明产品理解创作者的内容支柱、知识、观点和赛道。
+- 确认真实库有 64 个 Asset、253 个 Clip；全部 Asset 的 IP/project scope 为空，只有 80 个 Clip 有视觉描述，没有近似去重或完整素材生命周期，不能把现有入库能力说成完整 IP 素材治理。
+- 确认发布/学习闭环尚不可用：真实历史作品、发布记录、反馈和机会均为 0，自动发布为 `not_developed`，因此不能声称已有运营闭环。
+- 已把模块缺口矩阵、Voice/Talking 单模块先后关系、IP/素材/发布学习阶段和不再用技术 QA 代替人审的原则写入 `task_plan.md` 与 `findings.md`；当前阶段停在规划，不调用付费模型、不跑 Voice/Talking/全片。
+- 已同步 `STATUS.md`：`f22e0bac...` 技术主链仍成立，但用户整片判断为 Voice 重音和 Talking 口型未通过；下一入口改为 Voice 重音单模块，不先跑 Talking/全片。
+- 已在 `DECISIONS.md` 固化 D058–D062：重音独立能力、Talking 三类同步责任、IP 内容策略、IP 素材归属/近重复和发布学习闭环的长期边界。
+- 本轮只文档收口：`scripts/check_docs.py`、`sync_capability_docs.py --check` 与相关 `git diff --check` 均通过；未运行模型、Talking 或 Render。
+- 记录工具差异：默认 `python` 命令不可用，改用项目 `.venv\Scripts\python.exe` 读取 SQLite；规划脚本已通过该解释器恢复。执行多命令时部分并行包装未保留 PowerShell shell，后续改用显式 PowerShell 调用。
+- 普通 UI 项目 `cf7a9b01...` 单次启动 Job `9596d4ce...`，Run `a301d7d4...` 自主完成 6 个阶段，所有 Job attempt=1：Planning、Voice、Voice QA、Talking、Talking QA、Render。
+- Voice 输出 `dac14f3d...` 为 35.980 秒、QA verified；真实 ASR 分段存在两处 20 ms 时间戳重叠，修复后的有界归一已实际写入 metadata。Talking 输出 `5867b5c1...` 为 4.000 秒、100 帧、1080×1440，QA verified、时长差 20 ms。
+- 最终 `render:f22e0bac...` 为 36.000 秒、1080×1920、30 fps、1080 帧，H.264 + 24 kHz 单声道 AAC，SHA-256 `D6EF75CA...`；无 ≥0.2 秒黑帧或 ≥1 秒低于 -50 dB 断音。成片为 1 段 A-roll + 4 个本地图解，不含外部实拍或 AI 画面。
+- 普通页面显示“成片已输出，待完整质量审核”。证据、UI 截图和联系表保存在 `content-os-data/evaluation-evidence/ordinary-ui-autonomous-v6-20261107/`，等待用户整片判断。
+- 最终普通生产联合回归 696 项全部通过，能力文档索引、文档治理、Python 编译和 `git diff --check` 通过。
+- 将 Voice 的两条已确认整句规则提升为通用语法能力：`contrastive_correction` 处理“不是 A，是/而是 B”，`resultative_predicate_completion` 在动词结果补语完成后建立边界；加入不同主语、补语、继续关系和“是不是”等正反例。
+- 当前 Voice Profile 升级为 recipe v6、delivery schema 1.4；删除“这不是跟风”和“步行道分开”两条 `punctuation_overrides`/`generation_breaks`，保留多音字语境规则与系词短补语规则。
+- v6 同稿 Provider 文本 SHA-256 与已批执行一致：`c89ddb6b...`。Content OS Voice Worker Job `148ab359...` 真实完成，输出 Audio `16ac63f2...` 仍为 `f5312d...`，与用户已批准音频逐字节相同；v6 执行记录写入 Audio，Profile delivery review 回到 approved。
+- 工作区调用上限从 330 最小提高到 331；当前 331/331、已知金额 39.1762 CNY、CNY 449 金额上限和未知费用许可未变。
+- Voice 定向回归 78 项、普通生产/素材/三能力/文档联合回归 627 项全部通过；能力索引检查、文档治理、Python 编译和 `git diff --check` 通过。修改前数据库备份为 `.tmp/p6-production/before-voice-syntax-v6-20261107.sqlite3`。
+- 之前两项 Talking 预览 remux 失败经单独复跑通过，确认是批次波动而非 Voice 回退。已清理 Voice 临时操作脚本和误生成的 `$null` 输出文件。
+- 普通 UI 已创建 v6 验证项目 `fd9cc5af...`：绑定 `Local Research Creator`、`creator_led`、固定 1080×1920，Start Job `c41ee49c...` 单次启动；浏览器通过本地 Edge CDP 操作普通页面。因当前项目选择仍是旧 ACFun，首次误启动旧项目 `09823a16...`，该 Run `bb286248...` 在 Voice QA 后停止并保留；未恢复，也不作为本目标结果。
+- 新项目 `fd9cc5af...` 完成 Planning、Voice、Voice QA 后停在 `automatic_production_stopped`。离线只读诊断复现为 `NarrationTimelineError`：ASR 分段 5 与 6 有 90 ms 时间戳重叠，文本 token 与 QA 通过结果完整。
+- Voice QA 新增 ≤250 ms 相邻 ASR 分段重叠归一：后段起点夹到前段终点，保留文本并记录归一证据；超过 250 ms 明确失败。Voice/QA/Master 时间轴 84 项定向回归通过。服务已停止，待重启后从新项目验证。
+- 重启后从普通 UI 新建不同主题项目 `4d016f49...`，Start Job `8634f31c...`，再次完成 Planning、Voice 和 Voice QA；随后停在 `material_scene_unresolved`。实测调度把两个非关键本人段投影为说明画面，但原 fallback 仅本地/历史资产，未允许 stock 补缺。
+- Talking 调度的 supporting cutaway 投影现自动加入 `stock` 低成本 fallback；本地/历史仍先比较，外部视频继续经过区间用途 QA。Talking 调度 15 项回归通过，新增“本地不足时 stock 可补缺”覆盖。
+- 不同主题项目 `d531f1db...` 中外部素材体系真实执行 Pexels 搜索 2 次、导入/分析 3 个候选并调用 Kimi 网页搜索/Fetch；`s3-takeaway` 的 stock 候选未通过用途核验，属于真实素材缺口，保留了证据。
+- “只用本人开头 + 本地图解”项目 `6b72f270...` 完成规划、Voice、QA 后停在 `talking_motion_capacity_insufficient`。根本原因是实测开头 5.7 秒被拆成 4.02/1.68 秒两个 speech part，全部仍要求 A-roll，而人物连续窗口 4.566 秒。
+- Talking 调度新增实测 speech part 降级：保留容量内第一段 A-roll，其余 part 保留原旁白并转为本地 `key_point` 字卡；普通未拆分本人段不降级。Talking 调度 16 项回归通过。
+- 审计两条已完成 Render 的自动 Run：`automatic=1`，Planning/Voice/Voice QA/Talking/Render Job 均为产品 Worker 的首次尝试，无恢复或候选 Run；同时如实记录开发期修复、配置和重启介入不能算成片内代做。
+- 创建 Voice 单模块项目 `30a15f11...`，复用前一整片的同稿、Voice Profile 和参考窗口。首个 Job 被 320 次调用上限在推理前拦截，保留失败证据；仅把调用上限提高到 322，CNY 449 金额上限未变。
+- Voice Job `596bb216...` 完成，生成 Audio `651458ec...` 38.690 秒；V60 v2 删除 4 个段落接缝的 590 ms 实测静音，语音帧、全局 speed 和未测静音未改。
+- Voice QA Job `70260b00...` 完成并 verified：copy coverage 1.0、missing/duplicate 0、2 个已容差识别替换；性能观察 alignment unavailable，不代判句末/逗号时序。
+- 用户指出上一版断句与“照明差”读音错误，单模块未通过。新增 recipe v3 交付控制：可见原文不变，Provider 私有标点、短语生成边界和 OmniVoice `CHA4` 注音可控。
+- 新 Voice Job `c0bd95a8...` 生成 7 段 Audio `baf2aa00...` 38.950 秒；Voice QA Job `be398c71...` verified。新音频在“跟风/是”间有 120 ms PCM 静音，在“分开”后也有 120 ms PCM 静音；CHA4 控制已发送。
+- 用户确认上述三处通过。针对新发现的“是+短名词补语”拆句问题，新增通用句法规则及其多主语/多补语测试，而不是继续追加一段具体文案修复。
+- recipe v4 的 `copula_complement_break` 将“最主要的原因是照明”绑定成完整谓语，并在“照明”后拆出独立生成段；显式已审短语与该规则重叠时，显式规则优先。
+- 新 Voice Job `5a6ee04a...` 生成 8 段 Audio `16ac63f2...` 39.260 秒；Voice QA Job `1b109112...` verified。ASR 将“最主要的原因是照明”作为完整段，下一句前有 120 ms PCM 静音。
+- 用户确认 v4 确切音频通过，Human Review 六项 pass，Profile delivery review 已 approved。证据固化在 `content-os-data/evaluation-evidence/voice-copula-rule-v4-20261107/manifest.json`。未启动 Talking/Render。14 组 338 项回归、文档治理与 `git diff --check` 通过。
+- 新增核心能力机器注册表 `docs/product/CAPABILITIES.json`，登记场景规划、Voice、Talking、生产资源调度及四个支撑模块的唯一权威、代码/测试入口和关联关系。
+- 新增 `SCENE_PLANNING.md`、`VOICE.md`、`TALKING.md`、`PRODUCTION_SCHEDULING.md`；原 `VOICE_TALKING.md` 改为纯跳转，避免 Voice/Talking 双份规则。
+- 新增 `scripts/sync_capability_docs.py` 自动生成 `docs/product/README.md` 与 `CAPABILITY_INDEX.md`；`check_docs.py` 校验唯一 marker、权威重复、路径、相对链接和索引过期。
+- 文档检查、生成脚本 `--check`、Python 编译，以及能力文档/场景规划/Talking 池/Talking 调度/自动生产/预检 6 组共 240 项测试通过；没有调用模型或修改产品运行数据。
+- 将 V60 Voice Profile 升级为 recipe v2，新增可查看的 `pause_hierarchy` 与 `seam_policy`；原库备份为 `.tmp/p6-production/before-voice-pause-hierarchy-v2-20261107.sqlite3`。
+- 普通 Voice 多段生成现实际执行已知段落接缝的实测静音压缩：每侧 60 ms、单次最多 300 ms、不改语音帧/不插静音/不改全局 speed；`no_break`、`forward_binding`、无静音和超限接缝保持原声并记录。
+- Voice QA、分段修复范围和最终分段时轴已适配；生成 metadata 保存 raw/final 哈希、边界语义、cuts 与跳过原因，QA 从原始分段重建最终 Master。
+- 定向与普通主链 13 组共 333 项回归通过；文档检查与 `git diff --check` 通过。既有真实 Voice 零付费回放 39,280→38,690 ms，4 个段间接缝分别删除 80/150/160/110 ms，预览未登记、未人审。
+- `test_maintained_voice_prepared.py` 3 项旧评估测试仍因已移除路由/旧系统探测失败，保留为独立历史事实，不计入普通链通过。
+
+## 2026-11-06
+
+- 普通 UI 新项目 `b9b52e65-6de0-4e7e-b39f-9380c62cc9d8` 单次启动；Run `d16fe150-e5fd-4b62-81d6-6d284e118435` 自主完成 Planning、Voice、Voice QA、Talking、Talking QA、实测重排与 Render。
+- Voice 输出 `a4481d21-9c77-44d5-84aa-17d1cac50168` 为 39.280 秒；metadata 固定 V60 人审质量锚、W13 runtime、`28.24–34.24s` 参考窗口和参数哈希，未使用 W51。
+- Talking 输出 `21ce64b3-b829-4dae-a5cd-63266e1ebd8c` 为 7.440 秒；QA Job `7305b83c-479f-4205-81d9-c506115b75ea` 完成，覆盖 1.0、时长差 20 ms、186 帧，Run 自动进入 Render。
+- 最终 `render:f9d8ce6a-5766-4c40-ab92-1eb95f9a83dd` 为 39.300 秒、1080×1920、30 fps、1179 帧，H.264 + 24 kHz 单声道 AAC；无 ≥0.2 秒黑帧、无 ≥1 秒低于 -50 dB 断音。
+- 修复 Voice asset_pts 哈希契约、Talking 子进程 `WINDIR` 和本人切镜 stock 来源补齐；相关回归通过。最终 Run 使用 1 场 Talking 和 5 场已核验 stock/本地库画面，没有用 AI 生成画面补位。
+- 发现 Voice capability 选择按更新时间而非当前 runtime，导致模型虽实际跑 W13、产物却带 W51 许可证标记。已改为按 provider/current runtime/machine 精确选择，并把本片音频与 Talking 的 `model_usage` 纠正为 W13；修正前库备份保留。
+- 工作区临时调用上限 360，完成时 320 calls、CNY 39.1762；技术验收后恢复原 320。当前等待用户判断整片质量和可发布性。
+
+## 2026-11-05
+
+- 通过 SQLite backup API 备份运行库后重放 `f4ab1d52...` 实测链路，确认六个 `visual_route_unresolved/capture_required` 根因：实测时长超过已选 Clip，且一个显式 `diagram_flow` 场景未被当作本地可执行备选。
+- 已修共享素材解析：显式 diagram/text_card 在可选原片不满足实测时长或用途时转本地 typography，其他实测长场景按既有标点拆分后复用合格片段。新增定向回归；material/preflight/automatic/measured/run 五组全部通过。同快照回放得到 7 场，预检 `ready_for_authorized_dispatch`，stops 为空。
+- 标准服务已重启，运行就绪为 true，完整 FFmpeg/ffprobe 9.0.2。普通 UI 新建项目 `6f39aaeb-49fa-4d46-befd-256a15eb6ba3`，创建后确认尚无自动制作；仅对主题输入点击一次启动，Start Job `7c27821c-500b-4ef9-89b5-d436b8dee192` 当前 planning。后续仅通过只读 API/UI 观察。
+- `6f39aaeb` 的规划先成功完成（4 场、约 31.5 秒），随后首次源视频用途核验在 2.5 秒内连接失败，Job `7c27821c...` 以 `material_video_analysis_failed` 停止，无 Run。已保留 `attempt-1.json` 和失败 Provider 调用；未恢复/重试。DNS 与 TCP 443 复查当前连通，按瞬时连接故障处理。
+- 未恢复失败 Job；通过普通 UI 另建空项目 `da2edfad-f926-494c-b7c2-65abc40b2af6` 并只启动一次，Start Job `72c16fa7-8c88-4853-ab00-9ccd4ce47967`。当前 planning 运行中，继续只读观察。
+- `da2edfad` 规划 178.9 秒完成，生成 Run `d959006e...` 并自动进入 Voice Job `1bdd8c2f...`；继续只读等待 Voice/QA/画面/Talking/Render。
+- `da2edfad` 的 Voice 与真实 ASR QA 均完成；QA 后实测画面解析自动通过，没有人工改稿、选材或恢复。方案无 Talking 依赖，Run 已自动派发 Render Job `5a53f20f...`，当前 render_running。
+- `da2edfad` 的 Render 在 69.1 秒完成，最终 `render:a971ec16-6ffc-4b7f-a95f-679c25314853` 为 37.433 秒、1080×1920、30 fps、1123 帧，H.264+AAC；SHA-256 `FED0F340E12D83A65AC6DB44890F58C614327B37F93D7805D4351E493344FBFC`。普通 UI 显示“成片已输出，待完整质量审核”。8 帧联系表无空白/断裂，FFmpeg 未检出持续黑帧或异常断音。停在这里等用户整片判断，不进入第二主题。
+- 完成“三大核心能力与资源调度”审计：规格定义为场景规划、语音克隆、对口型；本次真实运行覆盖前两项与 Voice QA、媒体重排、Render，未触发第三项。历史 Voice/Talking 产品对象、文件、QA 和常规 Worker 路径均保留；当前项目 Talking 池可用 7 条/12 秒。调度采用有界联合选材、真实 Master 时长和三能力工序链，不是数学全局最优。
+- 完成 Voice/外部素材/IP 二次核查：当前 Voice 参数与历史 W51 执行规格完全一致，但参考窗口变更为最早 0.24–7.24 秒，新音频仅技术 QA、人工复核 pending，历史“比此前最终版差”的判断未转化为最佳配方选择；自动路径尚不能消费 narration performance plan。外部体系代码已覆盖 API、公共目录、网页搜索/Fetch、public-page 和统一入库核验，但本次未实际外取，且只有 Pexels/Wikimedia/Kimi 有少量真实成功证据。项目虽绑定 IP，最终却是 0 A-roll，说明自动规划尚未把 IP 可见辨识度作为主约束。
+- 恢复普通 UI 自主成片验收。复核当前运行就绪度为 ready：规划、视觉、Voice、Voice QA、Talking、Render 均可用，embedding 未配置但本地词法 retrieval 可用；浏览器读取到失败旧项目仍在，未恢复、未重试。下一步创建干净项目并只启动一次。
+- 干净项目 `8d173d9e-5767-4ff3-ae88-bb9f0e06fc82` 在普通 UI 只启动一次，Job `0759df14-29d4-49fc-856d-2bc276ce7308` 于 planning 阶段 424 ms 失败；未进入 Voice/Talking/Render，未自动重试。证据保留在 `content-os-data/render-diagnostics/0759df14-29d4-49fc-856d-2bc276ce7308/attempt-1.json`。失败原因为标准启动回退到 Remotion 受限 FFmpeg，素材分析执行 `fps` 滤镜时报 `No such filter: 'fps'`。
+- 已修正本地媒体工具解析：优先使用 `content-os-data` 中带完整滤镜集的 FFmpeg/ffprobe 对，再由标准 `start.ps1` 注入当前 API/Worker 环境；运行时就绪接口不再把受限渲染工具误报为通用媒体能力。新增 `test_runtime_readiness.py` 路径选择回归，14 项通过；现场解析结果指向完整 FFmpeg 9.0.2。
+- 标准启动重启后预检显示完整 FFmpeg/ffprobe 9.0.2，运行就绪度为 true。通过普通 UI 新建项目 `69baa8d8-1314-4142-8938-ef6809dfeda0`，主题为“用三段式结构把一次长采访里的核心观点讲清楚…”，画幅 1080×1920；启动前自动制作记录为空。
+- 该项目已执行唯一一次启动，Job `99762330-9acf-4420-840a-e8b94f7296f6` 已进入 `plan_content` running。后续只读轮询，不点击恢复、结果页或人工复核入口。
+- 规划前素材用途核验已完成两批真实 Kimi 视觉调用：`282f9168...` 用时 40.4 秒、`7d5c2c22...` 用时 33.1 秒；分别记录 27,773/701 与 19,060/658 Token，第二批缓存 1,536 Token。两批均返回证据，当前 `kimi-k3` 场景规划请求正在运行。
+- 第三项目单次启动最终在 324.1 秒后停止：规划响应 `finish_reason=length`，8,195 个输出 Token 中 7,851 个是内部推理，正文 JSON 被截断，错误码 `scene_planner_response_invalid`。未创建 Run，未进入 Voice/Talking/Render；已保留 40 KB 脱敏响应证据，不恢复、不自动重试。
+- 根因是普通 UI 保存的 `planner_max_output_tokens=8192` 对当前 `kimi-k3` 推理输出不足，不是能力档、商业标记或产品准入。将仅提高这一输出上限并重启；保留既有 449 CNY 金额上限，不提高付费授权。
+- 已通过普通 UI 将规划输出上限改为 `32768`；模型仍为 `kimi-k3`，接口/输出模式/空思考参数/600 秒超时不变，未提高金额或调用次数上限。标准服务重启成功，预检仍使用完整 FFmpeg 9.0.2。
+- 配置修复后创建独立项目 `5ea78efe-ce32-405d-bdfa-a3852ba93ebe` 并单次启动 Job `e039833b-3238-4c2c-bf66-61c259d48f9a`；启动前自动制作记录为空，当前进入 `plan_content` running。
+- 该次规划 283.6 秒后完整返回 12,605 输出 Token（11,285 reasoning），但被旧契约以 `material_request_invalid` 拒绝：三场 `creator_speaking` 已明确保留本人可见讲解，却把可选切题插入画面写成了必须新取素材的请求。保留 4 场完整响应证据，不恢复。
+- 修复共享规划契约：`creator_speaking` 的本人出镜本身可执行，可选插入画面不再成为新素材前置条件；解析时保留 `supporting_visual_intent`，清除该段非必需 `material_request`。提示词同步明确此规则。场景规划相关 204 项测试通过，真实失败响应离线回放得到 4 场方案（3 场人物讲话）且无素材请求前置。
+- 服务已重启加载契约修复。创建最终交付项目 `0d18b51e-577c-4525-9c43-b188a7ac13b5` 并单次启动 Job `7db3fc54-6548-4e99-ae6a-9414820ba6f4`；启动前自动制作记录为空，当前进入 `plan_content` running。
+- 该项目真实生成并保存 5 场初稿，`kimi-k3` 规划调用 completed（5,532 输入 / 15,671 输出 Token），但在人物素材阶段停止：现有毕英杰 Voice/Talking Profile 虽带明确授权和参考 Clip，升级后 `ip_profile_id` 仍为空，默认项目 IP 无法匹配。
+- 已先备份数据库到 `.tmp/p6-production/before-profile-ip-binding-20261105-195542.sqlite3`，再把现有声音 Profile `29294db2...` 与两个已授权 Talking Profile `c47d4a97...`、`a478fa76...` 绑定到默认 IP `65ed92be...`，并设默认声音；未重写同意、参考 Clip 或媒体。
+- 随后发现人物池选择器仍要求旧素材自身带 IP 元数据，忽略已绑定 IP 的授权 Profile。已改为 Profile 或素材至少一方明确绑定当前 IP，双方都未绑定时仍不可用；`test_talking_pool.py` 7 项通过。重启后只读池从 unavailable/0 变为 available/7 entries、12 秒连续容量。
+- 重启后创建项目 `3541da38-07a4-4699-ba8d-038faa316801`，启动前自动制作记录为空且人物池为 available/12 秒；已单次启动 Job `f8a111a6-19b1-4a4f-9172-49c594e2a265`，当前进入 `plan_content` running。
+- 项目 `3541da38...` 的规划请求在 600.9 秒达到超时，错误 `scene_planner_temporarily_unavailable`；没有收到响应、Token 用量未知，后续步骤未执行。保留超时诊断与其他项目隔离，不恢复。
+- 已确认账目累计 217 次调用、25 次未知费用调用、已知推算金额 2.1692 CNY，仍低于 449 CNY 与 240 次上限。对当前 K3 将尝试降低推理强度并保留 32768 输出余量，以在不扩大金额授权的情况下减少会话超时。
+- 已通过普通 UI 将 K3 推理强度设为 `low`，输出上限仍为 `32768`、超时 600 秒、金额与调用上限不变；重启后新建项目 `e63100e9-c673-47c2-9f86-caf5724def11`，人物池 available/12 秒、启动前自动制作记录为空。
+- 已对项目 `e63100e9...` 单次启动 Job `defd729a-6a49-454c-a875-afee8e616bb2`，当前为 `plan_content` running；只读观察。
+- `low` 推理实际在 48.0 秒内完成 3 场、10.2 秒规划，使用 5,729 输入 / 1,516 输出 Token（其中 reasoning 408）；但模型多返回一个值为 null 的 `framing_note`，并被旧字段集拒绝。
+- 已收紧为兼容规则而非放宽内容：`visual_intent`/`supporting_visual_intent` 中额外字段仅当全部为 null 时剥离，有值的未知字段仍拒绝；`creator_speaking` 没有实拍 fallback 时只剥离不可执行的可选插入意图，保留本人出镜。场景规划与 API 共 205 项测试通过，真实失败响应离线回放为 3 场、10.2 秒、2 场人物。
+- 为防后续 Voice/Talking/Render 在中途因自设调用次数不足停止，已在普通 UI 将工作区调用上限从 240 提高到 320，金额上限仍为 449 CNY、未知费用仍允许；当前账目 218 次、已知金额 2.1692 CNY。
+- 重启后创建项目 `66833a9c-1c3c-4f17-84e5-905bb65cd97f`，启动前无自动制作记录、人物池 available/12 秒；已单次启动 Job `244929e5-85e8-4dcd-a1b4-3b97b3e3e5b6`，当前为 `plan_content` running。
+- 该项目取得实质进展：规划 33.6 秒完成，自动按人物容量生成一次视觉修订；随后真实 Pexels 搜索/导入 2 个竖屏采访候选并完成两批视频用途核验。自动重排结果为 2 场人物 + 1 场采访实拍，人物池 estimated 容量通过。
+- 最终在预检被 `material_source_unavailable:structure-causality:stock` 阻断。该场景已有可执行 `diagram_flow` 且首选 typography，stock 只是可选背景；旧预检对任何 `material_request` 一律报缺，已改为仅在无 execut​able graphic 时才把该请求视为必需。
+- 新增生产预检回归；`test_production_preflight.py` 与 `test_automatic_production.py` 共 52 项通过。失败项目与外部素材证据保留，不恢复。
+- 重启后创建项目 `b6213a2b-f487-46c4-852c-d163e9d199f3`，启动前自动制作记录为空；已单次启动 Job `a0a37e2e-ef1c-4983-b3c0-0efb6d333258`，继续只读观察后续真实工序。
+- 该项目完成规划、Pexels 获取、4 批视觉用途核验并进入 Voice；Voice Job `1759aaac-d02c-4004-8596-c6877a6200fa` 在推理前失败为 `voice_invalid_request`，未生成音频。
+- 根因是 Voice Profile 只绑定 71 秒授权源 Clip，缺少 5–10 秒确切参考窗口。已让自动生产从同一授权源、同一 ASR 时间轴确定性地选取最高排序窗口，并把精确 Clip/区间/哈希写入 Voice Job；不扩大授权来源，也不要求逐个短窗口重复确认。真实 Profile 只读验证得到 24 个窗口，首个为 `6.24–14.24s`。
+- Voice 选择、Worker 和生产派发相关针对性测试通过。旧评估准备测试的 3 个失败分别来自系统版本探测 mock 与已移除的旧评估 HTTP 路由，不计为普通链路回归。
+- 重启后创建项目 `8225304c-d59d-4376-8018-a85f95e6cbb5`，启动前无自动制作记录；已单次启动 Job `e8cf8592-becc-471d-9493-23751449c79c`。
+- 该项目规划在 95 秒完成并进入 Voice；Voice Job `8c17e1a8-5ccc-47d9-b51c-a548fe167bcf` 真实完成，生成 51.13 秒 WAV，用时 69.05 秒，调用账目完成。随后 Voice QA Job `4cd86129-ed6c-4ff1-ac90-10d12c386c3e` 在 11 ms 内因 `voice_qa_segment_provenance_invalid` 停止，未调用 ASR。
+- 根因是 QA 读取完整 WAV 时把相对路径 `content-os-data\...` 再次拼到数据根，形成重复目录；实际 WAV、4 个生成分段及各自 SHA-256 均正确。已修复为统一数据根前缀解析，并新增相对路径回归；Voice 分段 QA 5 项通过。
+- Voice QA 路径修复后再次真实生成并完成 ASR：目标文字无缺失，但 3 个生成段中的 2 段开头多出参考音频尾句“说几句吧”。此前自动选择偏向任意中段 8 秒，参考尾部内容被模型带入输出。
+- 已将自动参考排序改为优先授权源中最早的 5–10 秒窗口；真实 Profile 现选 `0.24–7.24s`，转写为“大家好，今天我想跟大家讲一讲，我去年暑假来到了希腊，来学古希腊语”，避开此前污染的“说几句吧”尾句。`test_voice_performance.py` 8 项通过。
+- 重启后创建项目 `381d12f5-e697-4ca5-a9d5-443ef9f2b4ad`，启动前无自动制作记录；已单次启动 Job `c3e3079d-8561-4743-8d03-4e67956bf17b`，继续只读观察修正参考窗口后的完整链路。
+- 该项目自动完成规划、2 次视觉修订、Pexels/Pixabay/public-page 检索与 3 次导入；最终因没有合格“后期剪辑界面”实拍，`detail-support`/收尾场景保留真实 stock 缺口而停止。候选被用途核验明确判为严重失焦，不能视作通过。
+- 这不是程序门禁：所需画面在可用来源中确实没有合格证据。为避免用无关素材硬填，下一轮改用更短、可由本人与图解完成的主题，不降级真实素材核验。
+- 已创建短版项目 `b6bdd8b2-2c98-460d-b5d4-5294e16a8819` 并单次启动 Job `0ab4da09-e422-4775-8788-2b2e76f486c2`，启动前自动制作记录为空；当前只读观察规划/素材/Voice/QA/Talking/Render。
+- 短版规划在 47.8 秒内完整返回但 JSON 被拒：某场 `visual_intent.description` 后缺少对象闭合括号，下一场景因此解析失败。已加入仅针对“description 后直接接场景字段”的确定性单空格修复，补完仍执行完整 schema 和内容校验；场景规划/API 205 项测试通过，真实失败响应离线回放为 4 场、31.5 秒方案。
+- 重启后创建项目 `f4ab1d52-f17e-4149-9938-8c1d0630a5af`，启动前自动制作记录为空；已单次启动 Job `8d313775-bb27-4ec0-9876-69fbc6e804c4`，继续只读观察完整成片链。
+- 开始 P6 收口→架构减负的全面准入核查。已读取 `task_plan.md`、`findings.md`、`progress.md` 和当前 diff；初步确认商业许可拦截已从普通链路移除，但发现 Talking QA 后的形式复核原因、旧文案和折叠区复核按钮仍是需要收敛的残留。
+- 已收敛自动主链：自动 Run 不再写预审/U 审待办原因，自动页面不再同时暴露手动 Voice/Talking 复核；批派发避免同事务二次重绑定；修复无图形素材错误的泛化原因。相关自动人物序列、批派发、生产 Run 与预检回归通过。
+- 清理架构负担：删除无调用者且测试已失配的旧 Talking 来源复核服务与旧 HTTP 测试；更新本地运行时配置测试和旧 Voice 授权断言。完整后端测试现可正常收集；普通创作核心与媒体交接两组联合回归通过，前端 112 项通过。
+- 最终准入核查通过：自动主链回归、素材/媒体交接、生产可行性、批派发、Voice/Talking、前端 112 项、前端构建和文档检查均通过；商业档与能力证据不再出现在普通产品硬门中。未调用真实模型，下一步才是普通 UI 新主题自主成片。
+- 用户要求拆除私设门禁。已发现普通生成依赖能力档案及许可证据，旧评估执行器还有操作员准入；正在核查真实调用链，尚未声称移除。
+- 更正此前表述：已核验 2026-10-19 本机真实 Talking 任务 completed；6.5 GB 是声明值，代码中未发现以此拒绝 6 GB 的判断。个人使用的非商业能力档可通过现有准入，不应将标注当作本次阻塞。
+- 普通界面设置现有本机运行配置，工作区与项目预算已按授权调整；备份原库后启动产品并从普通 UI 新输入一次。规划错误停止，未生成声音/口型/视频；已依据真实失败修复人物参考和补画的职责交接，相关规划及生产回归通过。未重试。
+- 使用原失败响应及源库副本离线验证，修复后 5 场规划通过、2 场人物段保留；不视为真实出片。规划响应 Token 记账修复及关联回归通过，已发生的失败账目未改写。
+- 普通 API 与 Worker 已加载修复，原失败任务仍停止，没有自动重试。运行设置与预检已通过本机界面配置；普通 UI 全流程仍待下一次新输入验证。
+- 接续主链：确认标准启动缺少规划配置时后台会退出；正在修复普通 Worker 对未配置能力的处理，并只读核对既有模型配置与账目，不恢复失败任务。
+- 标准启动缺规划配置的 Worker 崩溃已修，中文提示已补。普通生产、预检、配时与 Voice/Talking/Render 交接离线联合回归通过；测试未生成真实声音、人物或成片。
+- 纠正方向：外取围绕具体表达需求，获取后核验实际内容并复用事实，不再把“外部素材接入统一入库语义调度”列为缺口。现有初轮也可能按规划声明的 stock 需求直接取材，不能笼统称为已证明本地缺口。
+- 完成入库视觉结果与可得用量记账、同任务安全复用；外部历史任务失败时保留已有 Clip，片段缺失时不误报就绪。旧素材换源测试的随机失败来自新时间区间，已修正测试，没有扩大素材禁用。
+- 前端 108 项通过；后端素材、视觉、外部获取与生产相关回归通过，新增界面状态回归的数据库线程夹具修复后通过；文档检查通过。没有真实模型调用。
+- 已接通未付费任务的预算恢复和已保存结果的中断恢复，保留旧失败及不明调用。发现恢复任务不能按数量充当不同 Clip，已改为按 Clip 去重补派；预算保存和补派已放入同一事务。
+- 最新相关后端联合回归、预算 API 及前端 108 项测试通过，前端构建通过；界面补上当前进程缺视觉配置的提示。源库无工作区预算，真实工序复验仍未完成。
+- 完成私设门禁拆除：普通预检不再以能力档、非商业标记或许可证据缺失阻塞；Worker 自动记录实际 provider/model 的运行时配置，派发仅核对同意、授权、预算与媒体/QA 事实。前端 111 项、核心后端联合回归及文档检查通过，前端构建通过；没有真实模型调用，普通 UI 新主题仍需重启服务后复验。
+
+## 2026-11-04 补充
+
+- 当前继续收口工作区预算可用性、外部素材旧任务状态与已有 Clip 交接，以及已完成视觉结果的中断恢复；不另起独立素材实验。真实库只读备份副本通过 schema 61 迁移和账目、外键核对；未修改源库。
+- 用户确认方向：素材理解作为共用能力由入库触发，优先现有远端接口；本地模型保留可选边界，不引入强制安装。正在并行检查入库调度、生产复用与预算契约。
+- 已识别全局素材与项目账目归属不一致，以及单帧索引可能覆盖更强证据；优先修证据保留并梳理工作区账目和有界调用。
+- 已实现工作区预算账目迁移、新入库有界抽样和普通 Worker 接入；保存单片成果并保护已核验区间。夹具通过，外部获取去重、失败自动恢复和真实视觉调用仍待验证。
+- 入库、预算迁移、Worker、素材复用与普通生产的 11 组联合回归通过；沙箱内接口测试卡住，沙箱外重跑通过。未调用真实模型。
+- 又补齐中断补派、请求防重复、外部重复入库及并发写入保护。扩展联合回归发现一项测试夹具使用旧签名，修正后该项与关联 47 项通过、1 项跳过；其余联合回归项已通过。文档校验通过，真实模型调用 0。
+- 用户明确必要额度不是问题；当前先核实视频语义模块、入库与生产核验职责及开源方案，再按主线继续。
+- 已核实入库技术分析与生产期语义核验目前分离；正在检查已有证据能否安全复用和入库索引链路是否完整。
+- 普通上传/导入自动排入本地切镜与抽帧；已有 Clip 或既有分析记录不重复派发。后续已接入有界远程视觉任务，真实调用待验证。
+- 已修复召回候选挤掉相同用途已核验区间的问题；四组素材回归通过，真实模型未调用。
+- 联合回归发现同时间戳调用账目按随机 ID 排序导致顺序不稳定，已改为按写入顺序排序。新增测试初次因夹具缺项目触发外键失败，补齐后与补画交接复验通过。
+- 入库、证据复用、外部补画与普通自动制作联合回归通过；本轮未调用真实模型或外网，真实成片仍待验证。
+
+## 2026-11-04
+
+- 承接用户要求，建立简短计划；现位于第 1 步。
+- 已有本地回归覆盖预检、版本与请求重放、重启续接、配时交接和限定作品 Worker 的外取/画面调整。真实 Voice、Talking、Render 在同一新作品的交接仍未执行。
+- 下一步：审查现有真实主链及失败恢复，只修确定影响闭环的问题；按无需付费的范围验证，不重试封存运行。
+- 已修复 QA 返工准备异常导致无限轮询及并发旧诊断覆盖新状态；保留原错误码，具体障碍通过现有停止原因返回。语音、人物两类回归及普通自动制作联合复测通过。
+- 一次错误展示调整覆盖了原 Voice QA 错误码并导致回归失败；已恢复原状态契约并复测通过。真实模型与外网调用为 0。
+- 前端补充返工失败的中文提示；108 项前端测试通过。构建初次因沙箱限制读取父目录失败，改为沙箱外本地构建后通过。
+
+## 2026-11-09
+
+- 复核用户可见片 `render:49561326...`：主题输入显式禁止本人出镜、外部实拍、AI 画面并指定全本地流程图解；ScenePlan 四场均记录该约束，故 A-roll/stock 为 0 是测试输入导致，不是产品视觉策略的产品验收结果。
+- 复核旧 Voice QA：Audio `5bce0e4d...` 的实际 ASR 为“痛哭来自判断”，当时旧容差将未解析语义替换放行。现有严格 QA 与字级修复已进入代码，但尚未完成新的真实整片音频验证。
+- 核对最新自然主题项目 `944e0696...`：规划已产生两场本人讲话及配套可替代切镜，随后在素材用途核验阶段遇到 Vision Provider 429，产品在启动后 24.324 秒停止。下一步修通这类可再生运行故障，再完成自然输入的普通 UI 成片。
+- 确认旧 Run 的产品内总耗时 `205.397s`，其中 Planning `81.694s`、Voice `58.604s`、Voice QA `33.974s`、Render `28.728s`；一小时体感包含开发轮次，但单次 18 秒成片仍偏慢。
+- 补充普通规划的创作者视觉母题召回：基于 Creator Brief 的内容支柱和常讲主题扩展古籍、图书馆、遗址、书写等有界检索词，仅把已核验 stock 作为候选提示，并过滤“无书写/没有人物”等否定描述。
+- 补充已核验区间描述的本地复用：规划器明确选中 Clip、来源/字幕/连续性有效且镜头意图有至少两个非泛化词义相交时才复用；弱匹配、冲突或未核验素材仍走正常 Provider 用途核验。
+- 干净项目 `36277a3d-9dfe-4da3-a89f-be8b3961f868` 由普通 UI 单次启动完成 Planning（15.740s），方案为 2 场本人讲述 + 古典遗址/旧书翻页/夜间书写 B-roll；未发生视觉 429，也未重复分析已明确匹配的 stock。
+- 该项目 Voice 生成 36.885s，首轮 QA 检出来源术语“斯多葛→斯多哥/斯多噶”等问题并自动局部返工；返工修复“边界是→边界使”，但仍未解决术语 ASR 差异，修复额度耗尽后严格停止，没有进入 Talking/Render。
+- 新增字符串感知 JSON 尾逗号及 `,"}` 修复；真实失败规划响应离线回放得到 5 场，完整 schema 继续生效。相关场景、素材与预检测试通过。
+- Voice Profile 术语别名从“斯多格”调整为无歧义同音别名“斯多阁”，独立普通 Voice Job `137fa100-df7b-469b-bd42-35a869428366` 生成 5.760 秒 Audio `5aa3ba25-4083-4fe6-95f2-7cce89de43f7`；独立 ASR 仍识别为“斯多噶”，QA 保持失败，待用户听审确认真实发音。

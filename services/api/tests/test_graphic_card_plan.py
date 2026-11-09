@@ -101,7 +101,7 @@ def test_normal_draft_preflight_exposes_supported_card_or_stops_unsupported_need
             assert body["preliminary_edit_plan"] is None
             assert "graphic_realization_unsupported:caption-discipline" in body["stop_reasons"]
             assert body["scenes"][0]["suitability"] == "unknown"
-        assert "voice_capability_not_verified" in body["stop_reasons"]
+        assert "voice_capability_not_verified" not in body["stop_reasons"]
         assert body["dispatch_performed"] is False
         assert client.get(root + "/provider-calls").json() == []
 

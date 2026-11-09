@@ -128,7 +128,7 @@ class ProviderCallLedger:
     def __init__(self, db: object) -> None:
         self.db = db
 
-    def check_reservation(self, *, project_id: UUID, estimated_cost: UsageCost) -> None:
+    def check_reservation(self, *, project_id: UUID | None, estimated_cost: UsageCost) -> None:
         """Observe normal global/project limits without claiming or spending.
 
         Callers inserting work must repeat this inside their own DB write fence;
@@ -140,7 +140,7 @@ class ProviderCallLedger:
     def reserve(
         self,
         *,
-        project_id: UUID,
+        project_id: UUID | None,
         idempotency_key: str,
         operation: ProviderOperation,
         mode: ProviderMode,
@@ -184,7 +184,7 @@ class ProviderCallLedger:
     def reserve_execution(
         self,
         *,
-        project_id: UUID,
+        project_id: UUID | None,
         idempotency_key: str,
         operation: ProviderOperation,
         mode: ProviderMode,
@@ -252,7 +252,7 @@ class ProviderCallLedger:
     def finish(
         self,
         *,
-        project_id: UUID,
+        project_id: UUID | None,
         call_id: UUID,
         status: ProviderTerminalStatus,
         actual_cost: UsageCost | None = None,
@@ -305,7 +305,7 @@ class ProviderCallLedger:
     def _candidate(
         self,
         *,
-        project_id: UUID,
+        project_id: UUID | None,
         idempotency_key: str,
         operation: ProviderOperation,
         mode: ProviderMode,
@@ -347,7 +347,7 @@ class ProviderCallLedger:
     def _enforce_scopes(
         self,
         repository: object,
-        project_id: UUID,
+        project_id: UUID | None,
         estimated_cost: UsageCost,
         allow_existing_unknown_cost: bool,
     ) -> None:
@@ -356,7 +356,7 @@ class ProviderCallLedger:
         policies = BudgetPolicyRepository(self.db)  # type: ignore[arg-type]
         calls = repository
         global_policy = policies.get_by_project(None)
-        project_policy = policies.get_by_project(project_id)
+        project_policy = policies.get_by_project(project_id) if project_id is not None else None
         if global_policy is not None:
             enforce_reservation(
                 global_policy,

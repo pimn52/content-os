@@ -130,9 +130,9 @@ export function ProductionPanel({ projectId, draftVersion, scriptRevision, hasSc
         <button type="button" className="button" disabled={busy || draftDirty || run.status === "cancelled"} onClick={() => void perform("resume")}>续接当前执行</button>
         <button type="button" className="button" disabled={busy || run.status === "cancelled"} onClick={() => void perform("cancel")}>取消执行（后端校验）</button></div>
       <details><summary>诊断引用</summary><p>执行：{run.id}</p><p>状态：{run.status}</p></details></article>}
-    {run && run.status !== "cancelled" && <ProductionVoicePanel key={`${projectId}:${draftVersion}:${scriptRevision}:${run.id}`} projectId={projectId} draftVersion={draftVersion} scriptRevision={scriptRevision} run={run} request={request} confirmAction={confirmAction} onRunChange={setRun} />}
-    {run && run.talking_dependencies?.length > 0 && <ProductionTalkingPanel key={`${projectId}:${draftVersion}:${scriptRevision}:${run.id}:${run.preflight_fingerprint}`} projectId={projectId} run={run} request={request} confirmAction={confirmAction} onRunChange={setRun} />}
-    {run && run.render_job_id && <PresentationRecoveryPanel key={`${projectId}:${draftVersion}:${scriptRevision}:${run.id}:${run.render_job_id}:${run.status}`} projectId={projectId} run={run} request={request} confirmAction={confirmAction} onRunChange={setRun} />}
+    {run && !run.automatic && run.status !== "cancelled" && <ProductionVoicePanel key={`${projectId}:${draftVersion}:${scriptRevision}:${run.id}`} projectId={projectId} draftVersion={draftVersion} scriptRevision={scriptRevision} run={run} request={request} confirmAction={confirmAction} onRunChange={setRun} />}
+    {run && !run.automatic && run.talking_dependencies?.length > 0 && <ProductionTalkingPanel key={`${projectId}:${draftVersion}:${scriptRevision}:${run.id}:${run.preflight_fingerprint}`} projectId={projectId} run={run} request={request} confirmAction={confirmAction} onRunChange={setRun} />}
+    {run && !run.automatic && run.render_job_id && <PresentationRecoveryPanel key={`${projectId}:${draftVersion}:${scriptRevision}:${run.id}:${run.render_job_id}:${run.status}`} projectId={projectId} run={run} request={request} confirmAction={confirmAction} onRunChange={setRun} />}
     <small className="muted">执行记录从后台恢复。失败不自动重试；渲染完成后审核整片。</small>
     </details>
   </section>;

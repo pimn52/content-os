@@ -10,7 +10,6 @@ from uuid import UUID
 from app.db import (AssetRepository, ClipRepository, Database, ProjectRepository,
     ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, TalkingProfileRepository)
 from app.domain.models import Asset, Clip, ProviderMachineCapabilityProfile, SourceKind, TalkingPerformanceBrief, TalkingProfile
-from app.providers.local_generation import local_generation_ready, local_generation_licensed
 from app.providers.talking import TalkingInputError
 from app.source_usage import SourceUsageConflict, SourceUsageService
 from .reference_selection import select_talking_reference
@@ -86,8 +85,8 @@ def configured_talking_choices(db: Database, project_id: UUID):
             or clip.id not in profile.reference_clip_ids
             or asset.metadata.get("ip_profile_id") not in (None, str(project.ip_profile_id))
             or expected_hash is not None and expected_hash != asset.content_hash
-            or capability is None or capability.capability != "talking" or capability.provider != profile.provider
-            or not local_generation_ready(capability) or not local_generation_licensed(capability)):
+            or capability is None or capability.capability != "talking"
+            or capability.provider != profile.provider):
             return
         choices[(profile.id, clip.id, capability.id)] = (profile, clip, capability)
 
@@ -105,7 +104,11 @@ def configured_talking_choices(db: Database, project_id: UUID):
         for clip_id in profile.reference_clip_ids:
             clip = clips.get(clip_id)
             asset = assets.get(clip.asset_id) if clip is not None else None
-            if asset is not None and asset.metadata.get("ip_profile_id") == str(project.ip_profile_id):
+            asset_ip = asset.metadata.get("ip_profile_id") if asset is not None else None
+            # 升级前的素材可能没有身份元数据；已绑定当前 IP 的授权 Profile
+            # 足以登记这条关系。双方都未绑定时仍不跨身份猜测。
+            if (asset is not None
+                    and str(project.ip_profile_id) in {profile.ip_profile_id and str(profile.ip_profile_id), asset_ip}):
                 for capability in capabilities.list():
                     if capability.capability == "talking":
                         add(profile, clip, capability)
@@ -273,8 +276,11 @@ def build_talking_pool(db: Database, project_id: UUID, *, talking_provider=None,
         source = canonical[0]
         if source["end_ms"] - source["start_ms"] != clip.end_ms - clip.start_ms:
             continue
+        # Original source reuse remains available. Only changed Voice/Talking
+        # performances consume the motion interval as a conflicting new action.
         blocked = [(other["start_ms"], other["end_ms"]) for other in held
-                   if other["source_hash"] == source["source_hash"]]
+                   if other["source_hash"] == source["source_hash"]
+                   and not other.get("repeatable", False)]
         limit = capability.verified_parameters.get("fresh_voice_talking_duration_ms")
         if limit is None:
             setting = ProviderMachineSettingRepository(db).get_by_scope_key(capability.scope_key)

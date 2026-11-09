@@ -28,6 +28,7 @@ from app.domain.models import (
     NarrationPerformanceSuggestions,
     NarrationRhythm,
 )
+from app.voice_syntax import find_syntax_boundaries
 
 
 class NarrationPerformancePlanError(ValueError):
@@ -90,6 +91,13 @@ def derive_narration_boundary_map(copy: str) -> NarrationBoundaryMap:
                 values[end] = NarrationDeliveryBoundary(end, NarrationBoundaryKind.FORWARD_BINDING, f"{marker} binds forward")
                 values[end + 1] = NarrationDeliveryBoundary(end + 1, NarrationBoundaryKind.FORWARD_BINDING, f"{marker} binds forward")
             offset = end
+    for decision in find_syntax_boundaries(copy):
+        boundary_index = decision.char_index + 1
+        values[boundary_index] = NarrationDeliveryBoundary(
+            boundary_index,
+            NarrationBoundaryKind.TERMINAL,
+            f"{decision.rule_id}: {decision.reason}",
+        )
     return NarrationBoundaryMap(fingerprint, tuple(values[index] for index in sorted(values)))
 
 

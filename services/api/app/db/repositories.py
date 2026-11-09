@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, ShootTask, TalkingProfile, TalkingRun, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, VoiceProfile
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetGovernanceEvent, AssetUsageEvent, AudioAsset, BudgetPolicy, Clip, ContentFeedback, ContentOpportunity, HistoricalContent, ImageAsset, IPProfile, Job, Project, ProjectDraft, ProjectDraftRevision, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationMetricObservation, PublicationRecord, ShootTask, TalkingProfile, TalkingRun, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, VoiceProfile
 
 from .database import Database
 
@@ -334,6 +334,43 @@ class FeedbackRepository(_Repository[ContentFeedback]):
         return [_model(row, self.model) for row in rows]
 
 
+class PublicationMetricObservationRepository(_Repository[PublicationMetricObservation]):
+    table, model = "publication_metric_observations", PublicationMetricObservation
+
+    def get_by_event_key(self, event_key: str) -> PublicationMetricObservation | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM publication_metric_observations WHERE event_key=?",
+            (event_key,),
+        ).fetchone()
+        return None if row is None else _model(row, self.model)
+
+    def create(self, value: PublicationMetricObservation) -> PublicationMetricObservation:
+        self.db.connection.execute(
+            """INSERT INTO publication_metric_observations(
+                id, project_id, publication_id, event_key, window_hours, observed_at, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(value.id), str(value.project_id), str(value.publication_id), value.event_key,
+                value.window_hours, _utc_timestamp(value.observed_at), _payload(value),
+            ),
+        )
+        return value
+
+    def list_for_project(self, project_id: UUID) -> list[PublicationMetricObservation]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM publication_metric_observations WHERE project_id=? ORDER BY observed_at, rowid",
+            (str(project_id),),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+    def list_for_publication(self, publication_id: UUID) -> list[PublicationMetricObservation]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM publication_metric_observations WHERE publication_id=? ORDER BY observed_at, rowid",
+            (str(publication_id),),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+
 class ContentOpportunityRepository(_Repository[ContentOpportunity]):
     table, model = "content_opportunities", ContentOpportunity
 
@@ -414,6 +451,15 @@ class HistoricalContentRepository(_Repository[HistoricalContent]):
             "INSERT INTO historical_content(id, account_connection_id, external_id, payload) VALUES (?, ?, ?, ?)",
             (str(value.id), str(value.account_connection_id), value.external_id, _payload(value)),
         )
+        return value
+
+    def update(self, value: HistoricalContent) -> HistoricalContent:
+        cursor = self.db.connection.execute(
+            "UPDATE historical_content SET payload=? WHERE id=? AND account_connection_id=? AND external_id=?",
+            (_payload(value), str(value.id), str(value.account_connection_id), value.external_id),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(value.id)
         return value
 
     def list_for_account(self, account_connection_id: UUID) -> list[HistoricalContent]:
@@ -533,7 +579,7 @@ class ProviderCallRepository(_Repository[ProviderCallRecord]):
                    id, project_id, idempotency_key, status, created_at, completed_at, payload
                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                str(value.id), str(value.project_id), value.idempotency_key, value.status,
+                str(value.id), None if value.project_id is None else str(value.project_id), value.idempotency_key, value.status,
                 _utc_timestamp(value.created_at),
                 None if value.completed_at is None else _utc_timestamp(value.completed_at),
                 _payload(value),
@@ -557,10 +603,10 @@ class ProviderCallRepository(_Repository[ProviderCallRecord]):
             raise KeyError(value.id)
         return value
 
-    def list_for_project(self, project_id: UUID) -> list[ProviderCallRecord]:
+    def list_for_project(self, project_id: UUID | None) -> list[ProviderCallRecord]:
         rows = self.db.connection.execute(
-            "SELECT * FROM provider_call_records WHERE project_id = ? ORDER BY created_at, id",
-            (str(project_id),),
+            "SELECT * FROM provider_call_records WHERE project_id IS ? ORDER BY created_at, rowid",
+            (None if project_id is None else str(project_id),),
         ).fetchall()
         return [_model(row, self.model) for row in rows]
 
@@ -601,6 +647,30 @@ class AssetRepository(_Repository[Asset]):
     def get_by_content_hash(self, content_hash: str) -> Asset | None:
         row = self.db.connection.execute("SELECT * FROM assets WHERE content_hash = ?", (content_hash,)).fetchone()
         return None if row is None else _model(row, self.model)
+
+
+class AssetGovernanceEventRepository(_Repository[AssetGovernanceEvent]):
+    table, model = "asset_governance_events", AssetGovernanceEvent
+
+    def create(self, value: AssetGovernanceEvent) -> AssetGovernanceEvent:
+        self.db.connection.execute(
+            "INSERT INTO asset_governance_events(id, asset_id, event_type, occurred_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                str(value.id), str(value.asset_id), value.event_type,
+                _utc_timestamp(value.occurred_at), _payload(value),
+            ),
+        )
+        return value
+
+    def list_for_asset(self, asset_id: UUID) -> list[AssetGovernanceEvent]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM asset_governance_events WHERE asset_id = ? ORDER BY occurred_at, rowid",
+            (str(asset_id),),
+        ).fetchall()
+        return [_model(row, self.model) for row in rows]
+
+    def delete(self, item_id: UUID) -> bool:
+        raise ValueError("asset governance events are append-only")
 
 
 class ClipRepository(_Repository[Clip]):
@@ -691,8 +761,15 @@ class JobRepository(_Repository[Job]):
         rows = self.db.connection.execute(
             """SELECT j.* FROM jobs AS j
                INNER JOIN asset_job_targets AS target ON target.job_id = j.id
-               WHERE target.asset_id = ? ORDER BY j.created_at, j.id""",
+               WHERE target.asset_id = ? ORDER BY j.created_at, j.rowid""",
             (str(asset_id),),
+        ).fetchall()
+        return [_model(row, Job) for row in rows]
+
+    def list_for_project(self, project_id: UUID) -> list[Job]:
+        rows = self.db.connection.execute(
+            "SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at, rowid",
+            (str(project_id),),
         ).fetchall()
         return [_model(row, Job) for row in rows]
 

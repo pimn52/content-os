@@ -689,7 +689,7 @@ def test_master_narration_uses_verified_asr_substitution_at_real_segment_boundar
             authorization_reference="creator-voice", imported_at=NOW,
             transcript_segments=[
                 TranscriptSegment(start_ms=0, end_ms=900, text="原话质已经丢失的细节"),
-                TranscriptSegment(start_ms=900, end_ms=2_000, text="码率不足会丢失细节"),
+                TranscriptSegment(start_ms=850, end_ms=2_000, text="码率不足会丢失细节"),
             ], transcript_source="independent-asr:local",
             metadata={"voice_generation": {
                 "qa_state": "verified", "target_text": "源画质已经丢失的细节，码率不足会丢失细节",

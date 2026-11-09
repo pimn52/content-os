@@ -6,8 +6,10 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db import Database, IPProfileRepository, ProjectRepository
-from app.domain.models import IPProfile, Project, RationalFps, ScenePlan, SourceKind, VisualIntent
+from app.db import (AccountConnectionRepository, Database, HistoricalContentRepository,
+                    IPProfileRepository, ProjectRepository)
+from app.domain.models import (AccountConnection, CreatorFit, HistoricalContent, IPProfile, Project,
+                               RationalFps, ScenePlan, SourceKind, VisualIntent)
 from app.main import _scene_planner_from_env, create_app
 from app.providers.scene_planner import OpenAICompatibleScenePlanner, ScenePlanResult, ScenePlannerHTTPResponse
 
@@ -18,6 +20,202 @@ def test_scene_planner_authentication_error_has_distinct_code():
 
     assert _scene_planner_error_code(ScenePlannerAuthenticationError("rejected")) == "scene_planner_authentication_rejected"
     assert _scene_planner_error_code(ScenePlannerConfigurationError("missing")) == "scene_planner_not_configured"
+
+
+def test_scene_plan_persists_traceable_creator_fit_from_current_ip_brief(tmp_path):
+    from app.scene_planning import ScenePlanRequest, generate_scene_plan
+
+    path = tmp_path / "creator-fit.sqlite"
+    project = _project(path)
+    with Database(path) as db:
+        profile = IPProfileRepository(db).get(project.ip_profile_id)
+        IPProfileRepository(db).update(profile.model_copy(update={
+            "positioning": "解释视频生产方法与平台机制",
+            "content_pillars": ["短视频生产方法论"],
+            "knowledge": ["平台压缩会损失细节。"],
+            "opinions": ["画质不能只归因于码率。"],
+        }))
+    scene = ScenePlan(
+        project_id=project.id,
+        scene_id="creator-fit",
+        order=0,
+        purpose="解释平台压缩",
+        voice_text="平台压缩会损失细节，但画质不能只归因于码率。",
+        duration_target_ms=3_000,
+        visual_intent=VisualIntent(subject="平台压缩"),
+        preferred_sources=[SourceKind.USER_ASSET],
+        creator_fit=CreatorFit(
+            fit_state="matched",
+            content_pillar="短视频生产方法论",
+            topic_fit_reason="平台压缩属于视频生产方法。",
+            audience_value="帮助创作者判断画质问题。",
+            knowledge_refs=["平台压缩会损失细节。"],
+            opinion_refs=["画质不能只归因于码率。"],
+        ),
+    )
+
+    class Planner:
+        def plan(self, *args, **kwargs):
+            return ScenePlanResult(project.id, (scene,))
+
+    with Database(path) as db:
+        result = generate_scene_plan(
+            db, project, ScenePlanRequest(topic="平台压缩与画质", persist=True),
+            Planner(), None, "creator-fit-persist",
+        )
+    assert result.draft is not None
+    fit = result.draft.scenes[0].creator_fit
+    assert fit is not None and fit.fit_state == "matched"
+    assert fit.content_pillar == "短视频生产方法论"
+    assert fit.knowledge_refs == ["平台压缩会损失细节。"]
+    assert fit.opinion_refs == ["画质不能只归因于码率。"]
+
+
+def test_explicit_no_creator_topic_overrides_a_planner_creator_scene(tmp_path):
+    from app.scene_planning import ScenePlanRequest, generate_scene_plan
+
+    path = tmp_path / "explicit-no-creator.sqlite"
+    project = _project(path)
+    scene = ScenePlan(
+        project_id=project.id, scene_id="opening", order=0, purpose="提出问题",
+        voice_text="斯多葛为什么既吸引现代人，也可能变成自我压抑？",
+        duration_target_ms=4_000, visual_intent=VisualIntent(subject="创作者本人", action="面对镜头"),
+        visual_requirement="creator_speaking", visual_requirement_reason="规划器错误地保留了本人出镜",
+        preferred_sources=[SourceKind.AI_VIDEO, SourceKind.TALKING_PROFILE],
+        fallback_sources=[SourceKind.HISTORICAL_ASSET],
+        caption_emphasis=["吸引力还是压抑？"], viewer_takeaway="先提出双重问题",
+    )
+
+    class Planner:
+        def plan(self, *args, **kwargs):
+            return ScenePlanResult(project.id, (scene,))
+
+    with Database(path) as db:
+        result = generate_scene_plan(
+            db, project,
+            ScenePlanRequest(topic="不要本人出镜，全片只用本地图解和文字要点", persist=False),
+            Planner(), None, "explicit-no-creator",
+        )
+    assert result.scenes[0].voice_text == scene.voice_text
+    assert result.scenes[0].visual_requirement == "explanatory"
+    assert result.scenes[0].preferred_sources == [SourceKind.TYPOGRAPHY]
+    assert result.scenes[0].graphic_plan is not None
+    assert result.scenes[0].graphic_plan.kind == "text_card"
+    assert result.scenes[0].graphic_plan.treatment == "headline"
+
+
+def test_creator_account_history_is_bounded_into_planning_context(tmp_path):
+    from app.scene_planning import _scene_planning_context
+
+    path = tmp_path / "creator-history.sqlite"
+    project = _project(path)
+    with Database(path) as db:
+        account = AccountConnectionRepository(db).create(AccountConnection(
+            ip_profile_id=project.ip_profile_id,
+            provider="youtube",
+            account_external_id="tim-tech",
+            display_name="TIM 科技",
+            profile_url="https://example.com/@tim",
+            connected_at=datetime.now(timezone.utc),
+        ))
+        item = HistoricalContentRepository(db).create(HistoricalContent(
+            account_connection_id=account.id,
+            external_id="video-1",
+            title="为什么平台视频越传越糊",
+            description="从4K、码率、H.264和平台压缩解释画质下降。",
+            published_at=datetime.now(timezone.utc),
+            metrics={"views": 1000},
+        ))
+        context, refs = _scene_planning_context(db, project, topic="平台压缩与视频画质")
+    history = context["creator_account_history"]
+    assert history["state"] == "historical_content_available"
+    assert history["items"][0]["title"] == "为什么平台视频越传越糊"
+    assert history["items"][0]["metrics"] == {"views": 1000}
+    assert f"historical_content:{item.id}" in refs
+
+
+def test_creator_history_budget_spans_accounts_instead_of_first_account_only(tmp_path):
+    from app.scene_planning import _scene_planning_context
+
+    path = tmp_path / "creator-multi-account-history.sqlite"
+    project = _project(path)
+    now = datetime.now(timezone.utc)
+    with Database(path) as db:
+        bilibili = AccountConnectionRepository(db).create(AccountConnection(
+            ip_profile_id=project.ip_profile_id,
+            provider="bilibili",
+            account_external_id="creator-bilibili",
+            display_name="创作者 B站",
+            connected_at=now,
+        ))
+        youtube = AccountConnectionRepository(db).create(AccountConnection(
+            ip_profile_id=project.ip_profile_id,
+            provider="youtube",
+            account_external_id="creator-youtube",
+            display_name="Creator YouTube",
+            connected_at=now,
+        ))
+        repository = HistoricalContentRepository(db)
+        for index in range(10):
+            repository.create(HistoricalContent(
+                account_connection_id=bilibili.id,
+                external_id=f"bilibili-{index}",
+                title=f"B站作品 {index}",
+                published_at=now,
+            ))
+        for index in range(3):
+            repository.create(HistoricalContent(
+                account_connection_id=youtube.id,
+                external_id=f"youtube-{index}",
+                title=f"YouTube work {index}",
+                published_at=now,
+            ))
+        context, refs = _scene_planning_context(db, project, topic="平台压缩与视频画质")
+
+    items = context["creator_account_history"]["items"]
+    assert len(items) == 8
+    assert {item["provider"] for item in items} == {"bilibili", "youtube"}
+    assert len({item["evidence_ref"] for item in items}) == 8
+    assert all(item["evidence_ref"] in refs for item in items)
+
+
+def test_structured_profile_rejects_uncredited_scene_topic_without_saving(tmp_path):
+    from app.providers.scene_planner import ScenePlannerProviderResponseError
+    from app.scene_planning import ScenePlanRequest, generate_scene_plan
+
+    path = tmp_path / "creator-scope-negative.sqlite"
+    project = _project(path)
+    with Database(path) as db:
+        profile = IPProfileRepository(db).get(project.ip_profile_id)
+        IPProfileRepository(db).update(profile.model_copy(update={
+            "positioning": "古典文明研究",
+            "content_pillars": ["古希腊罗马历史与古典文本"],
+            "platform_categories": ["历史", "人文"],
+            "topics": ["荷马史诗"],
+        }))
+    off_scope = ScenePlan(
+        project_id=project.id,
+        scene_id="off-scope",
+        order=0,
+        purpose="数码产品",
+        voice_text="讨论一款手机的芯片性能。",
+        duration_target_ms=3_000,
+        visual_intent=VisualIntent(subject="手机"),
+        preferred_sources=[SourceKind.USER_ASSET],
+    )
+
+    class Planner:
+        def plan(self, *args, **kwargs):
+            return ScenePlanResult(project.id, (off_scope,))
+
+    with Database(path) as db:
+        with pytest.raises(ScenePlannerProviderResponseError) as failure:
+            generate_scene_plan(
+                db, project, ScenePlanRequest(topic="手机芯片性能", persist=True),
+                Planner(), None, "creator-scope-negative",
+            )
+    assert failure.value.domain_rule == "creator_scope_unverified"
+    assert failure.value.domain_field == "creator_fit"
 
 
 def test_visual_revision_preserves_original_when_creator_preference_changes(tmp_path, monkeypatch):
@@ -154,7 +352,8 @@ def test_planning_can_choose_other_described_shots_from_a_matched_source_without
     path=tmp_path/'source-options.sqlite';project=_project(path)
     with Database(path) as db:
         asset=AssetRepository(db).create(Asset(source_file='source.mp4',content_hash='a'*64,duration_ms=30000,
-            width=1920,height=1080,fps=project.fps,authorization_reference='fixture',imported_at=project.created_at))
+            width=1920,height=1080,fps=project.fps,authorization_reference='fixture',imported_at=project.created_at,
+            metadata={'ip_profile_id':str(project.ip_profile_id),'lifecycle_state':'active'}))
         match=ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=0,end_ms=10000,asset_duration_ms=30000,visual_description='Bitrate quality comparison'))
         supporting=ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=10000,end_ms=20000,asset_duration_ms=30000,visual_description='Hand holding a camera'))
         unknown=ClipRepository(db).create(Clip(asset_id=asset.id,start_ms=20000,end_ms=30000,asset_duration_ms=30000))
@@ -163,6 +362,81 @@ def test_planning_can_choose_other_described_shots_from_a_matched_source_without
         assert context['materials'][1]['evidence_level']=='same_source_visual_option_not_topic_match'
         assert str(unknown.id) not in str(context['materials'])
         assert _scene_planning_context(db,project,topic='unrelated quasar')[0]['materials']==[]
+
+
+def test_creator_visual_motifs_surface_verified_stock_before_new_external_requests(tmp_path):
+    from app.db import AssetRepository, ClipRepository
+    from app.domain.models import Asset, Clip, SourceKind
+    from app.scene_planning import _scene_planning_context
+
+    path = tmp_path / 'creator-visual-motifs.sqlite'
+    project = _project(path)
+    with Database(path) as db:
+        profile = IPProfileRepository(db).get(project.ip_profile_id)
+        IPProfileRepository(db).update(profile.model_copy(update={
+            'content_pillars': ['西方哲学经典与 Great Books'],
+            'topics': ['斯多葛与《沉思录》'],
+        }))
+        content_hash = 'c' * 64
+        asset = AssetRepository(db).create(Asset(
+            source_file='verified-stock.mp4',
+            source_kind=SourceKind.STOCK,
+            content_hash=content_hash,
+            duration_ms=8_000,
+            width=1080,
+            height=1920,
+            fps=project.fps,
+            authorization_reference='fixture external stock',
+            imported_at=project.created_at,
+            metadata={'lifecycle_state': 'active'},
+        ))
+        clip = ClipRepository(db).create(Clip(
+            asset_id=asset.id,
+            start_ms=0,
+            end_ms=8_000,
+            asset_duration_ms=8_000,
+            visual_description='暖色台灯下在旧书旁书写，适合作为沉思与阅读场景',
+        ))
+        facts = {
+            'source_content_hash': content_hash,
+            'clip_interval': {'start_ms': 0, 'end_ms': 8_000},
+            'coverage': 'video_interval_analysis',
+            'method': 'provider_video_interval_analysis',
+            'content_consistent': True,
+            'analysis_video_sha256': 'd' * 64,
+            'covered_start_ms': 0,
+            'covered_end_ms': 8_000,
+            'analysis_duration_ms': 8_000,
+            'comparison_layout': 'none',
+            'subtitle_regions': [],
+            'protected_regions': [],
+            'source_subtitle_clearance_verified': True,
+            'visual_description': clip.visual_description,
+            'evidence_reference': 'video-analysis:fixture:verified-stock',
+        }
+        AssetRepository(db).update(asset.model_copy(update={
+            'metadata': {**asset.metadata, 'visual_analysis': {str(clip.id): facts}},
+        }))
+
+        context, refs = _scene_planning_context(
+            db,
+            project,
+            topic='斯多葛式的冷静与自我压抑之间有什么区别？',
+        )
+        motif = next(item for item in context['materials'] if item['clip_id'] == str(clip.id))
+        assert motif['evidence_level'] == 'content_motif_verified_stock_hint_not_scene_approval'
+        assert motif['visual_evidence']['usable_interval'] == {
+            'start_ms': 0, 'end_ms': 8_000, 'duration_ms': 8_000,
+        }
+        assert f'clip:{clip.id}' in refs
+
+
+def test_negative_visual_motifs_do_not_create_false_stock_matches():
+    from app.scene_planning import _positive_motif_match
+
+    assert _positive_motif_match('一只手在笔记本上书写', '书写')
+    assert not _positive_motif_match('画面无书写动作', '书写')
+    assert not _positive_motif_match('场景中没有人物，也无文字', '人物')
 
 
 def test_normal_api_sends_small_topic_brief_and_router_keeps_full_local_clips(tmp_path):
@@ -178,10 +452,10 @@ def test_normal_api_sends_small_topic_brief_and_router_keeps_full_local_clips(tm
     with Database(path) as db:
         profile = IPProfileRepository(db).get(project.ip_profile_id)
         IPProfileRepository(db).update(profile.model_copy(update={
-            'creator_name':'PRIVATE_NAME','knowledge':[private], 'metadata':{'secret':'PRIVATE_KEY'},
+            'creator_name':'PRIVATE_NAME', 'metadata':{'secret':'PRIVATE_KEY'},
             'audience':'builders contact me@example.com', 'style_notes':['call +8613812345678']}))
         for i in range(12):
-            metadata = {'r1_usage':'production'}
+            metadata = {'r1_usage':'production','ip_profile_id':str(project.ip_profile_id),'lifecycle_state':'active'}
             if i == 0: metadata['r1_usage'] = 'unknown'
             if i == 10: metadata['project_id'] = str(uuid4())
             if i == 11: metadata['r1_usage'] = 'unknown'
@@ -409,6 +683,95 @@ def _runtime_plan_response(status: int = 200) -> ScenePlannerHTTPResponse:
     }
     body = {"output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps({"scenes": [scene]})}]}]}
     return ScenePlannerHTTPResponse(200, json.dumps(body).encode(), {})
+
+
+def test_scene_plan_usage_records_current_response_on_success_and_failure(tmp_path, monkeypatch):
+    from app.costs import UnknownProviderCostEstimator
+    from app.db import BudgetPolicyRepository, ProviderCallRepository
+    from app.domain.models import BudgetPolicy
+    from app.providers.scene_planner import ScenePlannerProviderResponseError, ScenePlannerTimeout
+    from app.scene_planning import ScenePlanRequest, generate_scene_plan
+    import app.scene_planning as scene_planning
+
+    path = tmp_path / 'scene-usage.sqlite'
+    project = _project(path)
+    class Transport:
+        mode = 'invalid'
+        def post(self, *args):
+            if self.mode == 'timeout':
+                raise TimeoutError()
+            body = json.loads(_runtime_plan_response().body)
+            body['usage'] = {'prompt_tokens': 125, 'completion_tokens': 42, 'total_tokens': 167,
+                'prompt_tokens_details': {'cached_tokens': 25}}
+            if self.mode == 'invalid':
+                body['status'] = 'incomplete'
+            return ScenePlannerHTTPResponse(200, json.dumps(body).encode(), {})
+
+    transport = Transport()
+    planner = OpenAICompatibleScenePlanner('fixture', transport=transport)
+    with Database(path) as db:
+        BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=True,
+            updated_at=datetime.now(timezone.utc)))
+        def run(key):
+            return generate_scene_plan(db, project, ScenePlanRequest(topic='Budgeted runtime'), planner,
+                UnknownProviderCostEstimator(), key)
+        with pytest.raises(ScenePlannerProviderResponseError):
+            run('usage-invalid')
+        transport.mode = 'valid'
+        run('usage-success')
+        monkeypatch.setattr(scene_planning, 'validate_presentation_requirements',
+            lambda *args, **kwargs: (_ for _ in ()).throw(ScenePlannerProviderResponseError('post validation')))
+        with pytest.raises(ScenePlannerProviderResponseError):
+            run('usage-post-validation')
+        transport.mode = 'timeout'
+        with pytest.raises(ScenePlannerTimeout):
+            run('usage-timeout')
+        records = {r.idempotency_key: r for r in ProviderCallRepository(db).list_for_project(project.id)}
+        for key in ('usage-invalid', 'usage-success', 'usage-post-validation'):
+            record = records[key]
+            assert (record.input_tokens, record.output_tokens, record.cache_tokens) == (125, 42, 25)
+            assert record.usage_observable is True and record.actual_cost is None
+        assert records['usage-invalid'].status == records['usage-post-validation'].status == 'failed'
+        assert records['usage-success'].status == 'completed'
+        assert records['usage-timeout'].usage_observable is False
+        assert records['usage-timeout'].input_tokens is None
+
+
+def test_scene_plan_usage_does_not_trust_inconsistent_counts():
+    planner = OpenAICompatibleScenePlanner('fixture')
+    planner.last_usage = {'prompt_tokens': 10, 'input_tokens': 11, 'completion_tokens': 5,
+        'total_tokens': 15, 'cached_tokens': 20}
+    usage = planner.usage_accounting()
+    assert usage.input_tokens is None and usage.output_tokens == 5
+    assert usage.cache_tokens is None and usage.usage_observable is False and usage.actual_cost is None
+
+
+def test_kimi_chat_incomplete_response_records_usage(tmp_path):
+    from app.costs import UnknownProviderCostEstimator
+    from app.db import BudgetPolicyRepository, ProviderCallRepository
+    from app.domain.models import BudgetPolicy
+    from app.providers.scene_planner import ScenePlannerProviderResponseError
+    from app.scene_planning import ScenePlanRequest, generate_scene_plan
+
+    path = tmp_path / 'kimi-usage.sqlite'
+    project = _project(path)
+    class Transport:
+        def post(self, *args):
+            document = {'choices': [{'finish_reason': 'length', 'message': {'content': '{}'}}],
+                'usage': {'prompt_tokens': 234, 'completion_tokens': 75, 'total_tokens': 309}}
+            return ScenePlannerHTTPResponse(200, json.dumps(document).encode(), {})
+    planner = OpenAICompatibleScenePlanner('fixture', base_url='https://api.moonshot.cn/v1',
+        model='kimi-k2.6', protocol='chat_completions', transport=Transport())
+    with Database(path) as db:
+        BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=True,
+            updated_at=datetime.now(timezone.utc)))
+        with pytest.raises(ScenePlannerProviderResponseError):
+            generate_scene_plan(db, project, ScenePlanRequest(topic='Budgeted runtime'), planner,
+                UnknownProviderCostEstimator(), 'kimi-incomplete')
+        record = ProviderCallRepository(db).list_for_project(project.id)[0]
+        assert record.status == 'failed' and record.usage_observable is True
+        assert (record.input_tokens, record.output_tokens, record.cache_tokens) == (234, 75, None)
+        assert record.actual_cost is None
 
 
 def test_runtime_scene_plan_is_blocked_before_provider_when_cost_is_unknown(tmp_path: Path) -> None:
@@ -652,7 +1015,7 @@ def test_explanatory_first_graphic_persists_and_routes_without_waiving_voice(tmp
         assert result["scenes"][0]["planned_source_kind"] == "typography"
         assert result["preliminary_edit_plan"] is not None
         assert result["status"] == "blocked" and result["dispatch_performed"] is False
-        assert "voice_capability_not_verified" in result["stop_reasons"]
+        assert "voice_capability_not_verified" not in result["stop_reasons"]
         records = client.get(f"/projects/{project.id}/provider-calls").json()
         assert len(records) == len(requests) == 1 and records[0]["status"] == "completed"
 

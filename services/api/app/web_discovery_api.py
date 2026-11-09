@@ -66,7 +66,7 @@ def _service(db,request,project_id,name,*,capability="search"):
     provider=getattr(request.app.state,"web_discovery_provider",None)
     if provider is None or provider.provider_name!=name:
         try:
-            provider=web_provider(name,capability=capability)
+            provider=web_provider(name,capability=capability,environment=getattr(request.app.state,"runtime_environment",None))
         except WebConnectionError as exc:
             raise HTTPException(409,str(exc)) from exc
     return WebDiscoveryService(db,provider,supports_fetch=connection["fetch"])
@@ -76,7 +76,7 @@ def _service(db,request,project_id,name,*,capability="search"):
 async def providers(project_id:UUID,request:Request):
     if not ProjectRepository(request.app.state.database).get(project_id):
         raise HTTPException(404,"项目不存在")
-    return web_provider_connections()
+    return web_provider_connections(environment=getattr(request.app.state,"runtime_environment",None))
 
 
 @router.post("/web-search")

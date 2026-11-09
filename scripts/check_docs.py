@@ -4,6 +4,8 @@ import re
 import sys
 from pathlib import Path
 
+from sync_capability_docs import check_generated_documents, validate_registry
+
 ROOT = Path(__file__).resolve().parents[1]
 
 ACTIVE_ROOT_DOCS = {
@@ -17,8 +19,14 @@ ACTIVE_ROOT_DOCS = {
 
 PRODUCT_DOCS = {
     "docs/product/README.md",
+    "docs/product/CAPABILITY_INDEX.md",
     "docs/product/CREATOR_INTELLIGENCE.md",
+    "docs/product/SCENE_PLANNING.md",
     "docs/product/MEDIA_ASSET_SYSTEM.md",
+    "docs/product/VOICE.md",
+    "docs/product/TALKING.md",
+    "docs/product/PRODUCTION_SCHEDULING.md",
+    "docs/product/PUBLISHING_LEARNING.md",
     "docs/product/VOICE_TALKING.md",
     "docs/product/EXECUTION_COMPUTE.md",
     "docs/product/TIMELINE_RENDER_LEARNING.md",
@@ -51,6 +59,7 @@ FORBIDDEN_ROOT_PREFIXES = (
 REQUIRED_START_REFERENCES = {
     "CONTENT_OS_EXECUTION_SPEC.md",
     "docs/product/README.md",
+    "docs/product/CAPABILITY_INDEX.md",
     "docs/architecture/SYSTEM_ARCHITECTURE.md",
     "STATUS.md",
     "AGENTS.md",
@@ -93,6 +102,11 @@ def main() -> int:
     for name in FORBIDDEN_ROOT_DOCS:
         if (ROOT / name).exists():
             errors.append(f"historical document must not remain at repository root: {name}")
+
+    registry_errors, _ = validate_registry(ROOT)
+    errors.extend(registry_errors)
+    if not registry_errors:
+        errors.extend(check_generated_documents(ROOT))
 
     for path in ROOT.glob("*.md"):
         if any(path.name.startswith(prefix) for prefix in FORBIDDEN_ROOT_PREFIXES):
@@ -157,6 +171,9 @@ def main() -> int:
     print("Product module specs:")
     for name in sorted(PRODUCT_DOCS):
         print(f"- {name}")
+    print("Capability authority:")
+    print("- docs/product/CAPABILITIES.json")
+    print("- docs/product/CAPABILITY_INDEX.md (generated)")
     print("Architecture:")
     for name in sorted(ARCHITECTURE_DOCS):
         print(f"- {name}")

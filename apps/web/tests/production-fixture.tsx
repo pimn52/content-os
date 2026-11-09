@@ -154,7 +154,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     if (path.endsWith('/talking-preview-prepare') && replacementQa.state !== 'qa_verified_ready_for_preview') throw new Error('talking_qa_not_verified');
   }
   if (path.endsWith('/voice-dispatch')) {
-    if (JSON.parse(String(options?.body)).capability_profile_id === capabilityId) throw new Error('exact_voice_capability_not_verified · voice_provider_license_scope_unverified');
     value.status = 'voice_running'; value.voice_job_id = voiceJob; value.waiting_stop_reasons = [];
   }
   if (path.endsWith('/voice-qa-advance')) { value.status = 'awaiting_u_voice_review'; value.voice_audio_id = audioId; value.voice_qa_job_id = voiceJob; value.voice_qa_auto_stop_reasons = []; value.waiting_stop_reasons = []; }

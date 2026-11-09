@@ -1,5 +1,6 @@
 """API 与 Worker 共用的素材连接；凭据只从配置文件读取。"""
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from app.providers.commons_media import CommonsMediaProvider, ExternalMediaError
@@ -13,11 +14,12 @@ _KEY_SOURCES = (
 )
 
 
-def external_source_connections():
+def external_source_connections(*, environment: Mapping[str, str] | None = None):
     """列出公共能力与本机配置；不探网，也不覆盖历史真实调用结论。"""
+    values_map = os.environ if environment is None else environment
     values = []
     for name, label, setting in _KEY_SOURCES:
-        configured = os.environ.get(setting, "").strip()
+        configured = values_map.get(setting, "").strip()
         try:
             connected = bool(configured and Path(configured).is_file())
         except (OSError, ValueError):
@@ -35,17 +37,19 @@ def external_source_connections():
         "live_checks": ["response_schema", "download_rendition", "network_access"]}]
 
 
-def configured_external_sources():
+def configured_external_sources(*, environment: Mapping[str, str] | None = None):
     # 检查路径而不预读密钥、不构造尚未配置的提供商；配置状态不代表鉴权已验证。
-    available = {value["id"] for value in external_source_connections() if value["configured"]}
-    order = [name.strip() for name in os.environ.get("CONTENT_OS_EXTERNAL_SOURCE_ORDER",
+    values_map = os.environ if environment is None else environment
+    available = {value["id"] for value in external_source_connections(environment=values_map) if value["configured"]}
+    order = [name.strip() for name in values_map.get("CONTENT_OS_EXTERNAL_SOURCE_ORDER",
         "pexels,pixabay,coverr,wikimedia_commons").split(",") if name.strip()]
     if not order or len(order)!=len(set(order)) or set(order)-{"pexels","pixabay","coverr","wikimedia_commons"}:
         raise ExternalMediaError("外部素材来源顺序配置无效")
     return [name for name in order if name in available]
 
 
-def external_provider(name, project, *, for_import=False):
+def external_provider(name, project, *, for_import=False, environment: Mapping[str, str] | None = None):
+    values_map = os.environ if environment is None else environment
     if name == "public_page":
         from app.providers.public_page_media import PublicPageMediaProvider
         orientation = {"vertical":"portrait","horizontal":"landscape","square":"square"}[project.format.value]
@@ -58,7 +62,7 @@ def external_provider(name, project, *, for_import=False):
     _, label, setting = source
     key = None
     if not for_import:
-        configured = os.environ.get(setting)
+        configured = values_map.get(setting)
         try:
             key = Path(configured).read_text(encoding="utf-8-sig").strip() if configured else None
         except (OSError, UnicodeError, ValueError):

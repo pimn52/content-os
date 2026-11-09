@@ -8,8 +8,8 @@ import pytest
 
 from app.assembly.video_spec import VideoSpecAssembler, InvalidCandidateSelection
 from app.db import AssetRepository, ClipRepository
-from app.domain.models import Asset, Clip, MaterialRequest, SourceKind
-from app.media.planning import MaterialResolutionError,_distinct_observed_windows
+from app.domain.models import Asset, Clip, MaterialRequest, ScenePlan, SourceKind, VisualIntent
+from app.media.planning import MaterialResolutionError,_distinct_observed_windows,_local_description_match
 from app.media.visual_facts import scene_visual_key, full_interval_geometry, matches_scene
 from app.providers.vision import VideoIntervalAnalysis, VideoIntervalBatch, SceneVisualMatch
 from app.routing import AssetRouter
@@ -17,14 +17,49 @@ from app.search import ClipTextSearchService
 from test_material_resolution import material_library
 
 
+def test_verified_interval_description_reuses_exact_book_and_writing_shots():
+    scene = ScenePlan(
+        project_id=uuid4(), scene_id='writing', order=0, purpose='今晚的自省动作',
+        voice_text='今晚写下你仍在回避的感受。', duration_target_ms=5_000,
+        visual_intent=VisualIntent(
+            subject='夜灯下书写的手',
+            action='在横线笔记本上书写',
+            framing='竖屏特写',
+            description='真实书写动作承接自省练习',
+        ),
+        preferred_sources=[SourceKind.STOCK], visual_requirement='explanatory',
+        visual_requirement_reason='需要具体书写动作画面',
+    )
+    verified = {
+        'coverage': 'video_interval_analysis',
+        'content_consistent': True,
+        'source_subtitle_clearance_verified': True,
+        'visual_description': '一只手握着笔，在暖黄色台灯下的横线笔记本上持续书写。',
+    }
+    match = _local_description_match(scene, verified)
+    assert match and match['supported'] is True and match['fit'] == 'direct'
+    assert matches_scene({
+        **verified,
+        'local_description_matches': {scene_visual_key(scene): match},
+    }, scene) is True
+    assert _local_description_match(scene, {
+        **verified, 'visual_description': '办公室内一个人面对镜头讲话，无书写动作。',
+    }) is None
+
+
 def add_source(db, project, root, kind, name):
     path=root/(name+'.mp4');path.write_bytes(('fixture-'+name).encode())
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
     metadata={}
+    if kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_BROLL}:
+        metadata['ip_profile_id']=str(project.ip_profile_id)
+        metadata['reuse_role']='ordinary'
+        metadata['lifecycle_state']='active'
     if kind is SourceKind.AI_BROLL:
         metadata['visual_generation']={'provider':'fixture-generator','model':'fixture',
             'source_content_hash':digest,'license_evidence_reference':'fixture-model-use',
             'commercial_status':'commercial_safe'}
+        metadata['project_id']=str(project.id)
     asset=AssetRepository(db).create(Asset(source_kind=kind,source_file=str(path),content_hash=digest,
         duration_ms=6000,width=1080,height=1920,fps=project.fps,has_audio=False,
         authorization_reference='fixture intake',imported_at=datetime.now(timezone.utc),metadata=metadata))
@@ -60,6 +95,99 @@ def test_direct_external_explanation_beats_related_creator_equipment(tmp_path):
         assert SourceKind.STOCK in result.fallback_sources
         facts=full_interval_geometry(AssetRepository(db).get(stock[0].id),stock[1])
         assert facts['editorial_selections'][scene_visual_key(scene)]['viewer_takeaway']==scene.viewer_takeaway
+    finally:db.close()
+
+
+def test_explanatory_scene_can_use_verified_context_footage_but_action_evidence_cannot(tmp_path):
+    db,p,_,_,base,_,resolver=material_library(tmp_path)
+    try:
+        source=add_source(db,p,tmp_path,SourceKind.STOCK,'roman-context')
+        explanatory=base.model_copy(update={
+            'preferred_clip_id':None,
+            'preferred_sources':[SourceKind.STOCK],
+            'visual_requirement':'explanatory',
+            'visual_requirement_reason':'历史氛围只作语境，论点由旁白承载',
+            'material_request':MaterialRequest(source_kind='stock',query='roman ruins',reason='历史语境'),
+        })
+        windows=observed_pool(
+            resolver,p,[source],[explanatory],lambda v,s:(False,.2,'context'),
+        )
+        facts=full_interval_geometry(AssetRepository(db).get(source[0].id),source[1])
+        assert matches_scene(facts,explanatory)
+        selected=resolver._select(p,[explanatory],windows,None)[0]
+        assert selected.preferred_clip_id==source[1].id
+
+        evidence=explanatory.model_copy(update={
+            'id':uuid4(),
+            'scene_id':'evidence',
+            'visual_requirement':'action_evidence',
+            'visual_requirement_reason':'必须展示真实动作结果',
+        })
+        windows=observed_pool(
+            resolver,p,[source],[evidence],lambda v,s:(False,.2,'context'),
+        )
+        facts=full_interval_geometry(AssetRepository(db).get(source[0].id),source[1])
+        assert not matches_scene(facts,evidence)
+        with pytest.raises(MaterialResolutionError):
+            resolver._select(p,[evidence],windows,None)
+    finally:db.close()
+
+
+def test_zero_hit_subject_label_does_not_discard_broader_local_stock_recall(tmp_path):
+    db,p,_,_,base,_,resolver=material_library(tmp_path)
+    try:
+        local=add_source(db,p,tmp_path,SourceKind.STOCK,'roman-ruins')
+        ClipRepository(db).update(local[1].model_copy(update={
+            'visual_description':'Ancient Roman ruins and stone columns at night',
+        }))
+        external=add_source(db,p,tmp_path,SourceKind.STOCK,'external-candidate')
+        scene=base.model_copy(update={
+            'preferred_clip_id':None,
+            'voice_text':'Ancient Roman ruins and stone columns.',
+            'visual_intent':base.visual_intent.model_copy(update={
+                'subject':'古罗马士兵营地与手写场景',
+                'action':'镜头缓慢平移',
+            }),
+            'preferred_sources':[SourceKind.STOCK],
+            'material_request':MaterialRequest(
+                source_kind='stock',query='ancient roman ruins',reason='历史场景',
+            ),
+        })
+        windows,_=resolver._windows(
+            p,[scene],{'ancient roman ruins':[external[0].id]},
+        )
+        assert local[0].id in {asset.id for asset,_ in windows.values()}
+    finally:db.close()
+
+
+def test_visual_intent_recall_is_not_diluted_by_long_narration(tmp_path):
+    db,p,_,_,base,_,resolver=material_library(tmp_path)
+    try:
+        wanted=add_source(db,p,tmp_path,SourceKind.STOCK,'night-writing')
+        ClipRepository(db).update(wanted[1].model_copy(update={
+            'visual_description':'夜晚台灯下，一只手在横线笔记本上写字。',
+        }))
+        unrelated=add_source(db,p,tmp_path,SourceKind.STOCK,'roman-ruins')
+        ClipRepository(db).update(unrelated[1].model_copy(update={
+            'visual_description':'古罗马石柱与遗迹。',
+        }))
+        scene=base.model_copy(update={
+            'preferred_clip_id':None,
+            'voice_text':(
+                '今晚你可以做一件事：写下今天最让你不舒服的那个瞬间，'
+                '然后判断自己是在回应还是在压抑。'
+            ),
+            'visual_intent':base.visual_intent.model_copy(update={
+                'subject':'夜间书桌前书写的人',
+                'action':'台灯下在笔记本上写字',
+            }),
+            'preferred_sources':[SourceKind.STOCK],
+            'material_request':MaterialRequest(
+                source_kind='stock',query='night desk handwriting',reason='展示自省动作',
+            ),
+        })
+        windows,_=resolver._windows(p,[scene])
+        assert wanted[0].id in {asset.id for asset,_ in windows.values()}
     finally:db.close()
 
 
@@ -170,7 +298,10 @@ def test_uploaded_external_material_does_not_gain_creator_preference(tmp_path):
     try:
         borrowed=add_source(db,p,tmp_path,SourceKind.USER_ASSET,'uploaded-documentary')
         own=add_source(db,p,tmp_path,SourceKind.USER_ASSET,'creator-work')
-        AssetRepository(db).update(borrowed[0].model_copy(update={'metadata':{'external_sources':[{'source':'fixture-public-source'}]}}))
+        AssetRepository(db).update(borrowed[0].model_copy(update={'metadata':{
+            **borrowed[0].metadata,
+            'external_sources':[{'source':'fixture-public-source'}],
+        }}))
         borrowed=(AssetRepository(db).get(borrowed[0].id),borrowed[1])
         windows=observed_pool(resolver,p,[borrowed,own],[scene],
             lambda v,s:(True,.98 if v['clip_id']==str(borrowed[1].id) else .94,'direct'))

@@ -114,7 +114,7 @@ def test_normal_intake_adopt_choice_disable_history_restart(tmp_path):
         assert f"source_suitability_unknown:{scene.scene_id}" not in after["stop_reasons"]
         # Other hard gates remain in effect: changing choice is not dispatch/QA.
         assert after["status"] == "blocked" and not after["dispatch_performed"]
-        assert "voice_capability_not_verified" in after["stop_reasons"]
+        assert "voice_capability_not_verified" not in after["stop_reasons"]
         assert client.get(f"/projects/{project}/provider-calls").json() == []
         with Database(path) as db:
             for table in ("jobs", "production_runs", "presentation_observations", "planning_preferences"):

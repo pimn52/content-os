@@ -217,9 +217,9 @@ export function ProductionVoicePanel({ projectId, draftVersion, scriptRevision, 
     <div className="row-between"><div><span className="kicker">VOICE / MASTER NARRATION</span><h3>此执行的主旁白</h3></div><span className="badge">{run.status}</span></div>
     {error && <p role="alert" className="error">{error}</p>}{notice && <p role="status" className="ok">{notice}</p>}
     {eligibleForDispatch && <>
-      <p className="muted">选择已登记且有明确本人同意的 Voice Profile，再选择匹配供应商的持久化能力档案。所有档案原样列出；资格、质量、许可与预算由后台派发时重验。这里不执行自动推荐。</p>
+      <p className="muted">选择已登记且有明确本人同意的 Voice Profile，再选择匹配供应商的本机执行配置。商业标记与证据缺失不会阻断；后台只核对同意、实际 provider/model、预算与技术 QA。</p>
       <label>Voice Profile<select value={profileId} disabled={busy} onChange={event => setProfileId(event.target.value)}><option value="">请选择</option>{profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.provider} · 同意：{item.consent.confirmed ? "已记录" : "未知"} · {item.consent.subject_name}</option>)}</select></label>
-      <label>能力档案<select value={capabilityId} disabled={busy} onChange={event => setCapabilityId(event.target.value)}><option value="">请选择</option>{capabilities.map(item => <option key={item.id} value={item.id}>{item.provider} / {item.model} · {item.runtime} · {item.machine_id} · readiness={item.readiness} · quality={item.quality_status} · license={item.commercial_status}</option>)}</select></label>
+      <label>本机执行配置<select value={capabilityId} disabled={busy} onChange={event => setCapabilityId(event.target.value)}><option value="">请选择</option>{capabilities.map(item => <option key={item.id} value={item.id}>{item.provider} / {item.model} · {item.runtime} · {item.machine_id} · 状态={item.readiness} · 用量标记={item.commercial_status}</option>)}</select></label>
       {selectedCapability && <p className="muted">来源：{selectedCapability.provenance_source} · 质量证据：{selectedCapability.evidence_reference ?? "未知"} · 许可证据：{selectedCapability.license_evidence_reference ?? "未知"} · scope：{selectedCapability.scope_key}</p>}
       <button type="button" className="button primary" disabled={busy || !dispatchAllowed} onClick={() => void perform("voice-dispatch")}>按当前执行方案启动旁白（后台校验）</button>
     </>}

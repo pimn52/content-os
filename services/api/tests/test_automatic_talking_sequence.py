@@ -83,6 +83,7 @@ def test_one_input_runs_two_person_scenes_without_stopping_after_first_qa(tmp_pa
                 run = service.runs.reconcile_completed_talking_qa_job(first_qa[0])
                 assert run.status == "awaiting_talking_dependencies"
                 assert all(reason.startswith(IN_PROGRESS_REASONS) for reason in run.waiting_stop_reasons)
+                assert not any("preview_review" in reason or "u_review" in reason for reason in run.waiting_stop_reasons)
                 assert run.talking_qa_dependencies[1].state == expected_state
                 unfinished_states.append(expected_state)
 

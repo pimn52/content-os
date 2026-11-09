@@ -122,6 +122,14 @@ def _scene() -> ScenePlan:
     )
 
 
+def _claim_router_assets(router: AssetRouter, ip_profile_id) -> None:
+    for asset in router.assets.list():
+        if asset.source_kind in {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.AI_BROLL}:
+            router.assets.update(asset.model_copy(update={"metadata": {
+                **asset.metadata, "ip_profile_id": str(ip_profile_id), "lifecycle_state": "active",
+            }}))
+
+
 class _EmbeddingProvider:
     """Deterministic local embedding fake: no network or provider credential."""
 
@@ -236,7 +244,11 @@ def test_comparison_route_prefers_only_approved_playback_interval(tmp_path: Path
         profile = IPProfileRepository(db).create(IPProfile(creator_name="Creator"))
         project = ProjectRepository(db).create(Project(ip_profile_id=profile.id, title="Comparison", topic="Bitrate",
             fps=RationalFps(numerator=30, denominator=1), created_at=NOW))
+        _claim_router_assets(router, profile.id)
         portrait = AssetRepository(db).create(_asset(SourceKind.HISTORICAL_ASSET, 9))
+        portrait = AssetRepository(db).update(portrait.model_copy(update={"metadata": {
+            **portrait.metadata, "ip_profile_id": str(profile.id), "lifecycle_state": "active",
+        }}))
         alternatives = [_clip(portrait, index) for index in (0, 1)]
         for alternative in alternatives:
             ClipRepository(db).create(alternative)
@@ -467,7 +479,10 @@ def test_whole_vertical_plan_diversifies_repeated_landscape_fallback(tmp_path):
         project = Project(ip_profile_id=profile.id, title="Vertical", topic="Topic",
                           fps=RationalFps(numerator=30, denominator=1), created_at=NOW)
         ProjectRepository(db).create(project)
-        AssetRepository(db).update(source.model_copy(update={"width": 1280, "height": 720}))
+        _claim_router_assets(router, profile.id)
+        AssetRepository(db).update(source.model_copy(update={"width": 1280, "height": 720, "metadata": {
+            **source.metadata, "ip_profile_id": str(profile.id), "lifecycle_state": "active",
+        }}))
         first = _scene().model_copy(update={"project_id": project.id, "visual_requirement": "action_evidence",
             "visual_requirement_reason": "The action must be visible."})
         second = _scene().model_copy(update={"project_id": project.id, "order": 1,
@@ -492,14 +507,17 @@ def test_landscape_dominance_preserves_source_instead_of_promoting_graphic(tmp_p
     from app.db import IPProfileRepository, ProjectRepository
     from app.domain.models import GraphicCardPlan, IPProfile, Project
 
-    db, _, clips, source = _router(tmp_path)
+    db, router, clips, source = _router(tmp_path)
     try:
         profile = IPProfile(creator_name="Creator")
         IPProfileRepository(db).create(profile)
         project = Project(ip_profile_id=profile.id, title="Full source", topic="Topic",
                           fps=RationalFps(numerator=30, denominator=1), created_at=NOW)
         ProjectRepository(db).create(project)
-        AssetRepository(db).update(source.model_copy(update={"width": 1920, "height": 1080}))
+        _claim_router_assets(router, profile.id)
+        AssetRepository(db).update(source.model_copy(update={"width": 1920, "height": 1080, "metadata": {
+            **source.metadata, "ip_profile_id": str(profile.id), "lifecycle_state": "active",
+        }}))
         clip = ClipRepository(db).update(clips[0].model_copy(update={"end_ms": 12_000}))
 
         class Search:
@@ -528,13 +546,17 @@ def test_landscape_dominance_preserves_source_instead_of_promoting_graphic(tmp_p
 def test_route_all_avoids_reusing_a_clip_when_an_adequate_alternative_exists(tmp_path):
     from app.db import IPProfileRepository, ProjectRepository
     from app.domain.models import IPProfile, Project
-    db, router, _, _ = _router(tmp_path)
+    db, router, _, source = _router(tmp_path)
     try:
         profile = IPProfile(creator_name="Creator")
         IPProfileRepository(db).create(profile)
         project = Project(ip_profile_id=profile.id, title="Vertical", topic="Topic",
                           fps=RationalFps(numerator=30, denominator=1), created_at=NOW)
         ProjectRepository(db).create(project)
+        _claim_router_assets(router, profile.id)
+        source = AssetRepository(db).update(router.assets.get(source.id).model_copy(update={"metadata": {
+            **source.metadata, "ip_profile_id": str(profile.id), "lifecycle_state": "active",
+        }}))
         first = _scene().model_copy(update={"project_id": project.id})
         second = _scene().model_copy(update={"project_id": project.id, "order": 1})
 

@@ -14,6 +14,7 @@
 |---|---|
 | 产品范围与 R1 验收 | [CONTENT_OS_EXECUTION_SPEC.md](CONTENT_OS_EXECUTION_SPEC.md) |
 | 模块行为 | [docs/product/README.md](docs/product/README.md) |
+| 核心能力唯一权威与关联索引 | [docs/product/CAPABILITY_INDEX.md](docs/product/CAPABILITY_INDEX.md) |
 | 技术边界 | [docs/architecture/SYSTEM_ARCHITECTURE.md](docs/architecture/SYSTEM_ARCHITECTURE.md) |
 | 当前任务和阻塞 | [STATUS.md](STATUS.md) |
 | 实施约定 | [AGENTS.md](AGENTS.md) |

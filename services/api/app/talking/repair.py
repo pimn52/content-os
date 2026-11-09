@@ -133,6 +133,9 @@ class TalkingRepairService:
 
     def reconcile_automatic_qa_failure(self, project_id: UUID, run_id: UUID):
         """独立QA已定位的画面缺陷只修一次；生成请求失败和未知缺陷不重试。"""
+        snapshot=self.db.connection.execute('SELECT * FROM production_runs WHERE id=? AND project_id=?',
+            (str(run_id),str(project_id))).fetchone()
+        if snapshot is None:return None
         run=self.production.get(project_id,run_id)
         if run is None or not run.automatic or any(value.startswith('automatic_stop:') for value in run.waiting_stop_reasons):return None
         for binding in run.talking_source_bindings:
@@ -146,8 +149,10 @@ class TalkingRepairService:
                     confirmed_action='regenerate_scene',reason='独立技术核验已定位人物画面缺陷，保留合格旁白与其他人物段，执行一次局部修正。'))
             reasons=plan.stop_reasons or ('talking_qa_failure_requires_diagnosis',)
             with self.db.transaction(immediate=True):
-                row=self.db.connection.execute('SELECT waiting_stop_reasons FROM production_runs WHERE id=?',(str(run_id),)).fetchone()
-                current=json.loads(row[0]) if row else []
+                row=self.db.connection.execute('SELECT * FROM production_runs WHERE id=? AND project_id=?',
+                    (str(run_id),str(project_id))).fetchone()
+                if row is None or dict(row)!=dict(snapshot) or JobRepository(self.db).get(qa.id)!=qa:return None
+                current=json.loads(row['waiting_stop_reasons'])
                 self.db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',
                     (json.dumps(list(dict.fromkeys([*current,*(f'automatic_stop:{reason}' for reason in reasons)]))),str(run_id)))
             return None

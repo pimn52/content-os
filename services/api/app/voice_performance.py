@@ -246,13 +246,59 @@ def select_voice_reference_windows(
 
 def authorized_voice_reference_choices(
     profile: VoiceProfile, clips: Sequence[Clip], assets: dict[UUID, Asset], *, data_root: str | Path,
+    allow_auto_windows: bool = False,
 ) -> tuple[tuple[VoiceReferenceWindowSelection, VoiceReferenceWindow], ...]:
-    """Return only exact, user-confirmed Clip bindings in profile order."""
+    """Return Profile-bound windows; automatic production may derive a bounded window."""
     if not profile.consent.confirmed:
         raise VoicePerformancePlanningError("Voice reference choices require explicit profile consent")
     allowed_ids = set(profile.reference_clip_ids)
     by_id = {clip.id: clip for clip in clips if clip.id in allowed_ids}
     choices = []
+    from app.voice_recipe import parse_generation_recipe
+    recipe = parse_generation_recipe(profile)
+    if recipe is not None:
+        selection = recipe.reference_window
+        clip = by_id.get(selection.clip_id)
+        asset = None if clip is None else assets.get(clip.asset_id)
+        if (clip is None or asset is None or selection.asset_id != asset.id
+            or selection.start_ms < clip.start_ms or selection.end_ms > clip.end_ms):
+            raise VoicePerformancePlanningError("voice_recipe_reference_invalid")
+        if selection.source_timebase == "analysis_wav":
+            source_hash = clip.reference_source_content_hash
+            source_file = clip.reference_source_file
+            source_duration_ms = clip.reference_source_duration_ms
+            if (source_hash is None or source_file is None or source_duration_ms is None
+                or selection.asset_content_hash != asset.content_hash
+                or selection.source_content_hash != source_hash):
+                raise VoicePerformancePlanningError("voice_recipe_reference_invalid")
+        else:
+            source_hash = asset.content_hash
+            source_file = asset.source_file
+            source_duration_ms = asset.duration_ms
+            if selection.source_content_hash != source_hash:
+                raise VoicePerformancePlanningError("voice_recipe_reference_invalid")
+        source_path = _resolve_source_path(source_file, data_root)
+        try:
+            if (not source_path.is_file()
+                or _file_sha256(source_path) != selection.source_content_hash):
+                raise ValueError()
+        except (OSError, ValueError):
+            raise VoicePerformancePlanningError("voice_recipe_reference_source_changed") from None
+        segments = sorted((segment for segment in clip.transcript_segments
+            if selection.start_ms <= segment.start_ms < segment.end_ms <= selection.end_ms),
+            key=lambda segment: (segment.start_ms, segment.end_ms))
+        transcript = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+        if (not segments or segments[0].start_ms != selection.start_ms
+            or segments[-1].end_ms != selection.end_ms
+            or any(left.end_ms != right.start_ms for left, right in zip(segments, segments[1:]))
+            or hashlib.sha256(transcript.encode("utf-8")).hexdigest() != selection.transcript_sha256):
+            raise VoicePerformancePlanningError("voice_recipe_reference_transcript_changed")
+        choices.append((selection, VoiceReferenceWindow(
+            clip_id=clip.id, asset_id=asset.id, start_ms=selection.start_ms, end_ms=selection.end_ms,
+            transcript=transcript, source_file=str(source_path), rank_score=float("inf"),
+            source_timebase=selection.source_timebase, source_content_hash=selection.source_content_hash,
+            asset_content_hash=asset.content_hash, source_duration_ms=source_duration_ms,
+        )))
     for clip_id in profile.reference_clip_ids:
         clip = by_id.get(clip_id)
         if clip is None or not is_confirmed_voice_reference(clip):
@@ -303,7 +349,24 @@ def authorized_voice_reference_choices(
             source_timebase=source_timebase, source_content_hash=source_hash,
             asset_content_hash=asset.content_hash, source_duration_ms=source_duration_ms,
         )
-        choices.append((voice_reference_window_selection(window), window))
+        selection = voice_reference_window_selection(window)
+        if not any(existing == selection for existing, _ in choices):
+            choices.append((selection, window))
+    if not choices and allow_auto_windows:
+        eligible_clips = [clip for clip in clips if clip.id in allowed_ids]
+        eligible_assets = {asset_id: asset for asset_id, asset in assets.items()
+            if asset.metadata.get("ip_profile_id") in (None, str(profile.ip_profile_id))}
+        automatic = select_voice_reference_windows(
+            eligible_clips, eligible_assets, data_root=data_root,
+            minimum_ms=5_000, maximum_ms=10_000,
+        )
+        automatic = sorted(automatic, key=lambda window: (
+            window.start_ms, -(window.end_ms - window.start_ms), window.end_ms,
+            str(window.clip_id),
+        ))
+        # Prefer the earliest bounded source window to avoid arbitrary mid-source
+        # reference tails; exact hash, interval and transcript are persisted.
+        choices.extend((voice_reference_window_selection(window), window) for window in automatic[:24])
     return tuple(choices)
 
 

@@ -13,7 +13,7 @@ from threading import Barrier, Event
 
 import pytest
 
-from app.db import AssetRepository, AudioAssetRepository, CURRENT_SCHEMA_VERSION, Database, apply_migrations
+from app.db import AssetGovernanceEventRepository, AssetRepository, AudioAssetRepository, CURRENT_SCHEMA_VERSION, Database, apply_migrations
 from app.domain.models import RationalFps
 from app.media import AudioImportError, AudioImporter, AudioProbeMetadata, FFProbeAdapter, MediaImporter, ProbeMetadata
 from app.media.ffprobe import ProbeInvalid, ProbeMalformed, ProbeNoVideo
@@ -100,6 +100,28 @@ def test_import_chunk_size_must_be_a_bounded_positive_integer(tmp_path: Path, ch
     try:
         with pytest.raises(ValueError, match="chunk_size"):
             MediaImporter(db, tmp_path / "data", _StaticProbe(), chunk_size=chunk_size)
+    finally:
+        db.close()
+
+
+def test_import_records_product_owned_governance_event(tmp_path: Path) -> None:
+    source = tmp_path / "creator.mp4"
+    source.write_bytes(b"creator media")
+    db = Database(tmp_path / "governed.sqlite")
+    try:
+        importer = MediaImporter(db, tmp_path / "data", _StaticProbe())
+        asset = importer.import_path(
+            source, "creator-intake",
+            extra_metadata={
+                "ip_profile_id": "00000000-0000-0000-0000-000000000001",
+                "reuse_role": "ordinary",
+                "lifecycle_state": "active",
+            },
+        )
+        events = AssetGovernanceEventRepository(db).list_for_asset(asset.id)
+        assert [event.event_type for event in events] == ["imported"]
+        assert events[0].actor == "product_import"
+        assert events[0].details["ip_profile_id"] == "00000000-0000-0000-0000-000000000001"
     finally:
         db.close()
 

@@ -1,6 +1,7 @@
 """Offline single-take repair contracts; synthetic PCM/timing, no inference."""
 import hashlib
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -17,7 +18,7 @@ from app.jobs.runner import JobExecutionError
 from app.main import create_app
 from app.production_runs import ProductionRunService
 from app.repair_allowance import used_repairs
-from app.voice_repair import VoiceRepairService, VoiceRepairRequest
+from app.voice_repair import VoiceRepairService, VoiceRepairRequest, execution_snapshot
 from test_production_runs import _ready_fixture, _voice_dispatch_evidence, _generated_voice_output
 
 
@@ -124,7 +125,7 @@ def test_changed_or_unknown_scope_cannot_execute(tmp_path, change):
             if change == "profile":
                 db.connection.execute("UPDATE voice_profiles SET payload=json_set(payload,'$.name','changed')")
             if change == "capability":
-                repo = ProviderMachineCapabilityProfileRepository(db); c = next(c for c in repo.list() if c.capability == "voice"); repo.save(c.model_copy(update={"commercial_status": "unknown"}))
+                db.connection.execute("UPDATE provider_machine_capability_profiles SET payload=json_set(payload,'$.runtime','changed-runtime') WHERE json_extract(payload,'$.capability')='voice'")
             if change == "consumed": db.connection.execute("UPDATE production_runs SET stage='awaiting_master'")
             if change == "qa_unknown": db.connection.execute("DELETE FROM provider_machine_capability_profiles WHERE json_extract(payload,'$.capability')='asr'")
         if change == "draft": client.put(f"/projects/{project}/draft", json={"script": "different", "topic": "changed"})
@@ -139,6 +140,38 @@ def test_changed_or_unknown_scope_cannot_execute(tmp_path, change):
         assert client.get(root + "/voice-repairs").json() == []
 
 
+def test_local_capability_status_is_recorded_not_a_private_repair_gate(tmp_path):
+    path = tmp_path / "voice-open-capability.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, run, root, voice_job_id = setup(client, path)
+        with Database(path) as db:
+            repo = ProviderMachineCapabilityProfileRepository(db)
+            for capability in repo.list():
+                if capability.provider not in {"fixture-voice", "fixture-asr"}:
+                    continue
+                reduced = capability.model_copy(update={
+                    "readiness": "configured",
+                    "quality_status": "unknown",
+                    "commercial_status": "non_commercial_only",
+                    "license_evidence_reference": None,
+                    "last_verified_at": None,
+                })
+                repo.save(reduced)
+            job = JobRepository(db).get(UUID(voice_job_id))
+            snapshot = execution_snapshot(db, job.payload)
+            db.connection.execute(
+                "UPDATE voice_dispatch_snapshots SET payload=? WHERE job_id=?",
+                (json.dumps(snapshot), str(job.id)),
+            )
+        plan, request = body(client, root)
+        assert plan["action"] == "regenerate_take", plan
+        assert plan["evidence"]["qa_capability"]["quality_status"] == "unknown"
+        assert plan["evidence"]["qa_capability"]["commercial_status"] == "non_commercial_only"
+        assert "voice_repair_local_admission_required" not in plan["stop_reasons"]
+        assert "voice_repair_local_qa_capability_missing_or_ambiguous" not in plan["stop_reasons"]
+        assert client.post(root + "/voice-repair", json=request).status_code == 201
+
+
 def copy_failure(client, path, root, project, job_id, checks):
     with Database(path) as db:
         jobs = JobRepository(db); job = jobs.get(UUID(job_id)); jobs.update(job.model_copy(update={"status": JobStatus.COMPLETED, "error_code": None}))
@@ -147,6 +180,12 @@ def copy_failure(client, path, root, project, job_id, checks):
     assert qa.status_code == 200, qa.text
     with Database(path) as db:
         jobs = JobRepository(db); job = jobs.get(UUID(qa.json()["voice_qa_job_id"])); jobs.update(job.model_copy(update={"status": JobStatus.FAILED, "error_code": "voice_qa_failed"}))
+        db.connection.execute(
+            "INSERT INTO voice_execution_receipts(job_id,payload) VALUES (?,?)",
+            (qa.json()["voice_qa_job_id"], json.dumps({
+                "runtime": "fixture", "machine_id": "fixture-host", "parameters": {},
+            }, sort_keys=True)),
+        )
         audios = AudioAssetRepository(db); audio = audios.get(audio_id)
         metadata = audio.metadata.copy(); gen = metadata["voice_generation"].copy()
         gen.update(qa_state="failed", qa={"qa_state": "failed", "provider": "fixture-asr", "model": "fixture-qa", "playable": True, "transcript_segment_count": 1, "checks": checks})
@@ -203,6 +242,12 @@ def test_tts_and_asr_reservations_each_once_and_remote_denied(tmp_path):
         _generated_voice_output(path, project, record["replacement_job_id"], "A fresh creator point.")
         qa = client.post(root + "/voice-qa-advance").json()
         with Database(path) as db:
+            db.connection.execute(
+                "INSERT INTO voice_execution_receipts(job_id,payload) VALUES (?,?)",
+                (qa["voice_qa_job_id"], json.dumps({
+                    "runtime": "fixture", "machine_id": "fixture-host", "parameters": {},
+                }, sort_keys=True)),
+            )
             job = JobRepository(db).get(UUID(qa["voice_qa_job_id"]))
             args = dict(operation="asr", category=CostCategory.ASR, provider="fixture-asr", model="fixture-qa", input_source="test", repair_data_root=tmp_path, known_local_cost=True, repair_worker_execution={"runtime": "fixture", "machine_id": "fixture-host", "parameters": {}})
             for override in ({"repair_local_verified": False}, {"model": "changed"}, {"repair_worker_execution": {"runtime": "fixture", "machine_id": "fixture-host", "parameters": {"vad_filter": True}}}):
@@ -355,3 +400,138 @@ def test_identical_failed_bytes_cannot_be_new_candidate(tmp_path):
             assert AudioAssetRepository(db).get(audio_id) == before
             assert len(AudioAssetRepository(db).list()) == 1
         assert client.get(root).json()["voice_audio_id"] is None
+
+
+def test_targeted_pronunciation_correction_uses_target_character_and_tone():
+    from app.voice_repair import (
+        _targeted_pronunciation_corrections,
+        apply_segment_pronunciation,
+    )
+
+    corrections = _targeted_pronunciation_corrections("痛苦来自判断", "痛哭来自判断")
+
+    assert corrections == [{
+        "char_index": 1,
+        "character": "苦",
+        "provider_spelling": "KU3",
+        "target_token": "苦",
+        "observed_token": "哭",
+        "reason": "automatic independent ASR found a target-character substitution",
+    }]
+    assert apply_segment_pronunciation(
+        "痛苦来自判断", "痛苦来自判断", corrections,
+    ) == "痛KU3来自判断"
+
+
+def test_targeted_pronunciation_correction_is_character_scoped_not_sentence_scoped():
+    from app.voice_repair import (
+        _targeted_pronunciation_corrections,
+        apply_segment_pronunciation,
+    )
+
+    copy = "判断带来痛苦，放下痛苦。"
+    observed = "判断带来痛哭，放下痛苦。"
+    corrections = _targeted_pronunciation_corrections(copy, observed)
+
+    assert len(corrections) == 1
+    assert corrections[0]["char_index"] == copy.index("苦")
+    assert apply_segment_pronunciation(copy, copy, corrections) == "判断带来痛KU3，放下痛苦。"
+
+
+def test_targeted_pronunciation_does_not_reweight_a_visually_different_homophone():
+    from app.voice_repair import _targeted_pronunciation_corrections
+
+    assert _targeted_pronunciation_corrections("事实", "是实") == []
+
+
+def test_targeted_pronunciation_repairs_a_cjk_proper_noun_read_as_latin():
+    from app.voice_repair import (
+        _targeted_pronunciation_corrections,
+        apply_segment_pronunciation,
+    )
+
+    copy = "斯多葛能治愈焦虑。"
+    corrections = _targeted_pronunciation_corrections(copy, "Slog能治愈焦虑。")
+
+    assert [item["character"] for item in corrections] == ["斯", "多", "葛"]
+    assert all(re.fullmatch(r"[A-Z]+[1-5]", item["provider_spelling"]) for item in corrections)
+    rendered = apply_segment_pronunciation(copy, copy, corrections)
+    assert "斯多葛" not in rendered
+    assert " " in rendered
+
+
+def test_targeted_pronunciation_uses_full_pinyin_for_repeated_three_character_term():
+    from app.voice_repair import (
+        _targeted_pronunciation_corrections,
+        apply_segment_pronunciation,
+    )
+
+    copy = "斯多葛教我们冷静。斯多葛也提醒我们判断。斯多葛不是压抑。"
+    corrections = _targeted_pronunciation_corrections(
+        copy, "斯多噶教我们冷静。斯多噶也提醒我们判断。斯多噶不是压抑。",
+    )
+    rendered = apply_segment_pronunciation(copy, copy, corrections)
+    assert "斯多葛" not in rendered
+    assert rendered.count("SI1 DUO1 GE2") == 3
+
+
+def test_repair_skips_a_correction_already_covered_by_homophone_alias():
+    from app.voice_repair import (
+        _targeted_pronunciation_corrections,
+        apply_segment_pronunciation,
+    )
+
+    copy = "斯多葛与斯多葛。"
+    corrections = _targeted_pronunciation_corrections(copy, "斯多噶与斯多噶。")
+    provider_text = "斯多格与斯多格。"
+    assert apply_segment_pronunciation(provider_text, copy, corrections) == provider_text
+
+
+def test_whole_take_repair_accepts_mixed_missing_and_resolved_equivalence_checks():
+    from app.voice_qa import VoiceQaError
+    from app.voice_repair import _whole_take_pronunciation_repair
+
+    correction = {
+        "char_index": 6,
+        "character": "葛",
+        "provider_spelling": "GE2",
+        "target_token": "葛",
+        "observed_token": "噶",
+        "reason": "fixture",
+    }
+    diagnosis = {
+        "segments": [
+            {
+                "index": 2,
+                "start_char": 120,
+                "end_char": 203,
+                "checks": ["copy_substitution_tokens", "copy_phonetic_equivalence"],
+                "missing_token_count": 0,
+                "unresolved_substitution_token_count": 1,
+                "pronunciation_corrections": [correction],
+            },
+            {
+                "index": 3,
+                "start_char": 205,
+                "end_char": 232,
+                "checks": ["copy_missing_tokens", "copy_substitution_tokens"],
+                "missing_token_count": 1,
+                "unresolved_substitution_token_count": 2,
+                "pronunciation_corrections": [
+                    {**correction, "char_index": 6},
+                    {**correction, "char_index": 7, "character": "是"},
+                    {**correction, "char_index": 11},
+                ],
+            },
+        ],
+        "failed_segment_indexes": [2, 3],
+    }
+    repaired = _whole_take_pronunciation_repair(diagnosis)
+    assert repaired["failed_segment_indexes"] == [2, 3]
+    assert [item["char_index"] for item in repaired["pronunciation_corrections"]] == [
+        126, 211, 212, 216,
+    ]
+
+    diagnosis["segments"][1]["pronunciation_corrections"].pop()
+    with pytest.raises(VoiceQaError, match="segment_diagnosis_required"):
+        _whole_take_pronunciation_repair(diagnosis)

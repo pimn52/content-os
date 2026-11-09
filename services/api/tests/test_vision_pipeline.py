@@ -113,6 +113,43 @@ def test_analysis_frame_time_and_hash_survive_provider_and_persistence(tmp_path)
         db.close()
 
 
+@pytest.mark.parametrize('start,end', [(0, 1000), (250, 750)])
+def test_intake_keyframe_does_not_erase_verified_interval_or_its_uses(tmp_path, start, end):
+    from app.media.visual_facts import full_interval_geometry
+    from app.media.vision import planning_visual_evidence
+    db, asset, clips, paths = _fixture(tmp_path)
+    try:
+        clip = ClipRepository(db).update(clips[0].model_copy(update={
+            'action': 'verified action', 'objects': ['verified object'], 'quality_score': .45}))
+        clips[0] = clip
+        verified = dict(source_content_hash=asset.content_hash,
+            clip_interval=dict(start_ms=0, end_ms=1000), coverage='video_interval_analysis',
+            method='provider_video_interval_analysis', content_consistent=True,
+            analysis_video_sha256='a' * 64, covered_start_ms=start, covered_end_ms=end,
+            analysis_duration_ms=end-start, evidence_reference='video-evidence',
+            source_subtitle_clearance_verified=True,
+            scene_matches={'existing-use': {'supported': True, 'score': .9}})
+        asset = AssetRepository(db).update(asset.model_copy(update={
+            'metadata': {'visual_analysis': {str(clip.id): verified}}}))
+        result = MediaVisionPipeline(db, _Provider()).process(asset, clips[:1], paths[:1],
+            selected_clip_ids=[clip.id], keyframe_timestamps_ms=[500])
+        facts = full_interval_geometry(result.asset, clip, (start, end))
+        assert facts['scene_matches'] == verified['scene_matches']
+        assert facts['evidence_reference'] == 'video-evidence'
+        assert facts['intake_keyframe']['coverage'] == 'sampled_keyframe'
+        assert facts['intake_keyframe']['observations'][0]['description'] == 'new scene 0'
+        assert result.clips[0].visual_description == 'old one'
+        assert result.clips[0].action == 'verified action'
+        assert result.clips[0].objects == ['verified object']
+        assert result.clips[0].quality_score == .45
+        assert facts['intake_keyframe']['action'] == 'working'
+        evidence = planning_visual_evidence(db, result.asset, clip)
+        assert evidence['usable_interval']['duration_ms'] == end-start
+        assert evidence['observations'][0]['description'] == 'new scene 0'
+    finally:
+        db.close()
+
+
 def test_bad_timestamp_or_frame_changed_during_analysis_never_updates_clips(tmp_path):
     db, asset, clips, paths = _fixture(tmp_path)
     try:

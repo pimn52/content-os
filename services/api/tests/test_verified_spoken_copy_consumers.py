@@ -1,6 +1,7 @@
 """已核验读音等价沿原识别时间轴消费，不改写识别事实。"""
 from datetime import datetime, timezone
 from uuid import uuid4
+import wave
 
 import pytest
 
@@ -116,6 +117,65 @@ def test_qa_word_clauses_flow_through_schedule_talking_and_captions(tmp_path):
     assert (plan.start_ms, plan.end_ms) == (1200, 2700)
     assert _matches_interval_copy(split[1].voice_text, saved.transcript_segments, 1200, 2700, audio=saved)
     assert ''.join(c.text for c in _audio_captions_for_interval(saved, 0, saved.duration_ms)) == copy
+
+
+def test_segmented_voice_qa_keeps_real_word_offsets_for_talking(tmp_path):
+    from app.voice_qa import transcribe_voice_parts
+    from app.talking.slices import plan_talking_audio_slice
+    from app.talking.scheduling import schedule_talking_scenes
+    from app.production_runs import _unique_scene_speech_span
+    from test_talking_scheduling import short_latentsync_pool
+
+    source = tmp_path / 'master.bin'
+    source.write_bytes(b'offline fixture, not speech')
+    part_paths = {}
+    for name, duration_ms in (("first", 1000), ("second", 800)):
+        part = tmp_path / f"{name}.wav"
+        with wave.open(str(part), "wb") as output:
+            output.setparams((1, 2, 24_000, 0, "NONE", "not compressed"))
+            output.writeframes(b"\x00\x00" * (24_000 * duration_ms // 1000))
+        part_paths[name] = str(part)
+    copy = '画面复杂，运动更多。编码重要。'
+    class ASR:
+        def transcribe(self, source, *, language):
+            if str(source) == part_paths["first"]:
+                words = (TranscriptionWord(0, 500, '画面复杂'),
+                         TranscriptionWord(500, 1000, '运动更多'))
+                return TranscriptionResult('画面复杂运动更多',
+                    (TranscriptionSegment(0, 1000, '画面复杂运动更多'),), words=words)
+            return TranscriptionResult('编码重要', (TranscriptionSegment(0, 800, '编码重要'),),
+                words=(TranscriptionWord(0, 800, '编码重要'),))
+
+    transcription = transcribe_voice_parts(
+        ASR(),
+        [(part_paths["first"], 0, 1000), (part_paths["second"], 1000, 1800)],
+        language='zh',
+    )
+    audio = AudioAsset(source_file=str(source), content_hash='e' * 64, duration_ms=1800,
+        sample_rate=24000, channels=1, authorization_reference='fixture', imported_at=datetime.now(timezone.utc),
+        metadata={'voice_generation': {'target_text': copy, 'qa_state': 'pending'}})
+    saved = apply_voice_qa(audio, verify_generated_voice(audio, copy, transcription), transcription,
+        provider='fixture', model='fixture')
+    assert [(s.start_ms, s.end_ms) for s in saved.transcript_segments] == [(0, 500), (500, 1000), (1000, 1800)]
+    assert [s['start_ms'] for s in saved.metadata['voice_generation']['qa']['observed_segments']] == [0, 1000]
+    plan = plan_talking_audio_slice(saved, start_segment_index=1, end_segment_index=2, max_duration_ms=500)
+    assert (plan.start_ms, plan.end_ms) == (500, 1000)
+    project = Project(ip_profile_id=uuid4(), title='fixture', topic='fixture',
+        fps=RationalFps(numerator=25, denominator=1), created_at=datetime.now(timezone.utc))
+    original = ScenePlan(project_id=project.id, scene_id='speech', order=0, purpose='fixture',
+        voice_text=copy, duration_target_ms=1800, visual_intent=VisualIntent(subject='creator'),
+        preferred_sources=[SourceKind.AI_VIDEO], fallback_sources=[SourceKind.STOCK],
+        supporting_visual_intent=VisualIntent(subject='illustration'),
+        visual_requirement='creator_speaking', visual_requirement_reason='fixture')
+    split = _split_talking_master_clauses(None, project, copy, [original], master=saved, max_segment_ms=800)
+    revised, allocations = schedule_talking_scenes(short_latentsync_pool(1000), split)
+    assert len(allocations) == 1
+    assert ''.join(scene.voice_text for scene in revised) == copy
+    selected = [scene for scene in revised if scene.visual_requirement == 'creator_speaking']
+    for scene in selected:
+        interval = _unique_scene_speech_span(saved, revised, scene.id)
+        assert interval is not None
+        assert _matches_interval_copy(scene.voice_text, saved.transcript_segments, *interval, audio=saved)
 
 
 @pytest.mark.parametrize('invalid', ['different_words', 'overlap', 'inside_word'])

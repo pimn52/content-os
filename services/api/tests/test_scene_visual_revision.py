@@ -33,7 +33,8 @@ def _revision_fixture():
             "output_presentation": {"available": True}}}]}
     updates = [{"scene_id": scene.scene_id, "visual_intent": scene.visual_intent.model_dump(exclude={"schema_version"}),
         "preferred_sources": [kind.value for kind in scene.preferred_sources], "fallback_sources": [],
-        "preferred_clip_id": None if scene.scene_id == "creator" else clip_id} for scene in originals]
+        "preferred_clip_id": None if scene.scene_id == "creator" else clip_id,
+        "graphic_plan": scene.graphic_plan.model_dump(mode="json") if scene.graphic_plan else None} for scene in originals]
     updates[1]["visual_intent"]["description"] = "已有素材中的同原片编码对比"
     return project, originals, context, {"scenes": updates}
 
@@ -79,11 +80,42 @@ def test_visual_patch_schema_and_protocol_preserve_original_content_without_crea
         schema = json.JSONDecoder().raw_decode(prompt.split("Required output JSON Schema (return only the JSON instance, not the schema):\n")[1])[0]
     assert set(schema["properties"]) == {"scenes"}
     item = schema["properties"]["scenes"]["items"]
-    fields = {"scene_id", "visual_intent", "preferred_sources", "fallback_sources", "preferred_clip_id"}
+    fields = {"scene_id", "visual_intent", "preferred_sources", "fallback_sources", "preferred_clip_id", "graphic_plan"}
     assert set(item["required"]) == set(item["properties"]) == fields
     assert item["additionalProperties"] is False
     assert item["properties"]["scene_id"]["enum"] == ["creator", "evidence"]
     assert item["properties"]["preferred_clip_id"]["enum"] == [None, context["materials"][0]["clip_id"]]
+
+
+def test_visual_patch_can_add_a_semantic_diagram_for_one_unresolved_explanatory_beat():
+    project, originals, context, document = _revision_fixture()
+    context["materials"] = []
+    original = originals[1].model_copy(update={
+        "visual_requirement": "explanatory",
+        "visual_requirement_reason": "抽象关系由真实图解表达",
+        "material_request": None,
+    })
+    context["visual_revision"]["scenes"] = [
+        originals[0].model_dump(mode="json"),
+        original.model_dump(mode="json"),
+    ]
+    document["scenes"][1].update({
+        "preferred_sources": ["typography"],
+        "fallback_sources": [],
+        "preferred_clip_id": None,
+        "graphic_plan": {
+            "kind": "diagram",
+            "treatment": "diagram_flow",
+            "points": ["识别可控", "承认感受", "放下结果"],
+            "reason": None,
+        },
+    })
+    planner, requests = _planner(document)
+    result = planner.plan(project, context=context)
+    assert len(requests) == 1
+    assert result.scenes[1].graphic_plan is not None
+    assert result.scenes[1].graphic_plan.treatment == "diagram_flow"
+    assert result.scenes[1].preferred_sources[0].value == "typography"
 
 
 @pytest.mark.parametrize("violation", ["duplicate", "missing", "unknown_id", "voice_text", "material_request",

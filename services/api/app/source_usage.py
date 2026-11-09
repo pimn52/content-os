@@ -63,12 +63,13 @@ class SourceUsageService:
                 raise SourceUsageConflict("visual_source_lineage_unresolved")
             return self.resolve(parent.id, offset + start, offset + end, scene_id, _seen=seen)
         if isinstance(generation, dict):
-            clip = self.clips.get(UUID(generation["reference_clip_id"]))
-            offset = generation.get("reference_window_start_ms", None if clip is None else clip.start_ms)
-            if clip is None or type(offset) is not int or offset + end > clip.end_ms:
-                raise SourceUsageConflict("visual_source_lineage_unresolved")
-            return [{**use, "repeatable": False, "content_changed": True} for use in
-                    self.resolve(clip.asset_id, offset + start, offset + end, scene_id, _seen=seen)]
+            # A Talking output is a new visible performance. Its identity
+            # reference is reusable enrolment input, not footage embedded in
+            # the rendered video. Tracking the reference interval as visible
+            # output incorrectly exhausts the only clean creator reference.
+            return [dict(scene_id=str(scene_id), source_hash=asset.content_hash,
+                         start_ms=start, end_ms=end, repeatable=False,
+                         content_changed=True)]
         run = asset.metadata.get("talking_run") or asset.metadata.get("talking_run_preview")
         if isinstance(run, dict):
             # Never count a concatenated/generated hash as independent footage.
@@ -246,19 +247,6 @@ class SourceUsageService:
                 job = JobRepository(self.db).get(UUID(row["render_job_id"]))
                 if job and isinstance(job.payload, RenderVideoJobPayload):
                     uses = self.spec_uses(job.payload.video_spec)
-            # Legacy Talking runs also occupy their actual input motion, even
-            # before this column existed. Inference context is not visible use.
-            if not row["render_job_id"]:
-                for binding in json.loads(row["talking_source_bindings"]):
-                    if not binding.get("talking_job_id"):
-                        continue
-                    job = JobRepository(self.db).get(UUID(binding["talking_job_id"]))
-                    clip = self.clips.get(UUID(binding["reference_clip_id"]))
-                    if job and clip:
-                        start = job.payload.reference_window_start_ms
-                        start = clip.start_ms if start is None else start
-                        uses.extend(self.resolve(clip.asset_id, start,
-                            start + binding["master_end_ms"]-binding["master_start_ms"], binding["scene_plan_id"]))
             result.extend({**use, "project_id": row["project_id"], "run_id": row["id"], "state": held} for use in uses)
         render_jobs = self.db.connection.execute("""SELECT j.id FROM jobs j JOIN projects p ON p.id=j.project_id
             WHERE json_extract(j.payload,'$.type')='render' AND json_extract(p.payload,'$.ip_profile_id')=?""",

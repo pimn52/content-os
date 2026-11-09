@@ -46,7 +46,7 @@ const posts = f => f.calls.filter(call => call.options?.method === 'POST');
 async function selectSource(h) {
   await h.change('Talking Profile', 'profile-1');
   await h.change('Profile 授权来源 Clip', 'clip-1');
-  await h.change('Talking 能力档案', 'cap-1');
+  await h.change('Talking 本机执行配置', 'cap-1');
 }
 
 test('one global selection dispatches all scenes without per-scene reading or confirmation', async () => {
@@ -100,7 +100,7 @@ test('partial choices, absent consent, and ambiguous existing groups cannot batc
   await f.h.change('Talking Profile', 'profile-1');
   assert.equal(f.h.find('button', '制作全部人物画面').props.disabled, true);
   await f.h.change('Profile 授权来源 Clip', 'clip-1');
-  await f.h.change('Talking 能力档案', 'cap-1');
+  await f.h.change('Talking 本机执行配置', 'cap-1');
   assert.equal(f.h.find('button', '制作全部人物画面').props.disabled, true);
   assert.equal(posts(f).length, 0);
   f.h.unmount();

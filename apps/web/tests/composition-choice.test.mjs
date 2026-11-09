@@ -5,14 +5,14 @@ import { componentHarness } from './hook-harness.mjs';
 const file = fileURLToPath(new URL('../src/ProductionPanel.tsx', import.meta.url));
 const modules = Object.fromEntries(['ProductionVoicePanel', 'ProductionTalkingPanel', 'PresentationRecoveryPanel','AutomaticProductionPanel'].map(name => [`./${name}`, { [name]: () => null }]));
 const plan = { project_id: 'P', draft_version: 1, script_revision: 1, fingerprint: 'a'.repeat(64), status: 'blocked', evidence_level: 'fixture', cost_estimate: { known_amount: '0', currency: 'USD', unknown_cost_count: 0 }, estimated_local_runtime_ms: null, estimated_user_active_minutes: null, stop_reasons: [], authorization_needs: [], actions: [], scenes: [] };
-function setup(preflightOverride, saved = []) {
+function setup(preflightOverride, saved = [], selectedRun = null, selectedModules = modules) {
   const calls = [];
   const h = componentHarness(file, 'ProductionPanel', { projectId: 'P', draftVersion: 1, scriptRevision: 1, hasScenes: true,
     request: async (path, options) => { if (path.includes('/production-runs?') && !options) return saved;
       const body = options?.body && JSON.parse(options.body); calls.push({ path, body, options });
       if (path.endsWith('production-preflight')) return preflightOverride ? preflightOverride() : plan;
-      return { id: 'R', project_id: 'P', status: 'cancelled', talking_dependencies: [], waiting_stop_reasons: [], voice_qa_auto_stop_reasons: [] }; },
-  }, { modules });
+      return selectedRun ?? { id: 'R', project_id: 'P', status: 'cancelled', talking_dependencies: [], waiting_stop_reasons: [], voice_qa_auto_stop_reasons: [] }; },
+  }, { modules: selectedModules });
   return { h, calls };
 }
 test('current draft restores its latest backend Run without a browser bookmark', async () => {
@@ -22,6 +22,24 @@ test('current draft restores its latest backend Run without a browser bookmark',
   assert.equal(s.h.input('当前草稿的已有执行').props.value, 'R');
   assert.equal(s.calls.filter(call => call.path.endsWith('/production-runs/R')).length, 1);
   assert.equal(s.calls.some(call => call.path.endsWith('/production-runs/OLD')), false);
+  s.h.unmount();
+});
+test('automatic Run does not mount manual Voice, Talking or recovery review forms', async () => {
+  const rendered = [];
+  const tracking = Object.fromEntries([
+    ['ProductionVoicePanel', () => { rendered.push('voice'); return null; }],
+    ['ProductionTalkingPanel', () => { rendered.push('talking'); return null; }],
+    ['PresentationRecoveryPanel', () => { rendered.push('recovery'); return null; }],
+    ['AutomaticProductionPanel', () => null],
+  ].map(([name, component]) => [`./${name}`, { [name]: component }]));
+  const saved = [{id:'R',project_id:'P',draft_version:1,script_revision:1,stage:'render',created_at:'2026-11-05T00:00:00Z'}];
+  const run = { id:'R', project_id:'P', automatic:true, status:'render_completed_awaiting_review',
+    preflight_fingerprint:'a'.repeat(64), render_job_id:'render-1', voice_job_id:'voice-1',
+    voice_audio_id:'audio-1', voice_qa_job_id:'qa-1', waiting_stop_reasons:[], voice_qa_auto_stop_reasons:[],
+    talking_dependencies:[{scene_id:'s1',scene_plan_id:'scene-1'}], talking_source_bindings:[],
+    talking_qa_dependencies:[], talking_preview_dependencies:[] };
+  const s = setup(undefined, saved, run, tracking); await s.h.flush();
+  assert.deepEqual(rendered, []);
   s.h.unmount();
 });
 test('normal preflight and start carry identical subject-first tokens; changing choice requires fresh preflight', async () => {

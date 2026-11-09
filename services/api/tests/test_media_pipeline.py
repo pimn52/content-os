@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.db import AssetRepository, ClipRepository, Database
+from app.db import AssetGovernanceEventRepository, AssetRepository, ClipRepository, Database
 from app.domain.models import Asset, Clip, RationalFps
 from app.media.extraction import AudioExtraction, KeyframeExtraction, MediaExtractor
 from app.media.ffprobe import FFProbeAdapter
@@ -100,6 +100,75 @@ def test_repeat_processing_is_stable_and_duplicate_free(tmp_path: Path) -> None:
         assert first.keyframe_timestamps_ms == tuple((clip.start_ms + clip.end_ms) / 2 for clip in first.clips)
         assert ClipRepository(db).list_by_asset(asset.id) == list(first.clips)
         assert len(first.keyframe_paths) == len(set(first.keyframe_paths)) == 2
+    finally:
+        db.close()
+
+
+def test_analysis_persists_bounded_perceptual_fingerprint_without_blocking_clips(tmp_path: Path) -> None:
+    db = Database(tmp_path / "fingerprint.sqlite")
+    try:
+        asset = _persisted_asset(db, tmp_path, "fingerprint.mp4", has_audio=False)
+
+        class Fingerprinter:
+            def fingerprint(self, frames):
+                assert len(frames) == 2
+                return {
+                    "schema_version": "1.0",
+                    "algorithm": "dhash64-sampled-video-keyframes-v1",
+                    "sample_count": 2,
+                    "source_keyframe_count": 2,
+                    "samples": [
+                        {"timestamp_ms": round(timestamp), "hash": "ffffffffffffffff"}
+                        for _, timestamp in frames
+                    ],
+                }
+
+        pipeline = MediaAnalysisPipeline(
+            db,
+            _StaticSegmenter([(0, 1_000), (1_000, 2_000)]),
+            _WritingExtractor(tmp_path / "cache"),
+            Fingerprinter(),
+        )
+        result = pipeline.process(asset)
+
+        assert result is not None
+        fingerprint = AssetRepository(db).get(asset.id).metadata["perceptual_fingerprint"]
+        assert fingerprint["sample_count"] == 2
+        assert [sample["hash"] for sample in fingerprint["samples"]] == [
+            "ffffffffffffffff",
+            "ffffffffffffffff",
+        ]
+        events = AssetGovernanceEventRepository(db).list_for_asset(asset.id)
+        assert [event.event_type for event in events] == [
+            "fingerprint_created", "near_duplicate_scan",
+        ]
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize('preserve_existing', [True, False])
+def test_auto_analysis_rechecks_clips_under_writer_lock(tmp_path, preserve_existing):
+    path = tmp_path / 'concurrent-evidence.sqlite'
+    db = Database(path)
+    try:
+        asset = _persisted_asset(db, tmp_path, 'racing.mp4', has_audio=False)
+        prior = Clip(asset_id=asset.id, start_ms=0, end_ms=2000, asset_duration_ms=2000,
+            visual_description='已有用途证据')
+        class ConcurrentWriter(_WritingExtractor):
+            def extract_keyframe(self, source, clip):
+                if not ClipRepository(db).get(prior.id):
+                    with Database(path) as other:
+                        ClipRepository(other).create(prior)
+                return super().extract_keyframe(source, clip)
+        pipeline = MediaAnalysisPipeline(db, _StaticSegmenter([(0, 1000), (1000, 2000)]),
+            ConcurrentWriter(tmp_path / 'cache'))
+        result = pipeline.process(asset, preserve_existing=preserve_existing)
+        if preserve_existing:
+            assert result is None
+            assert ClipRepository(db).list_by_asset(asset.id) == [prior]
+        else:
+            assert result is not None
+            assert ClipRepository(db).list_by_asset(asset.id) == list(result.clips)
     finally:
         db.close()
 

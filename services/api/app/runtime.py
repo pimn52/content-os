@@ -76,6 +76,19 @@ def resolve_local_executable(
     if found:
         return found
     repository_root = Path(__file__).resolve().parents[3]
+    if name in {"ffmpeg", "ffprobe"}:
+        configured_root = values.get("CONTENT_OS_DATA_ROOT", "").strip()
+        configured_db = values.get("CONTENT_OS_DB_PATH", "").strip()
+        data_root = (Path(configured_root) if configured_root
+                     else Path(configured_db).parent if configured_db
+                     else repository_root / "content-os-data")
+        local_candidates = []
+        for package_root in sorted(data_root.glob("ffmpeg-gyan-*"), key=lambda path: path.name, reverse=True):
+            local_candidates.extend(sorted(package_root.glob(f"*/bin/{name}.exe"), key=lambda path: str(path), reverse=True))
+        local_candidates.append(data_root / "latentsync-runtime310" / "Library" / "bin" / f"{name}.exe")
+        local = next((candidate for candidate in local_candidates if candidate.is_file()), None)
+        if local is not None:
+            return str(local)
     package_root = repository_root / "apps" / "renderer" / "node_modules" / "@remotion" / "compositor-win32-x64-msvc"
     for candidate in (package_root / f"{name}.exe", package_root / name):
         if candidate.is_file():

@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID, uuid5
 
 from app.db import AssetRepository, ClipRepository, ProviderCallRepository
+from app.asset_management import asset_is_active, asset_scope_allows_project
 from app.domain.models import CandidateAsset, Clip, CostCategory, SourceKind, UsageCost
 from app.provider_execution import (ProviderExecutionService, ProviderExecutionRecordedFailure,
     ProviderExecutionInProgress, runtime_provider_identity)
@@ -16,6 +17,7 @@ from app.providers.vision import VideoIntervalBatch, VisionTimeout
 from app.search import ClipTextSearchService
 from app.source_usage import SourceUsageService, SourceUsageConflict
 from app.assembly.edit_plan import source_overlap_ms, same_source_information_change, intentional_reuse
+from app.search.index import _lexical_terms
 from .local_paths import existing_local_media_file
 from .vision import planning_visual_evidence,source_output_presentation
 from .visual_facts import footage_geometry, full_interval_geometry, scene_visual_key, subtitle_keep_height, generated_footage_admitted, material_origin, matches_scene
@@ -23,6 +25,7 @@ from .visual_facts import footage_geometry, full_interval_geometry, scene_visual
 _WINDOWS = UUID("75269028-6947-4fc9-b655-d5d21c7cdc02")
 _FOOTAGE = {SourceKind.USER_ASSET, SourceKind.HISTORICAL_ASSET, SourceKind.STOCK, SourceKind.AI_BROLL}
 _MIN_MATCH = .65
+_MIN_CONTEXT_MATCH = .2
 _BATCH_CLIPS = 3
 _BATCH_DURATION_MS = 24000
 _BATCH_BYTES = 12 * 1024 * 1024
@@ -119,15 +122,110 @@ def _catalogue_candidates(db,project,topic):
 
 
 def _allowed(asset, project):
-    return (asset is not None and asset.source_kind in _FOOTAGE
+    return (asset is not None and asset_is_active(asset) and asset.source_kind in _FOOTAGE
         and (asset.source_kind is not SourceKind.AI_BROLL or generated_footage_admitted(asset))
         and asset.metadata.get("project_id") in (None, str(project.id))
-        and asset.metadata.get("ip_profile_id") in (None, str(project.ip_profile_id)))
+        and (asset.source_kind is not SourceKind.AI_BROLL or asset.metadata.get("project_id") == str(project.id))
+        and asset_scope_allows_project(asset, project.ip_profile_id))
 
 
 def _needs_footage(scene):
     return (scene.visual_requirement != "creator_speaking" and scene.preferred_sources[0] is not SourceKind.TYPOGRAPHY
         and any(kind in _FOOTAGE for kind in (*scene.preferred_sources, *scene.fallback_sources)))
+
+
+def _executable_graphic(scene):
+    return (scene.graphic_plan is not None
+        and scene.graphic_plan.kind in {"diagram", "text_card"}
+        and scene.visual_requirement not in {"creator_speaking", "action_evidence"})
+
+
+_GENERIC_VISUAL_TERMS = frozenset({
+    "竖屏", "横屏", "特写", "中景", "近景", "远景", "画面", "镜头", "场景",
+    "内容", "真实", "动作", "全幅",
+})
+
+
+def _positive_description_term(description: str, term: str) -> bool:
+    for match in re.finditer(re.escape(term), description):
+        prefix = description[max(0, match.start() - 8):match.start()]
+        if not re.search(r"(?:没有|无|非|并非|不含|未出现|未有|而不是|而非)[^，。；]{0,5}$", prefix):
+            return True
+    return False
+
+
+def _local_description_match(scene, facts):
+    """Reuse a verified interval description when the requested shot is explicit."""
+    if (scene.material_request is not None
+            or facts.get("coverage") != "video_interval_analysis"
+            or facts.get("content_consistent") is not True
+            or facts.get("source_subtitle_clearance_verified") is not True):
+        return None
+    description = " ".join(str(value or "") for value in (
+        facts.get("visual_description"),
+        facts.get("action"),
+        facts.get("location"),
+    ))
+    intent = scene.visual_intent
+    requested = " ".join(str(value or "") for value in (
+        intent.subject,
+        intent.action,
+        intent.description,
+    ))
+    requested_terms = {
+        term for term in _lexical_terms(requested)
+        if len(term) >= 2 and term not in _GENERIC_VISUAL_TERMS
+    }
+    matched = sorted(term for term in requested_terms if _positive_description_term(description, term))
+    if len(matched) < 2:
+        return None
+    subject_or_action = " ".join(str(value or "") for value in (
+        intent.subject, intent.action,
+    )).strip()
+    direct = any(
+        term in description
+        for term in _lexical_terms(subject_or_action)
+        if len(term) >= 2 and term not in _GENERIC_VISUAL_TERMS
+    )
+    return {
+        "scene_key": scene_visual_key(scene),
+        "supported": True,
+        "score": min(0.9, 0.65 + 0.05 * (len(matched) - 2)),
+        "reason": "复用已核验连续区间描述：镜头意图与画面事实明确相交",
+        "fit": "direct" if direct else "context",
+        "quality_adequate": True,
+        "subject_verified": direct,
+    }
+
+
+def _prefer_executable_graphic(scene):
+    """Use an explicitly planned graphic when optional footage no longer fits."""
+    fallback = []
+    for source in (*scene.preferred_sources, *scene.fallback_sources):
+        if source is not SourceKind.TYPOGRAPHY and source not in fallback:
+            fallback.append(source)
+    return scene.model_copy(update={
+        "preferred_sources": [SourceKind.TYPOGRAPHY],
+        "fallback_sources": fallback,
+        "preferred_clip_id": None,
+        "material_request": None,
+    })
+
+
+def _graphic_fallbacks(scenes, failure):
+    failed = set()
+    for reason in failure.reasons:
+        if reason.startswith(("material_scene_unresolved:", "material_combination_unresolved:")):
+            failed.add(reason.split(":", 1)[1])
+        elif reason.startswith("material_source_unavailable:"):
+            parts = reason.split(":", 2)
+            if len(parts) >= 2:
+                failed.add(parts[1])
+    if not failed:
+        return tuple(scenes), False
+    revised = tuple(_prefer_executable_graphic(scene)
+        if scene.scene_id in failed and _executable_graphic(scene) else scene for scene in scenes)
+    return revised, revised != tuple(scenes)
 
 
 def _distinct_observed_windows(project,windows):
@@ -264,6 +362,8 @@ class VisualMaterialResolver:
         unavailable = {}
         for asset in self.assets.list():
             registered = asset.metadata.get("talking_motion_source")
+            if not asset_is_active(asset):
+                continue
             if isinstance(registered, dict) and registered.get("source_content_hash") != asset.content_hash:
                 unavailable[str(asset.id)] = "talking_motion_source_content_hash_changed"
                 continue
@@ -486,8 +586,23 @@ class VisualMaterialResolver:
             if scene.graphic_plan is not None and scene.graphic_plan.kind != "none":
                 requests[key]["graphic_plan"] = scene.graphic_plan.model_dump(mode="json")
             preferred = self.clips.get(scene.preferred_clip_id) if scene.preferred_clip_id else None
-            query = " ".join((scene.voice_text, scene.visual_intent.subject, scene.visual_intent.action or ""))
+            intent_query = " ".join(
+                value.strip() for value in (
+                    scene.visual_intent.subject,
+                    scene.visual_intent.action,
+                )
+                if isinstance(value, str) and value.strip()
+            )
+            # Narration describes the idea; the intended subject/action
+            # describes the shot. Mixing a long narration into every retrieval
+            # query dilutes precise visual terms and hides valid footage.
+            query = intent_query or scene.visual_intent.description or scene.voice_text
             hits = search.search(query, top_k=12)
+            if not hits and query != scene.voice_text:
+                # A label/lexicon miss is not proof that no footage matches.
+                # Retry the broader narration once so old local metadata still
+                # has a deterministic recall path.
+                hits = search.search(scene.voice_text, top_k=12)
             external = {}
             if scene.material_request and acquired_assets:
                 for asset_id in acquired_assets.get(" ".join(scene.material_request.query.split()), []):
@@ -497,7 +612,13 @@ class VisualMaterialResolver:
                 # 有明确外取需求时，通用动作词不能挤掉具体对象候选；这只是粗召回，仍须视频核验。
                 subject_hits = search.search(scene.visual_intent.subject, top_k=12)
                 subject_ids = {hit.clip.id for hit in subject_hits if hit.score >= .5}
-                local = [clip for clip in local if clip.id in subject_ids]
+                # A zero-hit subject query is not evidence that the broader
+                # caption/intent recall failed. Keep it available for the
+                # interval QA instead of discarding reusable stock solely
+                # because Chinese planning labels and English clip metadata
+                # do not share lexical tokens.
+                if subject_ids:
+                    local = [clip for clip in local if clip.id in subject_ids]
             scene_windows = []
             represented = set()
             hint_cache = {}
@@ -509,18 +630,34 @@ class VisualMaterialResolver:
                 if (not _allowed(asset, project)
                     or asset.source_kind is SourceKind.AI_BROLL and scene.visual_requirement=="action_evidence"):
                     return choices
+                fine = self.clips.list_by_asset(asset.id)
+                # A broad hint can contain an already verified exact-use Clip.
+                # Prefer that actual Clip before creating time-dependent windows;
+                # never project the whole interval's match onto a different Clip.
+                known = []
+                for candidate in fine:
+                    if (candidate.start_ms < hint.start_ms or candidate.end_ms > hint.end_ms
+                        or candidate.end_ms-candidate.start_ms < scene.duration_target_ms):
+                        continue
+                    facts = full_interval_geometry(asset, candidate)
+                    match = facts.get("scene_matches", {}).get(key, {})
+                    if (facts.get("source_subtitle_clearance_verified") and matches_scene(facts,scene)
+                        and match.get("supported") is True and match.get("score", 0) >= _MIN_MATCH):
+                        known.append((match["score"], candidate))
+                for _, candidate in sorted(known, key=lambda value:(-value[0],str(value[1].id))):
+                    choices.append((asset,candidate))
                 evidence = planning_visual_evidence(self.db, asset, hint,project=project)
                 usable=evidence.get("usable_interval")
                 if (usable and full_interval_geometry(asset,hint)
                     and hint.end_ms-hint.start_ms>=scene.duration_target_ms):
-                    choices.append((asset,hint))
+                    if not any(clip.id == hint.id for _,clip in choices):
+                        choices.append((asset,hint))
                     return choices
                 if evidence.get("output_presentation",{}).get("available") is False:
                     return choices
                 anchors = [int(o["timestamp_ms"]) for o in evidence.get("observations", [])
                     if isinstance(o.get("timestamp_ms"), (int,float)) and hint.start_ms <= o["timestamp_ms"] < hint.end_ms]
                 anchors = anchors or [(hint.start_ms+hint.end_ms)//2]
-                fine = self.clips.list_by_asset(asset.id)
                 for anchor in anchors[:2]:
                     containing = [c for c in fine if hint.start_ms <= c.start_ms <= anchor < c.end_ms <= hint.end_ms]
                     nearest = min(containing, key=lambda c:c.end_ms-c.start_ms) if containing else hint
@@ -590,7 +727,18 @@ class VisualMaterialResolver:
         if not windows and not scope.exists():
             missing=[(f"material_source_unavailable:{s.scene_id}:{s.material_request.source_kind}"
                 if s.material_request else f"material_scene_unresolved:{s.scene_id}") for s in scenes if _needs_footage(s)]
-            raise MaterialResolutionError(*missing)
+            failure=MaterialResolutionError(*missing)
+            scenes, changed = _graphic_fallbacks(scenes, failure)
+            if changed:
+                windows, requests = self._windows(project, scenes, acquired_assets)
+                if not requests:
+                    return scenes
+                failure=MaterialResolutionError(*[
+                    (f"material_source_unavailable:{s.scene_id}:{s.material_request.source_kind}"
+                     if s.material_request else f"material_scene_unresolved:{s.scene_id}")
+                    for s in scenes if _needs_footage(s)
+                ])
+            raise failure
         windows,_=self._bound_scope(project,windows,requests,job_id,"source-analysis")
         source_assets = list({asset.id:asset for asset, _ in windows.values()}.values())
         self._require_bytes(source_assets)
@@ -612,6 +760,12 @@ class VisualMaterialResolver:
             return self._select(project,scenes,windows,work_id,reserved_source_uses=reserved_source_uses)
         except MaterialResolutionError as initial:
             failure=initial
+        scenes, changed = _graphic_fallbacks(scenes, failure)
+        if changed:
+            try:
+                return self._select(project,scenes,windows,work_id,reserved_source_uses=reserved_source_uses)
+            except MaterialResolutionError as graphic_failure:
+                failure=graphic_failure
         index = 0
         while True:
             # Only unresolved uses need new observations. Unchanged admitted
@@ -636,6 +790,9 @@ class VisualMaterialResolver:
                 raise failure
             if index>=_MAX_BATCHES:
                 raise MaterialResolutionError(*failure.reasons,"material_analysis_batch_limit",
+                    candidate_rejections=failure.candidate_rejections)
+            if not getattr(self.provider, "supports_video_input", False):
+                raise MaterialResolutionError(*failure.reasons, "material_analysis_not_configured",
                     candidate_rejections=failure.candidate_rejections)
             # Do not ask a candidate to repeat a known answer just because
             # another candidate is missing a different use in the same batch.
@@ -886,13 +1043,25 @@ class VisualMaterialResolver:
                 asset = self.assets.get(clip.asset_id)
                 facts = full_interval_geometry(asset, clip)
                 match = facts.get("scene_matches", {}).get(key, {})
+                if not match and scene.preferred_clip_id == clip.id:
+                    match = _local_description_match(scene, facts) or {}
+                    if match:
+                        facts = {
+                            **facts,
+                            "scene_matches": {**facts.get("scene_matches", {}), key: match},
+                        }
                 reasons=[]
                 if not _allowed(asset,project):reasons.append("source_unavailable")
                 if asset is not None and asset.source_kind is SourceKind.AI_BROLL and scene.visual_requirement=="action_evidence":
                     reasons.append("generated_not_factual_evidence")
                 if not facts:reasons.append("interval_analysis_unavailable")
                 elif match.get("analysis_valid") is False:reasons.append("visual_purpose_unknown")
-                elif not match.get("supported") or match.get("score",0)<_MIN_MATCH or not matches_scene(facts,scene):
+                elif (not match.get("supported") or match.get("score",0)<_MIN_MATCH or not matches_scene(facts,scene)) and not (
+                    scene.visual_requirement == "explanatory"
+                    and match.get("fit") == "context"
+                    and match.get("quality_adequate") is True
+                    and match.get("score", 0) >= _MIN_CONTEXT_MATCH
+                ):
                     reasons.append("visual_purpose_mismatch")
                 if facts and not facts.get("source_subtitle_clearance_verified"):reasons.append("subtitle_clearance_unverified")
                 if clip.end_ms-clip.start_ms<scene.duration_target_ms:reasons.append("duration_insufficient")
@@ -1003,6 +1172,12 @@ class VisualMaterialResolver:
                 observed=dict(facts[str(candidate.clip_id)])
                 choices=dict(observed.get("editorial_selections",{}))
                 match=observed.get("scene_matches",{}).get(scene_visual_key(scene),{})
+                if not match and scene.preferred_clip_id == candidate.clip_id:
+                    match=_local_description_match(scene,observed) or {}
+                    if match:
+                        local_matches=dict(observed.get("local_description_matches",{}))
+                        local_matches[scene_visual_key(scene)]=match
+                        observed["local_description_matches"]=local_matches
                 choice={"scene_id":scene.scene_id,"scene_plan_id":str(scene.id),"viewer_takeaway":scene.viewer_takeaway,
                     "source_kind":asset.source_kind.value,"reason":reason,
                     "playback_start_ms":candidate.playback_start_ms if candidate.playback_start_ms is not None else self.clips.get(candidate.clip_id).start_ms,

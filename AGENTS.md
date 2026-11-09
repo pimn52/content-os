@@ -27,3 +27,4 @@
 - 创作者完成 Profile 同意和素材入库授权后，正常创建、预检和预算内执行不反复索要批准。派发前核验模型能力/许可、预算、幂等、哈希、重复与冲突；失败保留证据，不自动重试。破坏性删除和超预算执行需另行确认。
 - 优先验证普通工作流与第二主题复现；不能把 API 演示、辅助脚本或单一样片称作产品落地。
 - 文档避免长篇大论，只抓要点言简意赅。产品行为写入对应模块，当前状态写 STATUS，持久决定写 DECISIONS，历史过程留 Git/证据目录。交付前运行 python scripts/check_docs.py。
+- 核心能力行为只写唯一权威模块文档；在 [CAPABILITIES.json](docs/product/CAPABILITIES.json) 登记模块关系后运行 `python scripts/sync_capability_docs.py`，不得手工维护生成索引或保留第二份行为定义。

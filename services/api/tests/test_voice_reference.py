@@ -55,6 +55,17 @@ def test_real_ffmpeg_stereo_resample_exact_window_and_stable_identity(reference_
         assert replay.inputs_snapshot().reference_audio != inputs.reference_audio
 
 
+def test_asset_pts_parent_hash_binds_to_source_hash(reference_case):
+    from dataclasses import replace
+    c = reference_case
+    c.window = replace(c.window, source_content_hash=c.selection.source_content_hash,
+        asset_content_hash=c.selection.source_content_hash)
+    with prepare(c) as owned:
+        provenance = owned.verify_for(c.window, c.selection, owned.inputs_snapshot())
+        assert provenance["source_sha256"] == c.selection.source_content_hash
+        assert provenance["asset_sha256"] == c.selection.source_content_hash
+
+
 def test_analysis_wav_reference_uses_its_own_sample_clock(reference_case):
     from dataclasses import replace
     c = reference_case

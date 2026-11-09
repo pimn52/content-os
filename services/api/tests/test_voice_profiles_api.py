@@ -5,8 +5,9 @@ import wave
 
 from fastapi.testclient import TestClient
 
-from app.db import AssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectRepository
-from app.domain.models import Asset, Clip, IPProfile, Project, RationalFps
+from app.db import (AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository,
+    JobRepository, ProjectRepository)
+from app.domain.models import Asset, AudioAsset, Clip, IPProfile, Project, RationalFps
 from app.main import create_app
 
 
@@ -114,7 +115,7 @@ def test_reference_candidates_need_explicit_confirmation_before_stable_default_r
         selected = choices[0]["selection"]
         assert choices[0]["review_required"] is True and "speech_quality" not in choices[0]
         request = {"idempotency_key": "selected-ref", "voice_profile_id": profile_id,
-            "text": "任意，新文案", "delivery_text": "任意新文案", "authorization_reference": "voice-consent",
+            "text": "任意，新文案", "delivery_text": "任意新文案",
             "reference_window": selected}
         assert client.post(f"/projects/{project.id}/voice-jobs", json=request).status_code == 422
         assert client.post(f"/projects/{project.id}/voice-jobs", json={**request,
@@ -159,3 +160,120 @@ def test_reference_candidates_need_explicit_confirmation_before_stable_default_r
             assert stored.text == request["text"] and stored.delivery_text == request["delivery_text"]
         repeat = client.post(f"/projects/{project.id}/voice-jobs", json=default_request)
         assert repeat.status_code == 201 and repeat.json()["id"] == first.json()["id"]
+
+
+def test_voice_generation_recipe_requires_approved_anchor_and_authorized_window(tmp_path: Path) -> None:
+    database_path = tmp_path / "voice-recipe.sqlite3"
+    voice_id = uuid4()
+    source = tmp_path / "reference.media"
+    source.write_bytes(b"authorized voice source")
+    anchor = tmp_path / "approved-master.wav"
+    anchor.write_bytes(b"approved master bytes")
+    with Database(database_path) as db:
+        ip = IPProfile(creator_name="Creator")
+        IPProfileRepository(db).create(ip)
+        asset = Asset(source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
+            duration_ms=20_000, width=1080, height=1920, fps=RationalFps(numerator=25, denominator=1),
+            has_audio=True, authorization_reference="creator-rights", imported_at="2026-09-09T08:00:00Z",
+            metadata={"ip_profile_id": str(ip.id)})
+        AssetRepository(db).create(asset)
+        clip = Clip(asset_id=asset.id, start_ms=0, end_ms=10_000, asset_duration_ms=20_000,
+            transcript_source="owner-confirmed-reference:human-review",
+            transcript_segments=[
+                {"start_ms": 1_000, "end_ms": 3_000, "text": "审核开头"},
+                {"start_ms": 3_000, "end_ms": 5_000, "text": "审核结尾"},
+            ])
+        ClipRepository(db).create(clip)
+        AudioAssetRepository(db).create(AudioAsset(
+            source_file=str(anchor), content_hash=hashlib.sha256(anchor.read_bytes()).hexdigest(),
+            duration_ms=5_000, sample_rate=24_000, channels=1, authorization_reference="creator-rights",
+            imported_at="2026-09-09T08:00:00Z", metadata={"voice_generation": {
+                "qa_state": "verified", "human_review_state": "approved", "voice_profile_id": str(voice_id),
+                "human_review": {"schema_version": "0.1", "approved": True,
+                    "likeness": "pass", "naturalness": "pass", "emphasis": "pass",
+                    "pace": "pass", "pauses": "pass", "rhythm": "pass",
+                    "evidence_reference": "human:exact-master", "findings": ["fixture exact-master approval"],
+                    "reviewed_at": "2026-09-09T09:00:00Z"},
+            }},
+        ))
+    profile_payload = {
+        "id": str(voice_id), "ip_profile_id": str(ip.id), "name": "Creator voice", "provider": "omnivoice",
+        "provider_profile_id": "creator-recipe", "reference_clip_ids": [str(clip.id)],
+        "consent": {"subject_name": "Creator", "basis": "self", "confirmed": True,
+                    "confirmed_at": "2026-09-09T08:00:00Z"},
+        "created_at": "2026-09-09T08:00:00Z",
+    }
+    transcript = "审核开头 审核结尾"
+    # Build the request after recovering the persisted anchor identity.
+    with Database(database_path) as db:
+        anchor_id = AudioAssetRepository(db).list()[0].id
+    recipe = {
+        "schema_version": "0.5", "recipe_id": "human-approved-v60", "version": 6,
+        "quality_anchor_audio_id": str(anchor_id),
+        "quality_anchor_sha256": hashlib.sha256(anchor.read_bytes()).hexdigest(),
+        "quality_anchor_evidence_reference": "human:exact-master",
+        "human_review": {"approved": True, "likeness": "pass", "naturalness": "pass",
+            "emphasis": "pass", "pace": "pass", "pauses": "pass", "rhythm": "pass"},
+        "reference_window": {"clip_id": str(clip.id), "asset_id": str(asset.id),
+            "source_content_hash": asset.content_hash, "start_ms": 1_000, "end_ms": 5_000,
+            "transcript_sha256": hashlib.sha256(transcript.encode()).hexdigest()},
+        "runtime_label": "omnivoice-existing-maintained-personal-w13",
+        "runtime_parameters_sha256": "b" * 64,
+        "composition_policy": "paragraph_spans",
+        "pause_hierarchy": {
+            "schema_version": "1.0",
+            "levels": {
+                "phrase_internal": "continuous_no_cut",
+                "comma": "short_continuing_boundary",
+                "sentence": "natural_close_longer_than_comma",
+                "paragraph": "allow_one_beat",
+                "key_point": "allow_one_thinking_beat",
+                "ending": "natural_landing",
+            },
+            "invariants": {
+                "sentence_outranks_comma": True,
+                "global_speed_is_not_pause_control": True,
+                "insert_unmeasured_silence": False,
+            },
+            "evidence_refs": ["v19b-u-voice-punctuation-hierarchy-review"],
+        },
+        "seam_policy": {
+            "scope": "paragraph_spans",
+            "method": "pcm16_mono_24khz_10ms_rms_below_minus45dbfs",
+            "eligible_boundary_kinds": ["terminal", "continuing"],
+            "margin_ms_each_side": 60,
+            "max_cut_ms": 300,
+            "preserve_spoken_frames": True,
+            "insert_silence": False,
+            "evidence_reference": "content-os-data/evaluation-evidence/v60-length-completion/manifest.json",
+        },
+        "delivery_adjustments": {
+            "schema_version": "1.4", "review_state": "pending_user_review",
+            "syntax_rule_set_version": "zh-clause-binding-v1",
+            "punctuation_overrides": [], "pronunciation_overrides": [], "generation_breaks": [],
+            "copula_complement_break": {
+                "enabled": False, "max_complement_chars": 12,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "contextual_pronunciation": {
+                "enabled": False, "rule_set_version": "zh-common-polyphones-v1",
+                "evidence_reference": "fixture",
+            },
+            "contrastive_correction_break": {
+                "enabled": False, "max_negated_chars": 48,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "predicate_completion_break": {
+                "enabled": False, "max_clause_chars": 60,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+        },
+    }
+    with TestClient(create_app(database_path)) as client:
+        created = client.post("/voice-profiles", json=profile_payload)
+        assert created.status_code == 201
+        profile_id = created.json()["id"]
+        response = client.put(f"/voice-profiles/{profile_id}/generation-recipe",
+            json={"generation_recipe": recipe})
+        assert response.status_code == 200, response.text
+        assert response.json()["generation_recipe"]["recipe_id"] == "human-approved-v60"

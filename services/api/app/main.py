@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, model_validator
 from app.domain.models import AudioAssetTranscriptionJobPayload, ClipIndexJobPayload
 
 from app.budget import BudgetLimitError, ProviderCallError, ProviderCallLedger, is_over_budget, snapshot
@@ -25,10 +25,19 @@ from app.planning_feasibility import planning_feasibility, planning_identity_con
 from app.planning_input import creator_planning_brief
 from app.search.index import _lexical_terms
 from app.costs import ProviderCostEstimator, UnknownProviderCostEstimator, estimate_selected_candidates, reduce_candidate_cost
-from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingRunRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
-from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, EditPlan, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, TalkingSliceSeriesRecovery, UsageCost, VerifiedVerticalDerivationRequest, VideoSpec, VisualStyleTokens, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceHumanReview, VoicePaceCandidateJobPayload, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
+from app.db import AccountConnectionRepository, AnalysisResultRepository, AssetRepository, AssetUsageRepository, AudioAssetRepository, BudgetPolicyRepository, ClipRepository, ContentOpportunityRepository, Database, FeedbackRepository, HistoricalContentRepository, ImageAssetRepository, IPProfileRepository, JobRepository, ProjectDraftRepository, ProjectRepository, ProviderCallRepository, ProviderMachineCapabilityProfileRepository, ProviderMachineSettingRepository, PublicationMetricObservationRepository, PublicationRepository, ShootTaskRepository, TalkingProfileRepository, TalkingRunRepository, TalkingSliceSeriesContinuityReviewRepository, TalkingSliceSeriesRepository, VoiceProfileRepository
+from app.domain.models import AccountConnection, AnalysisResultBundle, Asset, AssetGovernanceEvent, AssetUsageEvent, AudioAsset, BudgetPolicy, CandidateAsset, Clip, ConsentRecord, ContentFeedback, ContentOpportunity, CostCategory, CostEstimate, CostReductionSuggestion, DraftRoute, EditPlan, HistoricalContent, ImageAsset, IPProfile, Job, JobStatus, JobType, NarrationDeliveryPlan, NarrationPace, NarrationPerformanceCue, NarrationPerformancePlan, NarrationPerformancePlanSource, NarrationPerformanceSuggestions, Project, ProjectDraft, ProjectDraftRevision, ProjectFormat, ProviderCallRecord, ProviderMachineCapabilityProfile, ProviderMachineSetting, PublicationMetricObservation, PublicationRecord, RationalFps, RenderVideoJobPayload, ScenePlan, ShootTask, SourceKind, TalkingGenerationJobPayload, TalkingPerformanceBrief, TalkingProfile, TalkingReferenceAssessment, TalkingReferenceSelection, TalkingRun, TalkingRunChildEvidence, TalkingSliceSeries, TalkingSliceSeriesContinuityReview, TalkingSliceSeriesRecovery, UsageCost, VerifiedVerticalDerivationRequest, VideoSpec, VisualStyleTokens, VoiceBoundaryAlignmentJobPayload, VoiceGenerationJobPayload, VoiceHumanReview, VoicePaceCandidateJobPayload, VoiceProfile, VoiceQaJobPayload, VoiceReferenceWindowSelection, VoiceReviewOutcome
 from app.assembly import NarrationRequiredForNewScript, VideoSpecAssembler, VideoSpecAssemblyError
 from app.asset_library import asset_library_page
+from app.asset_management import (
+    AssetManagementError,
+    asset_governance_history,
+    asset_references,
+    compute_asset_fingerprint,
+    near_duplicate_assets,
+    update_asset_lifecycle,
+    visual_evidence_coverage,
+)
 from app.external_media_api import router as external_media_router
 from app.web_discovery_api import router as web_discovery_router
 from app.video_production_api import router as video_production_router
@@ -80,6 +89,8 @@ from app.scene_planning import (ScenePlanRequest,ScenePlanResponse,generate_scen
     _scene_planning_context,_scene_planner_from_env,_scene_planner_error_code)
 from app.production_preflight import PreflightInputError, ProductionPreflight, StaleProductionPreflight, build_production_preflight
 from app.production_runs import ProductionRun, ProductionRunConflict, ProductionRunNotReady, ProductionRunReference, ProductionRunService, TalkingSourceContext, is_planned_talking_collection
+from app.publication import PublicationOutputError, publishable_outputs, require_publishable_output
+from app.publication_learning import creator_publication_baseline
 from app.talking.planned_admission import PlannedTalkingAdmissionError, PlannedTalkingAdmissionService
 from app.talking.repair import TalkingRepairPlan, TalkingRepairRecord, TalkingRepairRequest, TalkingRepairService
 from app.voice_repair import VoiceRepairPlan, VoiceRepairRequest, VoiceRepairService
@@ -93,6 +104,7 @@ from app.renderer import LocalResourceError, RemotionRenderer, RenderInputError,
 from app.media.local_paths import existing_local_media_file
 from app.media.viewport_feasibility import ViewportFeasibility, ViewportFeasibilityRequest, inspect_viewport
 from app.runtime import RuntimeCapability, inspect_runtime_capabilities, resolve_local_executable, scene_planner_api_key
+from app.runtime_settings import RuntimeSettings, load_runtime_settings, save_runtime_settings, runtime_environment
 from app.talking import TalkingRunAssembler, TalkingRunAssemblyError, TalkingSlicePlanningError, assess_talking_slice_series, plan_source_forward_reference_windows, plan_talking_audio_slice, plan_talking_audio_slice_series, select_talking_reference
 from app.execution_admission import UseAdmissionError
 from app.media.audio_access import AudioAccess, require_ordinary_media
@@ -448,6 +460,9 @@ class IPProfileUpdateRequest(BaseModel):
     creator_name: str = Field(min_length=1, max_length=200)
     default_voice_profile_id: UUID | None = None
     domains: list[str] = Field(default_factory=list, max_length=30)
+    positioning: str | None = Field(default=None, max_length=2_000)
+    content_pillars: list[str] = Field(default_factory=list, max_length=20)
+    platform_categories: list[str] = Field(default_factory=list, max_length=20)
     audience: str | None = Field(default=None, max_length=1_000)
     topics: list[str] = Field(default_factory=list, max_length=100)
     knowledge: list[str] = Field(default_factory=list, max_length=200)
@@ -457,6 +472,8 @@ class IPProfileUpdateRequest(BaseModel):
     avoided_expressions: list[str] = Field(default_factory=list, max_length=200)
     boundaries: list[str] = Field(default_factory=list, max_length=100)
     common_hooks: list[str] = Field(default_factory=list, max_length=100)
+    public_account_links: list[str] = Field(default_factory=list, max_length=20)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=200)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -476,6 +493,45 @@ class AssetIdentityUpdateRequest(BaseModel):
     motion_reference: bool | None = None
 
 
+class AssetLifecycleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: Literal["active", "archived"]
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AssetLifecycleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset: Asset
+    references: dict[str, object]
+
+
+class NearDuplicateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: UUID
+    algorithm: str
+    max_distance: int
+    matches: list[dict[str, object]]
+
+
+class AssetReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: UUID
+    reference_count: int
+    references: list[dict[str, object]]
+    delete_safe: bool
+
+
+class AssetGovernanceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset: Asset
+    ownership: dict[str, object]
+    lifecycle: dict[str, object]
+    perceptual_fingerprint: dict[str, object] | None
+    near_duplicate_scan: dict[str, object] | None
+    events: list[AssetGovernanceEvent]
+    references: AssetReferenceResponse
+
+
 class AssetStageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["not_started", "pending", "running", "completed", "failed", "cancelled"]
@@ -483,10 +539,19 @@ class AssetStageResponse(BaseModel):
     error_code: str | None = None
 
 
+class AssetVisualCoverageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    total_clips: int = Field(ge=0)
+    described_clips: int = Field(ge=0)
+    missing_clip_ids: list[UUID]
+    creator_owned: bool
+
+
 class AssetReadinessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_id: UUID
     stages: dict[str, AssetStageResponse]
+    visual_coverage: AssetVisualCoverageResponse
 
 
 class VerticalDerivationResponse(BaseModel):
@@ -500,6 +565,7 @@ class MediaImportRequest(BaseModel):
     source_path: str = Field(min_length=1, max_length=4_000)
     authorization_reference: str = Field(min_length=1, max_length=500)
     source_kind: str = Field(default="user_asset", pattern=r"^(user_asset|historical_asset)$")
+    ip_profile_id: UUID | None = None
     recursive: bool = True
 
 
@@ -526,6 +592,18 @@ class _LimitedUploadStream:
         if self.total > self.limit:
             raise ValueError("uploaded media exceeds the local size limit")
         return chunk
+
+
+def _asset_import_metadata(db: Database, ip_profile_id: UUID | None) -> dict[str, object]:
+    if ip_profile_id is None:
+        return {}
+    if IPProfileRepository(db).get(ip_profile_id) is None:
+        raise HTTPException(status_code=404, detail="ip profile not found")
+    return {
+        "ip_profile_id": str(ip_profile_id),
+        "reuse_role": "ordinary",
+        "lifecycle_state": "active",
+    }
 
 
 class InboxScanRequest(MediaImportRequest):
@@ -631,6 +709,10 @@ class PublicationRequest(BaseModel):
     output_version: str = Field(min_length=1, max_length=200)
     platform: str = Field(min_length=1, max_length=100)
     published_at: datetime
+    title: str = Field(min_length=1, max_length=500, pattern=r"\S")
+    description: str | None = Field(default=None, max_length=50_000)
+    cover_frame_ms: int = Field(default=0, ge=0)
+    account_connection_id: UUID | None = None
     content_url: str | None = Field(default=None, max_length=2_000)
     content_external_id: str | None = Field(default=None, max_length=500)
     metrics: dict[str, Any] = Field(default_factory=dict)
@@ -645,6 +727,16 @@ class FeedbackRequest(BaseModel):
     changed_fields: list[str] = Field(default_factory=list, max_length=100)
     rejection_reason: str | None = Field(default=None, max_length=2_000)
     notes: str | None = Field(default=None, max_length=10_000)
+
+
+class PublicationMetricObservationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_key: str = Field(min_length=16, max_length=500)
+    observed_at: AwareDatetime
+    window_hours: int = Field(ge=0, le=8_760)
+    metric_source: str = Field(min_length=1, max_length=200)
+    metrics: dict[str, JsonValue] = Field(min_length=1, max_length=100)
+    evidence_ref: str | None = Field(default=None, max_length=2_000)
 
 
 class ContentOpportunityRequest(BaseModel):
@@ -666,9 +758,11 @@ class OpportunityStatusRequest(BaseModel):
 
 class AccountConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    ip_profile_id: UUID | None = None
     provider: str = Field(min_length=1, max_length=100)
     account_external_id: str = Field(min_length=1, max_length=500)
     display_name: str | None = Field(default=None, max_length=200)
+    profile_url: str | None = Field(default=None, max_length=2_000)
     connected_at: AwareDatetime
 
 
@@ -681,6 +775,20 @@ class HistoricalContentRequest(BaseModel):
     description: str | None = Field(default=None, max_length=10_000)
     transcript: str | None = Field(default=None, max_length=100_000)
     metrics: dict[str, int | float] = Field(default_factory=dict)
+    asset_id: UUID | None = None
+    content_url: str | None = Field(default=None, max_length=2_000)
+    availability: Literal["available", "removed", "mirror_only", "unknown"] = "unknown"
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+
+
+class HistoricalContentAssetLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: UUID
+    content_url: str | None = Field(default=None, max_length=2_000)
+    availability: Literal["available", "removed", "mirror_only", "unknown"] = "unknown"
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+    published_at: AwareDatetime | None = None
+    description: str | None = Field(default=None, max_length=10_000)
 
 
 class VoiceProfileRequest(BaseModel):
@@ -693,7 +801,13 @@ class VoiceProfileRequest(BaseModel):
     reference_clip_ids: list[UUID] = Field(min_length=1, max_length=100)
     consent: ConsentRecord
     language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(-[A-Z]{2})?$")
+    generation_recipe: dict[str, JsonValue] | None = None
     created_at: AwareDatetime
+
+
+class VoiceProfileRecipeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generation_recipe: dict[str, JsonValue] | None
 
 
 class ConfirmVoiceReferenceRequest(BaseModel):
@@ -850,6 +964,36 @@ class NextSuggestion(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str
     suggestion: str
+    evidence_refs: list[str]
+
+
+class PublishableOutputResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: UUID
+    output_version: str
+    render_id: UUID
+    render_job_id: UUID
+    run_id: UUID | None
+    completed_at: AwareDatetime
+    width: int
+    height: int
+    duration_ms: int
+    available: bool
+    published: bool
+    feedback_recorded: bool
+
+
+class PerformanceBaselineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: Literal["no_publication", "no_current_observation", "insufficient", "emerging", "ready"]
+    publication_id: UUID | None
+    output_version: str | None
+    platform: str
+    window_hours: int
+    sample_size: int
+    current_metrics: dict[str, float]
+    baseline_median: dict[str, float]
+    delta_percent: dict[str, float | None]
     evidence_refs: list[str]
 
 
@@ -1052,6 +1196,37 @@ class RuntimeReadinessResponse(BaseModel):
     capabilities: list[RuntimeCapabilityResponse]
 
 
+def configured_execution_scopes(environment: dict[str, str]) -> list[dict[str, str]]:
+    """Describe the current local provider scope without probing a model."""
+    provider = environment.get("CONTENT_OS_TALKING_PROVIDER", "").strip().lower()
+    runtime = ""
+    machine_id = ""
+    if provider == "maintained-latentsync":
+        from app.providers.maintained_talking import maintained_talking_runtime_options
+        from app.providers.talking import TalkingConfigurationError
+        try:
+            options = maintained_talking_runtime_options(environment)
+        except TalkingConfigurationError:
+            return []
+        value = options.get("runtime_label")
+        host = options.get("machine_id")
+        runtime = value.strip() if isinstance(value, str) else ""
+        machine_id = host.strip() if isinstance(host, str) else ""
+    elif provider == "latentsync":
+        runtime = environment.get("CONTENT_OS_TALKING_RUNTIME_ID", "").strip()
+        machine_id = environment.get("CONTENT_OS_TALKING_MACHINE_ID", "").strip()
+    if not runtime or not machine_id:
+        return []
+    return [{
+        "capability": "talking",
+        "provider": "latentsync",
+        "model": "LatentSync-1.5",
+        "runtime": runtime,
+        "machine_id": machine_id,
+        "source": "current_runtime_configuration",
+    }]
+
+
 def create_app(
     data_path: str | Path | None = None,
     *,
@@ -1079,6 +1254,7 @@ def create_app(
         selected.data_root = application.state.data_root
         selected.render_output_root = application.state.render_output_root
         application.state.database = selected
+        application.state.runtime_environment = runtime_environment(load_runtime_settings(selected), os.environ)
         application.state.database_closed = False
         try:
             yield
@@ -1127,8 +1303,8 @@ def create_app(
 
     @application.get("/runtime/readiness", response_model=RuntimeReadinessResponse, tags=["system"])
     def runtime_readiness() -> RuntimeReadinessResponse:
-        capabilities = [RuntimeCapabilityResponse.model_validate(value.__dict__) for value in inspect_runtime_capabilities()]
-        required = {"local_media", "render", "scene_planning", "asr", "vision", "embedding"}
+        capabilities = [RuntimeCapabilityResponse.model_validate(value.__dict__) for value in inspect_runtime_capabilities(application.state.runtime_environment)]
+        required = {"local_media", "render", "scene_planning", "asr", "vision", "retrieval", "tts", "talking"}
         ready_keys = {value.key for value in capabilities if value.status == "ready"}
         return RuntimeReadinessResponse(
             checked_at=datetime.now(timezone.utc),
@@ -1136,11 +1312,31 @@ def create_app(
             capabilities=capabilities,
         )
 
+    @application.get("/runtime/settings", response_model=RuntimeSettings, tags=["system"])
+    async def get_runtime_settings(request: Request) -> RuntimeSettings:
+        return load_runtime_settings(request.app.state.database)
+
+    @application.put("/runtime/settings", response_model=RuntimeSettings, tags=["system"])
+    async def put_runtime_settings(payload: RuntimeSettings, request: Request) -> RuntimeSettings:
+        # 启动时加载快照，保存后重启才能改变当前 API 和 Worker 的运行能力。
+        try:
+            return save_runtime_settings(request.app.state.database, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @application.get("/execution-settings/schemas", tags=["execution-settings"])
-    def execution_settings_schemas() -> dict[str, object]:
+    def execution_settings_schemas(request: Request) -> dict[str, object]:
         """Return serializable provider-owned settings schemas without probing models."""
 
-        return {"schemas": [schema.as_dict() for schema in list_provider_settings_schemas()]}
+        active_scopes = configured_execution_scopes(request.app.state.runtime_environment)
+        schemas = [schema.as_dict() for schema in list_provider_settings_schemas()]
+        for scope in active_scopes:
+            schema = find_provider_settings_schema(
+                scope["capability"], scope["provider"], scope["model"], scope["runtime"],
+            )
+            if schema is not None and schema.as_dict() not in schemas:
+                schemas.append(schema.as_dict())
+        return {"schemas": schemas, "active_scopes": active_scopes}
 
     @application.get("/execution-settings/capabilities", response_model=list[ProviderMachineCapabilityProfile], tags=["execution-settings"])
     async def list_execution_capabilities(request: Request) -> list[ProviderMachineCapabilityProfile]:
@@ -1280,9 +1476,14 @@ def create_app(
         db: Database = request.app.state.database
         scope_key = ":".join((capability, "local", provider, model, runtime, machine_id))
         existing = ProviderMachineSettingRepository(db).get_by_scope_key(scope_key)
+        retained = {} if existing is None else {
+            key: value for key, value in existing.values.items()
+            if key not in {parameter.key for parameter in schema.parameters}
+        }
         setting = ProviderMachineSetting(
             id=existing.id if existing else uuid4(), capability=capability, mode="local", provider=provider,
-            model=model, runtime=runtime, machine_id=machine_id, values=values, updated_at=datetime.now(timezone.utc),
+            model=model, runtime=runtime, machine_id=machine_id, values={**retained, **values},
+            updated_at=datetime.now(timezone.utc),
         )
         with db.transaction():
             ProviderMachineSettingRepository(db).save(setting)
@@ -1399,6 +1600,19 @@ def create_app(
     @application.get("/ip-profiles", response_model=list[IPProfile], tags=["profile"])
     async def list_ip_profiles(request: Request) -> list[IPProfile]:
         return IPProfileRepository(request.app.state.database).list()
+
+    @application.post("/ip-profiles", response_model=IPProfile, status_code=201, tags=["profile"])
+    async def create_ip_profile(payload: IPProfileUpdateRequest, request: Request) -> IPProfile:
+        db: Database = request.app.state.database
+        if payload.default_voice_profile_id is not None:
+            raise HTTPException(status_code=422, detail="default_voice_profile_requires_existing_profile")
+        repository = IPProfileRepository(db)
+        if any(profile.creator_name == payload.creator_name for profile in repository.list()):
+            raise HTTPException(status_code=409, detail="ip_profile_name_already_exists")
+        profile = IPProfile(id=uuid4(), **payload.model_dump())
+        with db.transaction():
+            repository.create(profile)
+        return profile
 
     @application.put("/ip-profile", response_model=IPProfile, tags=["profile"])
     async def update_default_ip_profile(payload: IPProfileUpdateRequest, request: Request, ip_profile_id: UUID | None = None) -> IPProfile:
@@ -2073,8 +2287,10 @@ def create_app(
     async def set_global_budget(payload: BudgetPolicyRequest, request: Request) -> BudgetResponse:
         db: Database = request.app.state.database
         policy = BudgetPolicy(project_id=None, updated_at=datetime.now(timezone.utc), **payload.model_dump())
-        with db.transaction():
+        targets = AssetJobTargetStore(db)
+        with db.transaction(immediate=True):
             BudgetPolicyRepository(db).save(policy)
+            targets.resume_budget_blocked_intake(policy)
         return _budget_response(db, None)
 
     @application.get("/projects/{project_id}/budget", response_model=BudgetResponse, tags=["runtime"])
@@ -2178,11 +2394,34 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
         return AssetUsageRepository(db).list_for_project(project_id)
 
-    @application.post("/projects/{project_id}/publications", response_model=PublicationRecord, status_code=201, tags=["publishing"])
-    async def record_publication(project_id: UUID, payload: PublicationRequest, request: Request) -> PublicationRecord:
+    @application.get("/projects/{project_id}/publishable-outputs", response_model=list[PublishableOutputResponse], tags=["publishing"])
+    async def list_publishable_outputs(project_id: UUID, request: Request) -> list[PublishableOutputResponse]:
         db: Database = request.app.state.database
         if ProjectRepository(db).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
+        return [
+            PublishableOutputResponse.model_validate(value)
+            for value in publishable_outputs(db, project_id, request.app.state.render_output_root)
+        ]
+
+    @application.post("/projects/{project_id}/publications", response_model=PublicationRecord, status_code=201, tags=["publishing"])
+    async def record_publication(project_id: UUID, payload: PublicationRequest, request: Request) -> PublicationRecord:
+        db: Database = request.app.state.database
+        project = ProjectRepository(db).get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            output = require_publishable_output(
+                db, project_id, payload.output_version, request.app.state.render_output_root,
+            )
+        except PublicationOutputError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if payload.cover_frame_ms >= output["duration_ms"]:
+            raise HTTPException(status_code=422, detail="publication_cover_frame_outside_output")
+        if payload.account_connection_id is not None:
+            account = AccountConnectionRepository(db).get(payload.account_connection_id)
+            if account is None or account.ip_profile_id != project.ip_profile_id:
+                raise HTTPException(status_code=422, detail="publication_account_not_owned_by_project_ip")
         try:
             value = PublicationRecord(project_id=project_id, **payload.model_dump())
         except ValueError as exc:
@@ -2207,11 +2446,90 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
         return PublicationRepository(db).list_for_project(project_id)
 
+    @application.post(
+        "/projects/{project_id}/publications/{publication_id}/metric-observations",
+        response_model=PublicationMetricObservation,
+        status_code=201,
+        tags=["publishing"],
+    )
+    async def record_publication_metric_observation(
+        project_id: UUID,
+        publication_id: UUID,
+        payload: PublicationMetricObservationRequest,
+        request: Request,
+    ) -> PublicationMetricObservation:
+        db: Database = request.app.state.database
+        publication = PublicationRepository(db).get(publication_id)
+        if publication is None or publication.project_id != project_id:
+            raise HTTPException(status_code=404, detail="publication not found")
+        if payload.observed_at < publication.published_at:
+            raise HTTPException(status_code=422, detail="metric observation predates publication")
+        value = PublicationMetricObservation(
+            project_id=project_id, publication_id=publication_id, **payload.model_dump(),
+        )
+        repository = PublicationMetricObservationRepository(db)
+        existing = repository.get_by_event_key(value.event_key)
+        if existing is not None:
+            if existing.model_copy(update={"id": value.id}) != value:
+                raise HTTPException(status_code=409, detail="metric observation event key already exists")
+            return existing
+        try:
+            with db.transaction():
+                repository.create(value)
+        except sqlite3.IntegrityError as exc:
+            concurrent = repository.get_by_event_key(value.event_key)
+            if concurrent is not None and concurrent.model_copy(update={"id": value.id}) == value:
+                return concurrent
+            raise HTTPException(status_code=409, detail="metric observation event key already exists") from exc
+        return value
+
+    @application.get(
+        "/projects/{project_id}/publication-metric-observations",
+        response_model=list[PublicationMetricObservation],
+        tags=["publishing"],
+    )
+    async def list_publication_metric_observations(
+        project_id: UUID,
+        request: Request,
+        publication_id: UUID | None = Query(default=None),
+    ) -> list[PublicationMetricObservation]:
+        db: Database = request.app.state.database
+        if ProjectRepository(db).get(project_id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        repository = PublicationMetricObservationRepository(db)
+        values = repository.list_for_publication(publication_id) if publication_id else repository.list_for_project(project_id)
+        return [value for value in values if value.project_id == project_id]
+
+    @application.get(
+        "/projects/{project_id}/performance-baseline",
+        response_model=PerformanceBaselineResponse,
+        tags=["publishing"],
+    )
+    async def performance_baseline(
+        project_id: UUID,
+        request: Request,
+        platform: str = Query(min_length=1, max_length=100),
+        window_hours: int = Query(ge=0, le=8_760),
+    ) -> PerformanceBaselineResponse:
+        try:
+            return PerformanceBaselineResponse.model_validate(
+                creator_publication_baseline(request.app.state.database, project_id, platform, window_hours),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @application.post("/projects/{project_id}/feedback", response_model=ContentFeedback, status_code=201, tags=["publishing"])
     async def record_feedback(project_id: UUID, payload: FeedbackRequest, request: Request) -> ContentFeedback:
         db: Database = request.app.state.database
         if ProjectRepository(db).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
+        try:
+            require_publishable_output(
+                db, project_id, payload.output_version, request.app.state.render_output_root,
+                require_file=False,
+            )
+        except PublicationOutputError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         value = ContentFeedback(project_id=project_id, created_at=datetime.now(timezone.utc), **payload.model_dump())
         repository = FeedbackRepository(db)
         existing = repository.get_by_key(project_id, value.output_version)
@@ -2307,29 +2625,70 @@ def create_app(
         if ProjectRepository(db).get(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
         feedback = FeedbackRepository(db).list_for_project(project_id)
-        if not feedback:
-            return []
-        latest = feedback[-1]
-        evidence = [f"feedback:{latest.id}", f"project:{project_id}:output:{latest.output_version}"]
         suggestions: list[NextSuggestion] = []
-        for field in latest.changed_fields:
-            suggestions.append(NextSuggestion(
-                reason=f"用户反馈要求修改 {field}",
-                suggestion=f"下一稿优先重新审阅并修改 {field}，保留已确认的主题与素材边界。",
-                evidence_refs=evidence,
-            ))
-        if latest.rejection_reason:
-            suggestions.append(NextSuggestion(
-                reason="上一版被拒绝且记录了原因",
-                suggestion=f"下一稿先处理已记录的拒绝原因：{latest.rejection_reason}",
-                evidence_refs=evidence,
-            ))
-        if latest.accepted and not suggestions:
-            suggestions.append(NextSuggestion(
-                reason="上一版已接受",
-                suggestion="保留已接受的表达约束，下一稿只改变主题或角度并重新记录依据。",
-                evidence_refs=evidence,
-            ))
+        for latest in feedback[-4:]:
+            evidence = [f"feedback:{latest.id}", f"project:{project_id}:output:{latest.output_version}"]
+            before = len(suggestions)
+            for field in latest.changed_fields:
+                suggestions.append(NextSuggestion(
+                    reason=f"用户反馈要求修改 {field}",
+                    suggestion=f"下一稿优先重新审阅并修改 {field}，保留已确认的主题与素材边界。",
+                    evidence_refs=evidence,
+                ))
+            if latest.rejection_reason:
+                suggestions.append(NextSuggestion(
+                    reason="该成片版本被拒绝且记录了原因",
+                    suggestion=f"下一稿先处理已记录的拒绝原因：{latest.rejection_reason}",
+                    evidence_refs=evidence,
+                ))
+            if latest.accepted and len(suggestions) == before:
+                suggestions.append(NextSuggestion(
+                    reason="该成片版本已接受",
+                    suggestion="保留已接受的表达约束；下一稿改变主题或角度时重新记录依据。",
+                    evidence_refs=evidence,
+                ))
+        publications = PublicationRepository(db).list_for_project(project_id)
+        if publications:
+            latest = publications[-1]
+            evidence = [f"publication:{latest.id}", f"project:{project_id}:output:{latest.output_version}"]
+            if latest.metrics:
+                suggestions.append(NextSuggestion(
+                    reason="已有单个成片版本的平台指标",
+                    suggestion=f"先将 {', '.join(sorted(latest.metrics))} 与至少另一个已发布版本比较，再决定是否形成跨作品偏好；单条表现不能直接归因于某个钩子或画面。",
+                    evidence_refs=[*evidence, f"metric-source:{latest.metric_source}"],
+                ))
+            else:
+                suggestions.append(NextSuggestion(
+                    reason="已记录发布但尚无指标",
+                    suggestion="在明确观察窗口后导入平台指标；当前只能保留发布事实，不能判断钩子、声音或画面的效果。",
+                    evidence_refs=evidence,
+                ))
+        observations = PublicationMetricObservationRepository(db).list_for_project(project_id)
+        if observations:
+            latest_observation = observations[-1]
+            publication = PublicationRepository(db).get(latest_observation.publication_id)
+            if publication is not None:
+                baseline = creator_publication_baseline(
+                    db, project_id, publication.platform, latest_observation.window_hours,
+                )
+                if baseline["state"] in {"ready", "emerging"}:
+                    deltas = [
+                        f"{key} {value:+.1f}%"
+                        for key, value in baseline["delta_percent"].items()
+                        if value is not None
+                    ]
+                    suggestions.append(NextSuggestion(
+                        reason=f"同创作者、同平台、{latest_observation.window_hours} 小时窗口已有 {baseline['sample_size']} 个历史对照",
+                        suggestion=(f"当前作品相对自身基线：{'；'.join(deltas) or '没有共同数值指标'}。"
+                                    "先结合内容类型、封面和发布时间复核，再决定下一轮是否调整；这不是单项因果结论。"),
+                        evidence_refs=list(baseline["evidence_refs"]),
+                    ))
+                else:
+                    suggestions.append(NextSuggestion(
+                        reason="已有本作品指标，但同创作者对照不足",
+                        suggestion="至少积累两个同平台、同观察窗口的历史作品后再比较；当前不形成跨作品规则。",
+                        evidence_refs=[f"metric_observation:{latest_observation.id}"],
+                    ))
         return suggestions
 
     @application.get("/opportunities", response_model=list[ContentOpportunity], tags=["planning"])
@@ -2388,6 +2747,8 @@ def create_app(
     @application.post("/account-connections", response_model=AccountConnection, status_code=201, tags=["intelligence"])
     async def create_account_connection(payload: AccountConnectionRequest, request: Request) -> AccountConnection:
         db: Database = request.app.state.database
+        if payload.ip_profile_id is not None and IPProfileRepository(db).get(payload.ip_profile_id) is None:
+            raise HTTPException(status_code=404, detail="ip profile not found")
         value = AccountConnection(read_only=True, **payload.model_dump())
         repository = AccountConnectionRepository(db)
         existing = repository.get_by_key(value.provider, value.account_external_id)
@@ -2405,21 +2766,31 @@ def create_app(
             raise HTTPException(status_code=409, detail="account connection already exists") from exc
         return value
 
+    def validate_historical_asset(db: Database, account, asset_id: UUID | None) -> None:
+        if asset_id is None:
+            return
+        asset = AssetRepository(db).get(asset_id)
+        if (asset is None or account.ip_profile_id is None
+                or asset.metadata.get("ip_profile_id") != str(account.ip_profile_id)):
+            raise HTTPException(status_code=422, detail="historical content asset must belong to the account IP")
+
     @application.get("/historical-content", response_model=list[HistoricalContent], tags=["intelligence"])
     async def list_historical_content(
         request: Request,
         account_connection_id: UUID | None = Query(default=None),
+        asset_id: UUID | None = Query(default=None),
     ) -> list[HistoricalContent]:
         repository = HistoricalContentRepository(request.app.state.database)
-        if account_connection_id is not None:
-            return repository.list_for_account(account_connection_id)
-        return repository.list()
+        values = repository.list_for_account(account_connection_id) if account_connection_id is not None else repository.list()
+        return [value for value in values if asset_id is None or value.asset_id == asset_id]
 
     @application.post("/historical-content", response_model=HistoricalContent, status_code=201, tags=["intelligence"])
     async def create_historical_content(payload: HistoricalContentRequest, request: Request) -> HistoricalContent:
         db: Database = request.app.state.database
-        if AccountConnectionRepository(db).get(payload.account_connection_id) is None:
+        account = AccountConnectionRepository(db).get(payload.account_connection_id)
+        if account is None:
             raise HTTPException(status_code=404, detail="account connection not found")
+        validate_historical_asset(db, account, payload.asset_id)
         value = HistoricalContent(**payload.model_dump())
         repository = HistoricalContentRepository(db)
         existing = repository.get_by_key(value.account_connection_id, value.external_id)
@@ -2436,6 +2807,33 @@ def create_app(
                 return concurrent
             raise HTTPException(status_code=409, detail="historical content already exists") from exc
         return value
+
+    @application.patch("/historical-content/{historical_content_id}/asset-link", response_model=HistoricalContent, tags=["intelligence"])
+    async def link_historical_content_asset(
+        historical_content_id: UUID,
+        payload: HistoricalContentAssetLinkRequest,
+        request: Request,
+    ) -> HistoricalContent:
+        db: Database = request.app.state.database
+        repository = HistoricalContentRepository(db)
+        value = repository.get(historical_content_id)
+        if value is None:
+            raise HTTPException(status_code=404, detail="historical content not found")
+        account = AccountConnectionRepository(db).get(value.account_connection_id)
+        if account is None:
+            raise HTTPException(status_code=422, detail="historical content account is unavailable")
+        validate_historical_asset(db, account, payload.asset_id)
+        updated = value.model_copy(update={
+            "asset_id": payload.asset_id,
+            "content_url": payload.content_url,
+            "availability": payload.availability,
+            "evidence_refs": list(dict.fromkeys(payload.evidence_refs)),
+            "published_at": payload.published_at if "published_at" in payload.model_fields_set else value.published_at,
+            "description": payload.description if "description" in payload.model_fields_set else value.description,
+        })
+        with db.transaction():
+            repository.update(updated)
+        return updated
 
     @application.get("/voice-profiles", response_model=list[VoiceProfile], tags=["voice"])
     async def list_voice_profiles(request: Request, project_id: UUID | None = None, default_only: bool = False) -> list[VoiceProfile]:
@@ -2509,6 +2907,36 @@ def create_app(
         with db.transaction():
             repository.create(value)
         return value
+
+    @application.put("/voice-profiles/{profile_id}/generation-recipe", response_model=VoiceProfile, tags=["voice"])
+    async def set_voice_generation_recipe(
+        profile_id: UUID, payload: VoiceProfileRecipeRequest, request: Request,
+    ) -> VoiceProfile:
+        db: Database = request.app.state.database
+        repository = VoiceProfileRepository(db)
+        profile = repository.get(profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="voice profile not found")
+        updated = profile.model_copy(update={"generation_recipe": payload.generation_recipe})
+        if payload.generation_recipe is not None:
+            from app.voice_recipe import VoiceRecipeError, parse_generation_recipe, require_recipe_quality_anchor
+            try:
+                recipe = parse_generation_recipe(updated)
+                assert recipe is not None
+                require_recipe_quality_anchor(db, recipe, voice_profile_id=profile.id)
+                clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id))]
+                assets = {asset.id: asset for clip in clips
+                          if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
+                choices = authorized_voice_reference_choices(
+                    updated, clips, assets, data_root=request.app.state.data_root,
+                )
+                if not choices or choices[0][0] != recipe.reference_window:
+                    raise VoiceRecipeError("voice_generation_recipe_reference_unavailable")
+            except (VoiceRecipeError, VoicePerformancePlanningError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        with db.transaction():
+            repository.update(updated)
+        return updated
 
     @application.put("/voice-profiles/{profile_id}/reference-clip", response_model=VoiceProfile, tags=["voice"])
     async def confirm_voice_reference_clip(
@@ -2706,7 +3134,8 @@ def create_app(
     @application.get("/assets/{asset_id}/readiness", response_model=AssetReadinessResponse, tags=["assets"])
     async def get_asset_readiness(asset_id: UUID, request: Request) -> AssetReadinessResponse:
         db: Database = request.app.state.database
-        if AssetRepository(db).get(asset_id) is None:
+        asset = AssetRepository(db).get(asset_id)
+        if asset is None:
             raise HTTPException(status_code=404, detail="asset not found")
         jobs = JobRepository(db).list_for_asset(asset_id)
 
@@ -2716,6 +3145,16 @@ def create_app(
             if not matching:
                 return AssetStageResponse(status="not_started")
             job = matching[-1]
+            # 入库理解拆为多个单片任务，不能仅用最后一片代表整个批次。
+            if job_type is JobType.INDEX_CLIPS and not embeddings and job.idempotency_key.startswith("intake:vision:"):
+                group = job.idempotency_key.rsplit(":", 1)[0] + ":"
+                batch = [item for item in matching if item.idempotency_key.startswith(group)]
+                # 同一采样可能有新的预算恢复任务；保留历史，但只展示最新尝试。
+                latest = {item.idempotency_key.rsplit(":", 1)[-1].split("~", 1)[0]: item for item in batch}
+                batch = list(latest.values())
+                # 活跃任务优先，令界面持续轮询；全部结束后再呈现失败原因。
+                job = next((item for status in (JobStatus.RUNNING, JobStatus.PENDING, JobStatus.FAILED, JobStatus.CANCELLED)
+                    for item in batch if item.status is status), job)
             return AssetStageResponse(status=job.status.value, job_id=job.id, error_code=job.error_code)
 
         indexed = stage(JobType.INDEX_CLIPS)
@@ -2728,6 +3167,9 @@ def create_app(
                 "visual": indexed,
                 "index": stage(JobType.INDEX_CLIPS, embeddings=True),
             },
+            visual_coverage=AssetVisualCoverageResponse(
+                **visual_evidence_coverage(asset, ClipRepository(db).list_by_asset(asset_id)),
+            ),
         )
 
     @application.get("/assets/{asset_id}/media", tags=["assets"])
@@ -2762,12 +3204,83 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @application.patch("/assets/{asset_id}/lifecycle", response_model=AssetLifecycleResponse, tags=["assets"])
+    async def patch_asset_lifecycle(
+        asset_id: UUID,
+        payload: AssetLifecycleUpdateRequest,
+        request: Request,
+    ) -> AssetLifecycleResponse:
+        try:
+            asset, references = update_asset_lifecycle(
+                request.app.state.database,
+                asset_id,
+                state=payload.state,
+                reason=payload.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="asset not found") from exc
+        except AssetManagementError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return AssetLifecycleResponse(asset=asset, references=references)
+
+    @application.get("/assets/{asset_id}/references", response_model=AssetReferenceResponse, tags=["assets"])
+    async def get_asset_references(asset_id: UUID, request: Request) -> AssetReferenceResponse:
+        try:
+            return AssetReferenceResponse(**asset_references(request.app.state.database, asset_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="asset not found") from exc
+
+    @application.get("/assets/{asset_id}/governance", response_model=AssetGovernanceResponse, tags=["assets"])
+    async def get_asset_governance(asset_id: UUID, request: Request) -> AssetGovernanceResponse:
+        try:
+            return AssetGovernanceResponse(**asset_governance_history(
+                request.app.state.database, asset_id,
+            ))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="asset not found") from exc
+
+    @application.get("/assets/{asset_id}/near-duplicates", response_model=NearDuplicateResponse, tags=["assets"])
+    async def get_asset_near_duplicates(
+        asset_id: UUID,
+        request: Request,
+        max_distance: int = Query(default=12, ge=0, le=64),
+        limit: int = Query(default=10, ge=1, le=50),
+        include_archived: bool = Query(default=False),
+    ) -> NearDuplicateResponse:
+        try:
+            return NearDuplicateResponse(**near_duplicate_assets(
+                request.app.state.database,
+                asset_id,
+                max_distance=max_distance,
+                limit=limit,
+                include_archived=include_archived,
+            ))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="asset not found") from exc
+        except AssetManagementError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @application.post("/assets/{asset_id}/fingerprint", response_model=Asset, tags=["assets"])
+    async def create_asset_fingerprint(asset_id: UUID, request: Request) -> Asset:
+        try:
+            return compute_asset_fingerprint(
+                request.app.state.database,
+                request.app.state.data_root,
+                asset_id,
+                ffmpeg=resolve_local_executable("ffmpeg"),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="asset not found") from exc
+        except AssetManagementError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @application.post("/uploads", response_model=Asset, status_code=201, tags=["assets"])
     async def upload_local_media(
         request: Request,
         file: UploadFile = File(...),
         authorization_reference: str = Form(..., min_length=1, max_length=500),
         source_kind: str = Form("user_asset"),
+        ip_profile_id: UUID | None = Form(None),
         shoot_task_id: UUID | None = Form(None),
     ) -> Asset:
         """Import one browser/mobile video without exposing a source path."""
@@ -2800,9 +3313,11 @@ def create_app(
             FFProbeAdapter(resolve_local_executable("ffprobe")),
         )
         try:
+            import_metadata = _asset_import_metadata(db, ip_profile_id)
             asset = importer.import_stream(
                 _LimitedUploadStream(file.file, MAX_UPLOAD_BYTES), filename,
                 authorization_reference, source_kind=kind,
+                **({"extra_metadata": import_metadata} if import_metadata else {}),
             )
             if shoot_task is not None:
                 updated_task = shoot_task.model_copy(update={
@@ -2810,6 +3325,7 @@ def create_app(
                 })
                 with db.transaction():
                     ShootTaskRepository(db).update(updated_task)
+            AssetJobTargetStore(db).enqueue_initial_analysis(asset.id)
             return asset
         except ValueError as exc:
             raise HTTPException(status_code=413, detail="uploaded media exceeds the local size limit") from exc
@@ -2888,12 +3404,18 @@ def create_app(
             FFProbeAdapter(resolve_local_executable("ffprobe")),
         )
         try:
-            return [
-                importer.import_path(
-                    path, payload.authorization_reference, source_kind=SourceKind(payload.source_kind),
+            import_metadata = _asset_import_metadata(db, payload.ip_profile_id)
+            assets = []
+            targets = AssetJobTargetStore(db)
+            for path in paths:
+                asset = importer.import_path(
+                    path, payload.authorization_reference,
+                    source_kind=SourceKind(payload.source_kind),
+                    **({"extra_metadata": import_metadata} if import_metadata else {}),
                 )
-                for path in paths
-            ]
+                targets.enqueue_initial_analysis(asset.id)
+                assets.append(asset)
+            return assets
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="source path not found") from exc
         except ProbeError as exc:
@@ -2939,10 +3461,13 @@ def create_app(
         imported = 0
         existing = 0
         errors: list[InboxScanError] = []
+        import_metadata = _asset_import_metadata(db, payload.ip_profile_id)
         for path in paths:
             try:
                 asset = importer.import_path(
-                    path, payload.authorization_reference, source_kind=SourceKind(payload.source_kind),
+                    path, payload.authorization_reference,
+                    source_kind=SourceKind(payload.source_kind),
+                    **({"extra_metadata": import_metadata} if import_metadata else {}),
                 )
             except (FileNotFoundError, ProbeError, MediaImportError, OSError) as exc:
                 errors.append(InboxScanError(source_path=str(path), detail=str(exc)))
@@ -3398,9 +3923,24 @@ def create_app(
                 validate_voice_delivery_text(payload.text, payload.delivery_text)
             except VoiceDeliveryTextError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
+        performance_plan = None
+        core_emphasis_plan = False
+        if payload.use_draft_performance_plan:
+            draft = ProjectDraftRepository(db).get(project_id)
+            if draft is None or draft.narration_performance_plan is None:
+                raise HTTPException(status_code=422, detail="requested Voice performance plan is unavailable from the current draft")
+            try:
+                performance_plan = validate_narration_performance_plan(
+                    draft.narration_performance_plan, payload.text,
+                )
+            except NarrationPerformancePlanError as exc:
+                raise HTTPException(status_code=422, detail="requested Voice text does not match the current narration performance plan") from exc
+            from app.voice_emphasis import emphasis_only
+            core_emphasis_plan = emphasis_only(performance_plan)
         if payload.delivery_text is not None and payload.use_draft_performance_plan:
             raise HTTPException(status_code=422, detail="delivery text and draft performance plan cannot yet be applied together")
-        if payload.reference_window is not None and payload.use_draft_performance_plan:
+        if (payload.reference_window is not None and payload.use_draft_performance_plan
+                and not core_emphasis_plan):
             raise HTTPException(status_code=422, detail="selected reference and draft performance plan cannot yet be applied together")
         clips = [clip for clip_id in profile.reference_clip_ids if (clip := ClipRepository(db).get(clip_id)) is not None]
         assets = {asset.id: asset for clip in clips if (asset := AssetRepository(db).get(clip.asset_id)) is not None}
@@ -3414,15 +3954,6 @@ def create_app(
                 resolve_authorized_voice_reference_choice(payload.reference_window, choices)
             except VoicePerformancePlanningError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-        performance_plan = None
-        if payload.use_draft_performance_plan:
-            draft = ProjectDraftRepository(db).get(project_id)
-            if draft is None or draft.narration_performance_plan is None:
-                raise HTTPException(status_code=422, detail="requested Voice performance plan is unavailable from the current draft")
-            try:
-                performance_plan = validate_narration_performance_plan(draft.narration_performance_plan, payload.text)
-            except NarrationPerformancePlanError as exc:
-                raise HTTPException(status_code=422, detail="requested Voice text does not match the current narration performance plan") from exc
         now = datetime.now(timezone.utc)
         voice_payload = VoiceGenerationJobPayload(
             project_id=project_id,
@@ -4032,7 +4563,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
         try:
             return generate_scene_plan(db,project,payload,
-                request.app.state.scene_planner or _scene_planner_from_env(),request.app.state.cost_estimator,
+                request.app.state.scene_planner or _scene_planner_from_env(request.app.state.runtime_environment),request.app.state.cost_estimator,
                 _runtime_idempotency_key(request,"scene-planning"))
         except PlanningContextChanged as exc:
             raise HTTPException(status_code=409,detail=str(exc)) from exc

@@ -6,7 +6,7 @@
 
 - apps/web：React 工作台；apps/renderer：Remotion。
 - services/api：FastAPI、SQLite、Job/Worker 与提供商适配。
-- docs/product：模块行为；docs/architecture：技术边界；scripts：本地检查。
+- docs/product：模块唯一行为来源，入口见[能力权威索引](docs/product/CAPABILITY_INDEX.md)；docs/architecture：技术边界；scripts：本地检查。
 - [START_HERE.md](START_HERE.md) 是阅读入口。
 
 ## Windows 本地运行
@@ -23,6 +23,7 @@
 
     .\.venv\Scripts\python.exe -m pytest -q
     npm --prefix apps\web run build
+    .\.venv\Scripts\python.exe scripts\sync_capability_docs.py
     .\.venv\Scripts\python.exe scripts\check_docs.py
 
 首次 Web 安装用 npm --prefix apps\web install。运行依赖本地 FFmpeg/FFprobe 与锁定的 Node/Remotion；版本和再分发注意事项见 [依赖清单](docs/DEPENDENCIES.md)。

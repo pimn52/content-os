@@ -2,6 +2,8 @@
 
 R1 是模块化单体：FastAPI + SQLite + 本地 Job/Worker + 提供商适配器 + Remotion/FFmpeg。应用服务编排产品对象，路由负责输入输出；不为实验建立第二套执行系统。
 
+各核心能力的行为规则只由[能力权威索引](../product/CAPABILITY_INDEX.md)列出的模块主文档定义；本页只描述技术边界和工序关系，不复制模块配方。
+
 ## 主链
 
 工作区/IP → ProjectDraft、ScenePlan、EditPlan → 素材路由和生产预检 → ProductionRun → 必要的 Voice/Talking/媒体 Job → MasterNarration、TalkingRun、VideoSpec → Render → QA、复核和发布。

@@ -11,6 +11,7 @@ from app.provider_execution import ProviderExecutionService, RuntimeProviderIden
 from app.providers.vision import (OpenAICompatibleVisionProvider, VisionHTTPResponse, VisionInputError,
     VisionProviderResponseError)
 from test_provider_execution import _project
+from test_vision_provider import _analysis, _jpeg
 
 
 USAGE = {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
@@ -31,6 +32,55 @@ class Transport:
         document = {"choices": [{"finish_reason": "stop", "message": {
             "content": "invalid json" if self.invalid_output else json.dumps(output, ensure_ascii=False)}}], "usage": self.usage}
         return VisionHTTPResponse(200, json.dumps(document).encode(), {})
+
+
+def test_intake_frame_records_response_usage_and_does_not_reuse_previous_usage_on_failure(tmp_path):
+    from uuid import uuid4
+    from app.domain.models import Job, JobStatus, JobType
+    from app.jobs.handlers import _MeteredVisionProvider
+    from app.budget import ProviderCallLedger
+
+    class FrameTransport(Transport):
+        def post(self, endpoint, headers, body, timeout_seconds):
+            self.requests.append({"endpoint": endpoint, "body": json.loads(body)})
+            output = "invalid json" if self.invalid_output else json.dumps(_analysis())
+            return VisionHTTPResponse(200, json.dumps({"choices": [{"finish_reason": "stop", "message": {
+                "content": output}}], "usage": self.usage}).encode(), {})
+    with Database(tmp_path / 'intake-usage.sqlite') as db:
+        BudgetPolicyRepository(db).save(BudgetPolicy(allow_unknown_cost=True, max_calls=4,
+            updated_at=datetime.now(timezone.utc)))
+        transport = FrameTransport()
+        active = provider(transport)
+        job = Job(type=JobType.INDEX_CLIPS, status=JobStatus.RUNNING, idempotency_key='intake-frame',
+            created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        wrapper = _MeteredVisionProvider(active, ProviderCallLedger(db), job, uuid4(), 'openai-compatible', active.model, 'a' * 64)
+        assert wrapper.analyze(_jpeg(tmp_path)).visual_description
+        receipt = ProviderCallRepository(db).list_for_project(None)[0]
+        assert (receipt.input_tokens, receipt.output_tokens, receipt.cache_tokens) == (1000, 100, 200)
+        assert receipt.actual_cost.amount == Decimal('0.0082') and receipt.usage_observable
+        transport.invalid_output = True
+        with pytest.raises(VisionProviderResponseError): wrapper.analyze(_jpeg(tmp_path))
+        failed = ProviderCallRepository(db).list_for_project(None)[1]
+        assert failed.status == 'failed' and failed.actual_cost.amount == Decimal('0.0082')
+        invalid = tmp_path / 'invalid.jpg'; invalid.write_bytes(b'invalid')
+        with pytest.raises(VisionInputError): wrapper.analyze(invalid)
+        preflight = ProviderCallRepository(db).list_for_project(None)[2]
+        assert preflight.status == 'failed' and preflight.actual_cost is None
+        assert preflight.input_tokens is None and not preflight.usage_observable
+
+
+def test_vision_usage_is_scoped_to_the_calling_thread():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    active = provider()
+    barrier = Barrier(2)
+    def observe(count):
+        active.last_usage = {"prompt_tokens": count, "completion_tokens": 1, "cached_tokens": 0}
+        barrier.wait(timeout=5)
+        return active.usage_accounting().input_tokens
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(observe, n) for n in (10, 20)]
+        assert [f.result() for f in futures] == [10, 20]
 
 
 def provider(transport=None, **options):

@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from functools import wraps
@@ -28,6 +29,7 @@ from app.jobs.store import JobStore
 from app.jobs.targets import AssetJobTargetStore, AudioAssetJobTargetStore
 from app.jobs.worker import JobWorker
 from app.media.extraction import FFmpegExtractionService
+from app.media.fingerprint import FFmpegFrameFingerprinter
 from app.media.ffprobe import FFProbeAdapter
 from app.media.audio_importer import AudioImporter
 from app.media.voice_reference import reference_extraction_command
@@ -162,6 +164,26 @@ def parse_config(argv: Sequence[str] | None = None) -> WorkerConfig:
     )
 
 
+def _voice_qa_execution_identity(device: str, compute_type: str) -> tuple[str, str]:
+    """Return a stable local ASR identity for durable QA and repair receipts."""
+    runtime = os.environ.get("CONTENT_OS_VOICE_QA_RUNTIME_ID", "").strip()
+    if not runtime:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            whisper_version = version("faster-whisper")
+            ctranslate_version = version("ctranslate2")
+        except PackageNotFoundError:
+            runtime = "faster-whisper-configured"
+        else:
+            runtime = (f"faster-whisper-{whisper_version}-ctranslate2-"
+                       f"{ctranslate_version}-{device}-{compute_type}")
+    machine_id = os.environ.get("CONTENT_OS_VOICE_QA_MACHINE_ID", "").strip()
+    if not machine_id:
+        import platform
+        machine_id = platform.node().strip() or "configured-machine"
+    return runtime, machine_id
+
+
 def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
     # The same configured root owns media AND current use-admission evidence.
     # Never infer it from Worker CWD or the SQLite file's containing directory.
@@ -171,10 +193,13 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
     assets = AssetRepository(db)
     extractor = FFmpegExtractionService(config.data_root, command=config.ffmpeg)
     handlers = {}
-    voice_provider=talking_provider=None
+    voice_provider=talking_provider=talking_motion_probe=None
     if JobType.ANALYZE_ASSET in config.job_types:
         detector = FFmpegSceneDetector(config.ffmpeg)
-        pipeline = MediaAnalysisPipeline(db, detector, extractor)
+        pipeline = MediaAnalysisPipeline(
+            db, detector, extractor,
+            FFmpegFrameFingerprinter(config.ffmpeg),
+        )
         handlers[JobType.ANALYZE_ASSET] = AssetAnalysisJobHandler(targets, assets, pipeline)
     if JobType.TRANSCRIBE_AUDIO in config.job_types or JobType.TRANSCRIBE_AUDIO_ASSET in config.job_types:
         provider_kind = os.environ.get("CONTENT_OS_ASR_PROVIDER", "openai-compatible").strip().lower()
@@ -210,7 +235,15 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
                 AudioTranscriptPersistence(db), ledger, provider_name=provider_name,
                 provider_model=provider.model, data_root=config.data_root,
             )
-    if JobType.INDEX_CLIPS in config.job_types:
+    # A missing optional vision credential leaves intake jobs pending, rather
+    # than preventing the ordinary production worker from starting.
+    enable_vision_index = JobType.INDEX_CLIPS in config.job_types
+    if enable_vision_index and config.production_only:
+        try:
+            enable_vision_index = _vision_provider_from_env() is not None
+        except (VisionConfigurationError, ValueError, OSError):
+            enable_vision_index = False
+    if enable_vision_index:
         provider = _vision_provider_from_env()
         if provider is None:
             raise VisionConfigurationError("vision credential file must be configured")
@@ -253,13 +286,17 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
             config.data_root / "renders",
         )
     if JobType.GENERATE_VOICE in config.job_types:
-        provider = _build_voice_provider(config, db)
-        voice_provider=provider
-        handlers[JobType.GENERATE_VOICE] = VoiceGenerationJobHandler(
-            VoiceProfileRepository(db), AudioAssetRepository(db),
-            AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
-            provider, config.data_root / "generated", ProviderCallLedger(db),
-        )
+        try:
+            provider = _build_voice_provider(config, db)
+        except (VoiceConfigurationError, ValueError, OSError):
+            if not config.production_only: raise
+        else:
+            voice_provider=provider
+            handlers[JobType.GENERATE_VOICE] = VoiceGenerationJobHandler(
+                VoiceProfileRepository(db), AudioAssetRepository(db),
+                AudioImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
+                provider, config.data_root / "generated", ProviderCallLedger(db),
+            )
     if JobType.CREATE_VOICE_PACE_CANDIDATE in config.job_types:
         handlers[JobType.CREATE_VOICE_PACE_CANDIDATE] = VoicePaceCandidateJobHandler(
             AudioAssetRepository(db), JobRepository(db),
@@ -268,12 +305,18 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
         )
     if JobType.VERIFY_VOICE in config.job_types or JobType.ALIGN_VOICE_BOUNDARIES in config.job_types:
         qa_model = os.environ.get("CONTENT_OS_VOICE_QA_ASR_MODEL", "").strip()
-        if not qa_model or not Path(qa_model).exists():
+        if (not qa_model or not Path(qa_model).exists()) and not config.production_only:
             raise ASRConfigurationError("CONTENT_OS_VOICE_QA_ASR_MODEL must point to a local ASR model directory")
+        if not qa_model or not Path(qa_model).exists():
+            qa_model = None
+    if (JobType.VERIFY_VOICE in config.job_types or JobType.ALIGN_VOICE_BOUNDARIES in config.job_types) and qa_model:
+        qa_device = os.environ.get("CONTENT_OS_VOICE_QA_ASR_DEVICE", "cpu")
+        qa_compute_type = os.environ.get("CONTENT_OS_VOICE_QA_ASR_COMPUTE_TYPE", "int8")
+        qa_runtime, qa_machine_id = _voice_qa_execution_identity(qa_device, qa_compute_type)
         qa_provider = FasterWhisperASRProvider(
             model=qa_model,
-            device=os.environ.get("CONTENT_OS_VOICE_QA_ASR_DEVICE", "cpu"),
-            compute_type=os.environ.get("CONTENT_OS_VOICE_QA_ASR_COMPUTE_TYPE", "int8"),
+            device=qa_device,
+            compute_type=qa_compute_type,
             vad_filter=False,
             word_timestamps=True,
         )
@@ -284,10 +327,10 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
                 max_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
                 max_leading_silence_ms=int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500")),
                 data_root=config.data_root,
-                repair_execution={"runtime": os.environ.get("CONTENT_OS_VOICE_QA_RUNTIME_ID"),
-                    "machine_id": os.environ.get("CONTENT_OS_VOICE_QA_MACHINE_ID"),
-                    "parameters": {"device": os.environ.get("CONTENT_OS_VOICE_QA_ASR_DEVICE", "cpu"),
-                        "compute_type": os.environ.get("CONTENT_OS_VOICE_QA_ASR_COMPUTE_TYPE", "int8"),
+                repair_execution={"runtime": qa_runtime,
+                    "machine_id": qa_machine_id,
+                    "parameters": {"device": qa_device,
+                        "compute_type": qa_compute_type,
                         "vad_filter": False, "word_timestamps": True,
                         "max_silence_ms": int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_SILENCE_MS", "2000")),
                         "max_leading_silence_ms": int(os.environ.get("CONTENT_OS_VOICE_QA_MAX_LEADING_SILENCE_MS", "500"))}},
@@ -298,23 +341,28 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
                 data_root=config.data_root, provider_model=qa_model,
             )
     if JobType.GENERATE_TALKING in config.job_types:
-        provider = _build_talking_provider(config)
-        talking_provider=provider
-        handlers[JobType.GENERATE_TALKING] = TalkingGenerationJobHandler(
-            TalkingProfileRepository(db),
-            AudioAssetRepository(db),
-            AssetRepository(db),
-            MediaImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)),
-            provider,
-            config.data_root / "generated",
-            ProviderCallLedger(db),
-            ffmpeg_command=config.ffmpeg,
-            execution_runtime=getattr(provider, "runtime_label", None) or os.environ.get("CONTENT_OS_TALKING_RUNTIME_ID"),
-            execution_machine_id=getattr(provider, "machine_id", None) or os.environ.get("CONTENT_OS_TALKING_MACHINE_ID"),
-        )
+        try:
+            provider = _build_talking_provider(config)
+        except (TalkingConfigurationError, ValueError, OSError):
+            if not config.production_only: raise
+        else:
+            talking_provider=provider
+            from app.talking.sync_probe import LocalTalkingMotionProbe
+            talking_motion_probe = LocalTalkingMotionProbe.from_maintained_provider(
+                provider, ffmpeg=config.ffmpeg, data_root=config.data_root,
+            )
+            provider.talking_motion_probe = talking_motion_probe
+            handlers[JobType.GENERATE_TALKING] = TalkingGenerationJobHandler(
+                TalkingProfileRepository(db), AudioAssetRepository(db), AssetRepository(db),
+                MediaImporter(db, config.data_root, FFProbeAdapter(config.ffprobe)), provider,
+                config.data_root / "generated", ProviderCallLedger(db), ffmpeg_command=config.ffmpeg,
+                execution_runtime=getattr(provider, "runtime_label", None) or os.environ.get("CONTENT_OS_TALKING_RUNTIME_ID"),
+                execution_machine_id=getattr(provider, "machine_id", None) or os.environ.get("CONTENT_OS_TALKING_MACHINE_ID"),
+            )
     if JobType.VERIFY_TALKING in config.job_types:
         handlers[JobType.VERIFY_TALKING] = TalkingQaJobHandler(
             AssetRepository(db), data_root=config.data_root, probe=FFProbeAdapter(config.ffprobe),
+            motion_probe=talking_motion_probe,
         )
     if JobType.PREPARE_TALKING_RUN_PREVIEW in config.job_types:
         handlers[JobType.PREPARE_TALKING_RUN_PREVIEW] = TalkingRunPreviewJobHandler(
@@ -327,13 +375,20 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
     from app.costs import UnknownProviderCostEstimator
     vision = None
     if JobType.PLAN_CONTENT in config.job_types:
-        vision = _vision_provider_from_env()
+        if config.production_only:
+            try:
+                vision = _vision_provider_from_env()
+            except (VisionConfigurationError, ValueError, OSError):
+                pass  # 可选视觉配置损坏不能阻断已可执行的其他工序。
+        else:
+            vision = _vision_provider_from_env()
     elif JobType.RENDER in config.job_types:
         try:vision = _vision_provider_from_env()
         except (VisionConfigurationError,ValueError,OSError):pass  # 可选诊断配置不能阻断已就绪的本地渲染。
     estimator = vision.cost_estimator() if callable(getattr(vision,"cost_estimator",None)) else UnknownProviderCostEstimator()
     resolver = VisualMaterialResolver(db,config.data_root,vision,extractor,
-        FFProbeAdapter(config.ffprobe),estimator) if JobType.PLAN_CONTENT in config.job_types else None
+        FFProbeAdapter(config.ffprobe),estimator) if (JobType.PLAN_CONTENT in config.job_types
+            or config.production_run_id is not None and JobType.RENDER in config.job_types) else None
     acquirer = None
     if resolver is not None:
         from app.external_acquisition import BoundedExternalAcquirer, analyze_exact_job, reserve_production_tail
@@ -342,7 +397,10 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
         from app.web_discovery_connection import configured_web_providers, web_provider, web_provider_connections
         from app.web_discovery import WebDiscoveryService
         analysis = AssetAnalysisJobHandler(targets, assets,
-            MediaAnalysisPipeline(db, FFmpegSceneDetector(config.ffmpeg), extractor))
+            MediaAnalysisPipeline(
+                db, FFmpegSceneDetector(config.ffmpeg), extractor,
+                FFmpegFrameFingerprinter(config.ffmpeg),
+            ))
         local_runner = JobRunner(store, {JobType.ANALYZE_ASSET: analysis},
             worker_id=f"{config.worker_id}:external-analysis", lease_duration=timedelta(seconds=config.lease_seconds),
             heartbeat_interval=timedelta(seconds=config.heartbeat_seconds), max_attempts=1)
@@ -365,7 +423,22 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
     planner=None
     if JobType.PLAN_CONTENT in config.job_types:
         from app.scene_planning import _scene_planner_from_env
-        planner=_scene_planner_from_env()
+        from app.providers.scene_planner import ScenePlannerConfigurationError
+        if config.production_only:
+            try:
+                planner = _scene_planner_from_env()
+            except (ScenePlannerConfigurationError, ValueError, OSError):
+                pass
+        else:
+            planner = _scene_planner_from_env()
+    elif config.production_run_id is not None and JobType.RENDER in config.job_types:
+        # 真实配时后可能需要按既有规划能力修正画面；缺配置不能阻断可直接渲染的作品。
+        from app.scene_planning import _scene_planner_from_env
+        from app.providers.scene_planner import ScenePlannerConfigurationError
+        try:
+            planner = _scene_planner_from_env()
+        except (ScenePlannerConfigurationError, ValueError, OSError):
+            pass
     planner_estimator=UnknownProviderCostEstimator()
     from app.presentation_semantic import PresentationSemanticDiagnosis
     semantic_diagnoser=PresentationSemanticDiagnosis(db,config.data_root,vision,extractor,FFProbeAdapter(config.ffprobe),estimator)
@@ -374,8 +447,13 @@ def build_runner(config: WorkerConfig, db: Database) -> JobRunner:
     automatic=VideoProductionService(db,config.data_root,voice_provider=voice_provider,talking_provider=talking_provider,
         material_resolver=resolver, material_acquirer=acquirer,planner=planner,planner_cost_estimator=planner_estimator,
         semantic_diagnoser=semantic_diagnoser)
-    if planner is not None:
-        handlers[JobType.PLAN_CONTENT]=ContentPlanJobHandler(automatic,planner,planner_estimator)
+    if JobType.PLAN_CONTENT in config.job_types:
+        if planner is None:
+            def planner_unavailable(job):
+                raise JobExecutionError("scene_planner_not_configured", "未配置内容规划能力，未开始制作。", retryable=False)
+            handlers[JobType.PLAN_CONTENT] = planner_unavailable
+        else:
+            handlers[JobType.PLAN_CONTENT]=ContentPlanJobHandler(automatic,planner,planner_estimator)
     production_types={JobType.PLAN_CONTENT,JobType.GENERATE_VOICE,JobType.VERIFY_VOICE,
         JobType.GENERATE_TALKING,JobType.VERIFY_TALKING,JobType.RENDER}
     for kind,handler in list(handlers.items()):
@@ -456,7 +534,10 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         available = [item for item in referenced if item is not None]
         resolved_assets = {asset.id: asset for asset in (assets.get(clip.asset_id) for clip in available) if asset is not None}
         try:
-            return authorized_voice_reference_choices(profile, available, resolved_assets, data_root=config.data_root)
+            return authorized_voice_reference_choices(
+                profile, available, resolved_assets, data_root=config.data_root,
+                allow_auto_windows=True,
+            )
         except VoicePerformancePlanningError as exc:
             raise VoiceInputError(str(exc)) from exc
 
@@ -471,6 +552,17 @@ def _build_voice_provider(config: WorkerConfig, db: Database) -> OmniVoiceProvid
         choices = reference_choices(profile)
         if not choices:
             raise VoiceInputError("OmniVoice requires a user-confirmed complete reference before inference")
+        from app.voice_recipe import VoiceRecipeError, require_recipe_execution
+        try:
+            recipe = require_recipe_execution(
+                profile,
+                runtime_label=("" if maintained_options is None else maintained_options["runtime_label"]),
+                parameters=({} if maintained_options is None else maintained_options["parameters"]),
+            )
+        except VoiceRecipeError as exc:
+            raise VoiceInputError(str(exc)) from exc
+        if getattr(profile, "generation_recipe", None) is not None and recipe is None:
+            raise VoiceInputError("voice_generation_recipe_runtime_unverifiable")
         if selection is None:
             selection, window = choices[0]
         else:
@@ -660,11 +752,26 @@ def _run_production_run(config: WorkerConfig, db: Database, runner: JobRunner, s
     return 0
 
 
+def _intake_recovery_poll(db, *, clock=time.monotonic, interval_seconds=30):
+    """Check interrupted handoffs at startup and at most once per interval."""
+    recover = AssetJobTargetStore(db).recover_intake_visual_samples
+    next_check = 0.0
+    def poll():
+        nonlocal next_check
+        now = clock()
+        if now < next_check:
+            return 0
+        next_check = now + interval_seconds
+        return recover()
+    return poll
+
+
 def _run_product_queue(config,db,runner,stop,*,run_id=None):
     """常驻普通生产 Worker；不取旧孤立生成任务，不重试失败调用。"""
     service = getattr(runner, "production_service", None)
     if service is None:
         raise ValueError('production_decision_center_not_configured')
+    recovery = _intake_recovery_poll(db) if JobType.INDEX_CLIPS in runner.handler_types else None
     while not stop.is_set():
         candidates = service.queue_jobs(runner.handler_types,run_id=run_id)
         if run_id is not None:
@@ -685,6 +792,8 @@ def _run_product_queue(config,db,runner,stop,*,run_id=None):
             media_types=runner.handler_types & {JobType.ANALYZE_ASSET,JobType.TRANSCRIBE_AUDIO,JobType.TRANSCRIBE_AUDIO_ASSET,JobType.INDEX_CLIPS}
             if media_types:
                 processed=runner.run_once(allowed_types=media_types) is not None
+        if not processed and recovery is not None:
+            recovery()
         if config.once:return 0
         if not processed:stop.wait(config.poll_seconds)
     return 0
@@ -700,7 +809,22 @@ def run(config: WorkerConfig, *, stop_event: Event | None = None) -> int:
     stop = stop_event or Event()
     db = Database(config.db_path)
     db.data_root = Path(config.data_root).resolve()
+    prior_environment = {}
     try:
+        from app.runtime_settings import load_runtime_settings, runtime_environment
+        saved = load_runtime_settings(db)
+        effective = runtime_environment(saved, os.environ)
+        prior_environment = {key: os.environ.get(key) for key, value in effective.items() if os.environ.get(key) != value}
+        os.environ.update({key: effective[key] for key in prior_environment})
+        if config.production_only:
+            additional = []
+            if saved.voice_config_file: additional.append(JobType.GENERATE_VOICE)
+            if saved.voice_qa_model_path:
+                additional.extend((JobType.VERIFY_VOICE, JobType.ALIGN_VOICE_BOUNDARIES,
+                    JobType.TRANSCRIBE_AUDIO, JobType.TRANSCRIBE_AUDIO_ASSET))
+            if saved.talking_config_file:
+                additional.extend((JobType.GENERATE_TALKING, JobType.VERIFY_TALKING, JobType.PREPARE_TALKING_RUN_PREVIEW))
+            config = replace(config, job_types=tuple(dict.fromkeys((*config.job_types, *additional))))
         runner = build_runner(config, db)
         if config.production_only:
             return _run_product_queue(config,db,runner,stop)
@@ -720,13 +844,20 @@ def run(config: WorkerConfig, *, stop_event: Event | None = None) -> int:
             runner.run_once(allowed_types=runner.handler_types, job_id=config.job_id)
             return 0
         runner.production_service.recover_completed(runner.handler_types)
+        recovery = (_intake_recovery_poll(db)
+            if JobType.INDEX_CLIPS in runner.handler_types else None)
+        if recovery is not None:
+            recovery()
         if config.once:
             runner.recover_expired()
             runner.run_once(allowed_types=runner.handler_types)
         else:
-            JobWorker(runner, idle_interval=timedelta(seconds=config.poll_seconds)).run_forever(stop)
+            JobWorker(runner, idle_interval=timedelta(seconds=config.poll_seconds), on_idle=recovery).run_forever(stop)
         return 0
     finally:
+        for key, previous in prior_environment.items():
+            if previous is None: os.environ.pop(key, None)
+            else: os.environ[key] = previous
         db.close()
 
 

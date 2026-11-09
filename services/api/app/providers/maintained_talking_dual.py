@@ -340,7 +340,7 @@ def _environment(options,private,*,engine=False):
     system=_system_root(); private=Path(private)
     search=[Path(options["tools"]),system/"System32",system]
     if engine: search=[Path(options["engine"]),Path(options["engine"])/"Library/bin",*search]
-    env=dict(SystemRoot=str(system),PATH=os.pathsep.join(map(str,search)),TEMP=str(private),TMP=str(private),
+    env=dict(SystemRoot=str(system),WINDIR=str(system),PATH=os.pathsep.join(map(str,search)),TEMP=str(private),TMP=str(private),
         HF_HOME=str(options["hf"]),TORCH_HOME=str(options["torch"]),HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1",
         HF_HUB_DISABLE_TELEMETRY="1",PYTHONDONTWRITEBYTECODE="1",MPLCONFIGDIR=str(private/"mpl"),XDG_CACHE_HOME=str(private/"cache"))
     if engine: env["PYTORCH_CUDA_ALLOC_CONF"]=options["parameters"]["allocator"]

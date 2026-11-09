@@ -11,6 +11,7 @@ from app.db import (
     ProviderMachineCapabilityProfileRepository, TalkingProfileRepository,
 )
 from app.execution_admission import UseAdmissionError
+from app.asset_management import asset_is_active, asset_scope_allows_project
 from app.voice_plan import resolve_project_voice_profile
 
 
@@ -38,7 +39,8 @@ def _creator_options(db: Database, project_id: UUID) -> dict[str, object]:
             references = [clips.get(value) for value in profile.reference_clip_ids]
             valid = [clip for clip in references if clip is not None
                      and (asset := assets.get(clip.asset_id)) is not None
-                     and asset.metadata.get("ip_profile_id") in (None, str(ip.id))]
+                     and asset_is_active(asset)
+                     and asset_scope_allows_project(asset, ip.id)]
             voice = {
                 "default_binding": "matched", "profile_id": str(profile.id),
                 "reference_state": "present" if len(valid) == len(references) else "incomplete",
@@ -53,7 +55,7 @@ def _creator_options(db: Database, project_id: UUID) -> dict[str, object]:
                 asset = assets.get(clip.asset_id) if clip is not None else None
                 # TalkingProfile has no IP binding. Names and consent subjects
                 # cannot establish that another person's footage is this IP.
-                if asset is None or asset.metadata.get("ip_profile_id") != str(ip.id):
+                if asset is None or not asset_is_active(asset) or asset.metadata.get("ip_profile_id") != str(ip.id):
                     continue
                 matches.append({
                     "profile_id": str(profile.id), "clip_id": str(clip.id),
@@ -124,7 +126,7 @@ def planning_feasibility(db: Database, project_id: UUID, *, talking_provider=Non
     seen = set()
     for profile, clip, capability in configured_talking_choices(db, project_id):
         asset = AssetRepository(db).get(clip.asset_id)
-        if (asset.id, clip.id) in seen:
+        if asset is None or not asset_is_active(asset) or (asset.id, clip.id) in seen:
             continue
         seen.add((asset.id, clip.id))
         provider_matches = (getattr(talking_provider, "provider_name", None) == capability.provider

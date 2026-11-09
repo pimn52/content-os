@@ -92,13 +92,39 @@ def test_retrieval_defaults_to_local_when_embedding_is_unconfigured() -> None:
     assert by_key["retrieval"].provider == "local"
 
 
-def test_local_executable_resolution_prefers_explicit_override_and_bundled_tools(monkeypatch) -> None:
+def test_runtime_readiness_accepts_local_retrieval_without_embedding(tmp_path, monkeypatch):
+    from app.runtime import RuntimeCapability
+    keys = ("local_media", "render", "scene_planning", "asr", "vision", "retrieval", "tts", "talking")
+    values = [RuntimeCapability(key, "ready", "local", None, "") for key in keys]
+    values.append(RuntimeCapability("embedding", "provider_not_configured", None, None, ""))
+    monkeypatch.setattr("app.main.inspect_runtime_capabilities", lambda environment: values)
+    with TestClient(create_app(tmp_path / "runtime-local.sqlite3")) as client:
+        body = client.get("/runtime/readiness").json()
+    assert body["runtime_ready"] is True
+    assert next(item for item in body["capabilities"] if item["key"] == "embedding")["status"] == "provider_not_configured"
+
+
+def test_local_executable_resolution_prefers_explicit_override_and_bundled_tools(tmp_path, monkeypatch) -> None:
     explicit = r"C:\tools\custom-ffprobe.exe"
     assert resolve_local_executable("ffprobe", {"CONTENT_OS_FFPROBE": explicit}, executable_lookup=lambda _: None) == explicit
 
     monkeypatch.setattr("app.runtime.shutil.which", lambda command: None)
-    bundled = resolve_local_executable("ffprobe", {}, executable_lookup=lambda _: None)
+    bundled = resolve_local_executable(
+        "ffprobe", {"CONTENT_OS_DATA_ROOT": str(tmp_path)}, executable_lookup=lambda _: None,
+    )
     assert bundled.endswith("compositor-win32-x64-msvc\\ffprobe.exe")
+
+
+def test_local_executable_resolution_prefers_complete_local_media_toolset(tmp_path, monkeypatch) -> None:
+    tools = tmp_path / "ffmpeg-gyan-9.0.2-r1" / "ffmpeg-9.0.2-essentials_build" / "bin"
+    tools.mkdir(parents=True)
+    for name in ("ffmpeg.exe", "ffprobe.exe"):
+        (tools / name).write_bytes(b"fixture")
+    monkeypatch.setattr("app.runtime.shutil.which", lambda command: None)
+
+    env = {"CONTENT_OS_DATA_ROOT": str(tmp_path)}
+    assert resolve_local_executable("ffmpeg", env, executable_lookup=lambda _: None) == str(tools / "ffmpeg.exe")
+    assert resolve_local_executable("ffprobe", env, executable_lookup=lambda _: None) == str(tools / "ffprobe.exe")
 
 
 def test_local_asr_readiness_is_explicit_and_does_not_need_provider_key(monkeypatch) -> None:

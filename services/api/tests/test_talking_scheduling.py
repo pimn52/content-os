@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from app.db import Database
 from app.domain.models import (Asset, Clip, ConsentRecord, ProviderMachineCapabilityProfile,
-    RationalFps, ScenePlan, TalkingProfile, VisualIntent)
+    RationalFps, ScenePlan, SourceKind, TalkingProfile, VisualIntent)
 from app.providers.maintained_talking import MaintainedLatentSyncProvider
 from app.talking.pool import (TalkingPool, TalkingPoolEntry, allocate_talking_windows,
     build_talking_pool, TalkingPoolCapacityError, required_talking_reference_duration_ms)
@@ -58,6 +58,51 @@ def test_short_reference_keeps_the_feasible_complete_sentence_without_clipping_o
         assert [s.voice_text for s in revised]==[s.voice_text for s in original]
         assert [s.duration_target_ms for s in revised]==[3480,2360,3540]
         assert len(allocations)==1 and allocations[0].narration_duration_ms==2360
+
+
+def test_supporting_cutaway_adds_stock_fallback_when_local_footage_is_insufficient():
+    project=SimpleNamespace(id=uuid4())
+    original=[scene(project,0,duration=1400),
+        scene(project,1,alternative=True,duration=4000).model_copy(
+            update={"fallback_sources":[SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET]}
+        )]
+    revised,allocations=schedule_talking_scenes(
+        short_latentsync_pool(), original, talking_provider=MaintainedLatentSyncProvider,
+    )
+
+    assert revised[0].visual_requirement=="creator_speaking"
+    assert revised[1].visual_requirement=="explanatory"
+    assert revised[1].preferred_sources==[
+        SourceKind.USER_ASSET,SourceKind.HISTORICAL_ASSET,SourceKind.STOCK,
+    ]
+    assert len(allocations)==1
+
+
+def test_excess_measured_speech_part_uses_local_key_point_but_keeps_a_roll():
+    project=SimpleNamespace(id=uuid4())
+    first=scene(project,0,duration=2000).model_copy(update={
+        "scene_id":"s0-opening--speech-first",
+        "voice_text":"先说完整结论。",
+        "caption_emphasis":["先说完整结论"],
+    })
+    second=scene(project,1,duration=2000).model_copy(update={
+        "scene_id":"s0-opening--speech-second",
+        "voice_text":"再按真实时长拆镜头。",
+        "caption_emphasis":["再按真实时长拆镜头"],
+    })
+
+    revised,allocations=schedule_talking_scenes(
+        short_latentsync_pool(), [first,second],
+        talking_provider=MaintainedLatentSyncProvider,
+    )
+
+    assert revised[0]==first
+    assert revised[1].visual_requirement=="explanatory"
+    assert revised[1].graphic_plan.kind=="text_card"
+    assert revised[1].graphic_plan.treatment=="key_point"
+    assert revised[1].graphic_plan.points==["再按真实时长拆镜头"]
+    assert revised[1].voice_text==second.voice_text
+    assert len(allocations)==1 and allocations[0].narration_duration_ms==2000
 
 
 def short_latentsync_pool(duration=3200):

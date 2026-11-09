@@ -1,0 +1,201 @@
+{
+  "schema_version": "1.0",
+  "modules": [
+    {
+      "id": "scene_planning",
+      "name": "场景规划",
+      "group": "core",
+      "authority": "docs/product/SCENE_PLANNING.md",
+      "marker": "capability-authority:scene_planning",
+      "summary": "把主题、创作者立场、真实素材事实和制作约束转成可执行 ScenePlan；文案完整、镜头意图可核验。",
+      "related": ["voice_generation", "talking_generation", "media_assets", "production_scheduling", "timeline_render"],
+      "code": [
+        "services/api/app/scene_planning.py",
+        "services/api/app/providers/scene_planner.py",
+        "services/api/app/planning_input.py",
+        "services/api/app/video_production.py"
+      ],
+      "tests": [
+        "services/api/tests/test_scene_planner.py",
+        "services/api/tests/test_scene_plan_api.py",
+        "services/api/tests/test_planning_input.py",
+        "services/api/tests/test_automatic_production.py"
+      ]
+    },
+    {
+      "id": "voice_generation",
+      "name": "Voice 克隆旁白",
+      "group": "core",
+      "authority": "docs/product/VOICE.md",
+      "marker": "capability-authority:voice_generation",
+      "summary": "从已授权声线与版本化配方生成 MasterNarration；停顿、分段、独立 QA、修复和来源可追溯。",
+      "related": ["scene_planning", "talking_generation", "production_scheduling", "timeline_render"],
+      "code": [
+        "services/api/app/voice_recipe.py",
+        "services/api/app/voice_pronunciation.py",
+        "services/api/app/voice_syntax.py",
+        "services/api/app/voice_emphasis.py",
+        "services/api/app/narration_performance.py",
+        "services/api/app/voice_seam.py",
+        "services/api/app/jobs/handlers.py",
+        "services/api/app/worker_cli.py"
+      ],
+      "tests": [
+        "services/api/tests/test_voice_generation.py",
+        "services/api/tests/test_voice_performance.py",
+        "services/api/tests/test_voice_seam.py",
+        "services/api/tests/test_voice_profiles_api.py",
+        "services/api/tests/test_voice_pronunciation.py",
+        "services/api/tests/test_voice_syntax.py",
+        "services/api/tests/test_voice_emphasis.py",
+        "services/api/tests/test_voice_repair.py",
+        "services/api/tests/test_voice_segment_repair.py"
+      ]
+    },
+    {
+      "id": "talking_generation",
+      "name": "Talking 对口型",
+      "group": "core",
+      "authority": "docs/product/TALKING.md",
+      "marker": "capability-authority:talking_generation",
+      "summary": "把确切 Master 区间投射到授权人物参考；连续窗口、LatentSync 配方、独立 QA、复用和修复分别留证。",
+      "related": ["scene_planning", "voice_generation", "media_assets", "production_scheduling", "timeline_render"],
+      "code": [
+        "services/api/app/providers/maintained_talking.py",
+        "services/api/app/domain/talking_recipe.py",
+        "services/api/app/talking/pool.py",
+        "services/api/app/talking/scheduling.py",
+        "services/api/app/talking/sync_probe.py",
+        "services/api/app/talking/sync_probe_child.py",
+        "services/api/app/jobs/handlers.py"
+      ],
+      "tests": [
+        "services/api/tests/test_maintained_talking_dual.py",
+        "services/api/tests/test_talking_pool.py",
+        "services/api/tests/test_talking_scheduling.py",
+        "services/api/tests/test_planned_talking_source_reuse.py",
+        "services/api/tests/test_talking_sync_probe.py"
+      ]
+    },
+    {
+      "id": "production_scheduling",
+      "name": "生产资源调度",
+      "group": "scheduling",
+      "authority": "docs/product/PRODUCTION_SCHEDULING.md",
+      "marker": "capability-authority:production_scheduling",
+      "summary": "跨 Planning、Voice、Talking、素材、预算和 Render 选择有界可行方案；不是第四种内容能力。",
+      "related": ["scene_planning", "voice_generation", "talking_generation", "media_assets", "execution_compute", "timeline_render"],
+      "code": [
+        "services/api/app/video_production.py",
+        "services/api/app/production_runs.py",
+        "services/api/app/media/planning.py",
+        "services/api/app/talking/scheduling.py",
+        "services/api/app/budget.py"
+      ],
+      "tests": [
+        "services/api/tests/test_automatic_production.py",
+        "services/api/tests/test_production_preflight.py",
+        "services/api/tests/test_production_runs.py",
+        "services/api/tests/test_material_resolution.py",
+        "services/api/tests/test_talking_scheduling.py"
+      ]
+    },
+    {
+      "id": "creator_intelligence",
+      "name": "创作者与选题",
+      "group": "supporting",
+      "authority": "docs/product/CREATOR_INTELLIGENCE.md",
+      "marker": "capability-authority:creator_intelligence",
+      "summary": "工作区身份、受众、知识、选题来源、文案偏好和反馈事实；ScenePlan 契约交给场景规划。",
+      "related": ["scene_planning", "media_assets"],
+      "code": [
+        "services/api/app/planning_input.py",
+        "services/api/app/scene_planning.py",
+        "services/api/app/main.py",
+        "services/api/app/db/repositories.py"
+      ],
+      "tests": [
+        "services/api/tests/test_planning_input.py",
+        "services/api/tests/test_scene_plan_api.py",
+        "services/api/tests/test_account_intelligence_api.py",
+        "services/api/tests/test_m1_gate_api.py"
+      ]
+    },
+    {
+      "id": "media_assets",
+      "name": "媒体资产与选择",
+      "group": "supporting",
+      "authority": "docs/product/MEDIA_ASSET_SYSTEM.md",
+      "marker": "capability-authority:media_assets",
+      "summary": "素材导入、权利与来源、区间事实、外部供给和媒体候选选择；跨能力执行顺序交给资源调度。",
+      "related": ["scene_planning", "voice_generation", "talking_generation", "production_scheduling", "timeline_render"],
+      "code": [
+        "services/api/app/asset_management.py",
+        "services/api/app/domain/models.py",
+        "services/api/app/db/migrations.py",
+        "services/api/app/db/repositories.py",
+        "services/api/app/main.py",
+        "services/api/app/media/importer.py",
+        "services/api/app/media/fingerprint.py",
+        "services/api/app/media/planning.py",
+        "services/api/app/source_usage.py"
+      ],
+      "tests": [
+        "services/api/tests/test_asset_management.py",
+        "services/api/tests/test_media_fingerprint.py",
+        "services/api/tests/test_media_pipeline.py",
+        "services/api/tests/test_material_resolution.py",
+        "services/api/tests/test_material_selection.py",
+        "services/api/tests/test_asset_library_api.py"
+      ]
+    },
+    {
+      "id": "publishing_learning",
+      "name": "发布包装与学习闭环",
+      "group": "supporting",
+      "authority": "docs/product/PUBLISHING_LEARNING.md",
+      "marker": "capability-authority:publishing_learning",
+      "summary": "完成 Render 才能绑定发布包装与回执；历史节目可关联素材；不可覆盖指标快照形成同创作者自身基线并进入下一轮建议。",
+      "related": ["creator_intelligence", "timeline_render", "execution_compute", "media_assets"],
+      "code": [
+        "services/api/app/publication.py",
+        "services/api/app/publication_learning.py",
+        "services/api/app/main.py",
+        "services/api/app/db/repositories.py",
+        "services/api/app/db/migrations.py",
+        "services/api/app/domain/models.py",
+        "services/api/app/feedback_learning.py",
+        "services/api/app/scene_planning.py"
+      ],
+      "tests": [
+        "services/api/tests/test_asset_library_api.py",
+        "services/api/tests/test_account_intelligence_api.py",
+        "services/api/tests/test_publication_learning.py",
+        "services/api/tests/test_feedback_learning.py",
+        "services/api/tests/test_creator_preference_selection.py"
+      ]
+    },
+    {
+      "id": "execution_compute",
+      "name": "执行、能力与预算",
+      "group": "supporting",
+      "authority": "docs/product/EXECUTION_COMPUTE.md",
+      "marker": "capability-authority:execution_compute",
+      "summary": "Run/Job、实际 provider/model、预算、幂等、租约、失败与恢复；不定义跨能力调度算法。",
+      "related": ["production_scheduling", "voice_generation", "talking_generation", "timeline_render"],
+      "code": [],
+      "tests": []
+    },
+    {
+      "id": "timeline_render",
+      "name": "时间线与渲染",
+      "group": "supporting",
+      "authority": "docs/product/TIMELINE_RENDER_LEARNING.md",
+      "marker": "capability-authority:timeline_render",
+      "summary": "EditPlan、VideoSpec、渲染、整片技术 QA、版本判断和反馈；消费上游能力结果，不重定义其配方。",
+      "related": ["scene_planning", "voice_generation", "talking_generation", "media_assets", "production_scheduling"],
+      "code": [],
+      "tests": []
+    }
+  ]
+}

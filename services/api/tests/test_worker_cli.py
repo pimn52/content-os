@@ -18,9 +18,25 @@ from app.providers.asr import ASRConfigurationError
 from app.providers.talking import TalkingConfigurationError
 from app.providers.vision import VisionConfigurationError
 from app.runtime import resolve_local_executable
-from app.worker_cli import _build_voice_provider, _resolve_omnivoice_reference_path, build_runner, parse_config, run
+from app.worker_cli import (_build_voice_provider, _resolve_omnivoice_reference_path,
+    _voice_qa_execution_identity, build_runner, parse_config, run)
 from app.providers.voice import VoiceInputError, VoiceConfigurationError
 from app.voice_performance import authorized_voice_reference_choices
+
+
+def test_intake_recovery_poll_is_throttled_but_rechecks_expired_leases(tmp_path, monkeypatch):
+    from app.worker_cli import _intake_recovery_poll
+    now = [0.0]
+    calls = []
+    monkeypatch.setattr(AssetJobTargetStore, 'recover_intake_visual_samples', lambda self: calls.append(now[0]) or 1)
+    with Database(tmp_path / 'recovery-poll.sqlite') as db:
+        poll = _intake_recovery_poll(db, clock=lambda: now[0])
+        assert poll() == 1
+        now[0] = 29.9
+        assert poll() == 0
+        now[0] = 30.0
+        assert poll() == 1
+        assert calls == [0.0, 30.0]
 
 
 def test_worker_defaults_and_type_selection(monkeypatch):
@@ -34,6 +50,15 @@ def test_worker_defaults_and_type_selection(monkeypatch):
     assert config.ffmpeg == resolve_local_executable("ffmpeg")
     assert config.ffprobe == resolve_local_executable("ffprobe")
     assert config.job_id is None
+
+
+def test_production_worker_keeps_running_without_optional_intake_vision(tmp_path, monkeypatch):
+    monkeypatch.setattr('app.worker_cli._vision_provider_from_env', lambda: None)
+    config = parse_config(['--production-only', '--job-type', 'analyze_asset', '--job-type', 'index_clips'])
+    with Database(tmp_path / 'missing-vision.sqlite') as db:
+        runner = build_runner(config, db)
+        assert JobType.ANALYZE_ASSET in runner.handler_types
+        assert JobType.INDEX_CLIPS not in runner.handler_types
 
 
 def test_worker_job_id_requires_once_and_a_uuid():
@@ -100,6 +125,59 @@ def test_optional_semantic_provider_configuration_cannot_block_a_ready_render_wo
         assert runner._handlers[JobType.RENDER].__wrapped__.semantic_diagnoser is runner.production_service.semantic_diagnoser
 
 
+def test_product_worker_reports_missing_planner_without_blocking_other_handlers(tmp_path, monkeypatch):
+    from app.providers.scene_planner import ScenePlannerConfigurationError
+    def no_planner():
+        raise ScenePlannerConfigurationError('missing configuration')
+    def no_vision():
+        raise VisionConfigurationError('missing configuration')
+    monkeypatch.setattr('app.scene_planning._scene_planner_from_env', no_planner)
+    monkeypatch.setattr('app.worker_cli._vision_provider_from_env', no_vision)
+    with Database(tmp_path / 'product-missing-planner.sqlite') as db:
+        config = parse_config(['--once', '--production-only', '--job-type', 'plan_content',
+            '--job-type', 'analyze_asset', '--job-type', 'render', '--data-root', str(tmp_path)])
+        runner = build_runner(config, db)
+        assert {JobType.PLAN_CONTENT, JobType.ANALYZE_ASSET, JobType.RENDER} <= runner.handler_types
+        now = datetime.now(timezone.utc)
+        job = JobStore(db).enqueue(Job(type=JobType.PLAN_CONTENT, idempotency_key='missing-planner',
+            created_at=now, updated_at=now))
+        result = runner.run_once(job_id=job.id)
+        assert result.status is JobStatus.FAILED
+        assert result.error_code == 'scene_planner_not_configured'
+        assert result.attempt == 1
+
+
+def test_scoped_production_worker_can_resolve_and_acquire_materials_without_eager_calls(tmp_path, monkeypatch):
+    monkeypatch.setattr('app.worker_cli._vision_provider_from_env', lambda: None)
+    from app.providers.scene_planner import ScenePlannerConfigurationError
+    def no_planner():
+        raise ScenePlannerConfigurationError('missing configuration')
+    monkeypatch.setattr('app.scene_planning._scene_planner_from_env', no_planner)
+    monkeypatch.setenv('CONTENT_OS_EXTERNAL_SOURCE_ORDER', 'wikimedia_commons')
+    with Database(tmp_path / 'scoped.sqlite') as db:
+        config = parse_config(['--once', '--production-run-id', str(uuid4()),
+                               '--job-type', 'render', '--data-root', str(tmp_path)])
+        service = build_runner(config, db).production_service
+        assert service.material_resolver is not None
+        assert service.material_resolver.provider is None
+        assert service.material_acquirer is not None
+        assert 'wikimedia_commons' in service.material_acquirer.sources
+        assert service.planner is None
+
+
+def test_scoped_worker_reuses_planner_for_measured_revision_without_claiming_plan_jobs(tmp_path, monkeypatch):
+    monkeypatch.setattr('app.worker_cli._vision_provider_from_env', lambda: None)
+    monkeypatch.setenv('CONTENT_OS_EXTERNAL_SOURCE_ORDER', 'wikimedia_commons')
+    planner = SimpleNamespace(model='configured-fixture')
+    monkeypatch.setattr('app.scene_planning._scene_planner_from_env', lambda: planner)
+    with Database(tmp_path / 'scoped-planner.sqlite') as db:
+        config = parse_config(['--once', '--production-run-id', str(uuid4()),
+                               '--job-type', 'render', '--data-root', str(tmp_path)])
+        runner = build_runner(config, db)
+        assert runner.production_service.planner is planner
+        assert JobType.PLAN_CONTENT not in runner.handler_types
+
+
 def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"original authorized bytes")
@@ -125,6 +203,18 @@ def test_omnivoice_selected_reference_rechecks_source_hash_before_inference(tmp_
         source.write_bytes(b"changed source bytes")
         with pytest.raises(VoiceInputError, match="source changed"):
             provider.synthesize_with_reference(profile, "新文案", tmp_path / "output.wav", reference_window=selection)
+
+
+def test_voice_qa_execution_identity_is_recordable_without_manual_labels(monkeypatch):
+    monkeypatch.delenv("CONTENT_OS_VOICE_QA_RUNTIME_ID", raising=False)
+    monkeypatch.delenv("CONTENT_OS_VOICE_QA_MACHINE_ID", raising=False)
+    runtime, machine_id = _voice_qa_execution_identity("cpu", "int8")
+    assert runtime.startswith("faster-whisper-")
+    assert runtime.endswith("-cpu-int8")
+    assert machine_id
+    monkeypatch.setenv("CONTENT_OS_VOICE_QA_RUNTIME_ID", "exact-runtime")
+    monkeypatch.setenv("CONTENT_OS_VOICE_QA_MACHINE_ID", "exact-machine")
+    assert _voice_qa_execution_identity("cpu", "int8") == ("exact-runtime", "exact-machine")
 
 
 def test_transcribe_requires_runtime_key_but_analyze_does_not(tmp_path: Path, monkeypatch):
@@ -400,6 +490,8 @@ def test_once_uses_fake_runner_and_closes_database(tmp_path: Path, monkeypatch):
             closed.append(self.path)
 
     monkeypatch.setattr("app.worker_cli.Database", RecordingDatabase)
+    from app.runtime_settings import RuntimeSettings
+    monkeypatch.setattr("app.runtime_settings.load_runtime_settings", lambda db: RuntimeSettings())
     config = parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "verify_voice"])
     assert run(config) == 0
     assert calls == ["reconcile", "run"]
@@ -423,6 +515,8 @@ def test_build_failure_still_closes_database(tmp_path: Path, monkeypatch):
             closed.append(self.path)
 
     monkeypatch.setattr("app.worker_cli.Database", RecordingDatabase)
+    from app.runtime_settings import RuntimeSettings
+    monkeypatch.setattr("app.runtime_settings.load_runtime_settings", lambda db: RuntimeSettings())
     monkeypatch.setattr("app.worker_cli.build_runner", lambda config, db: (_ for _ in ()).throw(ASRConfigurationError("safe config error")))
     config = parse_config(["--once", "--db", str(tmp_path / "worker.sqlite"), "--job-type", "analyze_asset"])
     with pytest.raises(ASRConfigurationError):

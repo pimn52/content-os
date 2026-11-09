@@ -6,6 +6,10 @@ const source = readFileSync(new URL('../src/production.ts', import.meta.url), 'u
 const { code } = transformSync(source, { loader: 'ts', format: 'esm' });
 const { startBody, talkingRepairKey, talkingSeriesReviewKey, talkingReviewPolicyVersion, recoveryIdentity, recoveryIdempotencyKey, parseBookmark, productionKey, currentRunReferences, requestError, preflightReasonLabel, productionLabels, canDispatchVoice, voiceCandidateMatches, canReuseTalkingSource, canBindTalkingSource } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 
+test('missing planner is explained to creators', () => {
+  assert.match(preflightReasonLabel('scene_planner_not_configured'), /内容规划服务尚未配置/);
+});
+
 test('motion failures explain re-planning without asking for another shoot or approval', () => {
   const message = requestError({detail:{reasons:['talking_source_coverage_insufficient_replan']}},409);
   assert.match(message,/保留文案/);
@@ -85,7 +89,7 @@ test('technical completion is never presented as final human approval', () => {
   assert.equal(productionLabels.render_completed_awaiting_review, '渲染完成，尚未最终审查');
   assert.equal(productionLabels.awaiting_u_voice_review, '等待旁白人审');
 });
-test('Voice dispatch requires matching consent/profile/provider; backend owns capability and stored authorization gates', () => {
+test('Voice dispatch requires matching consent/profile/provider; evidence labels and commercial marks stay informational', () => {
   const profile = { provider: 'fixture', consent: { confirmed: true } };
   const unknownCapability = { provider: 'fixture', readiness: 'configured', quality_status: 'unknown', commercial_status: 'unknown' };
   assert.equal(canDispatchVoice(profile, unknownCapability), true);

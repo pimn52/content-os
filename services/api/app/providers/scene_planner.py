@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 import math
 import logging
+import re
 import socket
 import time
-from dataclasses import dataclass
+from threading import local
+from dataclasses import dataclass, replace
 from copy import deepcopy
 from ipaddress import ip_address
 from typing import Literal, Mapping, Protocol
@@ -20,7 +22,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 from pydantic import ValidationError
 
-from app.domain.models import Project, ScenePlan, SourceKind, VisualIntent, GRAPHIC_LABEL_MAX_CHARS, GRAPHIC_TOTAL_MAX_CHARS
+from app.domain.models import (
+    GRAPHIC_LABEL_MAX_CHARS, GRAPHIC_TOTAL_MAX_CHARS, GraphicCardPlan, Project,
+    ScenePlan, SourceKind, VisualIntent,
+)
+from app.costs import ProviderUsage
 from app.planning_input import audience_control_leak_field, planning_request, presentation_plan_gaps, opening_context_gap
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,9 +72,9 @@ _VALIDATION_CODES = frozenset({
 })
 _DOMAIN_RULES = frozenset({"unknown", "field_value", "visual_requirement_reason_required", "empty_plan",
     "scene_identity", "scene_order", "scene_id_duplicate", "audience_control_leak", "graphic_plan_required", "presentation_requirement", "script_copy_mismatch",
-    "graphic_omission", "graphic_treatment", "graphic_point_count", "graphic_realization", "graphic_label_content", "graphic_label_length", "graphic_total_length", "talking_motion_budget", "opening_context", "supporting_visual_intent_invalid", "material_request_invalid"})
+    "graphic_omission", "graphic_treatment", "graphic_point_count", "graphic_realization", "graphic_label_content", "graphic_label_length", "graphic_total_length", "talking_motion_budget", "opening_context", "supporting_visual_intent_invalid", "material_request_invalid", "creator_scope_unverified"})
 _DOMAIN_FIELDS = frozenset({"unknown", "scene_id", "order", "purpose", "voice_text", "duration_target_ms",
-    "visual_intent", "supporting_visual_intent", "material_request", "viewer_takeaway", "reuse_intent", "evidence_refs", "preferred_clip_id", "preferred_sources", "fallback_sources", "caption_emphasis", "visual_requirement", "visual_requirement_reason", "graphic_plan"})
+    "visual_intent", "supporting_visual_intent", "material_request", "viewer_takeaway", "reuse_intent", "evidence_refs", "preferred_clip_id", "preferred_sources", "fallback_sources", "caption_emphasis", "visual_requirement", "visual_requirement_reason", "graphic_plan", "creator_fit"})
 
 # Error locations can contain provider-controlled keys (e.g. extra fields).
 # Only render paths from our schema and never include the rejected value or message.
@@ -77,9 +83,11 @@ _DIAGNOSTIC_CHILD_FIELDS = {
     "supporting_visual_intent": frozenset({"subject", "action", "framing", "description"}),
     "graphic_plan": frozenset({"kind", "treatment", "points", "reason"}),
     "material_request": frozenset({"source_kind", "query", "reason"}),
+    "creator_fit": frozenset({"fit_state", "content_pillar", "topic_fit_reason", "audience_value",
+                              "knowledge_refs", "opinion_refs", "evidence_gaps", "deviation_risks"}),
 }
 _PYDANTIC_ERROR_TYPES = frozenset({"missing", "extra_forbidden", "string_type", "string_too_short",
-    "string_too_long", "int_type", "int_parsing", "greater_than", "greater_than_equal", "less_than",
+    "string_too_long", "int_type", "int_parsing", "int_from_float", "greater_than", "greater_than_equal", "less_than",
     "less_than_equal", "list_type", "too_short", "too_long", "literal_error", "enum", "uuid_type",
     "uuid_parsing", "model_type", "model_attributes_type", "value_error"}) | _DOMAIN_RULES
 _ROOT_ERROR_FIELDS = {"visual_requirement_reason_required": "visual_requirement_reason",
@@ -200,7 +208,69 @@ _SCENE_FIELDS = (
 )
 _VISUAL_REQUIREMENT_FIELDS = ("visual_requirement", "visual_requirement_reason")
 _VISUAL_INTENT_FIELDS = ("subject", "action", "framing", "description")
+_CREATOR_FIT_ANNOTATION_FIELDS = frozenset({
+    "fit_state", "content_pillar", "topic_fit_reason", "audience_value",
+    "knowledge_refs", "opinion_refs", "evidence_gaps", "deviation_risks",
+})
 _MATERIAL_FIELDS = ("viewer_takeaway", "material_request", "reuse_intent", "supporting_visual_intent")
+_CREATOR_FIT_FIELDS = ("fit_state", "content_pillar", "topic_fit_reason", "audience_value",
+                       "knowledge_refs", "opinion_refs", "evidence_gaps", "deviation_risks")
+_CREATOR_FIT_ALIASES = {
+    "pillar": "content_pillar",
+    "fit_reason": "topic_fit_reason",
+    "reason": "topic_fit_reason",
+    "audience_benefit": "audience_value",
+    "viewer_value": "audience_value",
+    "knowledge_used": "knowledge_refs",
+    "opinion_used": "opinion_refs",
+    "fact_gaps": "evidence_gaps",
+    "uncertainties": "evidence_gaps",
+    "risks": "deviation_risks",
+}
+
+
+def _normalize_creator_fit_fields(value):
+    """Keep Creator Fit explanatory metadata without rejecting provider aliases.
+
+    This field is derived evidence about the plan, not a source fact. Providers
+    occasionally use a synonymous key or append an explanatory key despite the
+    requested schema. Preserve known aliases, discard unknown extras, and leave
+    required-value validation to the CreatorFit contract.
+    """
+
+    if not isinstance(value, dict):
+        return value
+    normalized = {key: value[key] for key in _CREATOR_FIT_FIELDS if key in value}
+    for alias, key in _CREATOR_FIT_ALIASES.items():
+        if key in normalized or alias not in value:
+            continue
+        candidate = value[alias]
+        if key.endswith("_refs") and isinstance(candidate, str):
+            candidate = [candidate]
+        normalized[key] = candidate
+    return normalized
+
+
+def _estimate_narration_duration_ms(text: object) -> int:
+    if not isinstance(text, str):
+        return 3_000
+    tokens = re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9]+", text)
+    estimated = round(len(tokens) / 4.2 * 1_000)
+    return max(1_800, min(30_000, estimated))
+
+
+def _normalize_duration_milliseconds(value, voice_text):
+    """Accept integral provider durations and repair unusable planning hints."""
+
+    if isinstance(value, bool):
+        return _estimate_narration_duration_ms(voice_text)
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        value = int(value)
+    if type(value) is int and 1 <= value <= 3_600_000:
+        return value
+    return _estimate_narration_duration_ms(voice_text)
 
 
 def _graphic_variant(kind, treatments, minimum, maximum):
@@ -225,10 +295,39 @@ _GRAPHIC_SCHEMA={"anyOf":[{"type":"null"},
             "treatment":{"type":"null"},"points":{"type":"array","maxItems":0,"items":{"type":"string"}},
             "reason":{"type":"string","minLength":1,"maxLength":1000}}}]}
 
+_CREATOR_FIT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(_CREATOR_FIT_FIELDS),
+    "properties": {
+        "fit_state": {"type": "string", "enum": ["matched", "partial", "generic"]},
+        "content_pillar": {"type": ["string", "null"], "minLength": 1, "maxLength": 300},
+        "topic_fit_reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "audience_value": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "knowledge_refs": {
+            "type": "array", "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+        },
+        "opinion_refs": {
+            "type": "array", "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+        },
+        "evidence_gaps": {
+            "type": "array", "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+        },
+        "deviation_risks": {
+            "type": "array", "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+        },
+    },
+}
+
 _SCENE_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": [*_SCENE_FIELDS, *_VISUAL_REQUIREMENT_FIELDS, "graphic_plan", "preferred_clip_id", *_MATERIAL_FIELDS],
+    "required": [*_SCENE_FIELDS, *_VISUAL_REQUIREMENT_FIELDS, "graphic_plan", "preferred_clip_id",
+                 *_MATERIAL_FIELDS, "creator_fit"],
     "properties": {
         "scene_id": {"type": "string", "minLength": 1, "maxLength": 100},
         "order": {"type": "integer", "minimum": 0, "maximum": 10_000},
@@ -258,6 +357,7 @@ _SCENE_SCHEMA: dict[str, object] = {
                 "source_kind":{"type":"string","enum":["stock","ai_broll"]},
                 "query":{"type":"string","minLength":1,"maxLength":1000},
                 "reason":{"type":"string","minLength":1,"maxLength":1000}}}]},
+        "creator_fit": _CREATOR_FIT_SCHEMA,
     },
 }
 _PLAN_SCHEMA: dict[str, object] = {
@@ -280,7 +380,10 @@ def validate_automatic_material_requests(scenes, context) -> None:
 _SCENE_SCHEMA["properties"]["supporting_visual_intent"] = {
     "anyOf": [{"type": "null"}, deepcopy(_SCENE_SCHEMA["properties"]["visual_intent"])]}
 
-_VISUAL_REVISION_FIELDS = ("scene_id", "visual_intent", "preferred_sources", "fallback_sources", "preferred_clip_id")
+_VISUAL_REVISION_FIELDS = (
+    "scene_id", "visual_intent", "preferred_sources", "fallback_sources",
+    "preferred_clip_id", "graphic_plan",
+)
 _MOTION_REVISION_FIELDS = ("scene_id", "supporting_visual_intent", "fallback_sources", "replaceability_reason")
 
 
@@ -334,6 +437,10 @@ def _visual_revision_schema(scenes, materials):
     properties = {key: deepcopy(_SCENE_SCHEMA["properties"][key]) for key in _VISUAL_REVISION_FIELDS}
     properties["scene_id"]["enum"] = [scene.scene_id for scene in scenes]
     properties["preferred_clip_id"]["enum"] = [None, *dict.fromkeys(item["clip_id"] for item in materials)]
+    properties["graphic_plan"]["anyOf"] = [
+        variant for variant in properties["graphic_plan"]["anyOf"]
+        if variant.get("properties", {}).get("kind", {}).get("enum") in (None, ["diagram"])
+    ]
     return {"type": "object", "additionalProperties": False, "required": ["scenes"], "properties": {
         "scenes": {"type": "array", "minItems": len(scenes), "maxItems": len(scenes), "items": {
             "type": "object", "additionalProperties": False,
@@ -356,8 +463,24 @@ def _parse_visual_revision(value, project, originals):
     if set(updates) != {scene.scene_id for scene in originals}:
         raise ScenePlannerProviderResponseError("visual revision changed scene IDs", validation_code="scene_values", domain_field="scene_id")
     try:
-        scenes = tuple(ScenePlan.model_validate({**scene.model_dump(), **updates[scene.scene_id], "material_request": None})
-                       for scene in originals)
+        merged = []
+        for original in originals:
+            update = updates[original.scene_id]
+            graphic = GraphicCardPlan.model_validate(update["graphic_plan"]) if update["graphic_plan"] is not None else None
+            if original.graphic_plan is not None and graphic != original.graphic_plan:
+                raise ScenePlanRuleError("visual revision cannot replace an existing graphic", "graphic_treatment")
+            if original.graphic_plan is None and graphic is not None:
+                if (original.visual_requirement != "explanatory" or graphic.kind != "diagram"
+                        or update["preferred_clip_id"] is not None
+                        or update["preferred_sources"] != ["typography"]):
+                    raise ScenePlanRuleError(
+                        "new graphics require an unresolved explanatory beat and a real diagram",
+                        "graphic_realization",
+                    )
+            merged.append(ScenePlan.model_validate({
+                **original.model_dump(), **update, "material_request": None,
+            }))
+        scenes = tuple(merged)
         if any(scene.graphic_plan is None and SourceKind.TYPOGRAPHY in (*scene.preferred_sources, *scene.fallback_sources)
                for scene in scenes):
             raise ScenePlanRuleError("typography alternatives require explicit graphic realization", "graphic_plan_required")
@@ -376,6 +499,45 @@ def _material_duration_limit(material):
         and scope["duration_ms"]==scope["end_ms"]-scope["start_ms"] and scope["duration_ms"]>0):
         return scope["duration_ms"]
     return None
+
+
+def normalize_talking_reference_hints(scenes, context):
+    """人物参考由动作池调度，不能当作待直接播放的 B-roll 选择。"""
+    feasibility = context.get("production_feasibility", {}) if isinstance(context, dict) else {}
+    sources = feasibility.get("selected_talking_sources", []) if isinstance(feasibility, dict) else []
+    references = {item.get("clip_id") for item in sources if isinstance(item, dict) and isinstance(item.get("clip_id"), str)}
+    return tuple(scene.model_copy(update={"preferred_clip_id": None})
+        if scene.visual_requirement == "creator_speaking" and scene.preferred_clip_id is not None
+        and str(scene.preferred_clip_id) in references else scene for scene in scenes)
+
+
+def normalize_unobserved_preferred_clips(scenes, materials):
+    """Drop unusable source hints without erasing the scene's visual intent.
+
+    A provider may occasionally reuse an Asset/Scene ID as a Clip ID. That is
+    not evidence that an observed clip exists. For a fresh plan the normal
+    router can still resolve the declared visual intent, so the invalid hint
+    is cleared before source validation. A known clip that is shorter than
+    the requested scene is also only a routing hint, not a reason to reject
+    the complete content plan.
+    """
+
+    available = {
+        item["clip_id"]: _material_duration_limit(item) for item in materials
+        if isinstance(item, dict) and isinstance(item.get("clip_id"), str)
+    }
+    return tuple(
+        scene.model_copy(update={"preferred_clip_id": None})
+        if scene.visual_requirement != "creator_speaking"
+        and scene.preferred_clip_id is not None
+        and (
+            str(scene.preferred_clip_id) not in available
+            or available[str(scene.preferred_clip_id)] is not None
+            and scene.duration_target_ms > available[str(scene.preferred_clip_id)]
+        )
+        else scene
+        for scene in scenes
+    )
 
 
 def validate_observed_materials(scenes,materials,*,require_clip_selection=False):
@@ -427,6 +589,7 @@ _FIXED_PROMPT = (
     "Horizontal output needs an explicit creator setting and must not automatically choose portrait crops. "
     "Missing footage, rejected crops and reuse conflicts cannot promote typography; graphics need an independent editorial purpose. "
     "Graphics need a concrete editorial purpose; concept explanation alone does not justify mostly static cards. "
+    "Normal short videos are footage-led; static graphics need independent purpose. "
     "Honor production_controls.presentation_style. creator_led is an explicit creator instruction requiring visible exact speech. "
     "For creator_led include at least one creator_speaking scene; choose the remaining visuals for their actual "
     "content function. It does not require an action demonstration, a new shoot or a fixed speaking/card share. "
@@ -437,6 +600,8 @@ _FIXED_PROMPT = (
     "For replaceable creator speech, supply supporting_visual_intent as a concrete relevant footage alternative and allow its source in fallback_sources. "
     "It is a cutaway over the same complete narration, never a title card or evidence fabrication. Set it null for indispensable visible performance, "
     "explicit instructions requiring this exact visible speech, and all non-creator scenes. At least one creator scene must remain feasible when creator_led. "
+    "For creator_speaking set material_request to null: it can remain full-screen, and an optional supporting cutaway is used only when existing "
+    "footage or later timing fallback requires it. "
     "selected_talking_sources lists configured creator references shared with dispatch, not quality approval. "
     "Their real intervals are finite; do not count repeated bindings or overlapping Clips as extra motion. "
     "visible_source_occupancy describes use by other works. Avoid reusing occupied motion for newly altered speech/lips; "
@@ -468,6 +633,14 @@ _FIXED_PROMPT = (
     "Prefer one short, approximately 2-3 second clause per creator_speaking scene so local Talking can "
     "use short reference footage; keep longer source demonstrations as action_evidence. "
     "Keep final narration context after speech in the last scene; do not introduce an unsupported animation. "
+    "Every new-plan scene must include creator_fit. Use only background_evidence.ip_profile as the creator source; "
+    "never infer private facts from metadata. content_pillar must exactly match one supplied pillar or be null. "
+    "knowledge_refs and opinion_refs must be exact supplied strings, not paraphrases. topic_fit_reason explains why "
+    "this topic belongs to the creator; audience_value explains why this scene matters to the audience. If profile_state "
+    "is empty, set fit_state=generic and state the evidence gap. If only topical scope exists, use partial rather than "
+    "matched. A scene may be partial with no exact knowledge/opinion citation, but it must not invent one. "
+    "Use creator_account_history only as supplied evidence: imported titles/descriptions/metrics may support target "
+    "audience, category and editorial fit; links alone or missing imported history must remain an explicit unknown. "
 )
 
 
@@ -544,6 +717,36 @@ class OpenAICompatibleScenePlanner:
         self.max_output_tokens = max_output_tokens
         self.chat_output_mode = chat_output_mode
         self.transport = transport or UrllibScenePlannerTransport()
+        self._usage_local = local()
+
+    @property
+    def last_usage(self) -> dict:
+        return getattr(self._usage_local, "value", {})
+
+    @last_usage.setter
+    def last_usage(self, value: dict) -> None:
+        self._usage_local.value = value
+
+    def usage_accounting(self, error: Exception | None = None) -> ProviderUsage:
+        """仅记录本次响应给出的 Token；不推测价格或缺失用量。"""
+        usage = self.last_usage if error is None else getattr(error, "provider_usage", {})
+        if not isinstance(usage, dict):
+            usage = {}
+        def count(*names):
+            values = [usage[name] for name in names if name in usage]
+            if not values or any(type(v) is not int or not 0 <= v <= 1_000_000_000 for v in values) or len(set(values)) != 1:
+                return None
+            return values[0]
+        input_tokens = count("prompt_tokens", "input_tokens")
+        output_tokens = count("completion_tokens", "output_tokens")
+        total = count("total_tokens")
+        cached = count("cached_tokens")
+        if usage.get("cache_tokens_conflict") or cached is not None and (input_tokens is None or cached > input_tokens):
+            cached = None
+        consistent = (input_tokens is not None and output_tokens is not None
+            and ("total_tokens" not in usage or total is not None and total == input_tokens + output_tokens))
+        return ProviderUsage(input_tokens=input_tokens, output_tokens=output_tokens,
+            cache_tokens=cached, usage_observable=consistent)
 
     def plan(
         self,
@@ -553,6 +756,8 @@ class OpenAICompatibleScenePlanner:
         topic: str | None = None,
         context: Mapping[str, object] | None = None,
     ) -> ScenePlanResult:
+        # 每次执行先清空，预检、连接失败不能继承上一请求的用量。
+        self.last_usage = {}
         if not isinstance(project, Project):
             raise ScenePlannerInputError("scene planning requires a Project contract")
         revision = (context or {}).get("visual_revision")
@@ -570,7 +775,8 @@ class OpenAICompatibleScenePlanner:
         requested_topic = _optional_request_text("topic", topic, 5_000) or project.topic
         request_context = planning_request(project, topic=requested_topic, script=requested_script, context=context)
         prompt = _FIXED_PROMPT + "\n\nProject request:\n" + json.dumps(request_context, ensure_ascii=False,separators=(",",":"))
-        if project.presentation_style == "creator_led":
+        identity_required = request_context.get("production_controls", {}).get("identity_presence_required") is True
+        if project.presentation_style == "creator_led" or identity_required:
             prompt += ("\n\n本片要求本人讲解：至少一段 visual_requirement=creator_speaking。"
                 "新口播优先用 ai_video 表达已有克隆旁白，不要求重新拍摄口播。"
                 "其余画面按内容任务选择，不强制动作实拍或固定本人/字卡比例；避免连续字卡重复旁白。"
@@ -622,15 +828,28 @@ class OpenAICompatibleScenePlanner:
                 else:
                     prompt += "当前未配置自动外部素材获取；stock 请求只记录未满足需求，不代表可以自动获取。"
             prompt += "\n自动制作不使用大字卡主画面；图解只表达真实的关系、过程或信息损失，不逐句复述旁白。"
+            policy = (context or {}).get("continuous_production", {}).get("visual_mix_policy")
+            if isinstance(policy, dict) and policy.get("mode") == "short_video_footage_led":
+                prompt += ("\n普通短视频采用真实画面主导：本人或其它实拍合计约占时长 40% 以上，"
+                    "不连续三场文字/图解；历史、科技、自然和现实主题应主动请求应景 stock，"
+                    "查询用简短对象与动作词，取得后仍做用途核验。")
             prompt += ("\n先按用户主题、脚本和创作者立场组织完整内容，viewer_takeaway 说明观众应理解、相信或感受什么。"
                 "再比较本人素材、外部来源与 AI 示意的表达任务，不设来源比例，不为现有库缩小核心主张。"
+                "背景素材中标记为 content_motif_verified_stock_hint_not_scene_approval 的候选已完成真实区间核验，"
+                "若与当前表达应景，应优先给出对应 preferred_clip_id；只有它们不适配时才请求新的 stock。"
                 "能够胜任时优先本人素材；外部更精美本身不构成替换理由，明显更应景或提供必要信息时可优先。"
                 "缺少适合画面时，依据 material_supply 中已配置能力填写 material_request 和用途，preferred_clip_id=null；"
+                "本人讲话段的动作参考由产品从人物池分配，preferred_clip_id 必须为 null，不要将人物参考 ID 当作实拍镜头。"
                 "请求不是现成素材，也不是已配置能力，必须保留实际缺口，不能虚构已取得。"
                 "ai_video/talking_profile 专用于本人讲话；ai_broll 是非口播的生成补充画面，两者不可混淆。"
                 "AI 示意不能充当真实事件、亲历或实测证据。本人声音不允许编造本人经历。"
                 "origin=creator_provided 只代表用户提供；带外部出处的素材仍属于外部，不能推断本人拍摄或亲历。"
                 "reuse_intent=reference 仅用于有内容目的的原样回扣、事实引用或梗；新语音口型不豁免动作重复。")
+        if revision_scenes is None and materials:
+            plan_schema = deepcopy(plan_schema)
+            plan_schema["properties"]["scenes"]["items"]["properties"]["preferred_clip_id"]["enum"] = [
+                None, *dict.fromkeys(item["clip_id"] for item in materials)
+            ]
         if revision_scenes is not None and motion_revision:
             plan_schema = _motion_revision_schema(revision_scenes)
             prompt += ("\n人物动作不足，复核原场景能否在完整原旁白上使用切题实拍。只返回全部原 scene_id、"
@@ -641,10 +860,12 @@ class OpenAICompatibleScenePlanner:
                 "已有备选与非人物场景返回 null、[]、null。产品会独立按真实时长分配并保留至少一段本人出镜，素材仍需用途核验。")
         elif revision_scenes is not None:
             plan_schema = _visual_revision_schema(revision_scenes, materials)
-            prompt += ("\n当前仅调整未能落地的画面方案。visual_revision.scenes 是原方案；输出只含 scenes 数组，每项严格为五字段：scene_id、visual_intent、preferred_sources、fallback_sources、preferred_clip_id。"
-                "逐项返回全部原 scene_id，各出现一次；不能返回 creator_scene、文案、时长、主张、证据要求、图解、字幕或 material_request。"
+            prompt += ("\n当前仅调整未能落地的画面方案。visual_revision.scenes 是原方案；输出只含 scenes 数组，每项严格为六字段：scene_id、visual_intent、preferred_sources、fallback_sources、preferred_clip_id、graphic_plan。"
+                "逐项返回全部原 scene_id，各出现一次；不能返回 creator_scene、文案、时长、主张、证据要求、字幕或 material_request。"
                 "未调整的场景沿用原画面字段；系统保留原稿所有其它字段。只能选择当前给出的已核验候选，不再外取或生成新素材。"
-                "保留主张与事实证据要求，不能以环境镜头或图文降格代替；无适用画面须说明无法满足，不能虚构。")
+                "保留主张与事实证据要求，不能以环境镜头或文字卡降格代替。若原场为 explanatory、原 graphic_plan 为空且没有已核验候选，"
+                "可新增一个真实 diagram，并把 preferred_sources 设为 typography、preferred_clip_id 设为 null；图解必须表达关系、步骤或信息损失，不能复述旁白。"
+                "已有 graphic_plan 不得替换；creator_speaking、action_evidence 和不可替代事实证据不得改用图解。")
         if continuous:
             prompt += ("\n人物参考容量只约束可见画面分配，不限制文案字数。先给出完整文案与镜头意图，"
                 "产品在克隆旁白核验后按真实时长调度多条人物参考及应景画面；不循环、倒放或缩短旁白。"
@@ -746,12 +967,33 @@ class OpenAICompatibleScenePlanner:
             except Exception:
                 raise ScenePlannerConnectionError("scene planner transport request failed") from None
             stage = "http_status"
+            try:
+                usage = json.loads(response.body).get("usage", {})
+                if isinstance(usage, dict):
+                    self.last_usage = {key: value for key, value in usage.items()
+                        if key in {"prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens", "cached_tokens"}}
+                    caches = [usage["cached_tokens"]] if "cached_tokens" in usage else []
+                    for key in ("prompt_tokens_details", "input_tokens_details"):
+                        details = usage.get(key)
+                        if isinstance(details, dict) and "cached_tokens" in details:
+                            caches.append(details["cached_tokens"])
+                    if caches:
+                        if all(type(v) is int and 0 <= v <= 1_000_000_000 for v in caches) and len(set(caches)) == 1:
+                            self.last_usage["cached_tokens"] = caches[0]
+                        else:
+                            self.last_usage["cache_tokens_conflict"] = True
+            except (ValueError, AttributeError, TypeError):
+                pass
             if type(response.status_code) is int and 100 <= response.status_code <= 599:
                 status = response.status_code
             _raise_for_status(response.status_code)
             stage = "validation"
             result = _parse_response(response.body, project, protocol=self.protocol,
                 revision_scenes=revision_scenes, motion_revision=motion_revision)
+            if revision_scenes is None:
+                result = replace(result, scenes=normalize_unobserved_preferred_clips(result.scenes, materials))
+            if revision_scenes is None and (context or {}).get("continuous_production"):
+                result = replace(result, scenes=normalize_talking_reference_hints(result.scenes, context))
             if revision_scenes is None:
                 validate_automatic_material_requests(result.scenes, context)
             validate_opening_context(result.scenes, topic=requested_topic, script=requested_script)
@@ -768,6 +1010,7 @@ class OpenAICompatibleScenePlanner:
             outcome = "success"
             return result
         except ScenePlannerProviderResponseError as exc:
+            exc.provider_usage = dict(self.last_usage)
             # 仅随失败写入本地证据，不进日志/API；保留实际返回，避免只剩笼统字段名。
             if "response" in locals() and len(response.body)<=1_000_000:
                 try:exc.response_document=json.loads(response.body.decode("utf-8"))
@@ -778,6 +1021,9 @@ class OpenAICompatibleScenePlanner:
             domain_field = exc.domain_field if exc.domain_field in _DOMAIN_FIELDS else "unknown"
             validation_path = exc.validation_path if exc.validation_path in _DIAGNOSTIC_PATHS else "unknown"
             validation_type = exc.validation_type if exc.validation_type in _PYDANTIC_ERROR_TYPES else "unknown"
+            raise
+        except ScenePlannerError as exc:
+            exc.provider_usage = dict(self.last_usage)
             raise
         finally:
             # Only local allowlisted values/numbers. No provider text, IDs,
@@ -790,8 +1036,8 @@ class OpenAICompatibleScenePlanner:
 OpenAICompatibleScenePlanProvider = OpenAICompatibleScenePlanner
 
 
-def validate_presentation_requirements(project: Project, scenes) -> None:
-    gaps = presentation_plan_gaps(project, scenes)
+def validate_presentation_requirements(project: Project, scenes, *, identity_anchor_required: bool = False) -> None:
+    gaps = presentation_plan_gaps(project, scenes, identity_anchor_required=identity_anchor_required)
     if gaps:
         _LOGGER.warning("scene_planner presentation_gaps=%s", ",".join(gaps))
         raise ScenePlannerProviderResponseError(
@@ -858,6 +1104,49 @@ def _raise_for_status(status_code: object) -> None:
     raise ScenePlannerHTTPError(status_code)
 
 
+def _strip_json_trailing_commas(value: str) -> str:
+    """Remove commas before JSON closers without touching string contents."""
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if in_string:
+            result.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+            result.append(character)
+            index += 1
+            continue
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(value) and value[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(value) and value[lookahead] in "]}":
+                index += 1
+                continue
+            if lookahead < len(value) and value[lookahead] == '"':
+                closer = lookahead + 1
+                while closer < len(value) and value[closer].isspace():
+                    closer += 1
+                if closer < len(value) and value[closer] in "]}":
+                    # Some providers emit `,"}` for an empty trailing slot.
+                    index = lookahead + 1
+                    continue
+        result.append(character)
+        index += 1
+    return "".join(result)
+
+
 def _parse_response(
     body: bytes,
     project: Project,
@@ -911,8 +1200,36 @@ def _parse_response(
             if len(lines) < 3 or lines[-1].strip() != "```":
                 raise ValueError("incomplete code fence")
             cleaned = "\n".join(lines[1:-1]).strip()
-        value = json.loads(cleaned)
-    except ValueError:
+        # Some JSON-mode providers occasionally write a full-width colon
+        # after an ASCII field name, sometimes also omitting its closing
+        # quote. Repair only unescaped identifier-like keys; values and
+        # Chinese prose are left untouched, then the full schema still runs.
+        cleaned = re.sub(
+            r'(?<!\\)"([A-Za-z_][A-Za-z0-9_]*)：', r'"\1":', cleaned,
+        )
+        cleaned = re.sub(
+            r'(?<!\\)"([A-Za-z_][A-Za-z0-9_]*):(?=\s*[\[\{"0-9tfn-])',
+            r'"\1":', cleaned,
+        )
+        cleaned = re.sub(
+            r'(?<!\\)"([A-Za-z_][A-Za-z0-9_]*)"\s*：', r'"\1":', cleaned,
+        )
+        try:
+            value = json.loads(cleaned)
+        except json.JSONDecodeError as json_error:
+            without_trailing_commas = _strip_json_trailing_commas(cleaned)
+            scene_field = r"(?:preferred_sources|fallback_sources|caption_emphasis|visual_requirement|graphic_plan|preferred_clip_id|viewer_takeaway|material_request|reuse_intent|supporting_visual_intent)"
+            repaired = re.sub(
+                rf'("description"\s*:\s*"(?:[^"\\]|\\.)*")\s*,(?=\s*"{scene_field}"\s*:)',
+                r"\1},", without_trailing_commas,
+            )
+            try:
+                value = json.loads(without_trailing_commas)
+            except json.JSONDecodeError:
+                if repaired == without_trailing_commas:
+                    raise
+                value = json.loads(repaired)
+    except (ValueError, json.JSONDecodeError):
         raise ScenePlannerProviderResponseError("scene planner provider returned invalid structured output", validation_code="output_json") from None
     if revision_scenes is not None:
         if motion_revision:
@@ -929,10 +1246,56 @@ def _parse_response(
         value={"scenes":sorted(raw,key=lambda item:item["order"])}
     if not isinstance(value, dict) or set(value) != {"scenes"} or not isinstance(value["scenes"], list):
         raise ScenePlannerProviderResponseError("scene planner provider returned an incomplete scene plan", validation_code="plan_shape")
-    raw_scenes = value["scenes"]
+    raw_scenes = []
+    for original in value["scenes"]:
+        item = original
+        if isinstance(item, dict):
+            item = {
+                **item,
+                "duration_target_ms": _normalize_duration_milliseconds(
+                    item.get("duration_target_ms"), item.get("voice_text")),
+            }
+            for field in ("visual_intent", "supporting_visual_intent"):
+                intent = item.get(field)
+                if isinstance(intent, dict):
+                    ignored = set(intent) - set(_VISUAL_INTENT_FIELDS)
+                    if ignored and (
+                        all(intent.get(key) is None for key in ignored)
+                        or ignored <= _CREATOR_FIT_ANNOTATION_FIELDS
+                    ):
+                        item = {**item, field: {
+                            key: intent[key] for key in _VISUAL_INTENT_FIELDS if key in intent}}
+            if (item.get("visual_requirement") != "creator_speaking"
+                    and item.get("supporting_visual_intent") is not None):
+                # This optional cutaway contract exists only for replaceable
+                # creator speech. On an explanatory scene the primary/fallback
+                # sources already define execution, so a misplaced supporting
+                # annotation is not a second visual requirement.
+                item = {**item, "supporting_visual_intent": None}
+            graphic = item.get("graphic_plan")
+            if (
+                isinstance(graphic, dict)
+                and graphic.get("kind") == "diagram"
+                and graphic.get("treatment") == "diagram_loss"
+                and isinstance(graphic.get("points"), list)
+                and len(graphic["points"]) > 2
+            ):
+                # A loss diagram has exactly source and lost endpoints. A
+                # longer sequence is still executable as a flow and preserving
+                # the nodes avoids silently deleting semantic content.
+                item = {
+                    **item,
+                    "graphic_plan": {**graphic, "treatment": "diagram_flow"},
+                }
+            if isinstance(item.get("creator_fit"), dict):
+                item = {
+                    **item,
+                    "creator_fit": _normalize_creator_fit_fields(item["creator_fit"]),
+                }
+        raw_scenes.append(item)
     if any(
         not isinstance(item, dict)
-        or set(item)-{"preferred_clip_id",*_MATERIAL_FIELDS} not in (set(_SCENE_FIELDS), set((*_SCENE_FIELDS, *_VISUAL_REQUIREMENT_FIELDS)),
+        or set(item)-{"preferred_clip_id",*_MATERIAL_FIELDS,"creator_fit"} not in (set(_SCENE_FIELDS), set((*_SCENE_FIELDS, *_VISUAL_REQUIREMENT_FIELDS)),
                             set((*_SCENE_FIELDS, *_VISUAL_REQUIREMENT_FIELDS, "graphic_plan")))
         or not isinstance(item.get("visual_intent"), dict)
         or set(item["visual_intent"]) != set(_VISUAL_INTENT_FIELDS)
@@ -947,8 +1310,15 @@ def _parse_response(
         normalized = []
         for item in raw_scenes:
             alternative = item.get("supporting_visual_intent")
+            if item.get("visual_requirement") == "creator_speaking" and item.get("material_request") is not None:
+                # 人物可见讲解本身已经可执行；可选插入画面不能把本轮主链变成新素材前置条件。
+                item = {**item, "material_request": None}
+            footage = {"user_asset", "historical_asset", "stock", "ai_broll"}
+            fallback_sources = item.get("fallback_sources")
             if (item.get("visual_requirement") == "creator_speaking"
-                and item.get("fallback_sources") == [] and isinstance(alternative, dict)
+                and isinstance(fallback_sources, list)
+                and not footage.intersection(value for value in fallback_sources if isinstance(value, str))
+                and isinstance(alternative, dict)
                 and set(alternative) == set(_VISUAL_INTENT_FIELDS)):
                 try:
                     intent = VisualIntent.model_validate(alternative)

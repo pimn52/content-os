@@ -81,15 +81,30 @@ class MediaImporter:
         self.originals.mkdir(parents=True, exist_ok=True)
         self.probe = probe or FFProbeAdapter()
 
-    def import_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
+    def import_path(
+        self,
+        source: str | Path,
+        authorization_reference: str,
+        *,
+        source_kind: SourceKind = SourceKind.USER_ASSET,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> Asset:
         source_path = Path(source)
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
         with source_path.open("rb") as stream:
-            return self._import_stream(stream, source_path.name, authorization_reference, source_kind)
+            return self._import_stream(stream, source_path.name, authorization_reference, source_kind, extra_metadata)
 
-    def import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, *, source_kind: SourceKind = SourceKind.USER_ASSET) -> Asset:
-        return self._import_stream(stream, filename, authorization_reference, source_kind)
+    def import_stream(
+        self,
+        stream: BinaryIO,
+        filename: str,
+        authorization_reference: str,
+        *,
+        source_kind: SourceKind = SourceKind.USER_ASSET,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> Asset:
+        return self._import_stream(stream, filename, authorization_reference, source_kind, extra_metadata)
 
     def prepare_path(self, source: str | Path, authorization_reference: str, *, source_kind: SourceKind) -> PreparedMediaImport:
         """Copy and probe media without writing a database row."""
@@ -116,7 +131,14 @@ class MediaImporter:
                 target.write(chunk)
         return digest.hexdigest()
 
-    def _import_stream(self, stream: BinaryIO, filename: str, authorization_reference: str, source_kind: SourceKind) -> Asset:
+    def _import_stream(
+        self,
+        stream: BinaryIO,
+        filename: str,
+        authorization_reference: str,
+        source_kind: SourceKind,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> Asset:
         temp = self.originals / f".import-{secrets.token_hex(12)}.tmp"
         try:
             content_hash = self._copy_stream(stream, temp)
@@ -129,7 +151,10 @@ class MediaImporter:
             # importer. ffprobe identifies the file by contents, not suffix.
             destination = self.originals / f"{content_hash}.media"
             metadata = self.probe.probe(temp)
-            value = self._asset(destination, content_hash, authorization_reference, source_kind, metadata)
+            value = self._asset(
+                destination, content_hash, authorization_reference, source_kind,
+                metadata, extra_metadata,
+            )
             newly_created = False
             try:
                 with self._write_transaction():
@@ -137,6 +162,18 @@ class MediaImporter:
                     if existing is not None:
                         return self._existing_or_error(existing)
                     repository.create(value)
+                    from app.asset_management import record_asset_governance_event
+                    record_asset_governance_event(
+                        self.db, value, "imported", "product_import",
+                        details={
+                            "source_kind": value.source_kind.value,
+                            "source_filename": filename[:500],
+                            "authorization_reference": authorization_reference,
+                            "ip_profile_id": value.metadata.get("ip_profile_id"),
+                            "reuse_role": value.metadata.get("reuse_role"),
+                            "lifecycle_state": value.metadata.get("lifecycle_state", "active"),
+                        },
+                    )
                     newly_created = self._place(temp, destination)
                     self._verify_content_hash(destination, content_hash)
                 return value
@@ -208,8 +245,23 @@ class MediaImporter:
             raise MediaImportError(f"retained media path does not match content hash: {path}")
 
     @staticmethod
-    def _asset(path: Path, content_hash: str, authorization_reference: str, source_kind: SourceKind, metadata: ProbeMetadata) -> Asset:
-        return Asset(id=uuid4(), source_kind=source_kind, source_file=str(path), content_hash=content_hash, duration_ms=metadata.duration_ms, width=metadata.width, height=metadata.height, fps=metadata.fps, has_audio=metadata.has_audio, authorization_reference=authorization_reference, imported_at=datetime.now(timezone.utc), metadata=metadata.metadata)
+    def _asset(
+        path: Path,
+        content_hash: str,
+        authorization_reference: str,
+        source_kind: SourceKind,
+        probe_metadata: ProbeMetadata,
+        extra_metadata: dict[str, object] | None = None,
+    ) -> Asset:
+        return Asset(
+            id=uuid4(), source_kind=source_kind, source_file=str(path),
+            content_hash=content_hash, duration_ms=probe_metadata.duration_ms,
+            width=probe_metadata.width, height=probe_metadata.height,
+            fps=probe_metadata.fps, has_audio=probe_metadata.has_audio,
+            authorization_reference=authorization_reference,
+            imported_at=datetime.now(timezone.utc),
+            metadata={**probe_metadata.metadata, **(extra_metadata or {})},
+        )
 
 
 class PreparedMediaImport:
@@ -263,6 +315,18 @@ class PreparedMediaImport:
         """Internal ordinary row/file primitive; normal repository guards apply."""
         value = self._claim_retention(metadata)
         AssetRepository(self._importer.db).create(value)
+        from app.asset_management import record_asset_governance_event
+        record_asset_governance_event(
+            self._importer.db, value, "imported", "product_import",
+            details={
+                "source_kind": value.source_kind.value,
+                "source_filename": Path(value.source_file).name[:500],
+                "authorization_reference": value.authorization_reference,
+                "ip_profile_id": value.metadata.get("ip_profile_id"),
+                "reuse_role": value.metadata.get("reuse_role"),
+                "lifecycle_state": value.metadata.get("lifecycle_state", "active"),
+            },
+        )
         return self._place_retained(value)
 
     def close(self) -> None:

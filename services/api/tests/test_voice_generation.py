@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
@@ -25,7 +26,7 @@ from app.media.audio_importer import AudioImporter
 from app.media.ffprobe import AudioProbeMetadata
 from app.providers.voice import VoiceSynthesisResult
 from app.providers.asr import TranscriptionResult, TranscriptionSegment, TranscriptionWord
-from app.voice_qa import VoiceQaError, apply_voice_human_review, apply_voice_qa, comparison_tokens, verify_generated_voice, voice_human_review_status
+from app.voice_qa import VoiceQaError, apply_voice_human_review, apply_voice_qa, comparison_tokens, generated_voice_qa_parts, verify_generated_voice, voice_human_review_status
 from app.voice_recovery import VoiceRecoveryRoute, recommend_voice_recovery
 
 
@@ -47,6 +48,147 @@ def _project_and_profile(db: Database, root: Path) -> tuple[Project, VoiceProfil
     return project, profile
 
 
+def _reviewed_pause_recipe(profile: VoiceProfile):
+    return {
+        "schema_version": "0.5", "recipe_id": "v60-human-approved", "version": 6,
+        "quality_anchor_audio_id": str(uuid4()), "quality_anchor_sha256": "a" * 64,
+        "quality_anchor_evidence_reference": "audio:human-approved-v60",
+        "human_review": {"approved": True, "likeness": "pass", "naturalness": "pass",
+            "emphasis": "pass", "pace": "pass", "pauses": "pass", "rhythm": "pass"},
+        "reference_window": {
+            "clip_id": str(profile.reference_clip_ids[0]), "asset_id": str(uuid4()),
+            "source_content_hash": "b" * 64, "start_ms": 0, "end_ms": 6000,
+            "transcript_sha256": "c" * 64,
+        },
+        "runtime_label": "test-voice-runtime", "runtime_parameters_sha256": "d" * 64,
+        "composition_policy": "paragraph_spans",
+        "pause_hierarchy": {
+            "schema_version": "1.0",
+            "levels": {
+                "phrase_internal": "continuous_no_cut",
+                "comma": "short_continuing_boundary",
+                "sentence": "natural_close_longer_than_comma",
+                "paragraph": "allow_one_beat",
+                "key_point": "allow_one_thinking_beat",
+                "ending": "natural_landing",
+            },
+            "invariants": {
+                "sentence_outranks_comma": True,
+                "global_speed_is_not_pause_control": True,
+                "insert_unmeasured_silence": False,
+            },
+            "evidence_refs": ["v19b-u-voice-punctuation-hierarchy-review"],
+        },
+        "seam_policy": {
+            "scope": "paragraph_spans",
+            "method": "pcm16_mono_24khz_10ms_rms_below_minus45dbfs",
+            "eligible_boundary_kinds": ["terminal", "continuing"],
+            "margin_ms_each_side": 60, "max_cut_ms": 300,
+            "preserve_spoken_frames": True, "insert_silence": False,
+            "evidence_reference": "content-os-data/evaluation-evidence/v60-length-completion/manifest.json",
+        },
+        "delivery_adjustments": {
+            "schema_version": "1.4", "review_state": "pending_user_review",
+            "syntax_rule_set_version": "zh-clause-binding-v1",
+            "punctuation_overrides": [], "pronunciation_overrides": [], "generation_breaks": [],
+            "copula_complement_break": {
+                "enabled": False, "max_complement_chars": 12,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "contextual_pronunciation": {
+                "enabled": False, "rule_set_version": "zh-common-polyphones-v1",
+                "evidence_reference": "fixture",
+            },
+            "contrastive_correction_break": {
+                "enabled": False, "max_negated_chars": 48,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "predicate_completion_break": {
+                "enabled": False, "max_clause_chars": 60,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+        },
+    }
+
+
+def _wav_samples(path: Path, samples: list[int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(24_000)
+        output.writeframes(b"".join(value.to_bytes(2, "little", signed=True) for value in samples))
+
+
+def test_copula_complement_rule_generalizes_across_subjects_and_short_complements(tmp_path: Path) -> None:
+    with Database(tmp_path / "copula-rule.sqlite") as db:
+        _, profile = _project_and_profile(db, tmp_path)
+        recipe_value = deepcopy(_reviewed_pause_recipe(profile))
+        recipe_value["delivery_adjustments"] = {
+            "schema_version": "1.4", "review_state": "pending_user_review",
+            "syntax_rule_set_version": "zh-clause-binding-v1",
+            "punctuation_overrides": [], "pronunciation_overrides": [], "generation_breaks": [],
+            "copula_complement_break": {
+                "enabled": True, "max_complement_chars": 12,
+                "reason": "Copulas bind to a short complement and the sentence closes before the next sentence.",
+                "evidence_reference": "user-voice-feedback-2026-11-07-phrase-rhythm-and-cha4",
+            },
+            "contextual_pronunciation": {
+                "enabled": False, "rule_set_version": "zh-common-polyphones-v1",
+                "evidence_reference": "fixture",
+            },
+            "contrastive_correction_break": {
+                "enabled": False, "max_negated_chars": 48,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+            "predicate_completion_break": {
+                "enabled": False, "max_clause_chars": 60,
+                "reason": "disabled in fixture", "evidence_reference": "fixture",
+            },
+        }
+        updated = profile.model_copy(update={"generation_recipe": recipe_value})
+        from app.voice_recipe import apply_recipe_delivery_adjustments, parse_generation_recipe
+        recipe = parse_generation_recipe(updated)
+        assert recipe is not None
+
+        examples = (
+            ("最主要的原因，是照明。现在的城市主干道和绿道夜里灯火通明。",
+             "最主要的原因是照明。\n\n现在的城市主干道和绿道夜里灯火通明。"),
+            ("真正的问题，是成本。团队需要先验证最小方案。",
+             "真正的问题是成本。\n\n团队需要先验证最小方案。"),
+        )
+        for copy, expected in examples:
+            application = apply_recipe_delivery_adjustments(copy, recipe)
+            assert application.provider_text == expected
+            assert application.target_break_positions == (copy.index("。") + 1,)
+            assert application.evidence["adjustments"][0]["kind"] == "copula_complement"
+
+        combined = deepcopy(recipe_value)
+        combined["delivery_adjustments"]["punctuation_overrides"] = [{
+            "copy_text": "这不是跟风，是城市",
+            "provider_text": "这不是跟风。是城市",
+            "reason": "close the rhetorical first clause",
+            "evidence_reference": "fixture",
+        }]
+        combined["delivery_adjustments"]["generation_breaks"] = [{
+            "copy_break_after": "这不是跟风，",
+            "provider_break_after": "这不是跟风。",
+            "reason": "materialize the rhetorical first clause",
+            "evidence_reference": "fixture",
+        }]
+        combined_recipe = parse_generation_recipe(
+            profile.model_copy(update={"generation_recipe": combined})
+        )
+        copy = (
+            "这不是跟风，是城市夜间环境真的变了。\n\n"
+            "最主要的原因，是照明。现在的城市主干道和绿道夜里灯火通明。"
+        )
+        application = apply_recipe_delivery_adjustments(copy, combined_recipe)
+        assert "这不是跟风。\n\n是城市夜间环境真的变了。" in application.provider_text
+        assert "最主要的原因是照明。\n\n现在的城市主干道和绿道夜里灯火通明。" in application.provider_text
+        assert application.evidence["adjustments"][-1]["kind"] == "copula_complement"
+
+
 def _approved_u_voice_review() -> VoiceHumanReview:
     return VoiceHumanReview(
         approved=True,
@@ -62,7 +204,7 @@ def _approved_u_voice_review() -> VoiceHumanReview:
     )
 
 
-def test_voice_job_rejects_admitted_model_mismatch_before_provider_call(tmp_path: Path) -> None:
+def test_voice_job_rejects_actual_provider_mismatch_but_not_changed_commercial_metadata(tmp_path: Path) -> None:
     with Database(tmp_path / "voice-model.sqlite") as db:
         project, profile = _project_and_profile(db, tmp_path)
         now = datetime.now(timezone.utc)
@@ -98,8 +240,9 @@ def test_voice_job_rejects_admitted_model_mismatch_before_provider_call(tmp_path
         ProviderMachineCapabilityProfileRepository(db).save(capability.model_copy(update={
             "commercial_status": "unknown", "license_evidence_reference": None,
         }))
-        with pytest.raises(JobExecutionError, match="admission is no longer valid"):
+        with pytest.raises(JobExecutionError) as budget_stop:
             handler(job)
+        assert budget_stop.value.code == "provider_budget_blocked"
         assert ProviderCallRepository(db).list_for_project(project.id) == []
 
 
@@ -170,6 +313,314 @@ def test_voice_job_imports_provenance_and_reserves_local_tts(tmp_path: Path, cap
             assert ProviderMachineCapabilityProfileRepository(db).get(capability.id).quality_status == "unknown"
             with pytest.raises(GeneratedNarrationQaPending):
                 _require_generated_voice_qa(audio)
+    finally:
+        db.close()
+
+
+def test_voice_job_applies_reviewed_pause_policy_and_preserves_segment_provenance(tmp_path: Path) -> None:
+    db = Database(tmp_path / "voice-pause-policy.sqlite")
+    try:
+        project, profile = _project_and_profile(db, tmp_path)
+        profile = VoiceProfileRepository(db).update(
+            profile.model_copy(update={"generation_recipe": _reviewed_pause_recipe(profile)})
+        )
+        with db.transaction():
+            BudgetPolicyRepository(db).save(BudgetPolicy(
+                project_id=project.id, allow_unknown_cost=False,
+                updated_at=datetime.now(timezone.utc),
+            ))
+        data_root = tmp_path / "data-root"
+        data_root.mkdir()
+        target_text = "先说明白。\n\n再讲重点。"
+        now = datetime.now(timezone.utc)
+        job = Job(
+            project_id=project.id, type=JobType.GENERATE_VOICE,
+            idempotency_key="reviewed-pause-policy", created_at=now, updated_at=now,
+            payload=VoiceGenerationJobPayload(
+                project_id=project.id, voice_profile_id=profile.id, text=target_text,
+                authorization_reference="voice-consent-1", language="zh",
+            ),
+        )
+        JobStore(db).enqueue(job)
+
+        class Provider:
+            provider_name = "test-voice"
+            model = "test-model"
+            is_local = True
+
+            def synthesize(self, _profile: VoiceProfile, text: str, output_path: Path, *, language: str | None = None) -> VoiceSynthesisResult:
+                assert text == target_text and language == "zh"
+                first = [10_000] * (24_000 * 8 // 10) + [0] * (24_000 * 14 // 100)
+                second = [0] * (24_000 * 14 // 100) + [12_000] * (24_000 * 8 // 10)
+                parts_dir = output_path.parent / (output_path.stem + ".parts")
+                first_path, second_path = parts_dir / "000.wav", parts_dir / "001.wav"
+                _wav_samples(first_path, first)
+                _wav_samples(second_path, second)
+                _wav_samples(output_path, first + second)
+                segments = (
+                    {
+                        "start_char": 0, "end_char": 5, "start_sample": 0,
+                        "end_sample": len(first), "source_file": first_path.relative_to(data_root).as_posix(),
+                        "sha256": hashlib.sha256(first_path.read_bytes()).hexdigest(),
+                    },
+                    {
+                        "start_char": 7, "end_char": len(target_text),
+                        "start_sample": len(first),
+                        "end_sample": len(first) + len(second),
+                        "source_file": second_path.relative_to(data_root).as_posix(),
+                        "sha256": hashlib.sha256(second_path.read_bytes()).hexdigest(),
+                    },
+                )
+                return VoiceSynthesisResult(
+                    output_path, provider_version="test-version", generation_segments=segments,
+                )
+
+        class Importer:
+            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None, generated_job=None) -> AudioAsset:
+                with wave.open(str(source), "rb") as media:
+                    duration_ms = round(media.getnframes() * 1000 / media.getframerate())
+                value = AudioAsset(
+                    source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    duration_ms=duration_ms, sample_rate=24_000, channels=1,
+                    language=language, authorization_reference=authorization_reference,
+                    imported_at=datetime.now(timezone.utc),
+                )
+                AudioAssetRepository(db).create(value)
+                return value
+
+        handler = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db), AudioAssetRepository(db), Importer(), Provider(),
+            data_root, ProviderCallLedger(db),
+        )
+        result = JobRunner(
+            JobStore(db), {JobType.GENERATE_VOICE: handler}, worker_id="voice-pause-worker",
+            lease_duration=timedelta(minutes=1), max_attempts=1,
+        ).run_once()
+
+        assert result is not None and result.status is JobStatus.COMPLETED
+        audio = AudioAssetRepository(db).list()[0]
+        generation = audio.metadata["voice_generation"]
+        assert generation["generation_recipe"]["version"] == 6
+        assert generation["generation_recipe"]["pause_hierarchy"]["invariants"]["sentence_outranks_comma"] is True
+        assert generation["pause_policy"]["state"] == "applied"
+        assert generation["pause_policy"]["cuts"][0]["boundary_kind"] == "terminal"
+        assert generation["pause_policy"]["global_speed_changed"] is False
+        assert generation["generation_segments"][1]["final_start_sample"] == 24_000 * 86 // 100
+        parts = generated_voice_qa_parts(audio, data_root)
+        assert len(parts) == 2
+        assert parts[1][1] == 860
+    finally:
+        db.close()
+
+
+def test_voice_job_reuses_byte_identical_generation_and_records_new_recipe(tmp_path: Path) -> None:
+    db = Database(tmp_path / "voice-identical-reuse.sqlite")
+    try:
+        project, profile = _project_and_profile(db, tmp_path)
+        profile = VoiceProfileRepository(db).update(
+            profile.model_copy(update={"generation_recipe": _reviewed_pause_recipe(profile)})
+        )
+        with db.transaction():
+            BudgetPolicyRepository(db).save(BudgetPolicy(
+                project_id=project.id, allow_unknown_cost=False,
+                updated_at=datetime.now(timezone.utc),
+            ))
+        output = tmp_path / "generated" / "voice" / "identical.wav"
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"byte-identical-audio")
+        digest = hashlib.sha256(output.read_bytes()).hexdigest()
+        existing = AudioAsset(
+            source_file=str(output), content_hash=digest, duration_ms=1_000,
+            sample_rate=24_000, channels=1, language="zh",
+            authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+            metadata={"voice_generation": {
+                "provider": "test-voice", "model": "test-model",
+                "voice_profile_id": str(profile.id), "job_id": str(uuid4()),
+                "project_id": str(project.id), "target_text": "这是同一个声音文件。",
+                "qa_state": "verified", "human_review_state": "approved",
+            }},
+        )
+        AudioAssetRepository(db).create(existing)
+        now = datetime.now(timezone.utc)
+        job = Job(
+            project_id=project.id, type=JobType.GENERATE_VOICE,
+            idempotency_key="identical-generation", created_at=now, updated_at=now,
+            payload=VoiceGenerationJobPayload(
+                project_id=project.id, voice_profile_id=profile.id,
+                text="这是同一个声音文件。", authorization_reference="voice-consent-1",
+                language="zh",
+            ),
+        )
+        JobStore(db).enqueue(job)
+
+        class Provider:
+            provider_name = "test-voice"
+            model = "test-model"
+            is_local = True
+
+            def synthesize(self, _profile: VoiceProfile, _text: str, output_path: Path, *, language: str | None = None) -> VoiceSynthesisResult:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"byte-identical-audio")
+                return VoiceSynthesisResult(output_path, provider_version="test-version")
+
+        class Importer:
+            def import_path(self, _source: Path, _authorization_reference: str, *, language: str | None = None, generated_job=None) -> AudioAsset:
+                return existing
+
+        handler = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db), AudioAssetRepository(db), Importer(), Provider(),
+            tmp_path / "generated", ProviderCallLedger(db),
+        )
+        result = JobRunner(
+            JobStore(db), {JobType.GENERATE_VOICE: handler}, worker_id="identical-voice-worker",
+            lease_duration=timedelta(minutes=1), max_attempts=1,
+        ).run_once()
+
+        assert result is not None and result.status is JobStatus.COMPLETED
+        stored = AudioAssetRepository(db).get(existing.id)
+        assert stored is not None
+        generation = stored.metadata["voice_generation"]
+        assert generation["qa_state"] == "verified"
+        assert generation["human_review_state"] == "approved"
+        assert generation["byte_identical_reexecutions"][0]["job_id"] == str(job.id)
+        assert generation["byte_identical_reexecutions"][0]["generation"]["generation_recipe"]["version"] == 6
+        assert ProviderCallRepository(db).list_for_project(project.id)[0].status == "completed"
+    finally:
+        db.close()
+
+
+def test_voice_job_uses_recipe_delivery_text_but_keeps_original_copy_and_paragraph_spans(tmp_path: Path) -> None:
+    db = Database(tmp_path / "voice-recipe-delivery.sqlite")
+    try:
+        project, profile = _project_and_profile(db, tmp_path)
+        recipe = deepcopy(_reviewed_pause_recipe(profile))
+        recipe["delivery_adjustments"] = {
+            "schema_version": "1.4", "review_state": "pending_user_review",
+            "syntax_rule_set_version": "zh-clause-binding-v1",
+            "punctuation_overrides": [{
+                "copy_text": "这不是跟风，是城市",
+                "provider_text": "这不是跟风。是城市",
+                "reason": "close the first claim before 是",
+                "evidence_reference": "user-voice-feedback",
+            }],
+            "pronunciation_overrides": [],
+            "generation_breaks": [{
+                "copy_break_after": "这不是跟风，",
+                "provider_break_after": "这不是跟风。",
+                "reason": "materialize the completed first claim",
+                "evidence_reference": "user-voice-feedback",
+            }],
+            "copula_complement_break": {
+                "enabled": False, "max_complement_chars": 12,
+                "reason": "disabled for explicit break fixture",
+                "evidence_reference": "fixture",
+            },
+            "contextual_pronunciation": {
+                "enabled": True, "rule_set_version": "zh-common-polyphones-v1",
+                "evidence_reference": "user-voice-feedback",
+            },
+            "contrastive_correction_break": {
+                "enabled": False, "max_negated_chars": 48,
+                "reason": "disabled for explicit break fixture",
+                "evidence_reference": "fixture",
+            },
+            "predicate_completion_break": {
+                "enabled": False, "max_clause_chars": 60,
+                "reason": "disabled for explicit break fixture",
+                "evidence_reference": "fixture",
+            },
+        }
+        profile = VoiceProfileRepository(db).update(
+            profile.model_copy(update={"generation_recipe": recipe})
+        )
+        with db.transaction():
+            BudgetPolicyRepository(db).save(BudgetPolicy(
+                project_id=project.id, allow_unknown_cost=False,
+                updated_at=datetime.now(timezone.utc),
+            ))
+        data_root = tmp_path / "data-root"
+        data_root.mkdir()
+        target_text = "这不是跟风，是城市夜间环境真的变了。\n\n照明差。"
+        provider_text = "这不是跟风。\n\n是城市夜间环境真的变了。\n\n照明CHA4。"
+        provider_parts = provider_text.split("\n\n")
+        now = datetime.now(timezone.utc)
+        job = Job(
+            project_id=project.id, type=JobType.GENERATE_VOICE,
+            idempotency_key="recipe-delivery", created_at=now, updated_at=now,
+            payload=VoiceGenerationJobPayload(
+                project_id=project.id, voice_profile_id=profile.id, text=target_text,
+                authorization_reference="voice-consent-1", language="zh",
+            ),
+        )
+        JobStore(db).enqueue(job)
+
+        class Provider:
+            provider_name = "test-voice"
+            model = "test-model"
+            is_local = True
+
+            def synthesize(self, _profile: VoiceProfile, text: str, output_path: Path, *, language: str | None = None) -> VoiceSynthesisResult:
+                assert text == provider_text and language == "zh"
+                parts_dir = output_path.parent / (output_path.stem + ".parts")
+                samples = [
+                    [10_000] * (24_000 // 2),
+                    [11_000] * (24_000 // 2),
+                    [12_000] * (24_000 // 2),
+                ]
+                segments = []
+                cursor = sample_cursor = 0
+                all_samples = []
+                for index, (copy, part_samples) in enumerate(zip(provider_parts, samples)):
+                    part_path = parts_dir / f"{index:03}.wav"
+                    _wav_samples(part_path, part_samples)
+                    segments.append({
+                        "start_char": cursor, "end_char": cursor + len(copy),
+                        "start_sample": sample_cursor, "end_sample": sample_cursor + len(part_samples),
+                        "source_file": part_path.relative_to(data_root).as_posix(),
+                        "sha256": hashlib.sha256(part_path.read_bytes()).hexdigest(),
+                    })
+                    cursor += len(copy) + 2
+                    sample_cursor += len(part_samples)
+                    all_samples.extend(part_samples)
+                _wav_samples(output_path, all_samples)
+                return VoiceSynthesisResult(output_path, provider_version="test-version", generation_segments=segments)
+
+        class Importer:
+            def import_path(self, source: Path, authorization_reference: str, *, language: str | None = None, generated_job=None) -> AudioAsset:
+                with wave.open(str(source), "rb") as media:
+                    duration_ms = round(media.getnframes() * 1000 / media.getframerate())
+                value = AudioAsset(
+                    source_file=str(source), content_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    duration_ms=duration_ms, sample_rate=24_000, channels=1,
+                    language=language, authorization_reference=authorization_reference,
+                    imported_at=datetime.now(timezone.utc),
+                )
+                AudioAssetRepository(db).create(value)
+                return value
+
+        handler = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db), AudioAssetRepository(db), Importer(), Provider(),
+            data_root, ProviderCallLedger(db),
+        )
+        result = JobRunner(
+            JobStore(db), {JobType.GENERATE_VOICE: handler}, worker_id="voice-delivery-worker",
+            lease_duration=timedelta(minutes=1), max_attempts=1,
+        ).run_once()
+
+        assert result is not None and result.status is JobStatus.COMPLETED
+        audio = AudioAssetRepository(db).list()[0]
+        generation = audio.metadata["voice_generation"]
+        assert generation["target_text"] == target_text
+        assert generation["recipe_provider_text"] == provider_text
+        assert generation["recipe_delivery"]["state"] == "applied"
+        assert len(generation["recipe_delivery"]["adjustments"]) == 3
+        assert [
+            target_text[
+                segment["start_char"]:
+                segment["end_char"]
+            ] for segment in generation["generation_segments"]
+        ] == ["这不是跟风，", "是城市夜间环境真的变了。", "照明差。"]
+        assert len(generated_voice_qa_parts(audio, data_root)) == 3
     finally:
         db.close()
 
@@ -439,6 +890,39 @@ def test_voice_qa_worker_rejects_changed_portable_source_before_asr(tmp_path: Pa
         assert ProviderCallRepository(db).list_for_project(project.id) == []
 
 
+def test_segmented_voice_qa_resolves_data_root_prefixed_master_path(tmp_path):
+    from app.voice_qa import generated_voice_qa_parts
+    import struct
+
+    data_root = tmp_path / "content-os-data"
+    generated = data_root / "generated" / "voice" / "parts"
+    generated.mkdir(parents=True)
+    text = "第一段。\n\n第二段。"
+    raw = struct.pack("<h", 1000) * 24_000
+    parts = []
+    for index in range(2):
+        source = generated / f"{index}.wav"
+        with wave.open(str(source), "wb") as output:
+            output.setparams((1, 2, 24_000, 0, "NONE", "not compressed"))
+            output.writeframes(raw)
+        parts.append(dict(source_file=source.relative_to(data_root).as_posix(),
+            sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            start_char=(0, 6)[index], end_char=(4, 10)[index],
+            start_sample=index * 24_000, end_sample=(index + 1) * 24_000))
+    master = data_root / "master.wav"
+    with wave.open(str(master), "wb") as output:
+        output.setparams((1, 2, 24_000, 0, "NONE", "not compressed"))
+        output.writeframes(raw * 2)
+    audio = AudioAsset(source_file="content-os-data/master.wav",
+        content_hash=hashlib.sha256(master.read_bytes()).hexdigest(),
+        duration_ms=2_000, sample_rate=24_000, channels=1, language="zh",
+        authorization_reference="fixture:consent", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"target_text": text, "qa_state": "pending",
+            "generation_segments": parts}})
+
+    assert len(generated_voice_qa_parts(audio, data_root)) == 2
+
+
 @pytest.mark.parametrize("fault", [None, "part_changed", "master_changed", "copy_missing"])
 def test_segmented_voice_qa_checks_exact_pcm_and_never_prompts_or_retries(tmp_path, fault):
     from app.voice_qa import generated_voice_qa_parts
@@ -705,6 +1189,60 @@ def test_voice_qa_requires_real_timing_and_records_copy_and_silence_evidence(tmp
     assert not failed.verified and failed.missing_token_count == 2 and "copy_missing_tokens" in failed.checks
 
 
+def test_voice_qa_clamps_small_asr_segment_overlap_without_dropping_text(tmp_path: Path) -> None:
+    source = tmp_path / "overlap.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="e" * 64, duration_ms=2_000,
+        sample_rate=24_000, channels=1, authorization_reference="voice-consent-1",
+        imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {
+            "provider": "test-voice", "qa_state": "pending", "target_text": "你好世界",
+        }},
+    )
+    overlapping = TranscriptionResult(
+        "你好世界",
+        (
+            TranscriptionSegment(0, 1_000, "你好"),
+            TranscriptionSegment(950, 2_000, "世界"),
+        ),
+        words=(
+            TranscriptionWord(0, 400, "你好"),
+            TranscriptionWord(950, 1_500, "世界"),
+        ),
+    )
+    report = verify_generated_voice(audio, "你好世界", overlapping)
+    assert report.verified
+
+    updated = apply_voice_qa(
+        audio, report, overlapping, provider="qa-asr", model="qa-model",
+    )
+
+    assert [
+        (item.start_ms, item.end_ms, item.text)
+        for item in updated.transcript_segments
+    ] == [(0, 1_000, "你好"), (1_000, 2_000, "世界")]
+    assert updated.metadata["voice_generation"]["qa"]["transcript_timing_normalization"] == {
+        "method": "clamp_later_segment_start_to_previous_end",
+        "max_allowed_overlap_ms": 250,
+        "overlap_count": 1,
+        "max_overlap_ms": 50,
+    }
+
+    excessive = TranscriptionResult(
+        "你好世界",
+        (
+            TranscriptionSegment(0, 1_000, "你好"),
+            TranscriptionSegment(700, 2_000, "世界"),
+        ),
+    )
+    with pytest.raises(VoiceQaError, match="segment_timestamps_overlap"):
+        apply_voice_qa(
+            audio, verify_generated_voice(audio, "你好世界", excessive),
+            excessive, provider="qa-asr", model="qa-model",
+        )
+
+
 def test_voice_qa_accepts_traditional_asr_glyphs_but_not_new_words(tmp_path: Path) -> None:
     source = tmp_path / "generated.wav"
     source.write_bytes(b"playable")
@@ -745,7 +1283,35 @@ def test_voice_qa_normalizes_only_technical_identifier_punctuation(tmp_path: Pat
     assert not report.verified and "copy_substitution_tokens" in report.checks
 
 
-def test_voice_qa_keeps_small_asr_substitutions_explicit_and_bounded(tmp_path: Path) -> None:
+def test_voice_qa_compares_spoken_and_ascii_quantity_styles(tmp_path: Path) -> None:
+    source = tmp_path / "generated.wav"
+    source.write_bytes(b"playable")
+    audio = AudioAsset(
+        source_file=str(source), content_hash="q" * 64, duration_ms=2_000, sample_rate=24_000, channels=1,
+        authorization_reference="voice-consent-1", imported_at=datetime.now(timezone.utc),
+        metadata={"voice_generation": {"provider": "test-voice", "qa_state": "pending"}},
+    )
+    assert comparison_tokens("两千年前") == comparison_tokens("2000年前")
+    assert comparison_tokens("三步") == comparison_tokens("3步")
+    # Only explicit counting/time units are normalized; ordinary wording is not.
+    assert comparison_tokens("万一") == ("万", "一")
+    assert comparison_tokens("一直") == ("一", "直")
+
+    target = "焦虑时代，两千年前的人们仍会面对同样的选择。"
+    observed = "焦虑时代2000年前的人们仍会面对同样的选择"
+    report = verify_generated_voice(
+        audio,
+        target,
+        TranscriptionResult(observed, (TranscriptionSegment(0, 1_500, observed),)),
+    )
+    assert report.verified
+    assert report.missing_token_count == 0 and report.duplicate_token_count == 0
+    assert report.substitution_token_count == 0
+    assert report.phonetic_equivalences == ()
+    assert report.metadata(provider="qa-asr", model="qa-model")["quantity_style_normalization"] == "spoken_quantity_units_v1"
+
+
+def test_voice_qa_rejects_unresolved_semantic_substitutions(tmp_path: Path) -> None:
     source = tmp_path / "generated.wav"
     source.write_bytes(b"playable")
     audio = AudioAsset(
@@ -756,10 +1322,18 @@ def test_voice_qa_keeps_small_asr_substitutions_explicit_and_bounded(tmp_path: P
     report = verify_generated_voice(
         audio, "Content OS 可以审核这个新的成品并保留真实素材字幕", TranscriptionResult("ContentOS可以审阅这个新的成品并保留真实素材字幕", (TranscriptionSegment(0, 1_500, "ContentOS可以审阅这个新的成品并保留真实素材字幕"),)),
     )
-    assert report.verified
+    assert not report.verified
     assert report.missing_token_count == 0 and report.duplicate_token_count == 0
     assert report.substitution_token_count == 1
-    assert "copy_substitutions_within_tolerance" in report.checks
+    assert "copy_substitution_tokens" in report.checks
+
+    tone_changed = verify_generated_voice(
+        audio,
+        "痛苦来自判断",
+        TranscriptionResult("痛哭来自判断", (TranscriptionSegment(0, 1_500, "痛哭来自判断"),)),
+    )
+    assert not tone_changed.verified
+    assert "copy_substitution_tokens" in tone_changed.checks
 
     rejected = verify_generated_voice(
         audio, "一二三四五六七八九十", TranscriptionResult("甲乙丙丁戊己庚辛壬癸", (TranscriptionSegment(0, 1_500, "甲乙丙丁戊己庚辛壬癸"),)),

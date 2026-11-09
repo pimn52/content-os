@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 60
+CURRENT_SCHEMA_VERSION = 64
 
 _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, (
@@ -772,6 +772,91 @@ _MIGRATIONS += ((60, (
     )""",
 )),)
 
+_MIGRATIONS += ((61, (
+    """CREATE TABLE provider_call_records_next (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        payload TEXT NOT NULL
+    )""",
+    "INSERT INTO provider_call_records_next SELECT id,project_id,idempotency_key,status,created_at,completed_at,payload FROM provider_call_records",
+    "DROP TABLE provider_call_records",
+    "ALTER TABLE provider_call_records_next RENAME TO provider_call_records",
+    "CREATE INDEX provider_calls_project_idx ON provider_call_records(project_id, created_at, id)",
+    "CREATE INDEX provider_calls_status_idx ON provider_call_records(status)",
+)),)
+
+_MIGRATIONS += ((62, (
+    """CREATE TABLE asset_governance_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        asset_id TEXT NOT NULL REFERENCES assets(id),
+        event_type TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        payload TEXT NOT NULL
+    )""",
+    "CREATE INDEX asset_governance_events_asset_idx ON asset_governance_events(asset_id, occurred_at, id)",
+    """WITH snapshots(id, asset_id, occurred_at) AS (
+           SELECT lower(hex(randomblob(16))), a.id,
+                  strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           FROM assets a
+       )
+       INSERT INTO asset_governance_events(id, asset_id, event_type, occurred_at, payload)
+       SELECT s.id, s.asset_id, 'snapshot_initialized', s.occurred_at,
+              json_object(
+                'schema_version', '0.1',
+                'id', s.id,
+                'asset_id', s.asset_id,
+                'asset_content_hash', a.content_hash,
+                'event_type', 'snapshot_initialized',
+                'actor', 'migration',
+                'occurred_at', s.occurred_at,
+                'details', json_object(
+                    'ip_profile_id', json_extract(a.payload, '$.metadata.ip_profile_id'),
+                    'reuse_role', json_extract(a.payload, '$.metadata.reuse_role'),
+                    'lifecycle_state', json_extract(a.payload, '$.metadata.lifecycle_state'),
+                    'fingerprint_present', json_type(a.payload, '$.metadata.perceptual_fingerprint') IS NOT NULL
+                ),
+                'evidence_refs', json_array('asset:' || s.asset_id)
+              )
+       FROM snapshots s JOIN assets a ON a.id = s.asset_id
+       WHERE NOT EXISTS (
+           SELECT 1 FROM asset_governance_events e
+           WHERE e.asset_id = s.asset_id AND e.event_type = 'snapshot_initialized'
+       )""",
+)),)
+
+_MIGRATIONS += ((63, (
+    """CREATE TRIGGER asset_governance_events_no_update
+       BEFORE UPDATE ON asset_governance_events
+       BEGIN SELECT RAISE(ABORT, 'asset governance events are append-only'); END""",
+    """CREATE TRIGGER asset_governance_events_no_delete
+       BEFORE DELETE ON asset_governance_events
+       BEGIN SELECT RAISE(ABORT, 'asset governance events are append-only'); END""",
+)),)
+
+_MIGRATIONS += ((64, (
+    """CREATE TABLE publication_metric_observations (
+        id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        publication_id TEXT NOT NULL REFERENCES publication_records(id),
+        event_key TEXT NOT NULL UNIQUE,
+        window_hours INTEGER NOT NULL CHECK(window_hours >= 0 AND window_hours <= 8760),
+        observed_at TEXT NOT NULL,
+        payload TEXT NOT NULL
+    )""",
+    "CREATE INDEX publication_metrics_project_idx ON publication_metric_observations(project_id, observed_at, id)",
+    "CREATE INDEX publication_metrics_publication_idx ON publication_metric_observations(publication_id, window_hours, observed_at)",
+    """CREATE TRIGGER publication_metric_observations_no_update
+       BEFORE UPDATE ON publication_metric_observations
+       BEGIN SELECT RAISE(ABORT, 'publication metric observations are append-only'); END""",
+    """CREATE TRIGGER publication_metric_observations_no_delete
+       BEFORE DELETE ON publication_metric_observations
+       BEGIN SELECT RAISE(ABORT, 'publication metric observations are append-only'); END""",
+)),)
+
 MIGRATION_VERSIONS = tuple(version for version, _ in _MIGRATIONS)
 
 
@@ -783,7 +868,7 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     for version, sql in _MIGRATIONS:
         if connection.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone() is None:
             foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
-            if version in {54, 55}:
+            if version in {54, 55, 61}:
                 # SQLite's documented table-rebuild sequence: preserve referring
                 # rows, validate the complete graph before committing, restore FK.
                 connection.execute("PRAGMA foreign_keys=OFF")
@@ -791,7 +876,7 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
             try:
                 for statement in sql:
                     connection.execute(statement)
-                if version in {54, 55} and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                if version in {54, 55, 61} and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise sqlite3.IntegrityError("retained composition migration has invalid foreign keys")
                 connection.execute("INSERT INTO schema_migrations(version) VALUES (?)", (version,))
             except BaseException:
@@ -800,6 +885,6 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
             else:
                 connection.commit()
             finally:
-                if version in {54, 55}:
+                if version in {54, 55, 61}:
                     connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
     return CURRENT_SCHEMA_VERSION

@@ -43,7 +43,7 @@ def test_individually_valid_scenes_expose_repeated_information_and_source_interv
     assert EditPlan.model_validate_json(plan.model_dump_json()).whole_video == whole
 
 
-@pytest.mark.parametrize("role", ["reference", "meme", "brand_marker", "comparison"])
+@pytest.mark.parametrize("role", ["reference", "meme", "brand_marker", "signature", "comparison"])
 def test_intentional_references_keep_repeat_evidence_without_soft_diversity_pressure(role):
     _, scenes, choices, assets, intervals, plan = sequence([SourceKind.USER_ASSET] * 2,
         ["First demonstration", "Revisit the result"], [2000, 2000])

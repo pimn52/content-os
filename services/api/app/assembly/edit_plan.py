@@ -31,6 +31,9 @@ class EditPlanPreflightError(ValueError):
     """A visual plan is unsafe or contradictory before renderer work begins."""
 
 
+_INTENTIONAL_REUSE_ROLES = frozenset({"meme", "signature", "brand_marker"})
+
+
 def source_frame_interval_ms(start_ms, duration_frames, fps, clip_end_ms=None):
     """Return the frame-ceiled source window used by a scene, in integer ms."""
     if (isinstance(start_ms, bool) or not isinstance(start_ms, int) or start_ms < 0
@@ -354,7 +357,7 @@ def information_intent(scene):
 def intentional_reuse(scene, asset=None):
     from app.routing.asset_router import _comparison_intent
     return (scene.reuse_intent == "reference" or _comparison_intent(scene)
-        or asset is not None and asset.metadata.get("reuse_role") in {"meme", "brand_marker"})
+        or asset is not None and asset.metadata.get("reuse_role") in _INTENTIONAL_REUSE_ROLES)
 
 
 def source_overlap_ms(current, previous):

@@ -36,23 +36,59 @@ def test_m1_gate_page_and_project_creation_are_local(tmp_path: Path) -> None:
         assert listed.status_code == 200
         assert listed.json()[0]["id"] == project["id"]
 
-        second = client.post("/projects", json={"title": "第二个主题", "topic": "另一个主题", "creator_name": "不同输入"})
+        second = client.post("/projects", json={"title": "第二个主题", "topic": "另一个主题", "ip_profile_id": project["ip_profile_id"]})
         assert second.status_code == 201
         assert second.json()["ip_profile_id"] == project["ip_profile_id"]
 
         profile = client.get("/ip-profile")
         assert profile.status_code == 200
         updated = client.put("/ip-profile", json={
-            "creator_name": profile.json()["creator_name"], "domains": [], "topics": [],
-            "vocabulary": [], "avoided_expressions": [], "common_hooks": [], "boundaries": [],
+            "creator_name": profile.json()["creator_name"],
+            "positioning": "面向独立创作者的视频生产研究",
+            "content_pillars": ["短视频生产方法论", "平台分发机制"],
+            "platform_categories": ["知识", "科技"],
+            "public_account_links": ["https://example.com/@creator"],
+            "evidence_refs": ["asset:fixture-source"],
+            "domains": ["video research"], "topics": ["平台压缩"],
+            "vocabulary": ["片源"], "avoided_expressions": ["绝对保证"], "common_hooks": ["先别急着怪平台"],
+            "boundaries": ["不虚构亲历"],
             "metadata": {}, "audience": "software creators", "knowledge": ["local workflows"],
             "opinions": ["small tools should stay understandable"], "style_notes": ["concrete"],
         })
         assert updated.status_code == 200
         assert updated.json()["knowledge"] == ["local workflows"]
+        assert updated.json()["positioning"] == "面向独立创作者的视频生产研究"
+        assert updated.json()["content_pillars"] == ["短视频生产方法论", "平台分发机制"]
+        assert updated.json()["platform_categories"] == ["知识", "科技"]
+        assert updated.json()["public_account_links"] == ["https://example.com/@creator"]
+        assert updated.json()["evidence_refs"] == ["asset:fixture-source"]
+        assert updated.json()["topics"] == ["平台压缩"]
         revisions = client.get("/ip-profile/revisions")
         assert revisions.status_code == 200
         assert [item["version"] for item in revisions.json()] == [1, 2]
+        created = client.post("/ip-profiles", json={
+            "creator_name": "TIM",
+            "positioning": "数码科技与影像技术",
+            "domains": ["数码科技"],
+            "content_pillars": ["视频画质与编码"],
+            "platform_categories": ["数码", "科技"],
+            "audience": "数码科技用户",
+            "topics": ["平台压缩与画质"],
+        })
+        assert created.status_code == 201
+        assert created.json()["creator_name"] == "TIM"
+        assert {item["creator_name"] for item in client.get("/ip-profiles").json()} == {"我", "TIM"}
+        account = client.post("/account-connections", json={
+            "ip_profile_id": created.json()["id"],
+            "provider": "youtube",
+            "account_external_id": "tim-channel",
+            "display_name": "TIM",
+            "profile_url": "https://example.com/@tim",
+            "connected_at": "2026-11-08T00:00:00Z",
+        })
+        assert account.status_code == 201
+        assert account.json()["ip_profile_id"] == created.json()["id"]
+        assert account.json()["profile_url"] == "https://example.com/@tim"
 
 
 def test_project_create_rejects_secret_fields(tmp_path: Path) -> None:

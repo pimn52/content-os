@@ -55,7 +55,9 @@ def _selected_job_source(db, root, job):
     assets = {value.id: value for clip in clips if (value := AssetRepository(db).get(clip.asset_id)) is not None}
     try:
         window = resolve_authorized_voice_reference_choice(payload.reference_window,
-            authorized_voice_reference_choices(profile, clips, assets, data_root=root))
+            authorized_voice_reference_choices(
+                profile, clips, assets, data_root=root, allow_auto_windows=True,
+            ))
     except ValueError:
         raise UseAdmissionError("maintained_voice_reference_changed") from None
     return profile, window

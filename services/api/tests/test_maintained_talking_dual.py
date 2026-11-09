@@ -147,6 +147,7 @@ def test_private_vendor_resources_and_safe_shell_operands(dual_case,monkeypatch)
     assert (private/"work/reference.mp4").read_bytes()==b"video"
     assert (private/"work/narration-model.wav").read_bytes()==b"audio"
     assert calls[0][0][0]==str(c.options["engine"]/"python.exe") and calls[0][0][1:4]==["-I","-S","-B"]
+    assert calls[0][2]["WINDIR"]==str(c.root)
     assert calls[0][2]["PYTORCH_CUDA_ALLOC_CONF"]=="expandable_segments:True"
 
 

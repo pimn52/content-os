@@ -15,7 +15,10 @@ from fastapi.testclient import TestClient
 from app.budget import ProviderCallLedger
 from app.db import (AudioAssetRepository, Database, JobRepository, ProjectDraftRepository,
     ProviderCallRepository, VoiceProfileRepository)
-from app.domain.models import AudioAsset, JobStatus, JobType
+from app.domain.models import (AudioAsset, JobStatus, JobType, NarrationEmphasis,
+    NarrationPerformanceCue, NarrationPerformanceCueKind, NarrationPerformancePlan,
+    NarrationPerformancePlanSource, NarrationPace, TranscriptSegment)
+from app.narration_performance import narration_copy_fingerprint
 from app.jobs import JobRunner, JobStore
 from app.jobs.handlers import VoiceGenerationJobHandler, VoiceQaJobHandler
 from app.jobs.runner import JobExecutionError
@@ -27,6 +30,7 @@ from app.providers.asr import TranscriptionResult, TranscriptionSegment
 from app.providers.voice import VoiceSynthesisResult
 from app.repair_allowance import used_repairs
 from app.voice_repair import (VoiceRepairService, execution_snapshot, voice_segment_repair_context)
+from app.voice_qa import _transcript_sha256
 from app.video_production import VideoProductionService
 from app.worker_cli import _run_product_queue
 from test_voice_repair import setup
@@ -46,11 +50,15 @@ class Probe:
                 audio.getframerate(), audio.getnchannels(), "en", {})
 
 
-def segmented_failure(client, path, *, all_failed=False):
+def segmented_failure(
+    client, path, *, all_failed=False, performance_plan=None, multi_pronunciation=False,
+):
     project, run, root, predecessor = setup(client, path)
-    text = "A fresh\n\ncreator point."
+    text = "痛苦来自判断\n\n痛苦可以放下。" if multi_pronunciation else "A fresh\n\ncreator point."
+    first_end = text.index("\n\n")
+    second_start = first_end + 2
     parts = []
-    for index, (start, end) in enumerate(((0, 7), (9, len(text)))):
+    for index, (start, end) in enumerate(((0, first_end), (second_start, len(text)))):
         source = path.parent / f"part-{index}.wav"
         write_pcm(source, 1000+index)
         parts.append(dict(source_file=source.name, sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -63,7 +71,10 @@ def segmented_failure(client, path, *, all_failed=False):
                 output.writeframes(source.readframes(source.getnframes()))
     with Database(path) as db:
         jobs = JobRepository(db); job = jobs.get(UUID(predecessor))
-        payload = job.payload.model_copy(update={"text": text})
+        payload_updates = {"text": text}
+        if performance_plan is not None:
+            payload_updates["narration_performance_plan"] = performance_plan
+        payload = job.payload.model_copy(update=payload_updates)
         jobs.update(job.model_copy(update={"status": JobStatus.COMPLETED, "error_code": None, "payload": payload}))
         drafts = ProjectDraftRepository(db); draft = drafts.get(UUID(project))
         draft = drafts.save(draft.model_copy(update={"script": text, "version": draft.version+1,
@@ -85,7 +96,10 @@ def segmented_failure(client, path, *, all_failed=False):
         class ASR:
             is_local = True
             def transcribe(self, source, **kwargs):
-                copy = "A" if all_failed or Path(source).stem.endswith("1") else "A fresh"
+                if multi_pronunciation:
+                    copy = "痛哭来自判断" if Path(source).stem.endswith("0") else "痛哭可以放下。"
+                else:
+                    copy = "A" if all_failed or Path(source).stem.endswith("1") else "A fresh"
                 return TranscriptionResult(copy, (TranscriptionSegment(0, 900, copy),), "en")
         handler = VoiceQaJobHandler(AudioAssetRepository(db), ASR(), ProviderCallLedger(db),
             provider_name="fixture-asr", provider_model="fixture-qa", data_root=path.parent,
@@ -96,21 +110,41 @@ def segmented_failure(client, path, *, all_failed=False):
     return UUID(project), UUID(run["id"]), root, audio.id, parts
 
 
+def emphasis_plan(text, start_char, end_char):
+    return NarrationPerformancePlan(
+        copy_fingerprint=narration_copy_fingerprint(text),
+        delivery_goal="fixture emphasis",
+        overall_pace=NarrationPace.CONVERSATIONAL,
+        cues=[NarrationPerformanceCue(
+            kind=NarrationPerformanceCueKind.EMPHASIS,
+            start_char=start_char,
+            end_char=end_char,
+            emphasis=NarrationEmphasis.STRONG,
+        )],
+        source=NarrationPerformancePlanSource.ASSISTED,
+        evidence_refs=["fixture:segment-repair-plan"],
+    )
+
+
 def test_automatic_segment_repair_preserves_good_pcm_and_rechecks_full_master(tmp_path):
     path = tmp_path / "segmented.sqlite"
     with TestClient(create_app(path)) as client:
-        project, run, root, original_id, parts = segmented_failure(client, path)
+        text = "A fresh\n\ncreator point."
+        plan = emphasis_plan(text, 0, 1)
+        project, run, root, original_id, parts = segmented_failure(
+            client, path, performance_plan=plan,
+        )
         with Database(path) as db:
             service = VoiceRepairService(db, tmp_path)
-            plan = service.plan(project, run)
-            assert plan.action == "regenerate_take", plan
-            assert plan.execution_granularity == "segment"
-            assert plan.evidence["segment_repair"]["index"] == 1
-            assert plan.responsible_stage == "voice" and plan.assessment_state == "known"
-            assert plan.scope == {"scene_id": None, "start_ms": 1000, "end_ms": 2000,
+            repair = service.plan(project, run)
+            assert repair.action == "regenerate_take", repair
+            assert repair.execution_granularity == "segment"
+            assert repair.evidence["segment_repair"]["index"] == 1
+            assert repair.responsible_stage == "voice" and repair.assessment_state == "known"
+            assert repair.scope == {"scene_id": None, "start_ms": 1000, "end_ms": 2000,
                 "generation_segment_index": 1, "start_char": 9, "end_char": len("A fresh\n\ncreator point.")}
-            assert plan.preserves["master_audio_id"] == str(original_id)
-            assert plan.preserves["reused_segment_sha256"] == [parts[0]["sha256"]]
+            assert repair.preserves["master_audio_id"] == str(original_id)
+            assert repair.preserves["reused_segment_sha256"] == [parts[0]["sha256"]]
             original = AudioAssetRepository(db).get(original_id)
             record = service.reconcile_automatic_qa_failure(project, run)
             assert service.reconcile_automatic_qa_failure(project, run) is None
@@ -138,6 +172,9 @@ def test_automatic_segment_repair_preserves_good_pcm_and_rechecks_full_master(tm
             assert successor.metadata["voice_generation"]["qa_state"] == "pending"
             assert successor.metadata["voice_generation"]["generation_segments"][0] == parts[0]
             assert successor.metadata["voice_generation"]["segment_repair"]["predecessor_sha256"] == original.content_hash
+            assert successor.metadata["voice_generation"]["narration_performance"]["application_state"] == (
+                "retained_predecessor_emphasis_with_segment_repair"
+            )
             with wave.open(str(successor.source_file), "rb") as audio:
                 assert audio.readframes(24_000) == struct.pack("<h", 1000)*24_000
             assert AudioAssetRepository(db).get(original_id) == original
@@ -160,6 +197,95 @@ def test_automatic_segment_repair_preserves_good_pcm_and_rechecks_full_master(tm
             assert len(seen_qa) == 2
             assert AudioAssetRepository(db).get(successor.id).metadata["voice_generation"]["qa_state"] == "verified"
             assert len(ProviderCallRepository(db).list_for_project(project)) == 3  # 原QA、局部Voice、新Master QA
+
+
+def test_multiple_isolated_pronunciation_failures_are_batched_into_one_bounded_repair(tmp_path):
+    path = tmp_path / "multiple-pronunciation.sqlite"
+    text = "痛苦来自判断\n\n痛苦可以放下。"
+    with TestClient(create_app(path)) as client:
+        project, run, _, _, _ = segmented_failure(
+            client, path, multi_pronunciation=True,
+        )
+        with Database(path) as db:
+            service = VoiceRepairService(db, tmp_path)
+            repair = service.plan(project, run)
+            assert repair.action == "regenerate_take", repair
+            assert repair.execution_granularity == "whole_take"
+            assert repair.evidence["whole_take_repair"]["failed_segment_indexes"] == [0, 1]
+            assert [
+                correction["char_index"]
+                for correction in repair.evidence["whole_take_repair"]["pronunciation_corrections"]
+            ] == [text.index("苦"), text.rindex("苦")]
+            record = service.reconcile_automatic_qa_failure(project, run)
+            job = JobRepository(db).get(UUID(record["replacement_job_id"]))
+            seen = []
+            class Voice:
+                provider_name = "fixture-voice"
+                model = "fixture-model"
+                is_local = True
+                repair_execution = {"runtime": "fixture", "machine_id": "fixture-host", "parameters": {}}
+                def synthesize(self, profile, synthesis_text, output, **kwargs):
+                    seen.append(synthesis_text)
+                    write_pcm(output, 2000, frames=48_000)
+                    return VoiceSynthesisResult(output)
+            handler = VoiceGenerationJobHandler(
+                VoiceProfileRepository(db), AudioAssetRepository(db),
+                AudioImporter(db, tmp_path, Probe()), Voice(), tmp_path / "generated",
+                ProviderCallLedger(db),
+            )
+            handler(job.model_copy(update={"status": JobStatus.RUNNING}))
+            assert seen == ["痛KU3来自判断\n\n痛KU3可以放下。"]
+
+
+@pytest.mark.parametrize("overlap,allowed", [(False, True), (True, False)])
+def test_segment_repair_only_blocks_a_cue_inside_the_failed_segment(tmp_path, overlap, allowed):
+    path = tmp_path / f"plan-overlap-{overlap}.sqlite"
+    with TestClient(create_app(path)) as client:
+        text = "A fresh\n\ncreator point."
+        degraded_plan = emphasis_plan(text, 9, 10) if overlap else emphasis_plan(text, 0, 1)
+        project, run, _, _, _ = segmented_failure(client, path, performance_plan=degraded_plan)
+        with Database(path) as db:
+            repair = VoiceRepairService(db, tmp_path).plan(project, run)
+            assert (repair.action == "regenerate_take") is allowed, repair
+            if allowed:
+                assert repair.execution_granularity == "segment"
+            else:
+                assert "voice_repair_segment_delivery_diagnosis_required" in repair.stop_reasons
+
+
+def test_segment_repair_accepts_equivalent_master_segmentation(tmp_path):
+    path = tmp_path / "segmentation-equivalent.sqlite"
+    with TestClient(create_app(path)) as client:
+        project, run, _, audio_id, _ = segmented_failure(client, path)
+        with Database(path) as db:
+            audios = AudioAssetRepository(db)
+            audio = audios.get(audio_id)
+            assert len(audio.transcript_segments) >= 2
+            first, *rest = audio.transcript_segments
+            middle = (first.start_ms + first.end_ms) // 2
+            # ASR is allowed to choose different segment seams while preserving
+            # the exact ordered spoken-token stream and source bytes.
+            segments = [
+                TranscriptSegment(start_ms=first.start_ms, end_ms=middle, text="A"),
+                TranscriptSegment(start_ms=middle, end_ms=first.end_ms, text="fresh"),
+                *rest,
+            ]
+            changed = audio.model_copy(update={"transcript_segments": segments})
+            metadata = json.loads(changed.model_dump_json())["metadata"]
+            qa = metadata["voice_generation"]["qa"]
+            qa["transcript_segment_count"] = len(segments)
+            qa["observed_segments"] = [segment.model_dump(mode="json") for segment in segments]
+            qa["transcript_sha256"] = _transcript_sha256(changed)
+            changed = changed.model_copy(update={"metadata": metadata})
+            audios.update(changed)
+            plan = VoiceRepairService(db, tmp_path).plan(project, run)
+            assert plan.action == "regenerate_take", plan
+            assert plan.execution_granularity == "segment"
+            assert plan.evidence["segment_repair"]["index"] == 1
+            assert db.connection.execute(
+                "SELECT payload FROM voice_execution_receipts WHERE job_id=?",
+                (str(plan.evidence["qa_job"]["id"]),),
+            ).fetchone() is not None
 
 
 @pytest.mark.parametrize("change", ["all_failed", "missing_report", "tampered_report", "unknown_global", "part_changed", "budget", "consumed"])

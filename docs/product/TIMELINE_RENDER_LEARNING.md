@@ -1,4 +1,7 @@
+<!-- capability-authority:timeline_render -->
 # 时间线、渲染、复核与反馈
+
+本页是 EditPlan、VideoSpec、渲染、成片技术 QA、版本判断和反馈的唯一权威来源。上游 Voice、Talking、素材和调度规则由[能力权威索引](CAPABILITY_INDEX.md)中的各自主文档定义。
 
 EditPlan 保存场景时长、画面来源、裁切、字幕与图形意图；VideoSpec 锁定帧、实际素材、Master 和输出。先定视觉可行性，再用真实音频/画面时长解算，不靠渲染器猜编辑意图。
 

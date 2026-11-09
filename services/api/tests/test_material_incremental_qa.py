@@ -42,6 +42,36 @@ def test_new_clause_only_checks_new_use_and_preserves_existing_match(tmp_path):
         db.close()
 
 
+def test_same_use_after_retiming_prefers_existing_verified_clip(tmp_path):
+    db, project, _, _, scene, provider, resolver = material_library(tmp_path, metered=True)
+    try:
+        provider.accept = lambda video: True
+        first = resolver.resolve(project, [scene], uuid4())[0]
+        assert len(provider.calls) == 1
+        # A plan can retain its broad original hint instead of the exact prior
+        # selection. The shorter duration fits an already verified clip.
+        retimed = scene.model_copy(update={'duration_target_ms': 2000})
+        second = resolver.resolve(project, [retimed], uuid4())[0]
+        assert second.preferred_clip_id == first.preferred_clip_id
+        assert len(provider.calls) == 1
+        assert len(ProviderCallRepository(db).list_for_project(project.id)) == 1
+    finally:
+        db.close()
+
+
+def test_retiming_does_not_reuse_a_different_narration_use(tmp_path):
+    db, project, _, _, scene, provider, resolver = material_library(tmp_path, metered=True)
+    try:
+        provider.accept = lambda video: True
+        resolver.resolve(project, [scene], uuid4())
+        changed = scene.model_copy(update={'duration_target_ms': 2000, 'voice_text': '另一种不同的完整表达。'})
+        resolver.resolve(project, [changed], uuid4())
+        assert len(provider.calls) == 2
+        assert {request['scene_key'] for request in provider.calls[1][1]} == {scene_visual_key(changed)}
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize('global_policy', [False, True])
 def test_negative_batch_yields_to_supplement_with_tail_and_gaps_intact(tmp_path, global_policy):
     db, project, asset, _, base, provider, resolver = material_library(tmp_path, metered=True)

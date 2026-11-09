@@ -54,6 +54,12 @@ def _hash(path):
     return digest.hexdigest()
 
 
+def _asset_hash_matches_window(window, selection):
+    if window.source_timebase == "analysis_wav":
+        return window.asset_content_hash == selection.asset_content_hash
+    return window.asset_content_hash in {None, selection.source_content_hash}
+
+
 _OWNED = object()
 
 
@@ -75,7 +81,7 @@ class OwnedVoiceReference:
     def verify_for(self, window, selection, inputs):
         if self._closed or window != self._window or Path(window.source_file).resolve() != self._source:
             raise ExecutionPreparationError("voice_reference_binding_changed")
-        if selection.source_timebase != window.source_timebase or selection.asset_content_hash != window.asset_content_hash:
+        if selection.source_timebase != window.source_timebase or not _asset_hash_matches_window(window, selection):
             raise ExecutionPreparationError("voice_reference_binding_changed")
         expected = self.inputs_snapshot()
         keys = ("reference_audio", "reference_text", "reference_sha256", "reference_start_frame",
@@ -108,7 +114,7 @@ def prepare_voice_reference(*, data_root, staging_parent, ffmpeg, window, select
             or window.clip_id != selection.clip_id or window.asset_id != selection.asset_id
             or window.start_ms != selection.start_ms or window.end_ms != selection.end_ms
             or window.source_timebase != selection.source_timebase
-            or window.asset_content_hash != selection.asset_content_hash
+            or not _asset_hash_matches_window(window, selection)
             or inputs.reference_text != window.transcript.strip()
             or _hash(source) != selection.source_content_hash):
             raise ExecutionPreparationError("voice_reference_binding_invalid")

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from app.db.database import Database
 from app.db.repositories import JobRepository, _job_payload, _model, _utc_timestamp
-from app.domain.models import Job, JobStatus, JobType
+from app.domain.models import ClipIndexJobPayload, Job, JobStatus, JobType
 
 
 class JobStore:
@@ -100,8 +100,9 @@ class JobStore:
                     return None
                 current = _model(row, Job)
                 if current.attempt >= maximum:
-                    self._fail_exhausted(current, maximum, timestamp, timestamp_text)
-                    continue
+                    if not self._can_replay_completed_intake(current, maximum):
+                        self._fail_exhausted(current, maximum, timestamp, timestamp_text)
+                        continue
                 resource_key = resource_keys.get(current.type)
                 if resource_key is not None and not self._claim_resource(
                     resource_key, current.id, worker, timestamp_text, expiry_text,
@@ -137,6 +138,22 @@ class JobStore:
                     # outside JobStore's transaction discipline.
                     return None
                 return claimed
+
+    def _can_replay_completed_intake(self, job: Job, maximum: int) -> bool:
+        """One crash recovery of an already paid single-frame intake result."""
+        if (job.status is not JobStatus.RUNNING or job.attempt != maximum
+            or job.type is not JobType.INDEX_CLIPS or job.project_id is not None
+            or not job.idempotency_key.startswith("intake:vision:")
+            or not isinstance(job.payload, ClipIndexJobPayload)
+            or job.payload.index_embeddings or job.payload.clip_ids is None
+            or len(job.payload.clip_ids) != 1):
+            return False
+        return self.db.connection.execute(
+            """SELECT 1 FROM provider_call_records
+               WHERE idempotency_key=? AND status='completed'
+               AND json_extract(payload,'$.result_payload.kind')='clip_visual_analysis_v1'""",
+            (f"job:{job.id}:vision:keyframe-0",),
+        ).fetchone() is not None
 
     def claim_next(
         self,

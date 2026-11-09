@@ -84,19 +84,33 @@ def test_resolution_cannot_overwrite_new_inputs_or_poison_a_changed_run(handoff,
     assert all(job.type is not JobType.GENERATE_TALKING and job.type is not JobType.RENDER for job in JobRepository(c.db).list())
 
 
-def test_post_commit_resume_failure_is_recorded_against_its_new_snapshot_without_repeating_materials(handoff):
+def test_resume_failure_rolls_back_measured_plan_without_repeating_materials(handoff):
     c=handoff
     c.service._resolve_with_supplement=Mock(side_effect=lambda project,scenes,*a,**kw:tuple(scenes))
     c.service.runs.resume=Mock(side_effect=ProductionRunNotReady(('master_scene_timing_unresolved',)))
     c.service.completed(c.qa)
     row=c.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(str(c.run),)).fetchone()
     fresh=ProjectDraftRepository(c.db).get(c.project.id)
-    assert fresh.version==row['draft_version']==2 and fresh.script==c.draft.script
+    assert fresh==c.draft and row['draft_version']==1
     assert json.loads(row['waiting_stop_reasons'])==['automatic_stop:master_scene_timing_unresolved']
     assert c.service.status(c.project.id)['next_action']=='stopped'
     assert c.service.status(c.project.id)['responsible_stage']=='timing'
     c.service.completed(c.qa)
     c.service._resolve_with_supplement.assert_called_once()
+    assert AudioAssetRepository(c.db).get(c.master.id)==c.master
+
+
+def test_interruption_during_resume_rolls_back_both_draft_and_run(handoff):
+    c=handoff
+    c.service._resolve_with_supplement=Mock(side_effect=lambda project,scenes,*a,**kw:tuple(scenes))
+    before=c.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(str(c.run),)).fetchone()
+    def interrupt(*args):
+        c.db.connection.execute("UPDATE production_runs SET stage='awaiting_talking' WHERE id=?",(str(c.run),))
+        raise KeyboardInterrupt('fixture interrupted before handoff commit')
+    c.service.runs.resume=Mock(side_effect=interrupt)
+    with pytest.raises(KeyboardInterrupt):c.service._prepare_measured_plan(before)
+    after=c.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(str(c.run),)).fetchone()
+    assert dict(after)==dict(before) and ProjectDraftRepository(c.db).get(c.project.id)==c.draft
     assert AudioAssetRepository(c.db).get(c.master.id)==c.master
 
 

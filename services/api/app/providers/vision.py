@@ -6,6 +6,7 @@ import json
 import math
 import socket
 import time
+from threading import local
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -388,8 +389,17 @@ class OpenAICompatibleVisionProvider:
         self.timeout_seconds = timeout
         self.max_output_tokens = max_output_tokens
         self.transport = transport or UrllibVisionTransport()
-        self.last_usage: dict[str, int] = {}
+        self._usage_local = local()
+        self.last_usage = {}
         self.last_validation_issues: list[dict] = []
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        return getattr(self._usage_local, "value", {})
+
+    @last_usage.setter
+    def last_usage(self, value: dict[str, int]) -> None:
+        self._usage_local.value = value
 
     def _token_price(self):
         parsed = urlsplit(self._endpoint)

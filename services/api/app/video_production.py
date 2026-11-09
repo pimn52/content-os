@@ -12,11 +12,12 @@ from app.db import (ProjectRepository,ProjectDraftRepository,IPProfileRepository
 from app.domain.models import ContentPlanJobPayload,Job,JobType,JobStatus,VisualStyleTokens,SourceKind,MaterialRequest
 from app.production_runs import ProductionRunService,ProductionRunNotReady,TalkingPlanDependency
 from app.production_preflight import build_production_preflight
-from app.providers.local_generation import local_generation_ready,local_generation_licensed
+from app.providers.local_generation import ensure_runtime_capability_profile, provider_execution_identity
 from app.scene_planning import ScenePlanRequest,generate_scene_plan
 from app.project_drafts import save_project_draft,_split_talking_master_clauses
 from app.budget import snapshot
-from app.planning_input import short_video_project,normalize_automatic_graphics,automatic_graphic_gaps
+from app.planning_input import (short_video_project, normalize_automatic_graphics, automatic_graphic_gaps,
+    explicit_visual_constraints)
 from app.media.planning import VisualMaterialResolver
 from app.voice_qa import voice_human_review_status
 
@@ -70,7 +71,16 @@ class VideoProductionService:
         self.material_acquirer = material_acquirer
         self.planner,self.planner_cost_estimator=planner,planner_cost_estimator
         self.semantic_diagnoser=semantic_diagnoser
-        self.runs=ProductionRunService(db,data_root,talking_provider=talking_provider)
+        self.runs=ProductionRunService(
+            db, data_root, voice_provider=voice_provider, talking_provider=talking_provider,
+        )
+
+    def _ensure_runtime_profiles(self):
+        profiles=ProviderMachineCapabilityProfileRepository(self.db)
+        if self.voice_provider is not None:
+            ensure_runtime_capability_profile(profiles, self.voice_provider, "voice")
+        if self.talking_provider is not None:
+            ensure_runtime_capability_profile(profiles, self.talking_provider, "talking")
 
     def enqueue(self,project_id,topic,key,*,candidate_of_run_id=None,resume_from_job_id=None,expected_draft_version=None):
         previous=None
@@ -137,6 +147,7 @@ class VideoProductionService:
                 idempotency_key=key,created_at=now,updated_at=now,payload=payload))
 
     def talking_choice(self,project_id):
+        self._ensure_runtime_profiles()
         from app.planning_feasibility import configured_talking_choices
         choices=configured_talking_choices(self.db,project_id)
         if choices:
@@ -146,16 +157,39 @@ class VideoProductionService:
     def _voice_choice(self,project_id):
         from app.voice_plan import resolve_project_voice_profile
         profile=resolve_project_voice_profile(self.db,project_id)
-        candidates=[value for value in ProviderMachineCapabilityProfileRepository(self.db).list()
-            if value.capability=="voice" and value.provider==profile.provider
-            and local_generation_ready(value) and local_generation_licensed(value)]
+        from app.voice_recipe import VoiceRecipeError, parse_generation_recipe, require_recipe_execution, require_recipe_quality_anchor
+        try:
+            recipe=parse_generation_recipe(profile)
+            if recipe is not None:
+                require_recipe_quality_anchor(self.db,recipe,voice_profile_id=profile.id)
+                from app.runtime_settings import load_runtime_settings
+                from app.providers.maintained_voice_provider import read_maintained_voice_options
+                settings=load_runtime_settings(self.db)
+                if not settings.voice_config_file:
+                    raise VoiceRecipeError("voice_generation_recipe_runtime_missing")
+                options=read_maintained_voice_options(settings.voice_config_file,self.root)
+                require_recipe_execution(profile,runtime_label=options["runtime_label"],parameters=options["parameters"])
+        except (VoiceRecipeError,ValueError,OSError) as exc:
+            raise ProductionRunNotReady((str(exc) or "voice_generation_recipe_invalid",)) from exc
         if self.voice_provider is not None:
-            candidates=[value for value in candidates if value.model==self.voice_provider.model]
+            admitted = ensure_runtime_capability_profile(
+                ProviderMachineCapabilityProfileRepository(self.db), self.voice_provider, "voice",
+            )
+            runtime, machine_id = provider_execution_identity(self.voice_provider, "voice")
+            if admitted is not None:
+                if runtime is not None and admitted.runtime != runtime:
+                    raise ProductionRunNotReady(("voice_runtime_not_configured",))
+                if machine_id is not None and admitted.machine_id != machine_id:
+                    raise ProductionRunNotReady(("voice_runtime_not_configured",))
+                return profile, admitted
+        candidates=[value for value in ProviderMachineCapabilityProfileRepository(self.db).list()
+            if value.capability=="voice" and value.provider==profile.provider]
         if not candidates:
-            raise ProductionRunNotReady(("voice_capability_not_verified",))
+            raise ProductionRunNotReady(("voice_runtime_not_configured",))
         return profile,max(candidates,key=lambda value:value.updated_at)
 
     def plan(self,job,planner,cost_estimator):
+        self._ensure_runtime_profiles()
         project=ProjectRepository(self.db).get(job.project_id)
         existing=self.db.connection.execute("SELECT id FROM production_runs WHERE start_job_id=?",(str(job.id),)).fetchone()
         if existing:
@@ -183,7 +217,8 @@ class VideoProductionService:
                 reservation_guard=lambda:self._reserve_planning_tail(project,needs_analysis=bool(material_ids)))
             draft=response.draft
         scenes=normalize_automatic_graphics(draft.scenes)
-        gaps=automatic_graphic_gaps(scenes)
+        _, local_only = explicit_visual_constraints(job.payload.topic, draft.script)
+        gaps=automatic_graphic_gaps(scenes, allow_typography_text_card=local_only)
         if gaps:
             raise ProductionRunNotReady(gaps)
         if tuple(draft.scenes)!=scenes:
@@ -376,16 +411,30 @@ class VideoProductionService:
             raise ProductionRunNotReady(("automatic_draft_changed",))
         if any(scene.material_request is not None for scene in result.scenes):raise failure
         immutable=("id","project_id","order","voice_text","duration_target_ms","purpose","viewer_takeaway","visual_requirement",
-            "visual_requirement_reason","reuse_intent","graphic_plan","supporting_visual_intent","caption_emphasis","evidence_refs")
+            "visual_requirement_reason","reuse_intent","supporting_visual_intent","caption_emphasis","evidence_refs")
         before={scene.scene_id:scene for scene in draft.scenes}
         changed={scene.scene_id:{key:{"before":getattr(before[scene.scene_id],key),"after":getattr(scene,key)}
             for key in immutable if getattr(scene,key,None)!=getattr(before[scene.scene_id],key,None)}
             for scene in result.scenes if scene.scene_id in before}
         changed={key:value for key,value in changed.items() if value}
+        added_graphics={}
+        for scene in result.scenes:
+            previous=before[scene.scene_id]
+            if scene.graphic_plan==previous.graphic_plan:
+                continue
+            if (previous.graphic_plan is None and scene.graphic_plan is not None
+                    and scene.visual_requirement=="explanatory"
+                    and scene.graphic_plan.kind=="diagram"
+                    and scene.preferred_clip_id is None
+                    and scene.preferred_sources and scene.preferred_sources[0] is SourceKind.TYPOGRAPHY):
+                added_graphics[scene.scene_id]=scene.graphic_plan.model_dump(mode="json")
+            else:
+                changed.setdefault(scene.scene_id,{})["graphic_plan"]={
+                    "before":previous.graphic_plan,"after":scene.graphic_plan}
         (evidence.parent/"visual-revision-check.json").write_text(json.dumps({
             "missing_scene_ids":sorted(set(before)-{scene.scene_id for scene in result.scenes}),
             "unexpected_scene_ids":sorted({scene.scene_id for scene in result.scenes}-set(before)),
-            "changed_content_fields":changed},ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+            "changed_content_fields":changed,"added_graphics":added_graphics},ensure_ascii=False,indent=2,default=str),encoding="utf-8")
         if (len(result.scenes)!=len(before) or {scene.scene_id for scene in result.scenes}!=set(before)
             or changed):
             raise ProductionRunNotReady(("visual_revision_changed_content",))
@@ -609,6 +658,9 @@ class VideoProductionService:
                 visual_dependency_fingerprint=value.visual_dependency_fingerprint).model_dump(mode="json")
                 for value in plan.scenes if value.production_need=="new_talking"]
             self.db.connection.execute("UPDATE production_runs SET talking_dependencies=? WHERE id=?",(json.dumps(deps),row["id"]))
+            run=self.runs.resume(project.id,UUID(row['id']))
+            if run is None:
+                raise ProductionRunNotReady(('automatic_production_changed',))
             return self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(row['id'],)).fetchone()
 
     def advance(self,project_id,run_id):
@@ -627,8 +679,6 @@ class VideoProductionService:
                 return self.runs.dispatch_voice(project_id,run_id,voice_profile_id=profile.id,capability_profile_id=capability.id)
             if run.status in {"voice_qa_ready_for_draft","approved_master_ready_to_resume"}:
                 expected=self._prepare_measured_plan(row)
-                self.runs.resume(project_id,run_id)
-                expected=self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(row['id'],)).fetchone()
                 run=self.runs.get(project_id,run_id)
             if run.status=="awaiting_talking_dependencies":
                 if not any(item.talking_job_id for item in run.talking_source_bindings):
@@ -642,7 +692,7 @@ class VideoProductionService:
             self._stop_transition(expected,exc)
             raise
 
-    def _stop_transition(self,expected,error):
+    def _stop_transition(self,expected,error,*,expected_jobs=None):
         """只停止实际失败的工序快照，迟到回调不覆盖已推进或取消的 Run。"""
         reasons=getattr(error,'reasons',None)
         if not reasons:
@@ -653,6 +703,13 @@ class VideoProductionService:
         with self.db.transaction(immediate=True):
             current=self.db.connection.execute('SELECT * FROM production_runs WHERE id=?',(expected['id'],)).fetchone()
             if current is None or current['stage']=='cancelled' or dict(current)!=dict(expected):return
+            if expected_jobs is not None:
+                from app.production_runs import production_run_jobs
+                try:
+                    _,current_jobs=production_run_jobs(self.db,UUID(current['id']))
+                except ValueError:
+                    return
+                if current_jobs != expected_jobs:return
             self.db.connection.execute('UPDATE production_runs SET waiting_stop_reasons=? WHERE id=?',
                 (json.dumps(['automatic_stop:'+value for value in reasons]),current['id']))
 
@@ -685,8 +742,11 @@ class VideoProductionService:
     def recover_completed(self,handler_types):
         from app.production_runs import production_run_jobs
         supported=self._completion_types(handler_types)
-        for row in self.db.connection.execute("SELECT id FROM production_runs WHERE stage IN ('voice','awaiting_talking','render')").fetchall():
+        for row in self.db.connection.execute("SELECT id FROM production_runs WHERE stage IN ('awaiting_master','voice','awaiting_talking','render')").fetchall():
             current,jobs=production_run_jobs(self.db,UUID(row['id']))
+            if current['stage']=='awaiting_master':
+                self._recover_waiting_master(current,handler_types)
+                current,jobs=production_run_jobs(self.db,UUID(row['id']))
             for job in jobs:
                 if job.status is JobStatus.COMPLETED and job.type in supported:
                     if job.type is JobType.RENDER and not self._current_render_replay(current):continue
@@ -920,6 +980,17 @@ class VideoProductionService:
         row,jobs=production_run_jobs(self.db,run_id)
         return self._queue_decision(row,jobs,handler_types)
 
+    def _recover_waiting_master(self,row,handler_types):
+        # Do not race a running planner or reactivate a failed/cancelled plan.
+        parent=JobRepository(self.db).get(UUID(row['start_job_id'])) if row['start_job_id'] else None
+        if (not row['automatic'] or JobType.GENERATE_VOICE not in handler_types
+            or parent is None or parent.status is not JobStatus.COMPLETED
+            or self._queue_decision(row,[],handler_types)['next_action']!='continue'):
+            return
+        try:self.advance(UUID(row['project_id']),UUID(row['id']))
+        except (ValueError,RuntimeError) as exc:
+            self._stop_transition(row,exc)  # Snapshot check also protects cancellation and concurrent progress.
+
     def queue_jobs(self, handler_types,*,run_id=None):
         from app.production_runs import production_run_jobs
         supported=self._completion_types(handler_types)
@@ -927,7 +998,7 @@ class VideoProductionService:
         if run_id is None:
             for row in self.db.connection.execute("SELECT id FROM jobs WHERE json_extract(payload,'$.type')='plan_content' AND status IN ('pending','running') ORDER BY created_at"):
                 candidates.append(JobRepository(self.db).get(UUID(row[0])))
-        query="SELECT * FROM production_runs WHERE stage IN ('voice','awaiting_talking','render')"
+        query="SELECT * FROM production_runs WHERE stage IN ('awaiting_master','voice','awaiting_talking','render')"
         for row in self.db.connection.execute(query+(' AND id=?' if run_id is not None else ''),
             (str(run_id),) if run_id is not None else ()).fetchall():
             if row['render_job_id'] and self._current_render_replay(row):
@@ -940,6 +1011,11 @@ class VideoProductionService:
             _,jobs=production_run_jobs(self.db,UUID(row["id"]))
             decision=self._queue_decision(row,jobs,handler_types)
             if decision["next_action"] == "stopped":continue
+            if row['stage']=='awaiting_master':
+                self._recover_waiting_master(row,handler_types)
+                current,jobs=production_run_jobs(self.db,UUID(row['id']))
+                if self._queue_decision(current,jobs,handler_types)['next_action']=='continue':candidates.extend(jobs)
+                continue
             if decision['next_action']=='verify_material':
                 if JobType.RENDER not in handler_types:continue
                 if self.semantic_diagnoser is None:
@@ -974,7 +1050,19 @@ class VideoProductionService:
                 else:continue
                 try:
                     repaired=repair.reconcile_automatic_qa_failure(UUID(row['project_id']),UUID(row['id']))
-                except (ProductionRunNotReady,ProductionRunConflict,LookupError):continue
+                except (ProductionRunNotReady,ProductionRunConflict,LookupError) as exc:
+                    if isinstance(exc, ProductionRunNotReady):
+                        failure = exc
+                    else:
+                        detail = str(exc)
+                        # Only stable machine codes, never arbitrary exception text.
+                        import re
+                        code = (detail if re.fullmatch(r'[a-z][a-z0-9_]{0,127}', detail)
+                                else 'qa_repair_dependency_missing' if isinstance(exc, LookupError)
+                                else 'qa_repair_state_conflict')
+                        failure = ProductionRunNotReady((code,))
+                    self._stop_transition(row,failure,expected_jobs=jobs)
+                    continue
                 if repaired is None:continue
                 if 'planned_talking_qa_failed' in reasons:
                     with self.db.transaction(immediate=True):

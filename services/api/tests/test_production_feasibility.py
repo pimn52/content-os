@@ -62,6 +62,7 @@ def _service(tmp_path,monkeypatch,project,draft,master=None,*,resolver=None):
     service=VideoProductionService(db,tmp_path,voice_provider=Mock(),talking_provider=MaintainedLatentSyncProvider,
         material_resolver=resolver)
     service.runs=Mock()
+    monkeypatch.setattr("app.video_production.ensure_runtime_capability_profile", lambda *args, **kwargs: None)
     pool=short_latentsync_pool()
     monkeypatch.setattr('app.talking.pool.build_talking_pool',lambda *a,**kw:pool)
     for name,value in (('ProjectRepository',project),('ProjectDraftRepository',draft),('AudioAssetRepository',master)):

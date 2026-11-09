@@ -52,6 +52,22 @@ function Resolve-ExecutablePath {
     return $null
 }
 
+function Resolve-ContentOSMediaExecutable {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $apiDir = Join-Path $RepoRoot "services\api"
+    $resolver = "import sys; sys.path.insert(0, sys.argv[1]); from app.runtime import resolve_local_executable; print(resolve_local_executable(sys.argv[2]))"
+    try {
+        $resolved = & $Python -c $resolver $apiDir $Name 2>$null
+        if ($resolved) {
+            return ([string]$resolved).Trim()
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
 function Get-VersionLine {
     param(
         [string]$CommandPath,
@@ -112,16 +128,10 @@ function Show-RuntimePreflight {
 
     $node = Resolve-ExecutablePath -Name "node"
     $npm = Resolve-ExecutablePath -Name "npm" -OverrideVariable "CONTENT_OS_NPM"
-    $ffmpeg = Resolve-ExecutablePath -Name "ffmpeg" -OverrideVariable "CONTENT_OS_FFMPEG"
-    $ffprobe = Resolve-ExecutablePath -Name "ffprobe" -OverrideVariable "CONTENT_OS_FFPROBE"
-    if (-not $ffmpeg) {
-        $bundled = Join-Path $RendererCompositorDir "ffmpeg.exe"
-        if (Test-Path -LiteralPath $bundled) { $ffmpeg = $bundled }
-    }
-    if (-not $ffprobe) {
-        $bundled = Join-Path $RendererCompositorDir "ffprobe.exe"
-        if (Test-Path -LiteralPath $bundled) { $ffprobe = $bundled }
-    }
+    $ffmpeg = Resolve-ContentOSMediaExecutable -Name "ffmpeg"
+    $ffprobe = Resolve-ContentOSMediaExecutable -Name "ffprobe"
+    if ($ffmpeg) { $env:CONTENT_OS_FFMPEG = $ffmpeg }
+    if ($ffprobe) { $env:CONTENT_OS_FFPROBE = $ffprobe }
 
     $checks = @(
         [pscustomobject]@{ Name = "Python"; Path = $Python; Version = Get-VersionLine $Python @("--version"); Required = $true; Available = Test-Path -LiteralPath $Python },
@@ -187,7 +197,7 @@ try {
         if (-not (Test-Path -LiteralPath $Worker)) {
             throw "content-os-worker is not installed; run the documented editable install first"
         }
-        $workerArguments = @("--max-attempts", "1", "--production-only", "--job-type", "plan_content", "--job-type", "analyze_asset", "--job-type", "render")
+        $workerArguments = @("--max-attempts", "1", "--production-only", "--job-type", "plan_content", "--job-type", "analyze_asset", "--job-type", "index_clips", "--job-type", "render")
         if ($env:CONTENT_OS_VOICE_PROVIDER) {
             $workerArguments += @("--job-type", "generate_voice")
         }

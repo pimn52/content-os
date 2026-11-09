@@ -858,6 +858,18 @@ def analyze_exact_job(db, runner, job_id):
     if job.status is JobStatus.PENDING:
         runner.run_once(job_id=job_id)
         job = JobRepository(db).get(job_id)
+    # 外部入库可能重用已有 Asset。其先前固定分析任务失败并不意味着
+    # 后来已存在的 Clip 也不可用；反之任务完成不保证 Clip 仍然存在。
+    # 仅对由外部入库创建且目标身份一致的任务适用，后续仍执行用途核验。
+    target = db.connection.execute("SELECT asset_id FROM asset_job_targets WHERE job_id=?", (str(job_id),)).fetchone()
+    external_target = (job.type is JobType.ANALYZE_ASSET and target is not None
+        and job.idempotency_key == f"external-analysis:{target['asset_id']}")
+    if external_target:
+        has_clips = db.connection.execute("SELECT 1 FROM clips WHERE asset_id=? LIMIT 1", (target["asset_id"],)).fetchone() is not None
+        if job.status in {JobStatus.FAILED, JobStatus.CANCELLED} and has_clips:
+            return
+        if job.status is JobStatus.COMPLETED and not has_clips:
+            raise ExternalAcquisitionError("本地分析片段缺失，需要重新分析", "external_analysis_clips_missing")
     if job.status in {JobStatus.FAILED, JobStatus.CANCELLED}:
         # 用户在普通素材界面手动完成新分析后，沿用其结果；原失败任务不重试。
         row = db.connection.execute("""SELECT 1 FROM asset_job_targets original

@@ -80,7 +80,7 @@ def test_receipt_roundtrip_restart_reads_are_pure_and_dispatch_stays_closed(setu
         assert other.get(f'/projects/{project}/provider-use-admissions/{receipt["id"]}').json() == receipt
         # Existing commercial lane does not use this new receipt.
         plan = other.post(f'/projects/{project}/production-preflight', json={}).json()
-        assert 'provider_license_scope_unverified' in plan['stop_reasons']
+        assert 'provider_license_scope_unverified' not in plan['stop_reasons']
         denied = other.post(f'/projects/{project}/production-runs', json={
             'idempotency_key':'still-closed','expected_fingerprint':plan['fingerprint']})
         assert denied.status_code == 409

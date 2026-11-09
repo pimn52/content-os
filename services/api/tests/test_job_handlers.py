@@ -473,6 +473,236 @@ def test_scoped_vision_handler_limits_extraction_indexing_and_metered_calls(tmp_
             assert seen==[] and calls==[]
 
 
+@pytest.mark.parametrize(('status_code', 'error_code'), [(400, 'vision_request_rejected'), (503, 'vision_temporarily_unavailable')])
+def test_vision_failure_keeps_prior_clip_and_charges_each_attempt_once(tmp_path, status_code, error_code):
+    from app.domain.models import ClipIndexJobPayload
+    from app.media.vision_pipeline import MediaVisionPipeline
+    from app.providers.vision import ClipVisualAnalysis
+    with Database(tmp_path / 'partial-vision.sqlite') as db:
+        asset = _asset(db, tmp_path, has_audio=False)
+        profile = IPProfileRepository(db).create(IPProfile(creator_name='Fixture'))
+        project = ProjectRepository(db).create(Project(ip_profile_id=profile.id, title='Fixture',
+            topic='Fixture', fps=asset.fps, created_at=datetime.now(timezone.utc)))
+        BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=True,
+            max_calls=2, updated_at=datetime.now(timezone.utc)))
+        clips = [ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=i*1000,
+            end_ms=(i+1)*1000, asset_duration_ms=2000)) for i in range(2)]
+        frame = tmp_path / 'partial.jpg'; frame.write_bytes(b'frame')
+        class Resolver:
+            def resolve(self, candidate, supplied): return [frame, frame]
+        class Provider:
+            count = 0
+            def analyze(self, path):
+                self.count += 1
+                if self.count == 2: raise VisionHTTPError(status_code)
+                return ClipVisualAnalysis('first frame', (), (), None, None, None, .8, None, None, False)
+        job = _job(JobType.INDEX_CLIPS, 'partial-vision').model_copy(update={
+            'project_id': project.id, 'payload': ClipIndexJobPayload(clip_ids=[c.id for c in clips], index_embeddings=False)})
+        AssetJobTargetStore(db).enqueue(job, asset.id)
+        handler = AssetVisionJobHandler(AssetJobTargetStore(db), AssetRepository(db), ClipRepository(db),
+            Resolver(), MediaVisionPipeline(db, Provider()), None, ProviderCallLedger(db))
+        result = _runner(JobStore(db), {JobType.INDEX_CLIPS: handler}).run_once()
+        assert result.status is JobStatus.FAILED and result.error_code == error_code
+        assert ClipRepository(db).get(clips[0].id).visual_description == 'first frame'
+        assert ClipRepository(db).get(clips[1].id).visual_description is None
+        calls = ProviderCallRepository(db).list_for_project(project.id)
+        assert [call.status for call in calls] == ['completed', 'failed']
+        facts = AssetRepository(db).get(asset.id).metadata['visual_analysis']
+        assert facts[str(clips[0].id)]['coverage'] == 'sampled_keyframe'
+        assert str(clips[1].id) not in facts
+
+
+@pytest.mark.parametrize('first_result', ['completed', 'interrupted', 'changed_frame'])
+def test_index_lease_recovery_never_resends_paid_or_uncertain_call(tmp_path, first_result):
+    from app.domain.models import ClipIndexJobPayload
+    from app.jobs.runner import JobExecutionError
+    from app.media.vision_pipeline import MediaVisionPipeline
+    from app.providers.vision import ClipVisualAnalysis
+    with Database(tmp_path / 'recovered-vision.sqlite') as db:
+        asset = _asset(db, tmp_path, has_audio=False)
+        profile = IPProfileRepository(db).create(IPProfile(creator_name='Fixture'))
+        project = ProjectRepository(db).create(Project(ip_profile_id=profile.id, title='Fixture',
+            topic='Fixture', fps=asset.fps, created_at=datetime.now(timezone.utc)))
+        BudgetPolicyRepository(db).save(BudgetPolicy(project_id=project.id, allow_unknown_cost=True,
+            max_calls=4, updated_at=datetime.now(timezone.utc)))
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=2000, asset_duration_ms=2000))
+        frame = tmp_path / 'frame.jpg'; frame.write_bytes(b'frame')
+        class Resolver:
+            def resolve(self, candidate, supplied): return [frame]
+        class Provider:
+            count = 0
+            def analyze(self, path):
+                self.count += 1
+                if first_result == 'interrupted': raise KeyboardInterrupt()
+                return ClipVisualAnalysis('frame', (), (), None, None, None, .8, None, None, False)
+        provider = Provider()
+        targets = AssetJobTargetStore(db)
+        job = targets.enqueue(_job(JobType.INDEX_CLIPS, 'recovery').model_copy(update={
+            'project_id': project.id, 'payload': ClipIndexJobPayload(clip_ids=[clip.id], index_embeddings=False)}), asset.id)
+        handler = AssetVisionJobHandler(targets, AssetRepository(db), ClipRepository(db), Resolver(),
+            MediaVisionPipeline(db, provider), None, ProviderCallLedger(db))
+        attempt = job.model_copy(update={'status': JobStatus.RUNNING, 'attempt': 1})
+        if first_result == 'interrupted':
+            with pytest.raises(KeyboardInterrupt): handler(attempt)
+        else:
+            handler(attempt)
+            assert ClipRepository(db).get(clip.id).visual_description == 'frame'
+        if first_result == 'changed_frame': frame.write_bytes(b'different frame')
+        if first_result == 'completed':
+            handler(attempt.model_copy(update={'attempt': 2}))
+        else:
+            with pytest.raises(JobExecutionError) as failure:
+                handler(attempt.model_copy(update={'attempt': 2}))
+            assert failure.value.retryable is False
+            assert failure.value.code == ('provider_call_accounting_failed' if first_result == 'changed_frame'
+                else 'provider_execution_recovery_required')
+        assert provider.count == 1
+        assert len(ProviderCallRepository(db).list_for_project(project.id)) == 1
+        if first_result == 'completed':
+            manual = targets.enqueue(_job(JobType.INDEX_CLIPS, 'manual-reindex').model_copy(update={
+                'project_id': project.id, 'payload': ClipIndexJobPayload(clip_ids=[clip.id], index_embeddings=False)}), asset.id)
+            handler(manual.model_copy(update={'status': JobStatus.RUNNING, 'attempt': 1}))
+            assert provider.count == 2
+
+
+def test_index_recovers_completed_call_after_interruption_before_clip_save(tmp_path):
+    from app.domain.models import ClipIndexJobPayload
+    from app.media.vision_pipeline import MediaVisionPipeline
+    from app.providers.vision import ClipVisualAnalysis
+    with Database(tmp_path / 'vision-result-recovery.sqlite') as db:
+        asset = _asset(db, tmp_path, has_audio=False)
+        BudgetPolicyRepository(db).save(BudgetPolicy(allow_unknown_cost=True, max_calls=1,
+            updated_at=datetime.now(timezone.utc)))
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=2000, asset_duration_ms=2000))
+        frame = tmp_path / 'saved-frame.jpg'; frame.write_bytes(b'frame')
+        class Resolver:
+            def resolve(self, candidate, supplied): return [frame]
+        class Provider:
+            count = 0
+            def analyze(self, path):
+                self.count += 1
+                return ClipVisualAnalysis('saved frame', ('person',), ('camera',), None, None, None, .8, None, None, False,
+                    subtitle_regions=((.1, .1, .2, .2),))
+        provider = Provider()
+        targets = AssetJobTargetStore(db)
+        job = targets.enqueue(_job(JobType.INDEX_CLIPS, 'result-recovery').model_copy(update={
+            'payload': ClipIndexJobPayload(clip_ids=[clip.id], index_embeddings=False)}), asset.id)
+        pipeline = MediaVisionPipeline(db, provider)
+        persistence = pipeline.persistence
+        class Interrupted:
+            def apply(self, *args, **kwargs): raise KeyboardInterrupt()
+        pipeline.persistence = Interrupted()
+        handler = AssetVisionJobHandler(targets, AssetRepository(db), ClipRepository(db), Resolver(), pipeline,
+            None, ProviderCallLedger(db))
+        attempt = job.model_copy(update={'status': JobStatus.RUNNING, 'attempt': 1})
+        with pytest.raises(KeyboardInterrupt): handler(attempt)
+        assert ClipRepository(db).get(clip.id).visual_description is None
+        calls = ProviderCallRepository(db).list_for_project(None)
+        assert len(calls) == 1 and calls[0].status == 'completed'
+        pipeline.persistence = persistence
+        handler(attempt.model_copy(update={'attempt': 2}))
+        assert provider.count == 1
+        assert ClipRepository(db).get(clip.id).visual_description == 'saved frame'
+        assert len(ProviderCallRepository(db).list_for_project(None)) == 1
+
+
+@pytest.mark.parametrize('scenario', ['completed', 'interrupted', 'record_removed'])
+def test_intake_expired_lease_replays_only_a_completed_visual_response(tmp_path, scenario):
+    from app.domain.models import ClipIndexJobPayload
+    from app.media.vision_pipeline import MediaVisionPipeline
+    from app.providers.vision import ClipVisualAnalysis
+    with Database(tmp_path / 'intake-lease.sqlite') as db:
+        asset = _asset(db, tmp_path, has_audio=False)
+        BudgetPolicyRepository(db).save(BudgetPolicy(allow_unknown_cost=True, max_calls=1,
+            updated_at=datetime.now(timezone.utc)))
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=2000, asset_duration_ms=2000))
+        frame = tmp_path / 'frame.jpg'; frame.write_bytes(b'frame')
+        class Resolver:
+            def resolve(self, candidate, supplied): return [frame]
+        class Provider:
+            count = 0
+            def analyze(self, path):
+                self.count += 1
+                if scenario == 'interrupted': raise KeyboardInterrupt()
+                return ClipVisualAnalysis('observed', (), (), None, None, None, .8, None, None, False)
+        provider = Provider()
+        targets = AssetJobTargetStore(db)
+        job = targets.enqueue(_job(JobType.INDEX_CLIPS, 'intake:vision:parent:clip').model_copy(update={
+            'payload': ClipIndexJobPayload(clip_ids=[clip.id], index_embeddings=False)}), asset.id)
+        pipeline = MediaVisionPipeline(db, provider)
+        persistence = pipeline.persistence
+        class Interrupted:
+            def apply(self, *args, **kwargs): raise KeyboardInterrupt()
+        pipeline.persistence = Interrupted()
+        handler = AssetVisionJobHandler(targets, AssetRepository(db), ClipRepository(db), Resolver(), pipeline,
+            None, ProviderCallLedger(db))
+        store, start = JobStore(db), datetime.now(timezone.utc)
+        initial = store.claim('old-worker', timedelta(seconds=1), max_attempts=1,
+            allowed_types={JobType.INDEX_CLIPS}, now=start, job_id=job.id)
+        with pytest.raises(KeyboardInterrupt): handler(initial)
+        assert ClipRepository(db).get(clip.id).visual_description is None
+        recovered = store.claim('new-worker', timedelta(seconds=10), max_attempts=1,
+            allowed_types={JobType.INDEX_CLIPS}, now=start+timedelta(seconds=2), job_id=job.id)
+        if scenario == 'interrupted':
+            assert recovered is None
+            assert store.get(job.id).status is JobStatus.FAILED
+        else:
+            assert recovered is not None and recovered.attempt == 2
+            pipeline.persistence = persistence
+            if scenario == 'record_removed':
+                from app.jobs.runner import JobExecutionError
+                db.connection.execute("DELETE FROM provider_call_records")
+                with pytest.raises(JobExecutionError, match='saved provider result'):
+                    handler(recovered)
+                assert not ProviderCallRepository(db).list_for_project(None)
+            else:
+                handler(recovered)
+                assert store.complete(job.id, 'new-worker', now=start+timedelta(seconds=3)).status is JobStatus.COMPLETED
+                assert ClipRepository(db).get(clip.id).visual_description == 'observed'
+        assert provider.count == 1
+        assert len(ProviderCallRepository(db).list_for_project(None)) == (0 if scenario == 'record_removed' else 1)
+
+
+def test_single_attempt_worker_resumes_saved_intake_response_without_calling_provider(tmp_path):
+    from app.domain.models import ClipIndexJobPayload
+    from app.media.vision_pipeline import MediaVisionPipeline
+    from app.providers.vision import ClipVisualAnalysis
+    with Database(tmp_path / 'intake-worker.sqlite') as db:
+        asset = _asset(db, tmp_path, has_audio=False)
+        BudgetPolicyRepository(db).save(BudgetPolicy(allow_unknown_cost=True, max_calls=1,
+            updated_at=datetime.now(timezone.utc)))
+        clip = ClipRepository(db).create(Clip(asset_id=asset.id, start_ms=0, end_ms=2000, asset_duration_ms=2000))
+        frame = tmp_path / 'frame.jpg'; frame.write_bytes(b'frame')
+        class Resolver:
+            def resolve(self, candidate, supplied): return [frame]
+        class Provider:
+            count = 0
+            def analyze(self, path):
+                self.count += 1
+                return ClipVisualAnalysis('observed', (), (), None, None, None, .8, None, None, False)
+        provider = Provider()
+        targets = AssetJobTargetStore(db)
+        job = targets.enqueue(_job(JobType.INDEX_CLIPS, 'intake:vision:parent:worker').model_copy(update={
+            'payload': ClipIndexJobPayload(clip_ids=[clip.id], index_embeddings=False)}), asset.id)
+        pipeline = MediaVisionPipeline(db, provider)
+        persistence = pipeline.persistence
+        class Interrupted:
+            def apply(self, *args, **kwargs): raise KeyboardInterrupt()
+        pipeline.persistence = Interrupted()
+        handler = AssetVisionJobHandler(targets, AssetRepository(db), ClipRepository(db), Resolver(), pipeline,
+            None, ProviderCallLedger(db))
+        runner = JobRunner(JobStore(db), {JobType.INDEX_CLIPS: handler}, worker_id='worker',
+            lease_duration=timedelta(seconds=10), max_attempts=1)
+        with pytest.raises(KeyboardInterrupt): runner.run_once(job_id=job.id)
+        db.connection.execute('UPDATE jobs SET lease_expires_at=? WHERE id=?',
+            ((datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat(), str(job.id)))
+        pipeline.persistence = persistence
+        result = runner.run_once(job_id=job.id)
+        assert result.status is JobStatus.COMPLETED and result.attempt == 2
+        assert ClipRepository(db).get(clip.id).visual_description == 'observed'
+        assert provider.count == 1 and len(ProviderCallRepository(db).list_for_project(None)) == 1
+
+
 def test_requested_indexing_without_embedding_fails_before_vision(tmp_path):
     with Database(tmp_path/'no-embedding.sqlite') as db:
         asset=_asset(db,tmp_path,has_audio=False)
@@ -522,7 +752,7 @@ def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -
         handler = AssetVisionJobHandler(AssetJobTargetStore(db), AssetRepository(db), repository, Resolver(), Pipeline())  # type: ignore[arg-type]
         result = _runner(JobStore(db), {JobType.INDEX_CLIPS: handler}).run_once()
         assert result is not None and result.status is JobStatus.COMPLETED
-        assert seen == [(asset.id, [clip.id for clip in clips], keyframes)]
+        assert seen == [(asset.id, [clip.id], [path]) for clip, path in zip(clips, keyframes)]
     finally:
         db.close()
 
@@ -530,8 +760,8 @@ def test_vision_handler_completes_with_ordered_local_keyframes(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("failure", "expected_status", "expected_code"),
     [
-        (VisionRateLimitError("private-key"), JobStatus.PENDING, "vision_temporarily_unavailable"),
-        (VisionHTTPError(503), JobStatus.PENDING, "vision_temporarily_unavailable"),
+        (VisionRateLimitError("private-key"), JobStatus.FAILED, "vision_temporarily_unavailable"),
+        (VisionHTTPError(503), JobStatus.FAILED, "vision_temporarily_unavailable"),
         (VisionHTTPError(400), JobStatus.FAILED, "vision_request_rejected"),
     ],
 )
@@ -605,7 +835,7 @@ def test_vision_handler_passes_updated_clips_to_embedding_indexer(tmp_path: Path
                 return [str(frame)]
 
         class Pipeline:
-            def process(self, candidate, supplied, paths):
+            def process(self, candidate, supplied, paths, **kwargs):
                 return SimpleNamespace(clips=(updated,))
 
         class Indexer:
@@ -638,7 +868,7 @@ def test_embedding_rate_limit_retries_without_leaking_provider_detail(tmp_path: 
                 return [str(frame)]
 
         class Pipeline:
-            def process(self, candidate, supplied, paths):
+            def process(self, candidate, supplied, paths, **kwargs):
                 return SimpleNamespace(clips=(clip,))
 
         class Indexer:
@@ -649,7 +879,7 @@ def test_embedding_rate_limit_retries_without_leaking_provider_detail(tmp_path: 
             AssetJobTargetStore(db), AssetRepository(db), clips, Resolver(), Pipeline(), Indexer()  # type: ignore[arg-type]
         )
         result = _runner(JobStore(db), {JobType.INDEX_CLIPS: handler}).run_once()
-        assert result is not None and result.status is JobStatus.PENDING
+        assert result is not None and result.status is JobStatus.FAILED
         assert result.error_code == "embedding_temporarily_unavailable"
         assert "private" not in (result.error_message or "")
     finally:

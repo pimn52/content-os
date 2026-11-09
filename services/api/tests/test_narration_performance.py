@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from array import array
 from datetime import datetime, timedelta, timezone
+import hashlib
+import math
 from pathlib import Path
+import wave
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.budget import ProviderCallLedger
-from app.db import AudioAssetRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, ProviderCallRepository, VoiceProfileRepository
+from app.db import AssetRepository, AudioAssetRepository, ClipRepository, Database, IPProfileRepository, JobRepository, ProjectRepository, ProviderCallRepository, VoiceProfileRepository
 from app.domain.models import (
+    Asset,
     AudioAsset,
     Clip,
     ConsentRecord,
@@ -27,6 +32,8 @@ from app.domain.models import (
     NarrationRhythm,
     Project,
     RationalFps,
+    SourceKind,
+    TranscriptSegment,
     VoiceGenerationJobPayload,
     VoiceProfile,
 )
@@ -45,6 +52,7 @@ from app.narration_performance import (
 )
 from app.providers.voice import NarrationPerformanceCoverage, NarrationPerformancePreflight, VoiceSynthesisResult
 from app.routing import FeatureSupport
+from app.voice_emphasis import automatic_emphasis_plan
 
 
 COPY = "Start with the point, then prove it."
@@ -105,8 +113,34 @@ def _project_and_profile(db: Database) -> tuple[Project, VoiceProfile]:
         created_at=datetime.now(timezone.utc),
     )
     ProjectRepository(db).create(project)
-    clip = Clip(asset_id=project.id, start_ms=0, end_ms=1_000, asset_duration_ms=1_000, voice_candidate=True)
+    reference = Path(db.path).parent / "voice-reference.bin"
+    reference.write_bytes(b"confirmed voice reference")
+    asset = Asset(
+        source_kind=SourceKind.USER_ASSET,
+        source_file=reference.name,
+        content_hash=hashlib.sha256(reference.read_bytes()).hexdigest(),
+        duration_ms=1_000,
+        width=720,
+        height=1280,
+        fps=RationalFps(numerator=25, denominator=1),
+        has_audio=True,
+        authorization_reference="creator-voice-reference",
+        imported_at=datetime.now(timezone.utc),
+    )
+    AssetRepository(db).create(asset)
+    clip = Clip(
+        asset_id=asset.id,
+        start_ms=0,
+        end_ms=1_000,
+        asset_duration_ms=1_000,
+        transcript="Creator voice",
+        transcript_segments=[TranscriptSegment(start_ms=0, end_ms=1_000, text="Creator voice")],
+        transcript_source="owner-confirmed-reference:test",
+        voice_candidate=True,
+    )
+    ClipRepository(db).create(clip)
     profile = VoiceProfile(
+        ip_profile_id=ip.id,
         name="Creator voice",
         provider="test-voice",
         provider_profile_id="creator-v1",
@@ -366,7 +400,6 @@ def test_voice_job_snapshots_only_the_matching_current_draft_plan(tmp_path: Path
             "idempotency_key": "voice-with-performance-plan",
             "voice_profile_id": str(profile.id),
             "text": COPY,
-            "authorization_reference": "voice-consent-1",
             "language": "en",
             "use_draft_performance_plan": True,
         }
@@ -551,5 +584,120 @@ def test_voice_handler_rejects_nonfull_performance_preflight_before_reserving_or
         assert failed.error_code == expected_error
         assert failed.error_message is not None and reason in failed.error_message
         assert ProviderCallRepository(db).list_for_project(project.id) == []
+    finally:
+        db.close()
+
+
+def test_voice_handler_executes_emphasis_only_plan_through_exact_provider_segments(tmp_path: Path) -> None:
+    db = Database(tmp_path / "emphasis-handler.sqlite")
+    try:
+        project, profile = _project_and_profile(db)
+        copy = "结论先行。边界防止误用。最后，镜头要按真实时长来拆。"
+        plan = automatic_emphasis_plan(copy)
+        assert plan is not None and len(plan.cues) == 1
+        now = datetime.now(timezone.utc)
+        job = Job(
+            project_id=project.id,
+            type=JobType.GENERATE_VOICE,
+            idempotency_key="emphasis-supported",
+            created_at=now,
+            updated_at=now,
+            payload=VoiceGenerationJobPayload(
+                project_id=project.id,
+                voice_profile_id=profile.id,
+                text=copy,
+                authorization_reference="voice-consent-1",
+                language="zh",
+                narration_performance_plan=plan,
+            ),
+        )
+        JobStore(db).enqueue(job)
+
+        class Provider:
+            provider_name = "test-voice"
+            model = "test-model"
+            is_local = True
+
+            def synthesize(self, received: VoiceProfile, text: str, output_path: Path, *, language: str | None) -> VoiceSynthesisResult:
+                assert received.id == profile.id and language == "zh"
+                spans = []
+                cursor = 0
+                for part in text.split("\n\n"):
+                    start = text.index(part, cursor)
+                    cursor = start + len(part)
+                    left = start + len(part) - len(part.lstrip())
+                    right = cursor - (len(part) - len(part.rstrip()))
+                    spans.append((left, right))
+                samples = array("h")
+                segments = []
+                for index, (start, end) in enumerate(spans):
+                    amplitude = 4_000 + index * 2_000
+                    first_sample = index * 2_400
+                    for sample_index in range(2_400):
+                        samples.append(round(
+                            amplitude * math.sin(2 * math.pi * 220 * sample_index / 24_000)
+                        ))
+                    segments.append({
+                        "start_char": start,
+                        "end_char": end,
+                        "start_sample": first_sample,
+                        "end_sample": first_sample + 2_400,
+                    })
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(output_path), "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(24_000)
+                    audio.writeframes(samples.tobytes())
+                return VoiceSynthesisResult(
+                    output_path,
+                    provider_version="test-version",
+                    generation_segments=tuple(segments),
+                )
+
+        class Importer:
+            def import_path(
+                self, source: Path, authorization_reference: str, *,
+                language: str | None = None, generated_job=None,
+            ) -> AudioAsset:
+                assert source.is_file() and authorization_reference == "voice-consent-1"
+                value = AudioAsset(
+                    source_file=str(source),
+                    content_hash="a" * 64,
+                    duration_ms=300,
+                    sample_rate=24_000,
+                    channels=1,
+                    language=language,
+                    authorization_reference=authorization_reference,
+                    imported_at=datetime.now(timezone.utc),
+                )
+                AudioAssetRepository(db).create(value)
+                return value
+
+        handler = VoiceGenerationJobHandler(
+            VoiceProfileRepository(db),
+            AudioAssetRepository(db),
+            Importer(),
+            Provider(),
+            tmp_path / "generated",
+            ProviderCallLedger(db),
+        )
+        completed = JobRunner(
+            JobStore(db),
+            {JobType.GENERATE_VOICE: handler},
+            worker_id="emphasis-worker",
+            lease_duration=timedelta(minutes=1),
+            max_attempts=1,
+        ).run_once()
+
+        assert completed is not None and completed.status is JobStatus.COMPLETED
+        audio = AudioAssetRepository(db).list()[0]
+        generation = audio.metadata["voice_generation"]
+        assert generation["narration_performance"]["application_state"] == (
+            "core_emphasis_applied_pending_quality_review"
+        )
+        assert generation["focus_delivery"]["applied"][0]["copy_text"] == "最后，"
+        assert generation["focus_emphasis"]["state"] == "applied"
+        assert generation["focus_emphasis"]["applications"][0]["applied_gain_db"] > 1.0
     finally:
         db.close()

@@ -16,6 +16,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
 
 from app.db import AssetRepository, ClipRepository, ImageAssetRepository, ProjectRepository, TalkingRunRepository
+from app.asset_management import asset_is_active, asset_scope_allows_project
 from app.domain.models import Asset, CandidateAsset, Clip, CostCategory, ProjectFormat, ScenePlan, SourceKind, UsageCost
 from app.media.crop_assessment import CropAssessmentRepository, CropProposal
 from app.search import ClipSearchHit
@@ -160,9 +161,29 @@ class AssetRouter:
     def _route_from_hits(self, scene: ScenePlan, hits: list[ClipSearchHit]) -> RoutingResult:
         if not isinstance(hits, list) or any(not isinstance(hit, ClipSearchHit) for hit in hits):
             raise RoutingInputError("scene searcher returned invalid Clip hits")
+        project = ProjectRepository(self.assets.db).get(scene.project_id)
+        if project is not None:
+            filtered = []
+            for hit in hits:
+                asset = self.assets.get(hit.clip.asset_id)
+                if (asset is None or not asset_is_active(asset)
+                    or not asset_scope_allows_project(asset, project.ip_profile_id)
+                    or asset.source_kind is SourceKind.AI_BROLL
+                    and asset.metadata.get("project_id") != str(project.id)):
+                    continue
+                filtered.append(hit)
+            hits = filtered
         if scene.preferred_clip_id is not None:
             clip=ClipRepository(self.assets.db).get(scene.preferred_clip_id)
-            hits=[ClipSearchHit(clip,1.0,"planner_selection")] if clip is not None else []
+            preferred_asset = self.assets.get(clip.asset_id) if clip is not None else None
+            allowed_preferred = (
+                preferred_asset is not None
+                and asset_is_active(preferred_asset)
+                and (project is None or asset_scope_allows_project(preferred_asset, project.ip_profile_id))
+                and (project is None or preferred_asset.source_kind is not SourceKind.AI_BROLL
+                     or preferred_asset.metadata.get("project_id") == str(project.id))
+            )
+            hits=[ClipSearchHit(clip,1.0,"planner_selection")] if clip is not None and allowed_preferred else []
         candidates = self._score_hits(scene, hits)
         relevance = {hit.clip.id: hit.score for hit in hits}
         asset_relevance = {item.asset_id: max((hit.score for hit in hits if hit.clip.asset_id == item.asset_id), default=0)

@@ -61,7 +61,6 @@ def test_normal_reviewed_talking_reuses_source_without_evaluation_permission(adm
 @pytest.mark.parametrize("change,expected", [
     ("consent", "talking_run_source_context_invalid"),
     ("source_bytes", "talking_reference_bytes_changed"),
-    ("license", "planned_talking_execution_authority_changed"),
     ("binding", "planned_talking_execution_authority_changed"),
     ("admitted_origin", "planned_talking_admitted_binding_changed"),
 ])
@@ -78,10 +77,6 @@ def test_normal_reuse_still_rechecks_registered_source_facts(admitted, monkeypat
         elif change == "source_bytes":
             source = AssetRepository(db).get(UUID(binding["reference_asset_id"]))
             (admitted.path.parent / source.source_file).write_bytes(b"changed source after review")
-        elif change == "license":
-            repo = ProviderMachineCapabilityProfileRepository(db)
-            cap = repo.get(UUID(binding["capability_profile_id"]))
-            repo.save(cap.model_copy(update={"commercial_status": "unknown", "license_evidence_reference": None}))
         elif change == "admitted_origin":
             from app.db import TalkingRunRepository
             repo = TalkingRunRepository(db)
@@ -96,6 +91,18 @@ def test_normal_reuse_still_rechecks_registered_source_facts(admitted, monkeypat
             db.connection.execute("UPDATE production_runs SET talking_source_bindings=? WHERE id=?",
                 (json.dumps(bindings), str(admitted.production_run_id)))
         assert _blocker(db, admitted) == expected
+        assert ProviderCallRepository(db).list() == []
+
+
+def test_license_declaration_change_does_not_block_normal_reuse(admitted, monkeypatch):
+    monkeypatch.setattr(TalkingSourceAdmissionRepository, "get", _forbid_evaluation_lookup)
+    with Database(admitted.path) as db:
+        repo = ProviderMachineCapabilityProfileRepository(db)
+        cap = repo.get(UUID(admitted.binding["capability_profile_id"]))
+        repo.save(cap.model_copy(update={
+            "commercial_status": "unknown", "license_evidence_reference": None,
+        }))
+        assert _blocker(db, admitted) is None
         assert ProviderCallRepository(db).list() == []
 
 
